@@ -3,6 +3,7 @@
 替代 SQLite Storage，支持双向同步
 """
 import json
+import re
 from datetime import date, datetime
 from typing import List, Optional, Dict, Any, Tuple
 
@@ -90,7 +91,6 @@ class FeishuStorage:
                 'nav': True,
                 'cash_flow': True,
                 'share_change': True,
-                'nav_change': True,
                 'mtd_nav_change': True,
                 'ytd_nav_change': True,
                 'pnl': True,
@@ -163,9 +163,9 @@ class FeishuStorage:
             # 根据表名和字段名做类型转换
             if table == 'holdings':
                 if key == 'quantity' and value:
-                    result[key] = float(value)
+                    result[key] = self._parse_float(value) or 0.0
                 elif key == 'avg_cost' and value:
-                    result[key] = float(value)
+                    result[key] = self._parse_float(value) or 0.0
                 elif key == 'tag' and value:
                     try:
                         result[key] = json.loads(value) if isinstance(value, str) else value
@@ -176,7 +176,7 @@ class FeishuStorage:
 
             elif table == 'transactions':
                 if key in ['quantity', 'price', 'amount', 'fee', 'tax'] and value:
-                    result[key] = float(value)
+                    result[key] = self._parse_float(value) or 0.0
                 elif key == 'tx_date' and value:
                     result[key] = value  # 保持字符串，模型会解析
                 else:
@@ -184,7 +184,7 @@ class FeishuStorage:
 
             elif table == 'cash_flow':
                 if key in ['amount', 'cny_amount', 'exchange_rate'] and value:
-                    result[key] = float(value)
+                    result[key] = self._parse_float(value) or 0.0
                 else:
                     result[key] = value
 
@@ -192,10 +192,10 @@ class FeishuStorage:
                 if key in ['total_value', 'cash_value', 'stock_value', 'fund_value',
                           'cn_stock_value', 'us_stock_value', 'hk_stock_value',
                           'stock_weight', 'cash_weight', 'shares', 'nav',
-                          'cash_flow', 'share_change', 'nav_change',
+                          'cash_flow', 'share_change',
                           'mtd_nav_change', 'ytd_nav_change',
                           'pnl', 'mtd_pnl', 'ytd_pnl'] and value:
-                    result[key] = float(value)
+                    result[key] = self._parse_float(value) or 0.0
                 elif key == 'details' and value:
                     try:
                         result[key] = json.loads(value) if isinstance(value, str) else value
@@ -206,7 +206,7 @@ class FeishuStorage:
 
             elif table == 'price_cache':
                 if key in ['price', 'cny_price', 'change', 'change_pct', 'exchange_rate'] and value:
-                    result[key] = float(value)
+                    result[key] = self._parse_float(value) or 0.0
                 else:
                     result[key] = value
 
@@ -216,6 +216,39 @@ class FeishuStorage:
         return result
 
     # ========== 安全辅助方法 ==========
+
+    @staticmethod
+    def _parse_float(value) -> Optional[float]:
+        """解析飞书返回的数字字段，支持逗号分隔符、货币符号、括号负数
+
+        Examples:
+            '3,000.00' -> 3000.0
+            '¥ 50,000.00' -> 50000.0
+            '¥ (209,965.97)' -> -209965.97
+            1234.5 -> 1234.5
+        """
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        if not isinstance(value, str):
+            return None
+        s = value.strip()
+        if not s:
+            return None
+        # 检测括号负数格式
+        negative = bool(re.search(r'\(.*\)', s))
+        # 移除货币符号、空格、括号
+        s = re.sub(r'[¥$€£\s()]', '', s)
+        # 移除逗号
+        s = s.replace(',', '')
+        if not s:
+            return None
+        try:
+            result = float(s)
+            return -result if negative else result
+        except ValueError:
+            return None
 
     @staticmethod
     def _escape_filter_value(value: str) -> str:
@@ -929,7 +962,6 @@ class FeishuStorage:
             'nav': nav.nav,
             'cash_flow': nav.cash_flow,
             'share_change': nav.share_change,
-            'nav_change': nav.nav_change,
             'mtd_nav_change': nav.mtd_nav_change,
             'ytd_nav_change': nav.ytd_nav_change,
             'pnl': nav.pnl,
@@ -949,26 +981,27 @@ class FeishuStorage:
 
         def _opt_float(key):
             v = data.get(key)
-            return float(v) if v else None
+            if v is None:
+                return None
+            return FeishuStorage._parse_float(v)
 
         return NAVHistory(
             date=nav_date,
             record_id=data.get('record_id'),
             account=data.get('account', ''),
-            total_value=float(data.get('total_value', 0)),
-            cash_value=float(data.get('cash_value', 0)),
-            stock_value=float(data.get('stock_value', 0)),
-            fund_value=float(data.get('fund_value', 0)),
-            cn_stock_value=float(data.get('cn_stock_value', 0)),
-            us_stock_value=float(data.get('us_stock_value', 0)),
-            hk_stock_value=float(data.get('hk_stock_value', 0)),
+            total_value=FeishuStorage._parse_float(data.get('total_value')) or 0.0,
+            cash_value=FeishuStorage._parse_float(data.get('cash_value')) or 0.0,
+            stock_value=FeishuStorage._parse_float(data.get('stock_value')) or 0.0,
+            fund_value=FeishuStorage._parse_float(data.get('fund_value')) or 0.0,
+            cn_stock_value=FeishuStorage._parse_float(data.get('cn_stock_value')) or 0.0,
+            us_stock_value=FeishuStorage._parse_float(data.get('us_stock_value')) or 0.0,
+            hk_stock_value=FeishuStorage._parse_float(data.get('hk_stock_value')) or 0.0,
             stock_weight=_opt_float('stock_weight'),
             cash_weight=_opt_float('cash_weight'),
             shares=_opt_float('shares'),
             nav=_opt_float('nav'),
             cash_flow=_opt_float('cash_flow'),
             share_change=_opt_float('share_change'),
-            nav_change=_opt_float('nav_change'),
             mtd_nav_change=_opt_float('mtd_nav_change'),
             ytd_nav_change=_opt_float('ytd_nav_change'),
             pnl=_opt_float('pnl'),

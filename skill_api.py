@@ -17,7 +17,7 @@ sys.path.insert(0, str(SKILL_DIR))
 from src.feishu_storage import FeishuStorage, FeishuClient
 from src.portfolio import PortfolioManager
 from src.price_fetcher import PriceFetcher
-from src.models import AssetType, AssetClass, Industry, Holding, NavHistory
+from src.models import AssetType, AssetClass, Industry, Holding, NAVHistory
 from src.asset_utils import (
     validate_code as validate_asset_code,
     detect_asset_type,
@@ -526,7 +526,6 @@ class PortfolioSkill:
                 "cash_weight": latest.cash_weight,
                 "cash_flow": latest.cash_flow,
                 "share_change": latest.share_change,
-                "nav_change": latest.nav_change,
                 "mtd_nav_change": latest.mtd_nav_change,
                 "ytd_nav_change": latest.ytd_nav_change,
                 "pnl": latest.pnl,
@@ -553,7 +552,6 @@ class PortfolioSkill:
                 item = {
                     "date": n.date.isoformat(),
                     "nav": n.nav,
-                    "nav_change": n.nav_change,
                     "pnl": n.pnl,
                     "share_change": n.share_change,
                 }
@@ -665,60 +663,6 @@ class PortfolioSkill:
             "base": start_nav_label
         }
 
-    def _calc_daily_return(self, _navs: list = None) -> Dict:
-        """计算当日收益率（较上一次记录净值的变化）
-
-        如果上一日没有净值记录，会自动回退到最近一次有记录的净值作为基准。
-        返回中 days_gap 表示两次记录的间隔天数，base 显示实际基准日期。
-        """
-        if _navs is not None:
-            if not _navs:
-                return {"success": False, "message": "无净值数据"}
-            sorted_navs = sorted(_navs, key=lambda x: x.date, reverse=True)
-            latest_nav = sorted_navs[0]
-            prev_nav = sorted_navs[1] if len(sorted_navs) > 1 else None
-        else:
-            latest_nav = self.storage.get_latest_nav(self.account)
-            if not latest_nav:
-                return {"success": False, "message": "无净值数据"}
-
-            nav_history = self.storage.get_nav_history(self.account, days=30)
-            sorted_navs = sorted(nav_history, key=lambda x: x.date, reverse=True)
-            prev_nav = sorted_navs[1] if len(sorted_navs) > 1 else None
-
-        if not prev_nav:
-            return {
-                "success": True,
-                "period": "当日",
-                "return_pct": 0.0,
-                "start_nav": latest_nav.nav,
-                "end_nav": latest_nav.nav,
-                "start_date": latest_nav.date.isoformat(),
-                "end_date": latest_nav.date.isoformat(),
-                "days_gap": 0,
-                "base": "首日记录"
-            }
-
-        days_gap = (latest_nav.date - prev_nav.date).days
-        ret = (latest_nav.nav - prev_nav.nav) / prev_nav.nav * 100 if prev_nav.nav > 0 else 0
-
-        if days_gap == 1:
-            base_label = "昨日"
-        else:
-            base_label = f"{prev_nav.date.isoformat()}（{days_gap}天前）"
-
-        return {
-            "success": True,
-            "period": "当日",
-            "return_pct": ret,
-            "start_nav": prev_nav.nav,
-            "end_nav": latest_nav.nav,
-            "start_date": prev_nav.date.isoformat(),
-            "end_date": latest_nav.date.isoformat(),
-            "days_gap": days_gap,
-            "base": base_label
-        }
-
     def _calc_since_inception_return(self, _navs: list = None) -> Dict:
         """计算自 start_year 以来收益（以上年末净值为基准，标准化为1）"""
         start_year = config.get_start_year()
@@ -752,7 +696,9 @@ class PortfolioSkill:
         return {
             "success": True,
             "period": f"{start_year}至今",
+            "return_pct": total_ret,
             "total_return_pct": total_ret,
+            "cagr": cagr,
             "cagr_pct": cagr,
             "days": days,
             "start_nav": 1.0,
@@ -871,7 +817,6 @@ class PortfolioSkill:
                 "overview": full["overview"],
                 "nav": nav.get("nav"),
                 "total_value": nav.get("total_value"),
-                "daily_return": returns.get("daily"),
                 "pnl": nav.get("pnl"),
                 "cash_flow": nav.get("cash_flow"),
                 "top_holdings": full.get("top_holdings"),
@@ -888,7 +833,6 @@ class PortfolioSkill:
                 "monthly_return": returns.get("monthly"),
                 "mtd_nav_change": nav.get("mtd_nav_change"),
                 "mtd_pnl": nav.get("mtd_pnl"),
-                "daily_return": returns.get("daily"),
                 "top_holdings": full.get("top_holdings"),
                 "distribution": full.get("distribution"),
             }
@@ -955,7 +899,7 @@ class PortfolioSkill:
             if all_navs and live_total > 0:
                 last_nav = all_navs[-1]
                 if last_nav.date < today and last_nav.shares and last_nav.shares > 0:
-                    synthetic_nav = NavHistory(
+                    synthetic_nav = NAVHistory(
                         date=today,
                         account=self.account,
                         total_value=round(live_total, 2),
@@ -983,8 +927,7 @@ class PortfolioSkill:
                     "cash_weight": latest.cash_weight,
                 }
                 # 这些字段仅在已记录的 NAV 中有值（虚拟 NAV 为 None）
-                if latest.nav_change is not None:
-                    nav_latest["nav_change"] = latest.nav_change
+                if latest.mtd_nav_change is not None:
                     nav_latest["mtd_nav_change"] = latest.mtd_nav_change
                     nav_latest["ytd_nav_change"] = latest.ytd_nav_change
                     nav_latest["pnl"] = latest.pnl
@@ -1006,7 +949,6 @@ class PortfolioSkill:
             current_year = str(today.year)
             current_month = today.strftime('%Y-%m')
 
-            daily_return = self._calc_daily_return(_navs=working_navs)
             monthly_return = self._calc_month_return(current_month, _navs=working_navs)
             yearly_return = self._calc_year_return(current_year, _navs=working_navs)
             since_inception = self._calc_since_inception_return(_navs=working_navs)
@@ -1025,7 +967,6 @@ class PortfolioSkill:
                 },
                 "nav": nav_latest,
                 "returns": {
-                    "daily": daily_return,
                     "monthly": monthly_return,
                     "yearly": yearly_return,
                     "since_inception": since_inception,

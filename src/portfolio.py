@@ -462,7 +462,6 @@ class PortfolioManager:
 
         按日计算：
         - 当日资金变动 = 当日出入金总和
-        - 当日净值涨幅 = (今日净值 - 昨日净值) / 昨日净值
         - 当日资产升值 = 今日账户净值 - 昨日账户净值 - 当日资金变动
         """
         if valuation is None:
@@ -575,12 +574,6 @@ class PortfolioManager:
 
         nav = total_value / shares if shares > 0 else 1.0
 
-        # -- 日涨幅 --
-        if yesterday_nav and yesterday_nav.nav and yesterday_nav.nav > 0:
-            daily_nav_change = (nav - yesterday_nav.nav) / yesterday_nav.nav
-        else:
-            daily_nav_change = 0.0
-
         # -- 月初至今涨幅（基准：上月末净值） --
         if prev_month_end_nav and prev_month_end_nav.nav and prev_month_end_nav.nav > 0:
             month_nav_change = (nav - prev_month_end_nav.nav) / prev_month_end_nav.nav
@@ -638,7 +631,6 @@ class PortfolioManager:
 
         return dict(
             shares=shares, shares_change=shares_change, nav=nav,
-            daily_nav_change=daily_nav_change,
             month_nav_change=month_nav_change, year_nav_change=year_nav_change,
             cumulative_nav_change=cumulative_nav_change,
             daily_appreciation=daily_appreciation,
@@ -653,7 +645,7 @@ class PortfolioManager:
         stock_ratio, cash_ratio, daily_cash_flow, monthly_cash_flow,
         yearly_cash_flow,
         yearly_data, cumulative_cash_flow, start_year,
-        shares, shares_change, nav, daily_nav_change,
+        shares, shares_change, nav,
         month_nav_change, year_nav_change,
         cumulative_nav_change, daily_appreciation,
         month_appreciation, year_appreciation,
@@ -690,7 +682,6 @@ class PortfolioManager:
             nav=round(nav, 6),
             cash_flow=round(daily_cash_flow, 2),
             share_change=round(shares_change, 2),
-            nav_change=round(daily_nav_change, 6),
             mtd_nav_change=round(month_nav_change, 6),
             ytd_nav_change=round(year_nav_change, 6),
             pnl=round(daily_appreciation, 2),
@@ -704,7 +695,7 @@ class PortfolioManager:
         stock_ratio, cash_ratio, current_year, start_year,
         yesterday_nav, prev_year_end_nav, prev_month_end_nav,
         yearly_data,
-        shares, shares_change, nav, daily_nav_change,
+        shares, shares_change, nav,
         month_nav_change, year_nav_change,
         cumulative_nav_change, daily_appreciation,
         month_appreciation, year_appreciation,
@@ -720,8 +711,6 @@ class PortfolioManager:
         print(f"  单位净值: {nav:.4f}")
         print(f"  当日资金变动: ¥{daily_cash_flow:,.2f}")
         print(f"  份额变动: {shares_change:,.2f}")
-        if yesterday_nav:
-            print(f"  当日净值涨幅: {daily_nav_change*100:.2f}%")
         if prev_month_end_nav:
             print(f"  当月净值涨幅: {month_nav_change*100:.2f}%")
         if prev_year_end_nav:

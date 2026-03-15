@@ -204,7 +204,7 @@ class NAVHistory(BaseModel):
     字段对照 CSV: 月份→date, 股票市值→stock_value, 现金结余→cash_value,
     账户净值→total_value, 股票仓位占比→stock_weight, 现金占比→cash_weight,
     总份额→shares, 净值→nav, 资金变动→fund_flow, 份额变动→share_change,
-    当期净值涨幅→nav_change, 当月净值涨幅→mtd_nav_change, 当年净值涨幅→ytd_nav_change,
+    当月净值涨幅→mtd_nav_change, 当年净值涨幅→ytd_nav_change,
     当期资产升值→pnl, 当月资产升值→mtd_pnl, 当年资产升值→ytd_pnl
     """
     record_id: Optional[str] = None
@@ -235,7 +235,6 @@ class NAVHistory(BaseModel):
     share_change: Optional[float] = None
 
     # 收益
-    nav_change: Optional[float] = None
     mtd_nav_change: Optional[float] = None
     ytd_nav_change: Optional[float] = None
     pnl: Optional[float] = None
