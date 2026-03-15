@@ -1,0 +1,12 @@
+# 数据验证
+pydantic>=2.0.0
+
+# 价格获取
+requests>=2.28.0
+pytz>=2023.3
+
+# 美股价格（price_fetcher.py 中使用）
+yfinance>=0.2.18
+
+# 场外基金价格（price_fetcher.py 中使用）
+akshare>=1.10.0

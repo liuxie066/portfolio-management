@@ -1,0 +1,17 @@
+{
+  "account": "lx",
+  "initial_value": 0,
+  "start_year": 2024,
+  "finnhub_api_key": "",
+  "feishu": {
+    "app_id": "",
+    "app_secret": "",
+    "app_token": "",
+    "tables": {
+      "holdings": "",
+      "transactions": "",
+      "nav_history": "",
+      "cash_flow": ""
+    }
+  }
+}
