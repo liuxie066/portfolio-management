@@ -6,6 +6,7 @@ import json
 import time
 import requests
 import requests.adapters
+import threading
 from typing import Dict, List, Optional, Any, Union
 from datetime import datetime
 
@@ -30,9 +31,10 @@ class FeishuClient:
         self.app_secret = app_secret or config.get("feishu.app_secret")
         self.user_token = user_token or config.get("feishu.user_token")
 
-        # 应用级 token 缓存
+        # 应用级 token 缓存（带线程安全锁）
         self._tenant_token = None
         self._token_expire_time = 0
+        self._token_lock = threading.Lock()  # 用于双重检查锁
 
         # 限流保护：飞书 API 限制 20 QPS
         self._last_request_time = 0
@@ -89,29 +91,36 @@ class FeishuClient:
             }
 
     def _get_tenant_token(self) -> str:
-        """获取应用级 tenant access token（带缓存）"""
+        """获取应用级 tenant access token（带缓存，线程安全 DCL）"""
         now = time.time()
 
+        # 第一重检查（无锁）
         if self._tenant_token and now < self._token_expire_time - 300:
             return self._tenant_token
 
-        if not self.app_id or not self.app_secret:
-            raise ValueError("需要提供 app_id 和 app_secret，请在 config.json 或环境变量中配置")
+        # 获取锁进行第二重检查
+        with self._token_lock:
+            # 第二重检查（有锁）- 防止多个线程同时通过第一重检查后重复请求
+            if self._tenant_token and now < self._token_expire_time - 300:
+                return self._tenant_token
 
-        url = f"{self.BASE_URL}/auth/v3/tenant_access_token/internal"
-        response = requests.post(url, json={
-            'app_id': self.app_id,
-            'app_secret': self.app_secret
-        })
-        response.raise_for_status()
-        data = response.json()
+            if not self.app_id or not self.app_secret:
+                raise ValueError("需要提供 app_id 和 app_secret，请在 config.json 或环境变量中配置")
 
-        if data.get('code') != 0:
-            raise Exception(f"获取 token 失败: {data.get('msg')}")
+            url = f"{self.BASE_URL}/auth/v3/tenant_access_token/internal"
+            response = requests.post(url, json={
+                'app_id': self.app_id,
+                'app_secret': self.app_secret
+            })
+            response.raise_for_status()
+            data = response.json()
 
-        self._tenant_token = data['tenant_access_token']
-        self._token_expire_time = now + data['expire']
-        return self._tenant_token
+            if data.get('code') != 0:
+                raise Exception(f"获取 token 失败: {data.get('msg')}")
+
+            self._tenant_token = data['tenant_access_token']
+            self._token_expire_time = now + data['expire']
+            return self._tenant_token
 
     def _rate_limit(self):
         """限流控制"""

@@ -6,6 +6,7 @@
 """
 import json
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -14,6 +15,10 @@ from .models import AssetType, PriceCache, DATETIME_FORMAT
 
 # 默认缓存文件路径
 PRICE_CACHE_FILE = Path(__file__).parent.parent / '.data' / 'price_cache.json'
+
+# 延迟写入配置
+FLUSH_INTERVAL_SECONDS = 5  # 5秒自动刷盘
+FLUSH_MAX_DIRTY_COUNT = 10   # 累积10条变更立即刷盘
 
 
 class LocalPriceCache:
@@ -24,12 +29,17 @@ class LocalPriceCache:
     2. 低延迟 - 无需网络请求
     3. 自动过期清理
     4. 线程安全 - 使用锁保护并发访问
+    5. 延迟写入 - 批量写入减少 I/O
     """
 
     def __init__(self, cache_file: Path = PRICE_CACHE_FILE):
         self.cache_file = cache_file
         self._cache: Dict[str, Dict] = {}
         self._lock = threading.Lock()
+        self._dirty_count = 0  # 未保存的变更计数
+        self._dirty_flag = False  # 是否有未保存的变更
+        self._flush_timer: Optional[threading.Timer] = None
+        self._shutdown = False
         self._load()
 
     def _load_unlocked(self):
@@ -56,8 +66,45 @@ class LocalPriceCache:
             self.cache_file.parent.mkdir(parents=True, exist_ok=True)
             with open(self.cache_file, 'w', encoding='utf-8') as f:
                 json.dump(self._cache, f, ensure_ascii=False, indent=2)
+            self._dirty_count = 0
+            self._dirty_flag = False
         except IOError as e:
             print(f"[警告] 保存本地价格缓存失败: {e}")
+
+    def _schedule_flush(self):
+        """调度延迟写入（无锁版本，需在锁内调用）"""
+        if self._shutdown:
+            return
+        if self._flush_timer is None or not self._flush_timer.is_alive():
+            self._flush_timer = threading.Timer(FLUSH_INTERVAL_SECONDS, self._flush_delayed)
+            self._flush_timer.daemon = True
+            self._flush_timer.start()
+
+    def _flush_delayed(self):
+        """延迟写入回调"""
+        with self._lock:
+            if self._dirty_flag:
+                self._save_unlocked()
+            self._flush_timer = None
+
+    def flush(self):
+        """强制刷盘 - 线程安全"""
+        with self._lock:
+            if self._dirty_flag:
+                self._save_unlocked()
+            # 取消定时器
+            if self._flush_timer and self._flush_timer.is_alive():
+                self._flush_timer.cancel()
+                self._flush_timer = None
+
+    def close(self):
+        """关闭缓存，刷盘并清理资源"""
+        self._shutdown = True
+        self.flush()
+
+    def __del__(self):
+        """析构时确保数据写入"""
+        self.close()
 
     def get(self, asset_id: str) -> Optional[PriceCache]:
         """获取价格缓存（检查有效期）- 线程安全"""
@@ -71,7 +118,7 @@ class LocalPriceCache:
             now = datetime.now().strftime(DATETIME_FORMAT)
 
             if expires_at and expires_at < now:
-                self._delete_unlocked(asset_id)
+                self._delete_unlocked(asset_id, _flush=True)
                 return None
 
             return PriceCache(
@@ -88,8 +135,13 @@ class LocalPriceCache:
                 expires_at=expires_at if expires_at else None
             )
 
-    def save(self, price: PriceCache):
-        """保存价格缓存 - 线程安全"""
+    def save(self, price: PriceCache, *, _flush: bool = False):
+        """保存价格缓存 - 线程安全（延迟写入）
+
+        Args:
+            price: 价格缓存对象
+            _flush: 内部标志，True 时立即写入（用于批量操作后的最后一次）
+        """
         expires_at_str = None
         if price.expires_at:
             if isinstance(price.expires_at, datetime):
@@ -112,13 +164,30 @@ class LocalPriceCache:
                 'expires_at': expires_at_str,
                 'updated_at': datetime.now().strftime(DATETIME_FORMAT)
             }
-            self._save_unlocked()
+            self._dirty_count += 1
+            self._dirty_flag = True
 
-    def _delete_unlocked(self, asset_id: str):
+            # 满足任一条件时立即写入：
+            # 1. 调用方要求立即写入 (_flush=True)
+            # 2. 累积变更达到阈值
+            if _flush or self._dirty_count >= FLUSH_MAX_DIRTY_COUNT:
+                self._save_unlocked()
+            else:
+                # 否则调度延迟写入
+                self._schedule_flush()
+
+    def _delete_unlocked(self, asset_id: str, *, _flush: bool = False):
         """删除价格缓存（无锁版本，需在锁内调用）"""
         if asset_id in self._cache:
             del self._cache[asset_id]
-            self._save_unlocked()
+            self._dirty_count += 1
+            self._dirty_flag = True
+
+            # 根据条件决定是否立即写入
+            if _flush or self._dirty_count >= FLUSH_MAX_DIRTY_COUNT:
+                self._save_unlocked()
+            else:
+                self._schedule_flush()
 
     def delete(self, asset_id: str):
         """删除价格缓存 - 线程安全"""
@@ -157,10 +226,13 @@ class LocalPriceCache:
                 except (ValueError, TypeError):
                     continue
 
-            # 清理过期数据
+            # 清理过期数据（批量删除，最后统一刷盘）
             for asset_id in expired_ids:
                 self._cache.pop(asset_id, None)
             if expired_ids:
+                self._dirty_count += len(expired_ids)
+                self._dirty_flag = True
+                # 批量清理后立即刷盘，避免数据不一致
                 self._save_unlocked()
 
             return results
@@ -176,5 +248,7 @@ class LocalPriceCache:
             for asset_id in expired_ids:
                 self._cache.pop(asset_id, None)
             if expired_ids:
+                self._dirty_count += len(expired_ids)
+                self._dirty_flag = True
                 self._save_unlocked()
                 print(f"[本地缓存] 清理 {len(expired_ids)} 条过期价格缓存")

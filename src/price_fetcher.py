@@ -218,16 +218,16 @@ class PriceFetcher:
             with ThreadPoolExecutor(max_workers=2) as executor:
                 futures = []
 
-                # 提交非美股查询
+                # 提交非美股查询（_nested=True 避免嵌套线程池）
                 if other_codes:
                     futures.append(
-                        executor.submit(self._fetch_concurrent, other_codes, name_map)
+                        executor.submit(self._fetch_concurrent, other_codes, name_map, 5, True)
                     )
 
-                # 提交美股查询（并行执行）
+                # 提交美股查询（并行执行，_nested=True 避免嵌套线程池）
                 if us_codes:
                     futures.append(
-                        executor.submit(self._fetch_us_batch, us_codes, name_map, expired_cache)
+                        executor.submit(self._fetch_us_batch, us_codes, name_map, expired_cache, 3, True)
                     )
 
                 # 等待所有结果，设置总超时
@@ -259,13 +259,14 @@ class PriceFetcher:
         return results
 
     def _fetch_concurrent(self, codes: List[str], name_map: Dict[str, str],
-                          max_workers: int = 5) -> Dict[str, Dict]:
+                          max_workers: int = 5, _nested: bool = False) -> Dict[str, Dict]:
         """并发批量查询（用于非美股资产）
 
         Args:
             codes: 资产代码列表
             name_map: 代码到名称映射
             max_workers: 最大并发数
+            _nested: 内部标志，True 表示已在线程池中，使用顺序执行避免嵌套
 
         Returns:
             代码到价格数据的映射
@@ -280,21 +281,30 @@ class PriceFetcher:
             except Exception as e:
                 return code, {'error': str(e)}
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_code = {
-                executor.submit(fetch_single, code): code for code in codes
-            }
+        # 如果已在线程池中（嵌套调用），使用顺序执行避免死锁
+        if _nested:
+            for code in codes:
+                code, result = fetch_single(code)
+                if result and 'error' not in result:
+                    results[code] = result
+                elif result and 'error' in result:
+                    errors.append(f"{code}: {result['error']}")
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_code = {
+                    executor.submit(fetch_single, code): code for code in codes
+                }
 
-            for future in as_completed(future_to_code):
-                code = future_to_code[future]
-                try:
-                    _, result = future.result(timeout=15)
-                    if result and 'error' not in result:
-                        results[code] = result
-                    elif result and 'error' in result:
-                        errors.append(f"{code}: {result['error']}")
-                except Exception as e:
-                    errors.append(f"{code}: 并发查询异常 {e}")
+                for future in as_completed(future_to_code):
+                    code = future_to_code[future]
+                    try:
+                        _, result = future.result(timeout=15)
+                        if result and 'error' not in result:
+                            results[code] = result
+                        elif result and 'error' in result:
+                            errors.append(f"{code}: {result['error']}")
+                    except Exception as e:
+                        errors.append(f"{code}: 并发查询异常 {e}")
 
         if errors and len(errors) <= 3:
             print(f"部分资产查询失败: {'; '.join(errors[:3])}")
@@ -302,7 +312,8 @@ class PriceFetcher:
         return results
 
     def _fetch_us_batch(self, codes: List[str], name_map: Dict[str, str],
-                        expired_cache: Dict[str, Dict], max_workers: int = 3) -> Dict[str, Dict]:
+                        expired_cache: Dict[str, Dict], max_workers: int = 3,
+                        _nested: bool = False) -> Dict[str, Dict]:
         """批量获取美股价格（带快速失败机制）
 
         策略：
@@ -316,6 +327,7 @@ class PriceFetcher:
             name_map: 代码到名称映射
             expired_cache: 过期缓存数据，用于失败时 fallback
             max_workers: 最大并发数
+            _nested: 内部标志，True 表示已在线程池中，使用顺序执行避免嵌套
 
         Returns:
             代码到价格数据的映射
@@ -429,49 +441,71 @@ class PriceFetcher:
             except Exception:
                 return code, None
 
-        # 使用 ThreadPoolExecutor 并发查询，但限制并发数
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # 提交所有任务
-            future_to_code = {
-                executor.submit(fetch_single_us, code): code for code in codes
-            }
-
-            # 收集结果
-            for future in as_completed(future_to_code):
-                code = future_to_code[future]
-                try:
-                    _, result = future.result(timeout=10)  # 整体等待10秒
-                    if result:
-                        results[code] = result
-                        with failure_lock:
-                            consecutive_failures[0] = 0  # 重置失败计数
-                    else:
-                        with failure_lock:
-                            consecutive_failures[0] += 1
-                        # 使用过期缓存作为 fallback
-                        if code in expired_cache:
-                            results[code] = expired_cache[code]
-                            results[code]['source'] = 'cache_fallback'
-                except Exception:
-                    with failure_lock:
-                        consecutive_failures[0] += 1
+        # 如果已在线程池中（嵌套调用），使用顺序执行避免死锁
+        if _nested:
+            for code in codes:
+                _, result = fetch_single_us(code)
+                if result:
+                    results[code] = result
+                    consecutive_failures[0] = 0
+                else:
+                    consecutive_failures[0] += 1
                     if code in expired_cache:
                         results[code] = expired_cache[code]
                         results[code]['source'] = 'cache_fallback'
 
-                # 如果连续失败过多，取消剩余任务
-                with failure_lock:
-                    should_break = consecutive_failures[0] >= max_consecutive_failures
-                if should_break:
+                # 如果连续失败过多，跳过剩余查询
+                if consecutive_failures[0] >= max_consecutive_failures:
                     print(f"[美股价格] 连续 {consecutive_failures[0]} 次获取失败，跳过剩余美股查询")
-                    # 剩余未完成的都使用缓存
-                    for f, c in future_to_code.items():
+                    for c in codes:
                         if c not in results and c in expired_cache:
                             results[c] = expired_cache[c]
                             results[c]['source'] = 'cache_fallback'
                     break
+        else:
+            # 使用 ThreadPoolExecutor 并发查询，但限制并发数
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # 提交所有任务
+                future_to_code = {
+                    executor.submit(fetch_single_us, code): code for code in codes
+                }
+
+                # 收集结果
+                for future in as_completed(future_to_code):
+                    code = future_to_code[future]
+                    try:
+                        _, result = future.result(timeout=10)  # 整体等待10秒
+                        if result:
+                            results[code] = result
+                            with failure_lock:
+                                consecutive_failures[0] = 0  # 重置失败计数
+                        else:
+                            with failure_lock:
+                                consecutive_failures[0] += 1
+                            # 使用过期缓存作为 fallback
+                            if code in expired_cache:
+                                results[code] = expired_cache[code]
+                                results[code]['source'] = 'cache_fallback'
+                    except Exception:
+                        with failure_lock:
+                            consecutive_failures[0] += 1
+                        if code in expired_cache:
+                            results[code] = expired_cache[code]
+                            results[code]['source'] = 'cache_fallback'
+
+                    # 如果连续失败过多，取消剩余任务
+                    with failure_lock:
+                        should_break = consecutive_failures[0] >= max_consecutive_failures
+                    if should_break:
+                        print(f"[美股价格] 连续 {consecutive_failures[0]} 次获取失败，跳过剩余美股查询")
+                        # 剩余未完成的都使用缓存
+                        for f, c in future_to_code.items():
+                            if c not in results and c in expired_cache:
+                                results[c] = expired_cache[c]
+                                results[c]['source'] = 'cache_fallback'
+                        break
 
         return results
 

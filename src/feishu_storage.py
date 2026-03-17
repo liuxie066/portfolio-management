@@ -32,6 +32,11 @@ class FeishuStorage:
         # key: "asset_id:account:market" -> value: record_id
         self._holding_id_cache: Dict[str, str] = {}
 
+        # 防重缓存：本地 Set 预检，避免重复 API 查询
+        # key: request_id/dedup_key -> value: record_id (或 True 表示已存在)
+        self._request_id_cache: Dict[str, str] = {}  # transactions 表
+        self._dedup_key_cache: Dict[str, str] = {}   # transactions 和 cash_flow 表
+
         # 本地文件价格缓存（替代飞书多维表）
         self._local_price_cache = LocalPriceCache()
 
@@ -593,19 +598,44 @@ class FeishuStorage:
                 raise
 
         tx.record_id = result['record_id']
+
+        # 写入防重缓存，避免后续重复查询
+        if tx.request_id:
+            self._request_id_cache[tx.request_id] = tx.record_id
+        if tx.dedup_key:
+            self._dedup_key_cache[f"transactions:{tx.dedup_key}"] = tx.record_id
+
         return tx
 
     def _find_by_request_id(self, request_id: str) -> Optional[Transaction]:
-        """通过 request_id 查找交易记录（用于幂等性检查）"""
+        """通过 request_id 查找交易记录（用于幂等性检查，带本地缓存）"""
         if not request_id:
             return None
 
+        # 1. 本地缓存预检（避免重复 API 调用）
+        cached_record_id = self._request_id_cache.get(request_id)
+        if cached_record_id:
+            # 缓存命中，直接查询记录详情
+            try:
+                record = self.client.get_record('transactions', cached_record_id)
+                if record:
+                    fields = self._from_feishu_fields(record['fields'], 'transactions')
+                    fields['record_id'] = record['record_id']
+                    return self._dict_to_transaction(fields)
+            except Exception:
+                # 缓存记录可能已删除，清除缓存后回退到查询模式
+                self._request_id_cache.pop(request_id, None)
+
+        # 2. 缓存未命中，发起 API 查询
         filter_str = f'CurrentValue.[request_id] = "{self._escape_filter_value(request_id)}"'
         try:
             records = self.client.list_records('transactions', filter_str=filter_str)
             if records:
+                record_id = records[0]['record_id']
+                # 写入本地缓存
+                self._request_id_cache[request_id] = record_id
                 fields = self._from_feishu_fields(records[0]['fields'], 'transactions')
-                fields['record_id'] = records[0]['record_id']
+                fields['record_id'] = record_id
                 return self._dict_to_transaction(fields)
         except Exception as e:
             print(f"[警告] 幂等性检查失败: {e}")
@@ -613,7 +643,7 @@ class FeishuStorage:
         return None
 
     def _find_by_dedup_key(self, table: str, dedup_key: str) -> Optional[str]:
-        """通过 dedup_key 查找记录（用于内容指纹防重）
+        """通过 dedup_key 查找记录（用于内容指纹防重，带本地缓存）
 
         Returns:
             record_id if found, else None
@@ -621,12 +651,29 @@ class FeishuStorage:
         if not dedup_key:
             return None
 
+        # 1. 本地缓存预检（避免重复 API 调用）
+        cache_key = f"{table}:{dedup_key}"
+        cached_record_id = self._dedup_key_cache.get(cache_key)
+        if cached_record_id:
+            # 缓存命中，验证记录是否仍存在
+            try:
+                record = self.client.get_record(table, cached_record_id)
+                if record:
+                    return cached_record_id
+            except Exception:
+                # 缓存记录可能已删除，清除缓存后继续查询
+                self._dedup_key_cache.pop(cache_key, None)
+
+        # 2. 缓存未命中，发起 API 查询
         filter_str = f'CurrentValue.[dedup_key] = "{self._escape_filter_value(dedup_key)}"'
         try:
             records = self.client.list_records(table, filter_str=filter_str)
             if records:
-                return records[0]['record_id']
-        except Exception as e:
+                record_id = records[0]['record_id']
+                # 写入本地缓存
+                self._dedup_key_cache[cache_key] = record_id
+                return record_id
+        except Exception:
             # 字段不存在等错误静默忽略，不阻塞正常流程
             pass
 
@@ -757,6 +804,11 @@ class FeishuStorage:
             else:
                 raise
         cf.record_id = result['record_id']
+
+        # 写入防重缓存，避免后续重复查询
+        if cf.dedup_key:
+            self._dedup_key_cache[f"cash_flow:{cf.dedup_key}"] = cf.record_id
+
         return cf
 
     def get_cash_flow(self, record_id: str) -> Optional[CashFlow]:
