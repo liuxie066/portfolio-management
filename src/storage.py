@@ -1,4 +1,4 @@
-"""存储后端工厂：优先飞书，失败时优雅回退 SQLite。"""
+"""存储后端工厂：按配置创建后端；auto 模式下若 Feishu 不可用则显式失败，避免静默分裂写入。"""
 from __future__ import annotations
 
 from typing import Optional
@@ -27,11 +27,13 @@ def create_storage(prefer: Optional[str] = None):
     if backend == 'feishu':
         return FeishuStorage()
 
-    # auto 模式：先尝试飞书，失败则回退到 sqlite
+    # auto 模式：优先飞书；若不可用则显式失败，避免静默回退造成数据写入分裂。
     try:
         storage = FeishuStorage()
         _feishu_healthcheck(storage)
         return storage
     except Exception as e:
-        print(f"[存储] Feishu 不可用，回退 SQLite: {e}")
-        return SQLiteStorage()
+        raise RuntimeError(
+            f"[存储] auto 模式下 Feishu 不可用，已拒绝静默回退 SQLite 以避免数据分裂。"
+            f"请修复 Feishu 配置/权限，或显式设置 storage.backend=sqlite。原始错误: {e}"
+        ) from e

@@ -87,16 +87,29 @@ def test_full_report_and_record_nav_share_same_snapshot():
 
 def test_repair_nav_history_metrics_dry_run_does_not_apply():
     skill = PortfolioSkill(account='lx')
-    skill.audit_nav_history_metrics = Mock(return_value={
+    skill.audit_nav_history_accuracy = Mock(return_value={
         'success': True,
-        'rows': [{
+        'summary': {'repair_candidates': 1, 'exempt_rows': 0, 'ok_rows': 0},
+        'metrics': {
+            'rows': [{
+                'record_id': 'rec1',
+                'date': '2026-03-19',
+                'recomputed_mtd_nav_change': 0.1,
+                'recomputed_ytd_nav_change': 0.2,
+                'recomputed_mtd_pnl': 10.0,
+                'recomputed_ytd_pnl': 20.0,
+                'base_missing': {'month': False, 'year': False},
+            }]
+        },
+        'repair_candidates': [{
             'record_id': 'rec1',
             'date': '2026-03-19',
-            'recomputed_mtd_nav_change': 0.1,
-            'recomputed_ytd_nav_change': 0.2,
-            'recomputed_mtd_pnl': 10.0,
-            'recomputed_ytd_pnl': 20.0,
-        }]
+            'status': 'anomaly',
+            'anomalies': ['mismatch'],
+            'exemptions': [],
+        }],
+        'exempt_rows': [],
+        'ok_rows': [],
     })
     skill.storage.client = Mock()
 

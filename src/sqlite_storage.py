@@ -6,6 +6,7 @@ SQLite 存储层
 import json
 import sqlite3
 from datetime import date, datetime
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
@@ -20,6 +21,10 @@ from .local_cache import LocalPriceCache
 
 class SQLiteStorage:
     """本地 SQLite 存储层"""
+
+    MONEY_QUANT = Decimal('0.01')
+    NAV_QUANT = Decimal('0.000001')
+    WEIGHT_QUANT = Decimal('0.000001')
 
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = Path(db_path or config.get_sqlite_path())
@@ -128,6 +133,26 @@ class SQLiteStorage:
         return f"{prefix}_{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
 
     @staticmethod
+    def _to_decimal(v: Any) -> Decimal:
+        if v is None:
+            return Decimal('0')
+        if isinstance(v, Decimal):
+            return v
+        return Decimal(str(v))
+
+    @classmethod
+    def _quantize_money(cls, v: Any) -> float:
+        return float(cls._to_decimal(v).quantize(cls.MONEY_QUANT, rounding=ROUND_HALF_UP))
+
+    @classmethod
+    def _quantize_nav(cls, v: Any) -> float:
+        return float(cls._to_decimal(v).quantize(cls.NAV_QUANT, rounding=ROUND_HALF_UP))
+
+    @classmethod
+    def _quantize_weight(cls, v: Any) -> float:
+        return float(cls._to_decimal(v).quantize(cls.WEIGHT_QUANT, rounding=ROUND_HALF_UP))
+
+    @staticmethod
     def _dt_str(v):
         if not v:
             return None
@@ -174,7 +199,8 @@ class SQLiteStorage:
         existing = self.get_holding(holding.asset_id, holding.account, holding.market)
         with self._connect() as conn:
             if existing and existing.record_id:
-                new_quantity = existing.quantity + holding.quantity
+                is_cash_like = (existing.asset_type and existing.asset_type.value in ('cash', 'mmf'))
+                new_quantity = self._quantize_money(existing.quantity + holding.quantity) if is_cash_like else (existing.quantity + holding.quantity)
                 new_name = holding.asset_name or existing.asset_name
                 conn.execute(
                     """
@@ -228,16 +254,18 @@ class SQLiteStorage:
         holding = self.get_holding(asset_id, account, market)
         if not holding or not holding.record_id:
             return
+        is_cash_like = (holding.asset_type and holding.asset_type.value in ('cash', 'mmf'))
+        new_quantity = self._quantize_money(holding.quantity + quantity_change) if is_cash_like else (holding.quantity + quantity_change)
         with self._connect() as conn:
             conn.execute(
                 "UPDATE holdings SET quantity=?, updated_at=? WHERE record_id=?",
-                (holding.quantity + quantity_change, datetime.now().strftime(DATETIME_FORMAT), holding.record_id),
+                (new_quantity, datetime.now().strftime(DATETIME_FORMAT), holding.record_id),
             )
             conn.commit()
 
     def delete_holding_if_zero(self, asset_id: str, account: str, market: Optional[str] = None):
         holding = self.get_holding(asset_id, account, market)
-        if holding and holding.record_id and abs(holding.quantity) == 0:
+        if holding and holding.record_id and abs(holding.quantity) <= 1e-8:
             self.delete_holding_by_record_id(holding.record_id)
 
     def delete_holding_by_record_id(self, record_id: str) -> bool:
@@ -271,7 +299,7 @@ class SQLiteStorage:
                 (
                     record_id, tx.request_id, tx.dedup_key, tx.tx_date.isoformat(), tx.tx_type.value,
                     tx.asset_id, tx.asset_name, tx.asset_type.value if tx.asset_type else None,
-                    tx.market or '', tx.account, tx.quantity, tx.price, tx.amount or (tx.quantity * tx.price),
+                    tx.market or '', tx.account, tx.quantity, tx.price, tx.amount,
                     tx.currency, tx.fee, tx.tax, tx.related_account, tx.remark, tx.source,
                 ),
             )
@@ -402,13 +430,13 @@ class SQLiteStorage:
                     UPDATE nav_history SET total_value=?, cash_value=?, stock_value=?, fund_value=?,
                     cn_stock_value=?, us_stock_value=?, hk_stock_value=?, stock_weight=?, cash_weight=?,
                     shares=?, nav=?, cash_flow=?, share_change=?, mtd_nav_change=?, ytd_nav_change=?,
-                    pnl=NULL, mtd_pnl=?, ytd_pnl=?, details=? WHERE record_id=?
+                    pnl=?, mtd_pnl=?, ytd_pnl=?, details=? WHERE record_id=?
                     """,
                     (
                         nav.total_value, nav.cash_value, nav.stock_value, nav.fund_value,
                         nav.cn_stock_value, nav.us_stock_value, nav.hk_stock_value, nav.stock_weight,
                         nav.cash_weight, nav.shares, nav.nav, nav.cash_flow, nav.share_change,
-                        nav.mtd_nav_change, nav.ytd_nav_change, nav.mtd_pnl, nav.ytd_pnl,
+                        nav.mtd_nav_change, nav.ytd_nav_change, nav.pnl, nav.mtd_pnl, nav.ytd_pnl,
                         details, existing.record_id,
                     ),
                 )
@@ -422,14 +450,14 @@ class SQLiteStorage:
                         cn_stock_value, us_stock_value, hk_stock_value, stock_weight, cash_weight,
                         shares, nav, cash_flow, share_change, mtd_nav_change, ytd_nav_change,
                         pnl, mtd_pnl, ytd_pnl, details
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         record_id, nav.date.isoformat(), nav.account, nav.total_value, nav.cash_value,
                         nav.stock_value, nav.fund_value, nav.cn_stock_value, nav.us_stock_value,
                         nav.hk_stock_value, nav.stock_weight, nav.cash_weight, nav.shares, nav.nav,
                         nav.cash_flow, nav.share_change, nav.mtd_nav_change, nav.ytd_nav_change,
-                        nav.mtd_pnl, nav.ytd_pnl, details,
+                        nav.pnl, nav.mtd_pnl, nav.ytd_pnl, details,
                     ),
                 )
                 nav.record_id = record_id
@@ -448,16 +476,25 @@ class SQLiteStorage:
     def update_nav_fields(self, record_id: str, fields: Dict[str, Any], dry_run: bool = False):
         allowed = ['mtd_nav_change', 'ytd_nav_change', 'mtd_pnl', 'ytd_pnl', 'pnl', 'cash_flow', 'share_change', 'details']
         update_keys = [k for k in allowed if k in fields]
+        normalized = {}
+        for k in update_keys:
+            v = fields[k]
+            if k in ('mtd_nav_change', 'ytd_nav_change') and v is not None:
+                normalized[k] = self._quantize_nav(v)
+            elif k in ('mtd_pnl', 'ytd_pnl', 'pnl', 'cash_flow', 'share_change') and v is not None:
+                normalized[k] = self._quantize_money(v)
+            else:
+                normalized[k] = v
         if dry_run:
-            return {"record_id": record_id, "fields": {k: fields[k] for k in update_keys}}
+            return {"record_id": record_id, "fields": normalized}
         if not update_keys:
             return {"record_id": record_id, "fields": {}}
         assigns = ', '.join(f"{k}=?" for k in update_keys)
-        values = [fields[k] for k in update_keys] + [record_id]
+        values = [normalized[k] for k in update_keys] + [record_id]
         with self._connect() as conn:
             conn.execute(f"UPDATE nav_history SET {assigns} WHERE record_id=?", values)
             conn.commit()
-        return {"record_id": record_id, "fields": {k: fields[k] for k in update_keys}}
+        return {"record_id": record_id, "fields": normalized}
 
     def get_latest_nav(self, account: str) -> Optional[NAVHistory]:
         with self._connect() as conn:

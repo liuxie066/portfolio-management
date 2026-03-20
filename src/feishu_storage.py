@@ -5,6 +5,7 @@
 import json
 import re
 from datetime import date, datetime
+from decimal import Decimal, ROUND_HALF_UP
 from typing import List, Optional, Dict, Any, Tuple
 
 from .models import (
@@ -18,6 +19,10 @@ from .local_cache import LocalPriceCache
 
 class FeishuStorage:
     """飞书多维表存储层 (带内存缓存优化)"""
+
+    MONEY_QUANT = Decimal('0.01')
+    NAV_QUANT = Decimal('0.000001')
+    WEIGHT_QUANT = Decimal('0.000001')
 
     def __init__(self, client: FeishuClient = None):
         """
@@ -48,6 +53,57 @@ class FeishuStorage:
         """清除持仓缓存"""
         cache_key = self._get_holding_cache_key(asset_id, account, market)
         self._holding_id_cache.pop(cache_key, None)
+
+    @staticmethod
+    def _to_decimal(v: Any) -> Decimal:
+        if v is None:
+            return Decimal('0')
+        if isinstance(v, Decimal):
+            return v
+        return Decimal(str(v))
+
+    @classmethod
+    def _quantize_money(cls, v: Any) -> float:
+        return float(cls._to_decimal(v).quantize(cls.MONEY_QUANT, rounding=ROUND_HALF_UP))
+
+    @classmethod
+    def _quantize_nav(cls, v: Any) -> float:
+        return float(cls._to_decimal(v).quantize(cls.NAV_QUANT, rounding=ROUND_HALF_UP))
+
+    @classmethod
+    def _quantize_weight(cls, v: Any) -> float:
+        return float(cls._to_decimal(v).quantize(cls.WEIGHT_QUANT, rounding=ROUND_HALF_UP))
+
+    @classmethod
+    def _normalize_numeric_field(cls, table: str, key: str, value: Any) -> Any:
+        if value is None:
+            return None
+
+        money_fields = {
+            'holdings': {'avg_cost'},
+            'transactions': {'price', 'amount', 'fee', 'tax'},
+            'cash_flow': {'amount', 'cny_amount'},
+            'nav_history': {
+                'total_value', 'cash_value', 'stock_value', 'fund_value',
+                'cn_stock_value', 'us_stock_value', 'hk_stock_value',
+                'shares', 'cash_flow', 'share_change', 'pnl', 'mtd_pnl', 'ytd_pnl'
+            },
+            'price_cache': {'price', 'cny_price', 'change', 'change_pct', 'exchange_rate'},
+        }
+        nav_fields = {
+            'nav_history': {'nav', 'mtd_nav_change', 'ytd_nav_change'},
+        }
+        weight_fields = {
+            'nav_history': {'stock_weight', 'cash_weight'},
+        }
+
+        if key in money_fields.get(table, set()):
+            return cls._quantize_money(value)
+        if key in nav_fields.get(table, set()):
+            return cls._quantize_nav(value)
+        if key in weight_fields.get(table, set()):
+            return cls._quantize_weight(value)
+        return value
 
     # ========== 字段转换工具 ==========
 
@@ -140,12 +196,13 @@ class FeishuStorage:
                 result[key] = json.dumps(value, ensure_ascii=False)
             # 数字字段类型处理
             elif key in num_fields_config:
+                normalized_value = self._normalize_numeric_field(table, key, value)
                 if num_fields_config[key]:
                     # 数字类型：直接传数字
-                    result[key] = value
+                    result[key] = normalized_value
                 else:
                     # 文本类型：转换为字符串
-                    result[key] = str(value)
+                    result[key] = str(normalized_value)
             # 其他直接传
             else:
                 result[key] = value
@@ -172,10 +229,11 @@ class FeishuStorage:
 
             # 根据表名和字段名做类型转换
             if table == 'holdings':
-                if key == 'quantity' and value:
+                if key == 'quantity' and value is not None and value != '':
                     result[key] = self._parse_float(value) or 0.0
-                elif key == 'avg_cost' and value:
-                    result[key] = self._parse_float(value) or 0.0
+                elif key == 'avg_cost' and value is not None and value != '':
+                    parsed = self._parse_float(value)
+                    result[key] = self._normalize_numeric_field(table, key, parsed) if parsed is not None else None
                 elif key == 'tag' and value:
                     try:
                         result[key] = json.loads(value) if isinstance(value, str) else value
@@ -185,16 +243,18 @@ class FeishuStorage:
                     result[key] = value
 
             elif table == 'transactions':
-                if key in ['quantity', 'price', 'amount', 'fee', 'tax'] and value:
-                    result[key] = self._parse_float(value) or 0.0
+                if key in ['quantity', 'price', 'amount', 'fee', 'tax'] and value is not None and value != '':
+                    parsed = self._parse_float(value)
+                    result[key] = self._normalize_numeric_field(table, key, parsed) if parsed is not None else None
                 elif key == 'tx_date' and value:
                     result[key] = value  # 保持字符串，模型会解析
                 else:
                     result[key] = value
 
             elif table == 'cash_flow':
-                if key in ['amount', 'cny_amount', 'exchange_rate'] and value:
-                    result[key] = self._parse_float(value) or 0.0
+                if key in ['amount', 'cny_amount', 'exchange_rate'] and value is not None and value != '':
+                    parsed = self._parse_float(value)
+                    result[key] = self._normalize_numeric_field(table, key, parsed) if parsed is not None else None
                 else:
                     result[key] = value
 
@@ -212,10 +272,11 @@ class FeishuStorage:
 
                 if key in nav_required_fields:
                     parsed = self._parse_float(value)
-                    result[key] = parsed if parsed is not None else 0.0
+                    result[key] = self._normalize_numeric_field(table, key, parsed) if parsed is not None else 0.0
                 elif key in nav_optional_numeric_fields:
                     # 关键可选数值字段严禁把空值偷偷补成 0.0；None 和 0 语义不同
-                    result[key] = self._parse_float(value)
+                    parsed = self._parse_float(value)
+                    result[key] = self._normalize_numeric_field(table, key, parsed) if parsed is not None else None
                 elif key == 'details' and value:
                     try:
                         result[key] = json.loads(value) if isinstance(value, str) else value
@@ -225,8 +286,9 @@ class FeishuStorage:
                     result[key] = value
 
             elif table == 'price_cache':
-                if key in ['price', 'cny_price', 'change', 'change_pct', 'exchange_rate'] and value:
-                    result[key] = self._parse_float(value) or 0.0
+                if key in ['price', 'cny_price', 'change', 'change_pct', 'exchange_rate'] and value is not None and value != '':
+                    parsed = self._parse_float(value)
+                    result[key] = self._normalize_numeric_field(table, key, parsed) if parsed is not None else None
                 else:
                     result[key] = value
 
@@ -393,7 +455,8 @@ class FeishuStorage:
                     holding.asset_id, holding.account, holding.market
                 )
                 if existing and existing.record_id:
-                    new_quantity = existing.quantity + holding.quantity
+                    is_cash_like = (existing.asset_type and existing.asset_type.value in ('cash', 'mmf'))
+                    new_quantity = self._quantize_money(existing.quantity + holding.quantity) if is_cash_like else (existing.quantity + holding.quantity)
                     update_fields = {
                         'quantity': new_quantity,
                         'updated_at': now.strftime(DATETIME_FORMAT)
@@ -430,7 +493,8 @@ class FeishuStorage:
 
         if existing and existing.record_id:
             # 更新现有记录
-            new_quantity = existing.quantity + holding.quantity
+            is_cash_like = (existing.asset_type and existing.asset_type.value in ('cash', 'mmf'))
+            new_quantity = self._quantize_money(existing.quantity + holding.quantity) if is_cash_like else (existing.quantity + holding.quantity)
             update_fields = {
                 'quantity': new_quantity,
                 'updated_at': now.strftime(DATETIME_FORMAT)
@@ -474,7 +538,8 @@ class FeishuStorage:
         if not holding or not holding.record_id:
             return
 
-        new_quantity = holding.quantity + quantity_change
+        is_cash_like = (holding.asset_type and holding.asset_type.value in ('cash', 'mmf'))
+        new_quantity = self._quantize_money(holding.quantity + quantity_change) if is_cash_like else (holding.quantity + quantity_change)
         update_fields = {
             'quantity': new_quantity,
             'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -482,9 +547,9 @@ class FeishuStorage:
         self.client.update_record('holdings', holding.record_id, update_fields)
 
     def delete_holding_if_zero(self, asset_id: str, account: str, market: Optional[str] = None):
-        """如果持仓为0则删除"""
+        """如果持仓为0则删除（容忍极小浮点残值）"""
         holding = self.get_holding(asset_id, account, market)
-        if holding and holding.record_id and holding.quantity == 0:
+        if holding and holding.record_id and abs(holding.quantity) <= 1e-8:
             self.client.delete_record('holdings', holding.record_id)
 
     def delete_holding_by_record_id(self, record_id: str) -> bool:
@@ -558,7 +623,7 @@ class FeishuStorage:
             market=data.get('market') or None,
             account=data.get('account', ''),
             quantity=float(data.get('quantity', 0)),
-            avg_cost=float(data.get('avg_cost')) if data.get('avg_cost') else None,
+            avg_cost=float(data.get('avg_cost')) if data.get('avg_cost') is not None else None,
             currency=data.get('currency', 'CNY'),
             asset_class=AssetClass(data.get('asset_class')) if data.get('asset_class') else None,
             industry=Industry(data.get('industry')) if data.get('industry') else None,
@@ -568,6 +633,17 @@ class FeishuStorage:
         )
 
     # ========== transactions 交易记录操作 ==========
+
+    @staticmethod
+    def _is_missing_field_error(error: Exception) -> bool:
+        msg = str(error)
+        lowered = msg.lower()
+        return (
+            'fieldnamenotfound' in lowered or
+            ('field' in lowered and 'not found' in lowered) or
+            '字段不存在' in msg or
+            '不存在' in msg
+        )
 
     def add_transaction(self, tx: Transaction) -> Transaction:
         """添加交易记录（自动防止重复提交）
@@ -599,18 +675,12 @@ class FeishuStorage:
         fields = self._transaction_to_dict(tx)
         feishu_fields = self._to_feishu_fields(fields, 'transactions')
 
-        # 尝试创建记录，如果因为字段不存在失败则过滤掉可选字段重试
         try:
             result = self.client.create_record('transactions', feishu_fields)
         except Exception as e:
-            error_msg = str(e)
-            if 'field' in error_msg.lower() or '不存在' in error_msg:
-                # 移除可能不存在的可选字段后重试
-                for optional_field in ('request_id', 'dedup_key'):
-                    feishu_fields.pop(optional_field, None)
-                result = self.client.create_record('transactions', feishu_fields)
-            else:
-                raise
+            if self._is_missing_field_error(e):
+                raise ValueError("Feishu transactions 表缺少 request_id/dedup_key 等幂等字段，已拒绝降级写入；请先补齐表字段") from e
+            raise
 
         tx.record_id = result['record_id']
 
@@ -653,6 +723,8 @@ class FeishuStorage:
                 fields['record_id'] = record_id
                 return self._dict_to_transaction(fields)
         except Exception as e:
+            if self._is_missing_field_error(e):
+                raise ValueError("Feishu transactions 表缺少 request_id 字段，无法保证幂等性；请先补齐表字段") from e
             print(f"[警告] 幂等性检查失败: {e}")
 
         return None
@@ -688,9 +760,10 @@ class FeishuStorage:
                 # 写入本地缓存
                 self._dedup_key_cache[cache_key] = record_id
                 return record_id
-        except Exception:
-            # 字段不存在等错误静默忽略，不阻塞正常流程
-            pass
+        except Exception as e:
+            if self._is_missing_field_error(e):
+                raise ValueError(f"Feishu {table} 表缺少 dedup_key 字段，无法保证防重；请先补齐表字段") from e
+            raise
 
         return None
 
@@ -747,7 +820,7 @@ class FeishuStorage:
             'account': tx.account,
             'quantity': tx.quantity,
             'price': tx.price,
-            'amount': tx.amount or (tx.quantity * tx.price),
+            'amount': tx.amount,
             'currency': tx.currency,
             'fee': tx.fee,
             'related_account': tx.related_account,
@@ -760,7 +833,7 @@ class FeishuStorage:
         if tx.dedup_key:
             result['dedup_key'] = tx.dedup_key
         # tax 字段：仅当值有效时写入（飞书表可能不存在此字段）
-        if tx.tax and tx.tax > 0:
+        if tx.tax is not None:
             result['tax'] = tx.tax
         return result
 
@@ -784,7 +857,7 @@ class FeishuStorage:
             account=data.get('account', ''),
             quantity=float(data.get('quantity', 0)),
             price=float(data.get('price', 0)),
-            amount=float(data.get('amount')) if data.get('amount') else None,
+            amount=float(data.get('amount')) if data.get('amount') is not None else None,
             currency=data.get('currency', 'CNY'),
             fee=float(data.get('fee', 0)),
             tax=float(data.get('tax', 0)),
@@ -815,12 +888,9 @@ class FeishuStorage:
         try:
             result = self.client.create_record('cash_flow', feishu_fields)
         except Exception as e:
-            error_msg = str(e)
-            if 'field' in error_msg.lower() or '不存在' in error_msg:
-                feishu_fields.pop('dedup_key', None)
-                result = self.client.create_record('cash_flow', feishu_fields)
-            else:
-                raise
+            if self._is_missing_field_error(e):
+                raise ValueError("Feishu cash_flow 表缺少 dedup_key 等防重字段，已拒绝降级写入；请先补齐表字段") from e
+            raise
         cf.record_id = result['record_id']
 
         # 写入防重缓存，避免后续重复查询
@@ -872,14 +942,14 @@ class FeishuStorage:
             filter_str=f'CurrentValue.[account] = "{self._escape_filter_value(account)}"'
         )
 
-        total = 0.0
+        total = Decimal('0')
         for record in records:
             fields = record['fields']
             cny_amount = fields.get('cny_amount', fields.get('amount', 0))
-            if cny_amount:
-                total += float(cny_amount)
+            if cny_amount is not None and cny_amount != '':
+                total += self._to_decimal(cny_amount)
 
-        return total
+        return float(total)
 
     def _cash_flow_to_dict(self, cf: CashFlow) -> Dict:
         """CashFlow 转字典"""
@@ -912,8 +982,8 @@ class FeishuStorage:
             account=data.get('account', ''),
             amount=float(data.get('amount', 0)),
             currency=data.get('currency', 'CNY'),
-            cny_amount=float(data.get('cny_amount')) if data.get('cny_amount') else None,
-            exchange_rate=float(data.get('exchange_rate')) if data.get('exchange_rate') else None,
+            cny_amount=float(data.get('cny_amount')) if data.get('cny_amount') is not None else None,
+            exchange_rate=float(data.get('exchange_rate')) if data.get('exchange_rate') is not None else None,
             flow_type=data.get('flow_type', 'deposit'),
             source=data.get('source'),
             remark=data.get('remark'),
@@ -1036,7 +1106,15 @@ class FeishuStorage:
 
     def update_nav_fields(self, record_id: str, fields: Dict[str, Any], dry_run: bool = False):
         """更新 nav_history 指定字段。"""
-        feishu_fields = self._to_feishu_fields(fields, 'nav_history', preserve_none=True)
+        normalized = {}
+        for k, v in fields.items():
+            if k in ('mtd_nav_change', 'ytd_nav_change') and v is not None:
+                normalized[k] = self._quantize_nav(v)
+            elif k in ('mtd_pnl', 'ytd_pnl', 'pnl', 'cash_flow', 'share_change') and v is not None:
+                normalized[k] = self._quantize_money(v)
+            else:
+                normalized[k] = v
+        feishu_fields = self._to_feishu_fields(normalized, 'nav_history', preserve_none=True)
         if dry_run:
             return {"record_id": record_id, "fields": feishu_fields}
         self.client.update_record('nav_history', record_id, feishu_fields)
@@ -1170,10 +1248,10 @@ class FeishuStorage:
             asset_type=AssetType(data.get('asset_type')) if data.get('asset_type') else AssetType.OTHER,
             price=float(data.get('price', 0)),
             currency=data.get('currency', 'CNY'),
-            cny_price=float(data.get('cny_price')) if data.get('cny_price') else None,
-            change=float(data.get('change')) if data.get('change') else None,
-            change_pct=float(data.get('change_pct')) if data.get('change_pct') else None,
-            exchange_rate=float(data.get('exchange_rate')) if data.get('exchange_rate') else None,
+            cny_price=float(data.get('cny_price')) if data.get('cny_price') is not None else None,
+            change=float(data.get('change')) if data.get('change') is not None else None,
+            change_pct=float(data.get('change_pct')) if data.get('change_pct') is not None else None,
+            exchange_rate=float(data.get('exchange_rate')) if data.get('exchange_rate') is not None else None,
             data_source=data.get('data_source'),
             expires_at=data.get('expires_at')
         )
