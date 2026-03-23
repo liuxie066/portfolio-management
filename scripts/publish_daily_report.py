@@ -33,19 +33,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--account-label", default=os.environ.get("PM_REPORT_ACCOUNT_LABEL", "lx"), help="Display-only account label shown in the HTML report.")
     parser.add_argument("--reports-dir", default=str(REPO_ROOT / "reports"), help="Directory for generated HTML report files.")
     parser.add_argument("--publish-root", default=str(WORKSPACE / "prototypes"), help="Root directory for published static pages.")
-    parser.add_argument("--publish-base-url", default=os.environ.get("OPENCLAW_PUBLISH_BASE_URL"), help="Base public URL. Example: https://openclaw-pub-xxxx.imlgz.com")
+    # SECURITY: do not embed real publish URLs in repo history. Use env var only.
+    parser.add_argument("--publish-base-url", default=os.environ.get("OPENCLAW_PUBLISH_BASE_URL"), help="Base publish URL (set via env OPENCLAW_PUBLISH_BASE_URL).")
     parser.add_argument("--price-timeout", type=int, default=30, help="Price fetch timeout in seconds.")
     parser.add_argument("--dry-run", action="store_true", help="Do not persist NAV writes.")
     return parser.parse_args()
 
 
 def resolve_publish_base_url(explicit: Optional[str]) -> Optional[str]:
+    # SECURITY: Never derive or hardcode publish URLs in the repo.
+    # If you want public URLs, set OPENCLAW_PUBLISH_BASE_URL in runtime secrets.
     if explicit:
         return explicit.rstrip("/")
-    instance_id = os.environ.get("OPENCLAW_INSTANCE_ID", "").strip()
-    if not instance_id:
-        return None
-    return f"https://openclaw-pub-{instance_id}.imlgz.com"
+    return None
 
 
 def build_config(args: argparse.Namespace) -> PublishConfig:

@@ -26,15 +26,18 @@ python scripts/publish_daily_report.py
 python scripts/publish_daily_report.py \
   --account-label lx \
   --reports-dir ./reports \
-  --publish-root ../prototypes \
-  --publish-base-url https://openclaw-pub-<instance>.imlgz.com
+  --publish-root ../prototypes
+
+# 如果需要生成可访问的 URL，请在运行环境里设置：
+#   export OPENCLAW_PUBLISH_BASE_URL="https://<your-private-domain-or-gateway>"
+# 注意：不要把真实 URL 写进仓库（避免泄漏）。
 ```
 
 ## Notes
 
 - `--account-label` is display-only.
-- `--publish-base-url` can also be provided via `OPENCLAW_PUBLISH_BASE_URL`.
-- If `OPENCLAW_PUBLISH_BASE_URL` is not set, the script will derive a default OpenClaw publish URL from `OPENCLAW_INSTANCE_ID` when available.
+- `OPENCLAW_PUBLISH_BASE_URL` 用于生成 `public_url` 字段（可选）。
+- 出于安全考虑：脚本不会再从 `OPENCLAW_INSTANCE_ID` 推导默认 URL；没有配置则不输出可访问 URL（仅输出 slug）。
 - This script is intentionally split into three layers:
   - data collection: `build_report_data(...)`
   - HTML rendering: `render_daily_report_html(...)`
