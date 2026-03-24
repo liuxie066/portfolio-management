@@ -224,9 +224,17 @@ class FeishuClient:
 
         try:
             data = self._request('GET', endpoint)
+            # API returns {'record': {...}} for get_record
+            rec = data.get('record') if isinstance(data, dict) else None
+            if rec and isinstance(rec, dict):
+                return {
+                    'record_id': rec.get('record_id'),
+                    'fields': rec.get('fields')
+                }
+            # fallback (defensive)
             return {
-                'record_id': data['record_id'],
-                'fields': data['fields']
+                'record_id': data.get('record_id'),
+                'fields': data.get('fields')
             }
         except Exception:
             return None
