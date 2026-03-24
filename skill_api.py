@@ -1786,7 +1786,7 @@ def get_price(code: str) -> Dict:
 # 数据清理
 def clean_data(table: str = None, account: str = None, dry_run: bool = True,
                code: str = None, date_before: str = None,
-               empty_only: bool = False) -> Dict:
+               empty_only: bool = False, confirm: bool = False) -> Dict:
     """
     清理测试数据
 
@@ -1806,7 +1806,7 @@ def clean_data(table: str = None, account: str = None, dry_run: bool = True,
         clean_data(table='transactions', code='TEST')
 
         # 实际删除
-        clean_data(table='transactions', code='TEST', dry_run=False)
+        clean_data(table='transactions', code='TEST', dry_run=False, confirm=True)
 
         # 清理空记录
         clean_data(table='all', empty_only=True, dry_run=False, confirm=True)
@@ -1817,10 +1817,12 @@ def clean_data(table: str = None, account: str = None, dry_run: bool = True,
         storage = skill.storage
 
         # 将 date_before 转换为时间戳（毫秒）用于与飞书字段比较
+        # 业务语义：北京时间 00:00
         date_before_ts = None
         if date_before:
-            from datetime import datetime as dt
-            d = dt.strptime(date_before, "%Y-%m-%d")
+            from datetime import datetime as dt, timezone, timedelta
+            bj = timezone(timedelta(hours=8))
+            d = dt.strptime(date_before, "%Y-%m-%d").replace(tzinfo=bj)
             date_before_ts = int(d.timestamp() * 1000)
 
         results = {
@@ -1833,10 +1835,19 @@ def clean_data(table: str = None, account: str = None, dry_run: bool = True,
 
         tables_to_clean = ['holdings', 'transactions', 'cash_flow', 'nav_history'] if table == 'all' else [table]
 
+        if (not dry_run) and (not confirm):
+            return {
+                'success': False,
+                'error': 'Refuse to delete data without confirm=True (safety guard).',
+                'dry_run': dry_run,
+                'confirm': confirm,
+            }
+
         for tbl in tables_to_clean:
             if tbl == 'holdings':
                 # 获取所有记录（包括 quantity=0 的）
-                records = storage.client.list_records('holdings')
+                # Always filter by account in destructive actions
+                records = storage.client.list_records('holdings', filter_str=f'CurrentValue.[account] = "{target_account}"')
                 for record in records:
                     fields = record.get('fields', {})
                     r_id = record.get('record_id')
@@ -1865,7 +1876,7 @@ def clean_data(table: str = None, account: str = None, dry_run: bool = True,
                                 results[tbl] += 1
 
             elif tbl == 'transactions':
-                records = storage.client.list_records('transactions')
+                records = storage.client.list_records('transactions', filter_str=f'CurrentValue.[account] = "{target_account}"')
                 for record in records:
                     fields = record.get('fields', {})
                     r_id = record.get('record_id')
@@ -1902,7 +1913,7 @@ def clean_data(table: str = None, account: str = None, dry_run: bool = True,
                                 results[tbl] += 1
 
             elif tbl == 'cash_flow':
-                records = storage.client.list_records('cash_flow')
+                records = storage.client.list_records('cash_flow', filter_str=f'CurrentValue.[account] = "{target_account}"')
                 for record in records:
                     fields = record.get('fields', {})
                     r_id = record.get('record_id')
@@ -1933,7 +1944,7 @@ def clean_data(table: str = None, account: str = None, dry_run: bool = True,
                                 results[tbl] += 1
 
             elif tbl == 'nav_history':
-                records = storage.client.list_records('nav_history')
+                records = storage.client.list_records('nav_history', filter_str=f'CurrentValue.[account] = "{target_account}"')
                 for record in records:
                     fields = record.get('fields', {})
                     r_id = record.get('record_id')
