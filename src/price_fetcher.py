@@ -88,7 +88,9 @@ class PriceFetcher:
         from .time_utils import bj_now_naive
 
         result = dict(payload)
-        result.setdefault('fetched_at', bj_now_naive().isoformat())
+        # fetched_at 表示“本次实时抓取时间”。如果数据来自缓存（is_from_cache=True），不自动填充。
+        if not result.get('is_from_cache'):
+            result.setdefault('fetched_at', bj_now_naive().isoformat())
 
         for key in ('price', 'prev_close', 'open', 'high', 'low', 'change', 'cny_price'):
             if key in result and result[key] is not None:
@@ -1507,23 +1509,39 @@ class PriceFetcher:
             return None
 
     def _fetch_fund(self, code: str) -> Optional[Dict]:
-        """获取场外基金净值（优化版）
+        """获取场外基金净值。
 
         优化策略：
-        1. 优先使用单个基金查询接口（<1秒）
-        2. 单个查询失败时，再使用全量排行接口（20-30秒）作为备用
-        """
-        import akshare as ak
+        0. 优先使用腾讯 jj 接口（极快、无额外依赖）
+        1. akshare 单基金查询（<1秒，需依赖）
+        2. akshare 全量排行（慢，20-30秒，需依赖）
+        3. 东方财富网页抓取（备用）
 
+        说明：本项目的“日报/record_nav”对时效性要求高。
+        因此将“无依赖、低延迟”的数据源放在最前面，避免因依赖缺失或慢接口拖垮整体估值。
+        """
+
+        # 尝试0: 腾讯 jj 接口（推荐）
         try:
-            # 尝试1: 单个基金查询（快，<1秒）- 优先使用
+            result = self._fetch_fund_from_tencent(code)
+            if result:
+                result['market_type'] = 'fund'
+                return result
+        except Exception:
+            pass
+
+        # 尝试1/2: akshare（若可用）
+        try:
+            import akshare as ak
+            import pandas as pd
+
+            # 尝试1: 单个基金查询（快，<1秒）
             try:
                 df = ak.fund_open_fund_info_em(symbol=code)
                 if not df.empty and len(df) > 0:
                     latest = df.iloc[-1]
                     nav = float(latest['单位净值'])
 
-                    # 过滤无效数据
                     if nav > 0:
                         change_pct = None
                         if '日增长率' in latest and latest['日增长率'] is not None:
@@ -1532,7 +1550,6 @@ class PriceFetcher:
                             except (ValueError, TypeError):
                                 pass
 
-                        # 尝试获取基金名称
                         name = None
                         try:
                             name_df = ak.fund_individual_basic_info_xq(symbol=code)
@@ -1545,17 +1562,17 @@ class PriceFetcher:
                             'code': code,
                             'name': name,
                             'price': nav,
-                            'nav_date': latest['净值日期'],
+                            'nav_date': str(latest.get('净值日期') or ''),
                             'change_pct': change_pct,
                             'currency': 'CNY',
                             'cny_price': nav,
                             'market_type': 'fund',
-                            'source': 'akshare_info'  # 单个查询接口
+                            'source': 'akshare_info'
                         })
             except Exception as e:
-                print(f"[基金] 单个查询失败 {code}: {e}，尝试备用方案...")
+                print(f"[基金] akshare 单基金查询失败 {code}: {e}，尝试备用方案...")
 
-            # 尝试2: 全量排行查询（慢，20-30秒）- 备用方案
+            # 尝试2: 全量排行查询（慢，20-30秒）
             try:
                 print(f"[基金] 正在从全量排行获取 {code}（可能需要20-30秒）...")
                 df = ak.fund_open_fund_rank_em()
@@ -1568,36 +1585,93 @@ class PriceFetcher:
                     except (ValueError, TypeError):
                         change_pct = None
 
-                    return self._normalize_price_payload({
-                        'code': code,
-                        'name': row['基金简称'],
-                        'price': float(row['单位净值']),
-                        'nav_date': row['日期'],
-                        'change_pct': change_pct,
-                        'currency': 'CNY',
-                        'cny_price': float(row['单位净值']),
-                        'market_type': 'fund',
-                        'source': 'akshare_rank'  # 全量排行接口
-                    })
+                    nav = float(row['单位净值']) if pd.notna(row['单位净值']) else None
+                    if nav and nav > 0:
+                        return self._normalize_price_payload({
+                            'code': code,
+                            'name': row.get('基金简称'),
+                            'price': nav,
+                            'nav_date': str(row.get('日期') or ''),
+                            'change_pct': change_pct,
+                            'currency': 'CNY',
+                            'cny_price': nav,
+                            'market_type': 'fund',
+                            'source': 'akshare_rank'
+                        })
             except Exception:
                 pass
-
-            # 尝试3: 从东方财富网抓取
-            try:
-                result = self._fetch_fund_from_eastmoney(code)
-                if result:
-                    result['market_type'] = 'fund'
-                    return result
-            except Exception:
-                pass
-
-            return None
 
         except ImportError:
-            return {'error': '请先安装 akshare: pip install akshare'}
+            # akshare 不可用时，继续走网页抓取备用
+            pass
         except Exception as e:
             print(f"获取基金价格失败 {code}: {e}")
+
+        # 尝试3: 从东方财富网抓取
+        try:
+            result = self._fetch_fund_from_eastmoney(code)
+            if result:
+                result['market_type'] = 'fund'
+                return result
+        except Exception:
+            pass
+
+        return None
+
+    def _fetch_fund_from_tencent(self, code: str) -> Optional[Dict]:
+        """从腾讯 jj 接口获取场外基金净值（无依赖、低延迟）。
+
+        腾讯接口示例：
+        - http://qt.gtimg.cn/q=jj007722
+
+        返回格式示例：
+        v_jj007722="007722~基金简称~0.0000~0.0000~~1.9559~1.9559~...~2026-03-23~";
+
+        约定：
+        - 单位净值（NAV）在 parts[5]
+        """
+        code = (code or '').strip().upper()
+        if code.startswith(('SH', 'SZ')):
+            code = code[2:]
+
+        if not (code.isdigit() and len(code) == 6):
             return None
+
+        query_code = f"jj{code}"
+        url = f"http://qt.gtimg.cn/q={query_code}"
+        response = self.session.get(url, timeout=5)
+        response.encoding = 'gb2312'
+        text = response.text
+
+        import re
+        match = re.search(rf'v_{query_code}="([^"]+)"', text)
+        if not match:
+            return None
+
+        parts = match.group(1).split('~')
+        if len(parts) < 9:
+            return None
+
+        name = parts[1]
+        try:
+            nav = float(parts[5])
+        except Exception:
+            return None
+
+        if not nav or nav <= 0:
+            return None
+
+        nav_date = parts[8] if len(parts) > 8 else None
+
+        return self._normalize_price_payload({
+            'code': code,
+            'name': name,
+            'price': nav,
+            'nav_date': nav_date,
+            'currency': 'CNY',
+            'cny_price': nav,
+            'source': 'tencent_jj'
+        })
 
     def _fetch_fund_from_eastmoney(self, code: str) -> Optional[Dict]:
         """从东方财富网获取基金净值"""
