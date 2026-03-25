@@ -24,16 +24,35 @@ from skill_api import PortfolioSkill
 
 
 def main() -> int:
+    import argparse
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--account', default=None)
+    ap.add_argument(
+        '--since',
+        default=None,
+        help='Only enforce snapshot presence for nav_history dates >= since (YYYY-MM-DD).',
+    )
+    args = ap.parse_args()
+
     ps = PortfolioSkill()
-    account = ps.account
+    account = args.account or ps.account
     storage = ps.storage
 
     navs = storage.get_nav_history(account, days=9999)
 
+    since_d: date | None = None
+    if args.since:
+        since_d = date.fromisoformat(args.since)
+
     missing = []
+    checked = 0
     for nav in navs:
         if not nav.date:
             continue
+        if since_d and nav.date < since_d:
+            continue
+        checked += 1
         as_of = nav.date.strftime('%Y-%m-%d')
         # Use a narrow filter; Feishu uses && for AND.
         f = f'CurrentValue.[as_of] = "{as_of}" && CurrentValue.[account] = "{account}"'
@@ -43,7 +62,9 @@ def main() -> int:
 
     out = {
         'account': account,
+        'since': args.since,
         'nav_count': len(navs),
+        'checked_count': checked,
         'missing_count': len(missing),
         'missing': missing,
     }
