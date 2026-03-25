@@ -443,8 +443,16 @@ class PortfolioManager:
 
     # ========== 估值计算 ==========
 
-    def calculate_valuation(self, account: str, fetch_prices: bool = True) -> PortfolioValuation:
-        """计算账户估值"""
+    def calculate_valuation(self, account: str, fetch_prices: bool = True, price_timeout_seconds: int = 25,
+                            allow_stale_price_fallback: bool = True) -> PortfolioValuation:
+        """计算账户估值
+
+        Args:
+            account: 账户
+            fetch_prices: 是否拉取价格
+            price_timeout_seconds: 本次价格批量获取总超时（秒）
+            allow_stale_price_fallback: 超时/异常时是否允许回退到“仅缓存”（可能过期），避免日报/记账卡死
+        """
         # 1. 获取持仓
         holdings = self.storage.get_holdings(account=account)
 
@@ -455,16 +463,48 @@ class PortfolioManager:
         prices = {}
         price_errors = []
         normalization_warnings = []
-        if self.price_fetcher:
+        if self.price_fetcher and fetch_prices:
             # 构建名称映射
             name_map = {h.asset_id: h.asset_name for h in holdings}
-            # fetch_batch 会自动检查缓存、获取新价格、保存缓存
-            prices = self.price_fetcher.fetch_batch(
-                [h.asset_id for h in holdings],
-                name_map=name_map,
-                use_concurrent=True,
-                skip_us=False
-            )
+
+            # 用守护线程实现总超时，避免某些数据源卡死导致日报/record_nav 卡住
+            import threading
+            _fetch_result = {'prices': None, 'error': None}
+
+            def _do_fetch():
+                try:
+                    _fetch_result['prices'] = self.price_fetcher.fetch_batch(
+                        [h.asset_id for h in holdings],
+                        name_map=name_map,
+                        use_concurrent=True,
+                        skip_us=False
+                    )
+                except Exception as e:
+                    _fetch_result['error'] = e
+
+            t = threading.Thread(target=_do_fetch, daemon=True)
+            t.start()
+            t.join(timeout=price_timeout_seconds)
+
+            if _fetch_result['prices'] is not None:
+                prices = _fetch_result['prices']
+            else:
+                if t.is_alive():
+                    price_errors.append(f"价格获取超时（{price_timeout_seconds}秒），回退到缓存")
+                elif _fetch_result['error']:
+                    price_errors.append(f"价格获取异常，回退到缓存: {_fetch_result['error']}")
+
+                if allow_stale_price_fallback:
+                    # fallback: 仅用缓存，不启动并发避免线程泄漏
+                    prices = self.price_fetcher.fetch_batch(
+                        [h.asset_id for h in holdings],
+                        name_map=name_map,
+                        use_concurrent=False,
+                        skip_us=True,
+                        use_cache_only=True
+                    )
+                else:
+                    prices = {}
         else:
             # 无 fetcher 时，从缓存获取（可能过期）
             for h in holdings:
@@ -481,9 +521,27 @@ class PortfolioManager:
         us_asset_value = Decimal('0')
         hk_asset_value = Decimal('0')
 
+        # 记录本次价格命中情况
+        price_meta = {
+            'from_cache': 0,
+            'from_realtime': 0,
+            'stale_fallback': 0,
+            'missing': 0,
+        }
+
         for holding in holdings:
             price = prices.get(holding.asset_id, {})
             normalized_type = normalize_holding_type(holding)
+
+            if price and isinstance(price, dict):
+                if price.get('is_from_cache'):
+                    price_meta['from_cache'] += 1
+                else:
+                    price_meta['from_realtime'] += 1
+                if price.get('source') == 'cache_fallback' or price.get('is_stale'):
+                    price_meta['stale_fallback'] += 1
+            else:
+                price_meta['missing'] += 1
 
             # 记录分类兜底 warning
             raw_type = holding.asset_type.value if holding.asset_type else None
@@ -553,9 +611,10 @@ class PortfolioManager:
         warnings.extend(normalization_warnings)
         warnings.extend(price_errors)
 
-        warnings = []
-        warnings.extend(normalization_warnings)
-        warnings.extend(price_errors)
+        warnings.append(
+            f"[价格汇总] realtime={price_meta['from_realtime']}, cache={price_meta['from_cache']}, "
+            f"stale_fallback={price_meta['stale_fallback']}, missing={price_meta['missing']}"
+        )
 
         return PortfolioValuation(
             account=account,

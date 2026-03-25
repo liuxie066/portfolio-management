@@ -78,7 +78,18 @@ class PriceFetcher:
 
     @classmethod
     def _normalize_price_payload(cls, payload: Dict) -> Dict:
+        """统一价格输出口径。
+
+        约定：
+        - 所有金额字段按 MONEY_QUANT 量化
+        - change_pct / exchange_rate 量化
+        - 自动补充 fetched_at（北京时间 naive ISO 字符串），便于诊断“是否刷新/是否走缓存”
+        """
+        from .time_utils import bj_now_naive
+
         result = dict(payload)
+        result.setdefault('fetched_at', bj_now_naive().isoformat())
+
         for key in ('price', 'prev_close', 'open', 'high', 'low', 'change', 'cny_price'):
             if key in result and result[key] is not None:
                 result[key] = cls._quantize_money(result[key])
@@ -121,23 +132,34 @@ class PriceFetcher:
         if code.endswith('-MMF'):
             return self._get_mmf_price(code)
 
-        # 检查缓存
+        # 检查缓存（未过期才直接返回；过期则尝试实时刷新）
         if self.use_cache and not force_refresh:
             from .models import PriceCache
             cached = self.storage.get_price(code)
             if cached:
-                return self._normalize_price_payload({
-                    'code': cached.asset_id,
-                    'name': cached.asset_name,
-                    'price': cached.price,
-                    'currency': cached.currency,
-                    'cny_price': cached.cny_price,
-                    'change': cached.change,
-                    'change_pct': cached.change_pct,
-                    'exchange_rate': cached.exchange_rate,
-                    'source': cached.data_source,
-                    'expires_at': cached.expires_at
-                })
+                is_expired = True
+                if cached.expires_at:
+                    try:
+                        expire_dt = datetime.fromisoformat(cached.expires_at.replace('Z', '+00:00')) if isinstance(cached.expires_at, str) else cached.expires_at
+                        is_expired = expire_dt <= bj_now_naive()
+                    except Exception:
+                        pass
+
+                if not is_expired:
+                    return self._normalize_price_payload({
+                        'code': cached.asset_id,
+                        'name': cached.asset_name,
+                        'price': cached.price,
+                        'currency': cached.currency,
+                        'cny_price': cached.cny_price,
+                        'change': cached.change,
+                        'change_pct': cached.change_pct,
+                        'exchange_rate': cached.exchange_rate,
+                        'source': cached.data_source or 'cache',
+                        'expires_at': cached.expires_at,
+                        'is_stale': False,
+                        'is_from_cache': True,
+                    })
 
         # 获取实时价格
         result = self._fetch_realtime(code, asset_name)
@@ -207,13 +229,22 @@ class PriceFetcher:
         to_fetch = []
         expired_cache = {}  # 记录过期缓存，用于 fallback
 
+        # 批次级：提前获取一次汇率，供本批次所有资产复用（避免每个资产重复拉汇率）
+        try:
+            batch_rates = self._fetch_exchange_rates()
+        except Exception:
+            batch_rates = None
+
         for code in codes:
             normalized_code = (code or '').upper().strip()
 
             # 现金/货基优先直接生成价格，避免在缓存回退路径中漏掉外币现金汇率
             if normalized_code == 'CASH' or normalized_code.endswith('-CASH'):
                 try:
-                    results[code] = self._get_cash_price(normalized_code)
+                    if batch_rates:
+                        results[code] = self._get_cash_price_with_rates(normalized_code, batch_rates)
+                    else:
+                        results[code] = self._get_cash_price(normalized_code)
                     continue
                 except Exception:
                     # 如果实时汇率失败，再走后续缓存/回退逻辑
@@ -439,8 +470,7 @@ class PriceFetcher:
                                 change = current - prev_close
                                 change_pct = (change / prev_close * 100) if prev_close else 0
 
-                                rates = self._fetch_exchange_rates()
-                                usd_cny = rates['USDCNY']
+                                usd_cny = (batch_rates or self._fetch_exchange_rates())['USDCNY']
 
                                 return code, self._normalize_price_payload({
                                     'code': code,
@@ -472,8 +502,7 @@ class PriceFetcher:
                         change = current - prev_close
                         change_pct = (change / prev_close * 100) if prev_close else 0
 
-                        rates = self._fetch_exchange_rates()
-                        usd_cny = rates['USDCNY']
+                        usd_cny = (batch_rates or self._fetch_exchange_rates())['USDCNY']
 
                         return code, self._normalize_price_payload({
                             'code': code,
@@ -567,7 +596,7 @@ class PriceFetcher:
 
     def _price_cache_to_dict(self, cached) -> Dict:
         """将PriceCache对象转为字典"""
-        return {
+        return self._normalize_price_payload({
             'code': cached.asset_id,
             'name': cached.asset_name,
             'price': cached.price,
@@ -577,8 +606,9 @@ class PriceFetcher:
             'change_pct': cached.change_pct,
             'exchange_rate': cached.exchange_rate,
             'source': cached.data_source or 'cache',
-            'expires_at': cached.expires_at
-        }
+            'expires_at': cached.expires_at,
+            'is_from_cache': True,
+        })
 
     def _retry_with_backoff(self, func, max_retries: int = 3, base_delay: float = 1.0):
         """带指数退避的重试机制
@@ -624,6 +654,32 @@ class PriceFetcher:
                     time.sleep(delay)
 
         raise last_exception
+
+    def _get_cash_price_with_rates(self, code: str, rates: Dict[str, float]) -> Dict:
+        """获取现金价格（使用外部传入的汇率，避免重复请求）"""
+        currency = code.split('-')[0] if '-' in code else 'CNY'
+
+        if currency == 'CNY':
+            exchange_rate = 1.0
+        else:
+            rate_key = f'{currency}CNY'
+            exchange_rate = rates.get(rate_key)
+            if exchange_rate is None:
+                # 兼容旧键（USDCNY/HKDCNY）
+                exchange_rate = rates.get('USDCNY') if currency == 'USD' else rates.get('HKDCNY')
+            if exchange_rate is None:
+                raise KeyError(f"rates missing {rate_key}")
+
+        return self._normalize_price_payload({
+            'code': code,
+            'name': f'{currency}现金',
+            'price': 1.0,
+            'currency': currency,
+            'cny_price': exchange_rate,
+            'exchange_rate': exchange_rate,
+            'market_type': 'cash',
+            'source': 'fixed'
+        })
 
     def _get_cash_price(self, code: str) -> Dict:
         """获取现金价格"""
@@ -839,11 +895,13 @@ class PriceFetcher:
 
             # 定义多个汇率 API 源
             api_sources = [
-                # 源1: exchangerate-api.com
+                # 源1: open.er-api.com（免 key，稳定）
+                lambda: _fetch_from_open_er_api(currency),
+                # 源2: exchangerate-api.com（老接口，部分地区可用）
                 lambda: _fetch_from_exchangerate_api(currency),
-                # 源2: 中国外汇交易中心（官方）
+                # 源3: 中国外汇交易中心（官方参考）
                 lambda: _fetch_from_chinamoney(currency),
-                # 源3: 汇率转换备用接口
+                # 源4: exchangerate.host（可能需要 key，作为最后兜底）
                 lambda: _fetch_from_exchangerate_host(currency),
             ]
 
@@ -864,6 +922,16 @@ class PriceFetcher:
                         break
 
             return currency, None, f"所有API源失败: {last_error}"
+
+        def _fetch_from_open_er_api(currency: str) -> float:
+            """从 open.er-api.com 获取汇率（免 key）"""
+            url = f"https://open.er-api.com/v6/latest/{currency}"
+            response = self.session.get(url, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            if data.get('result') != 'success':
+                raise ValueError(f"open.er-api 返回异常: {data}")
+            return data['rates']['CNY']
 
         def _fetch_from_exchangerate_api(currency: str) -> float:
             """从 exchangerate-api.com 获取汇率"""
