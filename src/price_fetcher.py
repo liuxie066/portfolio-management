@@ -78,7 +78,20 @@ class PriceFetcher:
 
     @classmethod
     def _normalize_price_payload(cls, payload: Dict) -> Dict:
+        """统一价格输出口径。
+
+        约定：
+        - 所有金额字段按 MONEY_QUANT 量化
+        - change_pct / exchange_rate 量化
+        - 自动补充 fetched_at（北京时间 naive ISO 字符串），便于诊断“是否刷新/是否走缓存”
+        """
+        from .time_utils import bj_now_naive
+
         result = dict(payload)
+        # fetched_at 表示“本次实时抓取时间”。如果数据来自缓存（is_from_cache=True），不自动填充。
+        if not result.get('is_from_cache'):
+            result.setdefault('fetched_at', bj_now_naive().isoformat())
+
         for key in ('price', 'prev_close', 'open', 'high', 'low', 'change', 'cny_price'):
             if key in result and result[key] is not None:
                 result[key] = cls._quantize_money(result[key])
@@ -121,23 +134,34 @@ class PriceFetcher:
         if code.endswith('-MMF'):
             return self._get_mmf_price(code)
 
-        # 检查缓存
+        # 检查缓存（未过期才直接返回；过期则尝试实时刷新）
         if self.use_cache and not force_refresh:
             from .models import PriceCache
             cached = self.storage.get_price(code)
             if cached:
-                return self._normalize_price_payload({
-                    'code': cached.asset_id,
-                    'name': cached.asset_name,
-                    'price': cached.price,
-                    'currency': cached.currency,
-                    'cny_price': cached.cny_price,
-                    'change': cached.change,
-                    'change_pct': cached.change_pct,
-                    'exchange_rate': cached.exchange_rate,
-                    'source': cached.data_source,
-                    'expires_at': cached.expires_at
-                })
+                is_expired = True
+                if cached.expires_at:
+                    try:
+                        expire_dt = datetime.fromisoformat(cached.expires_at.replace('Z', '+00:00')) if isinstance(cached.expires_at, str) else cached.expires_at
+                        is_expired = expire_dt <= bj_now_naive()
+                    except Exception:
+                        pass
+
+                if not is_expired:
+                    return self._normalize_price_payload({
+                        'code': cached.asset_id,
+                        'name': cached.asset_name,
+                        'price': cached.price,
+                        'currency': cached.currency,
+                        'cny_price': cached.cny_price,
+                        'change': cached.change,
+                        'change_pct': cached.change_pct,
+                        'exchange_rate': cached.exchange_rate,
+                        'source': cached.data_source or 'cache',
+                        'expires_at': cached.expires_at,
+                        'is_stale': False,
+                        'is_from_cache': True,
+                    })
 
         # 获取实时价格
         result = self._fetch_realtime(code, asset_name)
@@ -207,13 +231,22 @@ class PriceFetcher:
         to_fetch = []
         expired_cache = {}  # 记录过期缓存，用于 fallback
 
+        # 批次级：提前获取一次汇率，供本批次所有资产复用（避免每个资产重复拉汇率）
+        try:
+            batch_rates = self._fetch_exchange_rates()
+        except Exception:
+            batch_rates = None
+
         for code in codes:
             normalized_code = (code or '').upper().strip()
 
             # 现金/货基优先直接生成价格，避免在缓存回退路径中漏掉外币现金汇率
             if normalized_code == 'CASH' or normalized_code.endswith('-CASH'):
                 try:
-                    results[code] = self._get_cash_price(normalized_code)
+                    if batch_rates:
+                        results[code] = self._get_cash_price_with_rates(normalized_code, batch_rates)
+                    else:
+                        results[code] = self._get_cash_price(normalized_code)
                     continue
                 except Exception:
                     # 如果实时汇率失败，再走后续缓存/回退逻辑
@@ -439,8 +472,7 @@ class PriceFetcher:
                                 change = current - prev_close
                                 change_pct = (change / prev_close * 100) if prev_close else 0
 
-                                rates = self._fetch_exchange_rates()
-                                usd_cny = rates['USDCNY']
+                                usd_cny = (batch_rates or self._fetch_exchange_rates())['USDCNY']
 
                                 return code, self._normalize_price_payload({
                                     'code': code,
@@ -472,8 +504,7 @@ class PriceFetcher:
                         change = current - prev_close
                         change_pct = (change / prev_close * 100) if prev_close else 0
 
-                        rates = self._fetch_exchange_rates()
-                        usd_cny = rates['USDCNY']
+                        usd_cny = (batch_rates or self._fetch_exchange_rates())['USDCNY']
 
                         return code, self._normalize_price_payload({
                             'code': code,
@@ -567,7 +598,7 @@ class PriceFetcher:
 
     def _price_cache_to_dict(self, cached) -> Dict:
         """将PriceCache对象转为字典"""
-        return {
+        return self._normalize_price_payload({
             'code': cached.asset_id,
             'name': cached.asset_name,
             'price': cached.price,
@@ -577,8 +608,9 @@ class PriceFetcher:
             'change_pct': cached.change_pct,
             'exchange_rate': cached.exchange_rate,
             'source': cached.data_source or 'cache',
-            'expires_at': cached.expires_at
-        }
+            'expires_at': cached.expires_at,
+            'is_from_cache': True,
+        })
 
     def _retry_with_backoff(self, func, max_retries: int = 3, base_delay: float = 1.0):
         """带指数退避的重试机制
@@ -624,6 +656,32 @@ class PriceFetcher:
                     time.sleep(delay)
 
         raise last_exception
+
+    def _get_cash_price_with_rates(self, code: str, rates: Dict[str, float]) -> Dict:
+        """获取现金价格（使用外部传入的汇率，避免重复请求）"""
+        currency = code.split('-')[0] if '-' in code else 'CNY'
+
+        if currency == 'CNY':
+            exchange_rate = 1.0
+        else:
+            rate_key = f'{currency}CNY'
+            exchange_rate = rates.get(rate_key)
+            if exchange_rate is None:
+                # 兼容旧键（USDCNY/HKDCNY）
+                exchange_rate = rates.get('USDCNY') if currency == 'USD' else rates.get('HKDCNY')
+            if exchange_rate is None:
+                raise KeyError(f"rates missing {rate_key}")
+
+        return self._normalize_price_payload({
+            'code': code,
+            'name': f'{currency}现金',
+            'price': 1.0,
+            'currency': currency,
+            'cny_price': exchange_rate,
+            'exchange_rate': exchange_rate,
+            'market_type': 'cash',
+            'source': 'fixed'
+        })
 
     def _get_cash_price(self, code: str) -> Dict:
         """获取现金价格"""
@@ -839,11 +897,13 @@ class PriceFetcher:
 
             # 定义多个汇率 API 源
             api_sources = [
-                # 源1: exchangerate-api.com
+                # 源1: open.er-api.com（免 key，稳定）
+                lambda: _fetch_from_open_er_api(currency),
+                # 源2: exchangerate-api.com（老接口，部分地区可用）
                 lambda: _fetch_from_exchangerate_api(currency),
-                # 源2: 中国外汇交易中心（官方）
+                # 源3: 中国外汇交易中心（官方参考）
                 lambda: _fetch_from_chinamoney(currency),
-                # 源3: 汇率转换备用接口
+                # 源4: exchangerate.host（可能需要 key，作为最后兜底）
                 lambda: _fetch_from_exchangerate_host(currency),
             ]
 
@@ -864,6 +924,16 @@ class PriceFetcher:
                         break
 
             return currency, None, f"所有API源失败: {last_error}"
+
+        def _fetch_from_open_er_api(currency: str) -> float:
+            """从 open.er-api.com 获取汇率（免 key）"""
+            url = f"https://open.er-api.com/v6/latest/{currency}"
+            response = self.session.get(url, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            if data.get('result') != 'success':
+                raise ValueError(f"open.er-api 返回异常: {data}")
+            return data['rates']['CNY']
 
         def _fetch_from_exchangerate_api(currency: str) -> float:
             """从 exchangerate-api.com 获取汇率"""
@@ -1439,23 +1509,39 @@ class PriceFetcher:
             return None
 
     def _fetch_fund(self, code: str) -> Optional[Dict]:
-        """获取场外基金净值（优化版）
+        """获取场外基金净值。
 
         优化策略：
-        1. 优先使用单个基金查询接口（<1秒）
-        2. 单个查询失败时，再使用全量排行接口（20-30秒）作为备用
-        """
-        import akshare as ak
+        0. 优先使用腾讯 jj 接口（极快、无额外依赖）
+        1. akshare 单基金查询（<1秒，需依赖）
+        2. akshare 全量排行（慢，20-30秒，需依赖）
+        3. 东方财富网页抓取（备用）
 
+        说明：本项目的“日报/record_nav”对时效性要求高。
+        因此将“无依赖、低延迟”的数据源放在最前面，避免因依赖缺失或慢接口拖垮整体估值。
+        """
+
+        # 尝试0: 腾讯 jj 接口（推荐）
         try:
-            # 尝试1: 单个基金查询（快，<1秒）- 优先使用
+            result = self._fetch_fund_from_tencent(code)
+            if result:
+                result['market_type'] = 'fund'
+                return result
+        except Exception:
+            pass
+
+        # 尝试1/2: akshare（若可用）
+        try:
+            import akshare as ak
+            import pandas as pd
+
+            # 尝试1: 单个基金查询（快，<1秒）
             try:
                 df = ak.fund_open_fund_info_em(symbol=code)
                 if not df.empty and len(df) > 0:
                     latest = df.iloc[-1]
                     nav = float(latest['单位净值'])
 
-                    # 过滤无效数据
                     if nav > 0:
                         change_pct = None
                         if '日增长率' in latest and latest['日增长率'] is not None:
@@ -1464,7 +1550,6 @@ class PriceFetcher:
                             except (ValueError, TypeError):
                                 pass
 
-                        # 尝试获取基金名称
                         name = None
                         try:
                             name_df = ak.fund_individual_basic_info_xq(symbol=code)
@@ -1477,17 +1562,17 @@ class PriceFetcher:
                             'code': code,
                             'name': name,
                             'price': nav,
-                            'nav_date': latest['净值日期'],
+                            'nav_date': str(latest.get('净值日期') or ''),
                             'change_pct': change_pct,
                             'currency': 'CNY',
                             'cny_price': nav,
                             'market_type': 'fund',
-                            'source': 'akshare_info'  # 单个查询接口
+                            'source': 'akshare_info'
                         })
             except Exception as e:
-                print(f"[基金] 单个查询失败 {code}: {e}，尝试备用方案...")
+                print(f"[基金] akshare 单基金查询失败 {code}: {e}，尝试备用方案...")
 
-            # 尝试2: 全量排行查询（慢，20-30秒）- 备用方案
+            # 尝试2: 全量排行查询（慢，20-30秒）
             try:
                 print(f"[基金] 正在从全量排行获取 {code}（可能需要20-30秒）...")
                 df = ak.fund_open_fund_rank_em()
@@ -1500,36 +1585,93 @@ class PriceFetcher:
                     except (ValueError, TypeError):
                         change_pct = None
 
-                    return self._normalize_price_payload({
-                        'code': code,
-                        'name': row['基金简称'],
-                        'price': float(row['单位净值']),
-                        'nav_date': row['日期'],
-                        'change_pct': change_pct,
-                        'currency': 'CNY',
-                        'cny_price': float(row['单位净值']),
-                        'market_type': 'fund',
-                        'source': 'akshare_rank'  # 全量排行接口
-                    })
+                    nav = float(row['单位净值']) if pd.notna(row['单位净值']) else None
+                    if nav and nav > 0:
+                        return self._normalize_price_payload({
+                            'code': code,
+                            'name': row.get('基金简称'),
+                            'price': nav,
+                            'nav_date': str(row.get('日期') or ''),
+                            'change_pct': change_pct,
+                            'currency': 'CNY',
+                            'cny_price': nav,
+                            'market_type': 'fund',
+                            'source': 'akshare_rank'
+                        })
             except Exception:
                 pass
-
-            # 尝试3: 从东方财富网抓取
-            try:
-                result = self._fetch_fund_from_eastmoney(code)
-                if result:
-                    result['market_type'] = 'fund'
-                    return result
-            except Exception:
-                pass
-
-            return None
 
         except ImportError:
-            return {'error': '请先安装 akshare: pip install akshare'}
+            # akshare 不可用时，继续走网页抓取备用
+            pass
         except Exception as e:
             print(f"获取基金价格失败 {code}: {e}")
+
+        # 尝试3: 从东方财富网抓取
+        try:
+            result = self._fetch_fund_from_eastmoney(code)
+            if result:
+                result['market_type'] = 'fund'
+                return result
+        except Exception:
+            pass
+
+        return None
+
+    def _fetch_fund_from_tencent(self, code: str) -> Optional[Dict]:
+        """从腾讯 jj 接口获取场外基金净值（无依赖、低延迟）。
+
+        腾讯接口示例：
+        - http://qt.gtimg.cn/q=jj007722
+
+        返回格式示例：
+        v_jj007722="007722~基金简称~0.0000~0.0000~~1.9559~1.9559~...~2026-03-23~";
+
+        约定：
+        - 单位净值（NAV）在 parts[5]
+        """
+        code = (code or '').strip().upper()
+        if code.startswith(('SH', 'SZ')):
+            code = code[2:]
+
+        if not (code.isdigit() and len(code) == 6):
             return None
+
+        query_code = f"jj{code}"
+        url = f"http://qt.gtimg.cn/q={query_code}"
+        response = self.session.get(url, timeout=5)
+        response.encoding = 'gb2312'
+        text = response.text
+
+        import re
+        match = re.search(rf'v_{query_code}="([^"]+)"', text)
+        if not match:
+            return None
+
+        parts = match.group(1).split('~')
+        if len(parts) < 9:
+            return None
+
+        name = parts[1]
+        try:
+            nav = float(parts[5])
+        except Exception:
+            return None
+
+        if not nav or nav <= 0:
+            return None
+
+        nav_date = parts[8] if len(parts) > 8 else None
+
+        return self._normalize_price_payload({
+            'code': code,
+            'name': name,
+            'price': nav,
+            'nav_date': nav_date,
+            'currency': 'CNY',
+            'cny_price': nav,
+            'source': 'tencent_jj'
+        })
 
     def _fetch_fund_from_eastmoney(self, code: str) -> Optional[Dict]:
         """从东方财富网获取基金净值"""
