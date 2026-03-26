@@ -1,5 +1,37 @@
 # Runbook
 
+## 常用命令速查（pm CLI）
+
+为了把常用查询从“记函数名”变成“敲命令”，提供一个薄 CLI：`scripts/pm.py`。
+
+准备：
+```bash
+cd /home/node/.openclaw/workspace/portfolio-management
+. .venv/bin/activate
+```
+
+常用查询（只读，默认不写入任何表）：
+```bash
+# 查持仓（默认不拉实时价格；主要用于结构/数量核对）
+python scripts/pm.py holdings
+
+# 查现金（按 cash 类持仓汇总）
+python scripts/pm.py cash
+python scripts/pm.py cash --json
+
+# 查净值（nav_history 最新一条 + 最近若干条 history）
+python scripts/pm.py nav
+python scripts/pm.py nav --json
+
+# 查日报（只生成报告，不写 nav_history；如需更快/更稳可调 timeout）
+python scripts/pm.py report daily
+python scripts/pm.py report daily --timeout 25 --json
+```
+
+说明：
+- `--json` 适合做自动化/二次处理；默认输出对人更友好。
+- CLI 目前仅暴露只读命令；涉及写入的动作（如 `record_nav/close_nav`）仍需走显式 confirm 语义。
+
 ## 清仓 / 关闭账户：写入 shares=0 的净值点（close_nav）
 
 背景：
