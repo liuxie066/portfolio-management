@@ -29,6 +29,7 @@ from src.asset_utils import (
     parse_date,
 )
 from src.broker_message_parser import parse_futu_fill_message
+from src.write_guard import validate_and_normalize_trade_input, validate_and_normalize_nav_input
 from src import config
 
 
