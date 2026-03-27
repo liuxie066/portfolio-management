@@ -99,9 +99,13 @@ def type_label(v: str) -> str:
 
 
 def build_report_data(price_timeout: int, dry_run: bool = False) -> dict[str, Any]:
+    # NOTE: skill_api.record_nav() 默认 dry_run=True（安全约束）。
+    # 作为定时任务，我们在非 dry_run 模式下显式写入：dry_run=False 且 confirm=True。
     if dry_run:
-        raise RuntimeError("当前 skill_api.record_nav 便捷入口不支持 dry_run 参数，请改用 PortfolioSkill.record_nav(...) 或移除 --dry-run")
-    nav_result = record_nav(price_timeout=price_timeout)
+        nav_result = record_nav(price_timeout=price_timeout, dry_run=True, confirm=False)
+    else:
+        nav_result = record_nav(price_timeout=price_timeout, dry_run=False, confirm=True)
+
     if not nav_result.get("success"):
         raise RuntimeError(json.dumps(nav_result, ensure_ascii=False))
 
@@ -148,7 +152,9 @@ def render_daily_report_html(report_bundle: dict[str, Any], config: PublishConfi
     equity_value = (float(stock_value) if stock_value is not None else 0.0) + fund_value
     equity_ratio = stock_ratio + fund_ratio
     dt = report.get("date") or date.today().isoformat()
-    prev_nav = history[-2].get("nav") if len(history) >= 2 else None
+    # nav_snapshot.history does NOT include today's synthetic NAV (it only contains persisted NAV records).
+    # Therefore, the correct '较昨日' baseline is the latest persisted NAV (usually yesterday), i.e. history[-1].
+    prev_nav = history[-1].get("nav") if len(history) >= 1 else None
     daily_change = (nav - float(prev_nav)) if prev_nav not in (None, 0) else None
     daily_return = ((nav / float(prev_nav)) - 1) if prev_nav not in (None, 0) else None
     # Estimated daily PnL in CNY when cash_flow is 0: delta_NAV * shares

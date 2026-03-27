@@ -447,7 +447,12 @@ class PriceFetcher:
                 if c.startswith(('SH', 'SZ')):
                     q = c.lower()
                 elif c.isdigit() and len(c) == 6:
-                    q = ('sh' + c) if c.startswith('6') else ('sz' + c)
+                    # A股/ETF 代码前缀规则（经验）：
+                    # - 6xxxxx / 688xxx：上交所
+                    # - 5xxxxx：上交所基金/ETF 常见前缀（如 510/512/513/515/516/588...）
+                    # - 0/1/3/2 开头多为深交所（其中 159xxx 为深交所 ETF 常见）
+                    # 不能再用“非6一律SZ”，否则 5xxxxx 的 ETF 会被错查成 sz563020=新疆2437 这种离谱结果。
+                    q = ('sh' + c) if c.startswith(('6', '5')) else ('sz' + c)
                 else:
                     leftover.append(code)
                     continue
