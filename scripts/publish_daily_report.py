@@ -37,6 +37,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--publish-base-url", default=os.environ.get("OPENCLAW_PUBLISH_BASE_URL"), help="Base publish URL (set via env OPENCLAW_PUBLISH_BASE_URL).")
     parser.add_argument("--price-timeout", type=int, default=30, help="Price fetch timeout in seconds.")
     parser.add_argument("--dry-run", action="store_true", help="Do not persist NAV writes.")
+    parser.add_argument("--no-html", action="store_true", help="Do not render HTML; only record NAV + generate JSON bundle.")
+    parser.add_argument("--no-publish", action="store_true", help="Do not write HTML files into reports/publish dirs.")
+    parser.add_argument("--quiet", action="store_true", help="No stdout on success (scheduled mode).")
     return parser.parse_args()
 
 
@@ -282,14 +285,32 @@ def main() -> None:
     args = parse_args()
     config = build_config(args)
     report_bundle = build_report_data(price_timeout=args.price_timeout, dry_run=args.dry_run)
+
+    # Fast mode: only compute bundle (record_nav + generate_report + get_nav)
+    if bool(args.no_html):
+        if not bool(args.quiet):
+            print(json.dumps({
+                "success": True,
+                "nav_result": report_bundle.get("nav_result"),
+                "report": report_bundle.get("report"),
+                "nav_snapshot": report_bundle.get("nav_snapshot"),
+            }, ensure_ascii=False, indent=2))
+        return
+
     report_date, html = render_daily_report_html(report_bundle, config)
-    publish_result = publish_report(report_date, html, config)
+
+    publish_result = None
+    if not bool(args.no_publish):
+        publish_result = publish_report(report_date, html, config)
+
     result = {
         "success": True,
-        **publish_result,
+        "date": report_date,
         "nav_result": report_bundle["nav_result"],
+        "publish": publish_result,
     }
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    if not bool(args.quiet):
+        print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
