@@ -16,7 +16,7 @@ import os
 import time
 import random
 from datetime import datetime, timedelta
-from typing import Dict, Optional, List, Tuple
+from typing import Dict, Optional, List, Tuple, Any
 
 from .time_utils import bj_now_naive
 from concurrent.futures import ThreadPoolExecutor, as_completed
