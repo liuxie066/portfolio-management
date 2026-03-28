@@ -368,6 +368,7 @@ def main() -> None:
                 "nav_result": report_bundle.get("nav_result"),
                 "report": report_bundle.get("report"),
                 "nav_snapshot": report_bundle.get("nav_snapshot"),
+                "stage_timings": report_bundle.get("stage_timings"),
                 "timings": timings,
             }
             if not bool(args.quiet):
