@@ -16,7 +16,7 @@ WORKSPACE = REPO_ROOT.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from skill_api import record_nav, generate_report, get_nav
+# NOTE: use skill instance to reuse a single snapshot (avoid repeated price fetch).
 
 
 @dataclass
@@ -60,6 +60,8 @@ def _suppress_internal_stdout(enabled: bool):
     if not enabled:
         return contextlib.nullcontext()
     return contextlib.redirect_stdout(open(os.devnull, 'w'))
+
+
 def build_config(args: argparse.Namespace) -> PublishConfig:
     return PublishConfig(
         repo_root=REPO_ROOT,
@@ -111,22 +113,36 @@ def type_label(v: str) -> str:
 
 
 def build_report_data(price_timeout: int, dry_run: bool = False) -> dict[str, Any]:
+    """Build a consistent bundle for publishing.
+
+    Performance notes:
+    - Avoid fetching holdings/prices more than once.
+    - Use one snapshot for both record_nav and report generation.
+    """
+    # Build a single snapshot first (heavy operation: holdings + price fetch).
+    # Import lazily to keep script startup fast.
+    from skill_api import _get_default_skill
+
+    skill = _get_default_skill()
+    snapshot = skill.build_snapshot()
+
     # NOTE: skill_api.record_nav() 默认 dry_run=True（安全约束）。
     # 作为定时任务，我们在非 dry_run 模式下显式写入：dry_run=False 且 confirm=True。
     if dry_run:
-        nav_result = record_nav(price_timeout=price_timeout, dry_run=True, confirm=False)
+        nav_result = skill.record_nav(price_timeout=price_timeout, dry_run=True, confirm=False, snapshot=snapshot)
     else:
-        nav_result = record_nav(price_timeout=price_timeout, dry_run=False, confirm=True)
+        nav_result = skill.record_nav(price_timeout=price_timeout, dry_run=False, confirm=True, snapshot=snapshot)
 
     if not nav_result.get("success"):
         raise RuntimeError(json.dumps(nav_result, ensure_ascii=False))
 
-    report = generate_report(report_type="daily", record_nav=False, price_timeout=price_timeout)
+    # Generate report using the same snapshot (no extra price fetch).
+    report = skill.generate_report(report_type="daily", record_nav=False, price_timeout=price_timeout, snapshot=snapshot)
     if not report.get("success"):
         raise RuntimeError(json.dumps(report, ensure_ascii=False))
 
     # For daily report, we only need recent 2 days of NAV history.
-    nav_snapshot = get_nav(days=2)
+    nav_snapshot = skill.get_nav(days=2)
     if not nav_snapshot.get("success"):
         raise RuntimeError(json.dumps(nav_snapshot, ensure_ascii=False))
 
@@ -294,6 +310,12 @@ def publish_report(report_date: str, html: str, config: PublishConfig) -> dict[s
 def main() -> None:
     args = parse_args()
     config = build_config(args)
+
+    # Speed: scheduled daily report can skip expensive NAV runtime validation.
+    # Enable only for this script via env var to avoid impacting other entry points.
+    if os.environ.get("PM_DISABLE_NAV_RUNTIME_VALIDATION") in ("1", "true", "TRUE", "yes", "YES"):
+        os.environ["PORTFOLIO_NAV_DISABLE_RUNTIME_VALIDATION"] = "1"
+
     with _suppress_internal_stdout(enabled=(not bool(args.debug_internal))):
         report_bundle = build_report_data(price_timeout=args.price_timeout, dry_run=args.dry_run)
     
