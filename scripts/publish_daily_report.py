@@ -123,13 +123,26 @@ def build_report_data(price_timeout: int, dry_run: bool = False) -> dict[str, An
     # Import lazily to keep script startup fast.
     from skill_api import _get_default_skill
 
+    import time
+    def _ms():
+        return int(time.time()*1000)
+
     skill = _get_default_skill()
+
+    t_snapshot = _ms()
     snapshot = skill.build_snapshot()
+    snapshot_ms = _ms() - t_snapshot
+
+    t_navs = _ms()
+    navs_all = skill.storage.get_nav_history(skill.account, days=9999)
+    navs_ms = _ms() - t_navs
+
 
     # Fetch full NAV history once and reuse it across record_nav/report.
     # This avoids duplicate Feishu reads in a single publish run.
     navs_all = skill.storage.get_nav_history(skill.account, days=9999)
 
+    t_record_nav = _ms()
     # NOTE: skill_api.record_nav() 默认 dry_run=True（安全约束）。
     # 作为定时任务，我们在非 dry_run 模式下显式写入：dry_run=False 且 confirm=True。
     if dry_run:
@@ -137,16 +150,23 @@ def build_report_data(price_timeout: int, dry_run: bool = False) -> dict[str, An
     else:
         nav_result = skill.record_nav(price_timeout=price_timeout, dry_run=False, confirm=True, snapshot=snapshot)
 
+    record_nav_ms = _ms() - t_record_nav
+
     if not nav_result.get("success"):
         raise RuntimeError(json.dumps(nav_result, ensure_ascii=False))
 
+    t_report = _ms()
     # Generate report using the same snapshot (no extra price fetch).
     report = skill.generate_report(report_type="daily", record_nav=False, price_timeout=price_timeout, snapshot=snapshot, navs=navs_all)
+    report_ms = _ms() - t_report
+
     if not report.get("success"):
         raise RuntimeError(json.dumps(report, ensure_ascii=False))
 
+    t_get_nav = _ms()
     # For daily report, we only need recent 2 days of NAV history.
     nav_snapshot = skill.get_nav(days=2)
+    get_nav_ms = _ms() - t_get_nav
     if not nav_snapshot.get("success"):
         raise RuntimeError(json.dumps(nav_snapshot, ensure_ascii=False))
 
@@ -154,6 +174,13 @@ def build_report_data(price_timeout: int, dry_run: bool = False) -> dict[str, An
         "nav_result": nav_result,
         "report": report,
         "nav_snapshot": nav_snapshot,
+        "stage_timings": {
+            "snapshot_ms": snapshot_ms,
+            "navs_all_ms": navs_ms,
+            "record_nav_ms": record_nav_ms,
+            "generate_report_ms": report_ms,
+            "get_nav_ms": get_nav_ms,
+        },
     }
 
 
