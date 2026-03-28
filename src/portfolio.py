@@ -517,6 +517,7 @@ class PortfolioManager:
                     _fetch_result['prices'] = self.price_fetcher.fetch_batch(
                         [h.asset_id for h in holdings],
                         name_map=name_map,
+                        asset_type_map={h.asset_id: h.asset_type for h in holdings},
                         use_concurrent=True,
                         skip_us=False
                     )
@@ -540,6 +541,7 @@ class PortfolioManager:
                     prices = self.price_fetcher.fetch_batch(
                         [h.asset_id for h in holdings],
                         name_map=name_map,
+                        asset_type_map={h.asset_id: h.asset_type for h in holdings},
                         use_concurrent=False,
                         skip_us=True,
                         use_cache_only=True

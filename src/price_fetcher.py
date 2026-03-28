@@ -182,6 +182,19 @@ class PriceFetcher:
             from datetime import datetime, timedelta
 
             market_type = _detect_market_type_func(code)
+            # Prefer holdings-provided asset_type when available to avoid market mis-detection.
+            if asset_type_map is not None and code in asset_type_map:
+                from .models import AssetType
+                at = asset_type_map.get(code)
+                atv = at.value if hasattr(at, 'value') else str(at)
+                if atv in (AssetType.A_STOCK.value, AssetType.CN_FUND.value):
+                    market_type = 'cn'
+                elif atv in (AssetType.HK_STOCK.value, AssetType.HK_FUND.value):
+                    market_type = 'hk'
+                elif atv in (AssetType.US_STOCK.value, AssetType.US_FUND.value):
+                    market_type = 'us'
+                elif atv in (AssetType.FUND.value,):
+                    market_type = 'fund'
             ttl = MarketTimeUtil.get_cache_ttl(market_type)
 
             # 计算过期时间（北京时间 naive）
@@ -217,6 +230,7 @@ class PriceFetcher:
         return result
 
     def fetch_batch(self, codes: List[str], name_map: Dict[str, str] = None,
+                    asset_type_map: Dict[str, Any] = None,
                     force_refresh: bool = False, use_concurrent: bool = True,
                     skip_us: bool = False, use_cache_only: bool = False) -> Dict[str, Dict]:
         """批量获取价格 (智能缓存 + 并发查询)
@@ -301,6 +315,19 @@ class PriceFetcher:
         other_codes = []
         for code in to_fetch:
             market_type = _detect_market_type_func(code)
+            # Prefer holdings-provided asset_type when available to avoid market mis-detection.
+            if asset_type_map is not None and code in asset_type_map:
+                from .models import AssetType
+                at = asset_type_map.get(code)
+                atv = at.value if hasattr(at, 'value') else str(at)
+                if atv in (AssetType.A_STOCK.value, AssetType.CN_FUND.value):
+                    market_type = 'cn'
+                elif atv in (AssetType.HK_STOCK.value, AssetType.HK_FUND.value):
+                    market_type = 'hk'
+                elif atv in (AssetType.US_STOCK.value, AssetType.US_FUND.value):
+                    market_type = 'us'
+                elif atv in (AssetType.FUND.value,):
+                    market_type = 'fund'
             if market_type == 'us' and not skip_us:
                 us_codes.append(code)
             elif market_type != 'us':
