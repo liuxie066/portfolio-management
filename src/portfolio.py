@@ -17,6 +17,47 @@ from .reporting_utils import normalize_holding_type
 from . import config
 
 
+def _snapshot_digest(snapshots) -> str:
+    """Compute a stable digest of holdings snapshot content.
+
+    We intentionally ignore fields that may change due to pricing noise if desired.
+    Current policy: include quantity + market_value_cny + currency + market + asset_id.
+    """
+    import json
+    import hashlib
+
+    items = []
+    for s in snapshots:
+        items.append({
+            'account': s.account,
+            'as_of': s.as_of,
+            'asset_id': s.asset_id,
+            'market': s.market,
+            'currency': s.currency,
+            'quantity': s.quantity,
+            'market_value_cny': s.market_value_cny,
+        })
+    items.sort(key=lambda x: (x['account'], x['as_of'], x['market'], x['asset_id']))
+    raw = json.dumps(items, ensure_ascii=False, separators=(',', ':'), sort_keys=True).encode('utf-8')
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _read_local_snapshot_digest(*, account: str, as_of: str) -> str | None:
+    try:
+        from pathlib import Path
+        p = Path(__file__).resolve().parents[1] / '.data' / 'holdings_snapshot' / account / f'{as_of}.json'
+        if not p.exists():
+            return None
+        import json
+        data = json.loads(p.read_text(encoding='utf-8'))
+        digest = data.get('digest')
+        if isinstance(digest, str) and digest:
+            return digest
+    except Exception:
+        return None
+    return None
+
+
 class PortfolioManager:
     """组合管理器"""
 
@@ -745,8 +786,18 @@ class PortfolioManager:
                             source='record_nav',
                         )
                     )
+                # Skip snapshot write if unchanged compared to last local snapshot (best-effort).
+                as_of_prev = (today - __import__('datetime').timedelta(days=1)).strftime('%Y-%m-%d')
+                prev_digest = _read_local_snapshot_digest(account=account, as_of=as_of_prev)
+                cur_digest = _snapshot_digest(snapshots)
+                should_write_snapshot = (prev_digest is None) or (prev_digest != cur_digest)
+
                 # Use the same dry_run flag to avoid side effects during rehearsals.
-                self.storage.batch_upsert_holding_snapshots(snapshots, dry_run=dry_run)
+                if should_write_snapshot:
+                    self.storage.batch_upsert_holding_snapshots(snapshots, dry_run=dry_run)
+                else:
+                    # No change: skip Feishu write to reduce latency/quota usage.
+                    pass
 
                 # Local snapshot (secondary): best-effort write for debugging / fallback (does not affect correctness).
                 try:
@@ -755,10 +806,13 @@ class PortfolioManager:
                     out_dir = Path(__file__).resolve().parents[1] / '.data' / 'holdings_snapshot' / account
                     out_dir.mkdir(parents=True, exist_ok=True)
                     out_file = out_dir / f'{as_of}.json'
+                    digest = _snapshot_digest(snapshots)
+
                     payload = {
                         'as_of': as_of,
                         'account': account,
                         'count': len(snapshots),
+                        'digest': digest,
                         'snapshots': [s.model_dump() for s in snapshots],
                     }
                     out_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
