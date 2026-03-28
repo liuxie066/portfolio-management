@@ -786,13 +786,12 @@ class PortfolioManager:
                             source='record_nav',
                         )
                     )
-                # Skip snapshot write if unchanged compared to last local snapshot (best-effort).
-                as_of_prev = (today - __import__('datetime').timedelta(days=1)).strftime('%Y-%m-%d')
-                prev_digest = _read_local_snapshot_digest(account=account, as_of=as_of_prev)
-                cur_digest = _snapshot_digest(snapshots)
-                should_write_snapshot = (prev_digest is None) or (prev_digest != cur_digest)
 
-                # Use the same dry_run flag to avoid side effects during rehearsals.
+                # Skip snapshot write if unchanged compared to existing Feishu snapshot for the same day.
+                # This ensures we write at most once per day unless content truly changes.
+                dry_preview = self.storage.batch_upsert_holding_snapshots(snapshots, dry_run=True)
+                should_write_snapshot = bool(dry_preview.get('to_create') or dry_preview.get('to_update'))
+
                 if should_write_snapshot:
                     self.storage.batch_upsert_holding_snapshots(snapshots, dry_run=dry_run)
                 else:
