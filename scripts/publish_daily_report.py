@@ -131,6 +131,15 @@ def build_report_data(price_timeout: int, dry_run: bool = False) -> dict[str, An
 
     t_snapshot = _ms()
     snapshot = skill.build_snapshot()
+
+    # Debug: show price meta if present
+    try:
+        valuation = snapshot.get('valuation')
+        pm = getattr(valuation, 'price_meta', None)
+        if pm is not None:
+            print('[price_meta]', pm)
+    except Exception:
+        pass
     snapshot_ms = _ms() - t_snapshot
 
     t_navs = _ms()
