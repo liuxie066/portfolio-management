@@ -307,6 +307,11 @@ def publish_report(report_date: str, html: str, config: PublishConfig) -> dict[s
     }
 
 
+def _now_ms() -> int:
+    import time
+    return int(time.time() * 1000)
+
+
 def main() -> None:
     args = parse_args()
     config = build_config(args)
@@ -316,31 +321,46 @@ def main() -> None:
     if os.environ.get("PM_DISABLE_NAV_RUNTIME_VALIDATION") in ("1", "true", "TRUE", "yes", "YES"):
         os.environ["PORTFOLIO_NAV_DISABLE_RUNTIME_VALIDATION"] = "1"
 
+    timings: dict[str, int] = {}
+    t0 = _now_ms()
+
     with _suppress_internal_stdout(enabled=(not bool(args.debug_internal))):
+        t1 = _now_ms()
         report_bundle = build_report_data(price_timeout=args.price_timeout, dry_run=args.dry_run)
-    
+        timings['build_report_data_ms'] = _now_ms() - t1
+
         # Fast mode: only compute bundle (record_nav + generate_report + get_nav)
         if bool(args.no_html):
+            timings['total_ms'] = _now_ms() - t0
+            out = {
+                "success": True,
+                "nav_result": report_bundle.get("nav_result"),
+                "report": report_bundle.get("report"),
+                "nav_snapshot": report_bundle.get("nav_snapshot"),
+                "timings": timings,
+            }
             if not bool(args.quiet):
-                print(json.dumps({
-                    "success": True,
-                    "nav_result": report_bundle.get("nav_result"),
-                    "report": report_bundle.get("report"),
-                    "nav_snapshot": report_bundle.get("nav_snapshot"),
-                }, ensure_ascii=False, indent=2))
+                print(json.dumps(out, ensure_ascii=False, indent=2))
             return
-    
+
+        t2 = _now_ms()
         report_date, html = render_daily_report_html(report_bundle, config)
-    
+        timings['render_html_ms'] = _now_ms() - t2
+
         publish_result = None
         if not bool(args.no_publish):
+            t3 = _now_ms()
             publish_result = publish_report(report_date, html, config)
-    
+            timings['publish_ms'] = _now_ms() - t3
+
+        timings['total_ms'] = _now_ms() - t0
+
         result = {
             "success": True,
             "date": report_date,
             "nav_result": report_bundle["nav_result"],
             "publish": publish_result,
+            "timings": timings,
         }
         if not bool(args.quiet):
             print(json.dumps(result, ensure_ascii=False, indent=2))
