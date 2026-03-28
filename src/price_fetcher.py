@@ -148,7 +148,7 @@ class PriceFetcher:
         # 检查缓存（未过期才直接返回；过期则尝试实时刷新）
         if self.use_cache and not force_refresh:
             from .models import PriceCache
-            cached = self.storage.get_price(code)
+            cached = self.storage.get_price(code, allow_expired=accept_stale_when_closed, max_stale_after_expiry_sec=max_stale_after_expiry_sec)
             if cached:
                 is_expired = True
                 if cached.expires_at:
@@ -235,6 +235,8 @@ class PriceFetcher:
     def fetch_batch(self, codes: List[str], name_map: Dict[str, str] = None,
                     asset_type_map: Dict[str, Any] = None,
                     market_closed_ttl_multiplier: float = 1.0,
+                    accept_stale_when_closed: bool = False,
+                    max_stale_after_expiry_sec: int = 0,
                     force_refresh: bool = False, use_concurrent: bool = True,
                     skip_us: bool = False, use_cache_only: bool = False) -> Dict[str, Dict]:
         """批量获取价格 (智能缓存 + 并发查询)
@@ -284,7 +286,7 @@ class PriceFetcher:
 
             if self.use_cache:
                 from .models import PriceCache
-                cached = self.storage.get_price(code)
+                cached = self.storage.get_price(code, allow_expired=accept_stale_when_closed, max_stale_after_expiry_sec=max_stale_after_expiry_sec)
                 if cached:
                     cached_dict = self._price_cache_to_dict(cached)
                     # 检查是否过期

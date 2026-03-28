@@ -50,7 +50,7 @@ class PortfolioSkill:
     def build_snapshot(self) -> Dict[str, Any]:
         """构建统一估值快照，供 full_report / record_nav 复用，避免时点差。"""
         # For reporting/NAV snapshot, prefer cache if available to reduce latency.
-        valuation = self.portfolio.calculate_valuation(self.account, prefer_cache_if_available=True)
+        valuation = self.portfolio.calculate_valuation(self.account)
         holdings = valuation.holdings or []
         holdings_list = []
         for h in holdings:
