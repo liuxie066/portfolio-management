@@ -1525,7 +1525,7 @@ class PortfolioSkill:
 
         merged_rows = list(merged_by_code.values())
         if cash_bucket["_parts"]:
-            cash_bucket["code"] = "+".join(sorted(cash_bucket["_parts"])) if cash_bucket["_parts"] else "CASH+MMF"
+            cash_bucket["code"] = "CASH+MMF"
             cash_bucket["name"] = "现金及货基(合并)"
             merged_rows.append(cash_bucket)
 

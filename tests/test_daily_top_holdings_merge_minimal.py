@@ -71,5 +71,4 @@ def test_full_report_top_holdings_merge_duplicates_and_cash_mmf_bucket():
     assert cash_row is not None
     assert abs(float(cash_row["market_value"]) - 150.0) < 1e-9
     assert abs(float(cash_row["weight"]) - (150.0 / total_value)) < 1e-9
-    cash_codes = set(str(cash_row.get("code") or "").split("+"))
-    assert {"CNY-CASH", "USD-CASH", "CNY-MMF"}.issubset(cash_codes)
+    assert cash_row.get("code") == "CASH+MMF"
