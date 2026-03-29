@@ -50,6 +50,9 @@ def main() -> None:
         test_validate_code_strips_market_suffix_and_normalizes_hk,
         test_detect_market_type_respects_suffix,
     )
+    from tests.test_price_fetcher_single_fetch_cache_only import (
+        test_single_fetch_cache_only_and_stale_fallback,
+    )
 
     tests = [
         test_currency_from_us_ticker_suffix,
@@ -57,6 +60,7 @@ def main() -> None:
         test_currency_fallback_venue_hint,
         test_validate_code_strips_market_suffix_and_normalizes_hk,
         test_detect_market_type_respects_suffix,
+        test_single_fetch_cache_only_and_stale_fallback,
     ]
     for t in tests:
         t()
