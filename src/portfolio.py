@@ -486,8 +486,7 @@ class PortfolioManager:
 
     def calculate_valuation(self, account: str, fetch_prices: bool = True, price_timeout_seconds: int = 25,
                             allow_stale_price_fallback: bool = True,
-                            price_market_closed_ttl_multiplier: float = 1.0,
-                            prefer_cache_if_available: bool = False) -> PortfolioValuation:
+                            price_market_closed_ttl_multiplier: float = 1.0) -> PortfolioValuation:
         """计算账户估值
 
         Args:
@@ -531,10 +530,15 @@ class PortfolioManager:
                 now_open_us = MarketTimeUtil.is_us_market_open()
 
                 any_open = (now_open_cn or now_open_hk or now_open_us)
-                prefer_cache_if_available_flag = bool(prefer_cache_if_available or (not any_open))
+
+                # Snapshot perf: when markets are closed, allow using expired local cache within a window
+                # Snapshot perf: when markets are closed, allow using expired local cache within a window
+                accept_stale_when_closed_flag = (not any_open)
+                max_stale_after_expiry_sec_flag = 24 * 3600
                 market_closed_ttl_multiplier = (price_market_closed_ttl_multiplier if not any_open else 1.0)
             except Exception:
-                prefer_cache_if_available_flag = False
+                accept_stale_when_closed_flag = False
+                max_stale_after_expiry_sec_flag = 0
                 market_closed_ttl_multiplier = 1.0
 
             # 用守护线程实现总超时，避免某些数据源卡死导致日报/record_nav 卡住
@@ -548,7 +552,7 @@ class PortfolioManager:
                         name_map=name_map,
                         asset_type_map={h.asset_id: h.asset_type for h in holdings},
                         market_closed_ttl_multiplier=market_closed_ttl_multiplier,
-                        prefer_cache_if_available=bool(prefer_cache_if_available_flag),
+                        accept_stale_when_closed=bool(accept_stale_when_closed_flag),
                         use_concurrent=True,
                         skip_us=False
                     )
@@ -574,7 +578,7 @@ class PortfolioManager:
                         name_map=name_map,
                         asset_type_map={h.asset_id: h.asset_type for h in holdings},
                         market_closed_ttl_multiplier=market_closed_ttl_multiplier,
-                        prefer_cache_if_available=bool(prefer_cache_if_available_flag),
+                        accept_stale_when_closed=bool(accept_stale_when_closed_flag),
                         use_concurrent=False,
                         skip_us=True,
                         use_cache_only=True
