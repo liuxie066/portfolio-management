@@ -42,21 +42,6 @@ def _snapshot_digest(snapshots) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def _read_local_snapshot_digest(*, account: str, as_of: str) -> str | None:
-    try:
-        from pathlib import Path
-        p = Path(__file__).resolve().parents[1] / '.data' / 'holdings_snapshot' / account / f'{as_of}.json'
-        if not p.exists():
-            return None
-        import json
-        data = json.loads(p.read_text(encoding='utf-8'))
-        digest = data.get('digest')
-        if isinstance(digest, str) and digest:
-            return digest
-    except Exception:
-        return None
-    return None
-
 
 class PortfolioManager:
     """组合管理器"""
