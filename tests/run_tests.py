@@ -69,6 +69,7 @@ def main() -> None:
     )
     from tests.test_nav_bulk_upsert_minimal import (
         test_nav_bulk_upsert_uses_single_preload_and_batch_ops_for_n_le_500,
+        test_nav_bulk_upsert_upsert_mode_keeps_existing_cache_values_for_none_fields,
         test_nav_bulk_upsert_updates_nav_index_cache_incrementally,
     )
 
@@ -88,6 +89,7 @@ def main() -> None:
         test_cash_flow_agg_cache_updates_on_new_record,
         test_record_nav_avoids_get_nav_history_full_scan_when_preloaded,
         test_nav_bulk_upsert_uses_single_preload_and_batch_ops_for_n_le_500,
+        test_nav_bulk_upsert_upsert_mode_keeps_existing_cache_values_for_none_fields,
         test_nav_bulk_upsert_updates_nav_index_cache_incrementally,
     ]
     for t in tests:

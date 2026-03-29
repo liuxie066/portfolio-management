@@ -180,6 +180,53 @@ def test_nav_bulk_upsert_uses_single_preload_and_batch_ops_for_n_le_500():
     assert result['created'] == 1
 
 
+def test_nav_bulk_upsert_upsert_mode_keeps_existing_cache_values_for_none_fields():
+    client = StubNavBulkClient(
+        initial_records=[
+            {
+                'record_id': 'rec_nav_1',
+                'fields': {
+                    'date': '2026-03-01',
+                    'account': 'lx',
+                    'total_value': 1000,
+                    'shares': 1000,
+                    'nav': 1.0,
+                    'cash_flow': 0,
+                    'pnl': 0,
+                    'mtd_nav_change': 0,
+                    'ytd_nav_change': 0,
+                    'mtd_pnl': 12.34,
+                    'ytd_pnl': 56.78,
+                },
+            }
+        ]
+    )
+    nav_idx_cache = StubLocalNavIndexCache()
+    storage = FeishuStorage(client=client, local_nav_index_cache=nav_idx_cache)
+
+    # mode=upsert: None 字段不应覆盖/清空已有值
+    payload = [
+        NAVHistory(
+            date=date(2026, 3, 1),
+            account='lx',
+            total_value=1010.0,
+            shares=1000.0,
+            nav=1.01,
+            # mtd_pnl/ytd_pnl omitted -> None
+        )
+    ]
+    storage.upsert_nav_bulk(payload, mode='upsert')
+
+    idx = storage.get_nav_index('lx')
+    rows = idx.get('nav_history') or []
+    by_date = {r.get('date'): r for r in rows}
+    row = by_date['2026-03-01']
+    assert row.get('total_value') == 1010.0
+    # 关键：缓存应保留旧值，避免与 upsert（不清空）语义冲突
+    assert row.get('mtd_pnl') == 12.34
+    assert row.get('ytd_pnl') == 56.78
+
+
 def test_nav_bulk_upsert_updates_nav_index_cache_incrementally():
     client = StubNavBulkClient(
         initial_records=[

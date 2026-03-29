@@ -1908,9 +1908,12 @@ class FeishuStorage:
                 preloaded_accounts.append(account)
                 idx = self.get_nav_index(account)
                 existing_by_date: Dict[str, str] = {}
+                existing_row_by_date: Dict[str, Dict[str, Any]] = {}
                 for row in idx.get('nav_history') or []:
                     ds = str((row or {}).get('date') or '')
                     rid = (row or {}).get('record_id')
+                    if ds:
+                        existing_row_by_date[ds] = dict(row or {})
                     if ds and rid:
                         existing_by_date[ds] = rid
 
@@ -1930,7 +1933,16 @@ class FeishuStorage:
                         feishu_fields = self._to_feishu_fields(fields, 'nav_history', preserve_none=preserve_none_for_update)
                         update_payloads.append({'record_id': rid, 'fields': feishu_fields})
                         nav.record_id = rid
-                        update_rows_for_cache.append(self._nav_to_index_row(nav, updated_at=feishu_fields.get('updated_at')))
+
+                        existing_row = dict(existing_row_by_date.get(ds) or {})
+                        merged_row = dict(existing_row)
+                        merged_row.update(self._nav_to_index_row(nav, updated_at=feishu_fields.get('updated_at')))
+                        # upsert mode 不应把未提供字段写成 None：保留旧缓存值，避免本地索引与远端语义不一致
+                        if not preserve_none_for_update:
+                            for k, v in list(merged_row.items()):
+                                if v is None and k in existing_row:
+                                    merged_row[k] = existing_row.get(k)
+                        update_rows_for_cache.append(merged_row)
                     else:
                         feishu_fields = self._to_feishu_fields(fields, 'nav_history', preserve_none=False)
                         create_payloads.append({'fields': feishu_fields})

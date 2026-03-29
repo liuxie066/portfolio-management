@@ -167,8 +167,12 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--mode", choices=["replace", "upsert"], default="replace")
     ap.add_argument("--allow-partial", action="store_true")
     ap.add_argument("--apply", action="store_true", help="Actually write to Feishu")
+    ap.add_argument("--dry-run", action="store_true", help="Force dry-run (explicit no-write)")
     ap.add_argument("--limit", type=int, default=0, help="Only process first N dates (debug)")
-    return ap.parse_args()
+    args = ap.parse_args()
+    if args.apply and args.dry_run:
+        raise ValueError("--apply and --dry-run are mutually exclusive")
+    return args
 
 
 def main() -> None:
