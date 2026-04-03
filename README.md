@@ -2,10 +2,13 @@
 
 基于飞书多维表（Bitable）的投资组合净值系统：**用基金净值法记账**，输出持仓/现金/收益统计，并生成日报。
 
+- For Agents：看 `SKILL.md`（能力边界、API 入口、约束）
+- For Humans：看本文（Quickstart / Cheatsheet / 发布与排障）
+
 - 适用：长期投资组合的“账 + 报告”一体化
 - 不适用：高频交易撮合；把不可靠行情当最终真相
 
-> 给 AI/Agent 的接口说明看 `SKILL.md`；Python 统一入口看 `skill_api.py`。
+> Python 统一入口：`skill_api.py`
 
 ---
 
