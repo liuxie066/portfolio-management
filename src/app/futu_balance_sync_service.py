@@ -52,7 +52,7 @@ class FutuOpenApiBalanceProvider:
     """
 
     CASH_COLUMNS = ("cash", "available_funds", "withdraw_cash", "power")
-    MMF_NAME_KEYWORDS = ("货币", "现金", "money market", "money fund", "mmf")
+    MMF_COLUMNS = ("fund_assets",)
 
     def __init__(
         self,
@@ -71,9 +71,9 @@ class FutuOpenApiBalanceProvider:
         self.acc_id = int(acc_id) if acc_id is not None else _env_int("FUTU_ACC_ID")
         self.market = market or os.environ.get("FUTU_TRD_MARKET", "HK")
         self.cash_currency = cash_currency or os.environ.get("FUTU_CASH_CURRENCY", "CNH")
-        env_codes = os.environ.get("FUTU_MMF_CODES", "")
-        codes = mmf_codes if mmf_codes is not None else [c.strip() for c in env_codes.split(",")]
-        self.mmf_codes = {str(c).upper() for c in codes if c}
+        # Kept for constructor compatibility. MMF balance is authoritative from
+        # accinfo.fund_assets, not position code matching.
+        self._legacy_mmf_codes = tuple(mmf_codes or ())
 
     def fetch_balances(self) -> FutuBalanceSnapshot:
         try:
@@ -96,6 +96,20 @@ class FutuOpenApiBalanceProvider:
         return FutuBalanceSnapshot(cash=cash, mmf=mmf, currency="CNY", source="futu-openapi")
 
     def _fetch_cash(self, futu_sdk: Any, ctx: Any) -> Optional[float]:
+        row = self._fetch_accinfo_row(futu_sdk, ctx)
+        for column in self.CASH_COLUMNS:
+            if column in row and row[column] is not None:
+                return float(row[column])
+        return None
+
+    def _fetch_mmf(self, futu_sdk: Any, ctx: Any) -> Optional[float]:
+        row = self._fetch_accinfo_row(futu_sdk, ctx)
+        for column in self.MMF_COLUMNS:
+            if column in row and row[column] is not None:
+                return float(Decimal(str(row[column])).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+        return None
+
+    def _fetch_accinfo_row(self, futu_sdk: Any, ctx: Any) -> dict[str, Any]:
         kwargs = self._accinfo_kwargs(futu_sdk)
         try:
             ret, data = ctx.accinfo_query(**kwargs)
@@ -103,37 +117,7 @@ class FutuOpenApiBalanceProvider:
             kwargs.pop("currency", None)
             ret, data = ctx.accinfo_query(**kwargs)
         self._ensure_ok(futu_sdk, ret, data, "accinfo_query")
-        row = _first_row(data)
-        for column in self.CASH_COLUMNS:
-            if column in row and row[column] is not None:
-                return float(row[column])
-        return None
-
-    def _fetch_mmf(self, futu_sdk: Any, ctx: Any) -> Optional[float]:
-        kwargs = self._position_kwargs(futu_sdk)
-        try:
-            ret, data = ctx.position_list_query(**kwargs)
-        except TypeError:
-            kwargs["trd_market"] = kwargs.pop("position_market", None)
-            ret, data = ctx.position_list_query(**kwargs)
-        self._ensure_ok(futu_sdk, ret, data, "position_list_query")
-
-        total = Decimal("0")
-        for row in _rows(data):
-            code = str(row.get("code") or row.get("stock_code") or "").upper()
-            name = str(row.get("stock_name") or row.get("name") or "").lower()
-            if not self._is_mmf_position(code, name):
-                continue
-            value = (
-                row.get("market_val")
-                or row.get("market_value")
-                or row.get("nominal_price")
-                or row.get("qty")
-                or row.get("quantity")
-            )
-            if value is not None:
-                total += Decimal(str(value))
-        return float(total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+        return _first_row(data)
 
     def _open_trade_context(self, futu_sdk: Any) -> Any:
         kwargs = {"host": self.host, "port": self.port}
@@ -150,23 +134,10 @@ class FutuOpenApiBalanceProvider:
             kwargs["acc_id"] = self.acc_id
         return kwargs
 
-    def _position_kwargs(self, futu_sdk: Any) -> dict[str, Any]:
-        kwargs: dict[str, Any] = {}
-        kwargs["trd_env"] = self._enum_value(futu_sdk, "TrdEnv", self.trd_env)
-        kwargs["position_market"] = self._enum_value(futu_sdk, "TrdMarket", self.market)
-        if self.acc_id is not None:
-            kwargs["acc_id"] = self.acc_id
-        return kwargs
-
     @staticmethod
     def _enum_value(futu_sdk: Any, enum_name: str, value: str) -> Any:
         enum_type = getattr(futu_sdk, enum_name, None)
         return getattr(enum_type, value, value) if enum_type is not None else value
-
-    def _is_mmf_position(self, code: str, name: str) -> bool:
-        if self.mmf_codes and code in self.mmf_codes:
-            return True
-        return any(keyword in name for keyword in self.MMF_NAME_KEYWORDS)
 
     @staticmethod
     def _ensure_ok(futu_sdk: Any, ret: Any, data: Any, op: str) -> None:

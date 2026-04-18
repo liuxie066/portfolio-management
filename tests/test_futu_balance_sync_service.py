@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from src.app import FutuBalanceSnapshot, FutuBalanceSyncService
+from src.app.futu_balance_sync_service import FutuOpenApiBalanceProvider
 from src.models import AssetType, Holding
 
 
@@ -116,3 +119,24 @@ def test_sync_cash_and_mmf_accepts_manual_balances_without_provider():
         }
     ]
     assert storage.holdings[("CNY-CASH", "lx", "富途")].quantity == 1.24
+
+
+def test_futu_openapi_provider_reads_mmf_from_accinfo_fund_assets():
+    class FakeCtx:
+        def __init__(self):
+            self.position_called = False
+
+        def accinfo_query(self, **kwargs):
+            return 0, [{"cash": "12.345", "fund_assets": "345.678"}]
+
+        def position_list_query(self, **kwargs):
+            self.position_called = True
+            raise AssertionError("MMF should be read from accinfo.fund_assets")
+
+    futu_sdk = SimpleNamespace(RET_OK=0, TrdEnv=SimpleNamespace(REAL="REAL"), Currency=SimpleNamespace(CNH="CNH"))
+    ctx = FakeCtx()
+    provider = FutuOpenApiBalanceProvider()
+
+    assert provider._fetch_cash(futu_sdk, ctx) == 12.345
+    assert provider._fetch_mmf(futu_sdk, ctx) == 345.68
+    assert ctx.position_called is False
