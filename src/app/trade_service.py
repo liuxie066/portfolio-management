@@ -182,12 +182,18 @@ class TradeService:
             remark=remark,
             request_id=request_id,
         )
-        tx = self.storage.add_transaction(tx)
+
+        try:
+            tx = self.storage.add_transaction(tx)
+        except Exception as exc:
+            print(f"[卖出失败] 记录交易失败: {exc}")
+            raise
 
         sell_holding_payload = self.manager._normalize_holding_payload(quantity=-quantity)
         try:
             self.storage.update_holding_quantity(asset_id, account, sell_holding_payload["quantity"], market)
         except Exception as exc:
+            print(f"[警告] 持仓更新失败，但交易已记录: {exc}")
             self.manager._record_compensation(
                 operation_type="SELL_HOLDING_UPDATE_FAILED",
                 account=account,
@@ -200,11 +206,11 @@ class TradeService:
                 },
                 error=exc,
             )
-            raise
 
         try:
             self.storage.delete_holding_if_zero(asset_id, account, market)
         except Exception as exc:
+            print(f"[警告] 零持仓清理失败，但交易已记录: {exc}")
             self.manager._record_compensation(
                 operation_type="SELL_ZERO_HOLDING_DELETE_FAILED",
                 account=account,
@@ -216,7 +222,6 @@ class TradeService:
                 },
                 error=exc,
             )
-            raise
 
         if auto_add_cash and currency == "CNY":
             gross_proceeds = self.manager._quantize_money(
@@ -230,6 +235,7 @@ class TradeService:
             try:
                 self.manager._add_cash(account, total_proceeds)
             except Exception as exc:
+                print(f"[警告] 现金增加异常: {exc}")
                 self.manager._record_compensation(
                     operation_type="SELL_CASH_ADD_FAILED",
                     account=account,
@@ -241,7 +247,6 @@ class TradeService:
                     },
                     error=exc,
                 )
-                raise
 
         return tx
 
