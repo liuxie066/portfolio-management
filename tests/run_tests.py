@@ -75,6 +75,28 @@ def main() -> None:
     from tests.test_daily_top_holdings_merge_minimal import (
         test_full_report_top_holdings_merge_duplicates_and_cash_mmf_bucket,
     )
+    from tests.test_audit_fixes import (
+        test_round_none_guard_in_nav_record_fields,
+        test_zero_is_not_none_in_truthiness_check,
+        test_sort_with_none_dates_uses_date_min,
+        test_deduct_cash_prevalidates_insufficient_funds,
+        test_deduct_cash_succeeds_when_sufficient,
+        test_nav_calculator_warns_when_shares_zero_but_value_positive,
+        test_name_update_compares_content_not_length,
+        test_del_does_not_raise,
+        test_singleton_lock_exists,
+        test_rate_limiter_has_lock,
+        test_prev_close_not_overwritten_when_valid,
+        test_escape_filter_value_handles_quotes,
+    )
+    from tests.test_feishu_efficiency import (
+        test_get_holdings_uses_cache_when_loaded,
+        test_get_holdings_includes_empty_when_requested,
+        test_get_holdings_falls_through_when_cache_not_loaded,
+        test_get_holdings_with_asset_type_bypasses_cache,
+        test_get_transactions_pushes_date_filter_to_server,
+        test_get_total_cash_flow_cny_uses_agg_cache,
+    )
 
     tests = [
         test_currency_from_us_ticker_suffix,
@@ -95,6 +117,26 @@ def main() -> None:
         test_nav_bulk_upsert_upsert_mode_keeps_existing_cache_values_for_none_fields,
         test_nav_bulk_upsert_updates_nav_index_cache_incrementally,
         test_full_report_top_holdings_merge_duplicates_and_cash_mmf_bucket,
+        # audit fix regression tests
+        test_round_none_guard_in_nav_record_fields,
+        test_zero_is_not_none_in_truthiness_check,
+        test_sort_with_none_dates_uses_date_min,
+        test_deduct_cash_prevalidates_insufficient_funds,
+        test_deduct_cash_succeeds_when_sufficient,
+        test_nav_calculator_warns_when_shares_zero_but_value_positive,
+        test_name_update_compares_content_not_length,
+        test_del_does_not_raise,
+        test_singleton_lock_exists,
+        test_rate_limiter_has_lock,
+        test_prev_close_not_overwritten_when_valid,
+        test_escape_filter_value_handles_quotes,
+        # feishu efficiency tests
+        test_get_holdings_uses_cache_when_loaded,
+        test_get_holdings_includes_empty_when_requested,
+        test_get_holdings_falls_through_when_cache_not_loaded,
+        test_get_holdings_with_asset_type_bypasses_cache,
+        test_get_transactions_pushes_date_filter_to_server,
+        test_get_total_cash_flow_cny_uses_agg_cache,
     ]
     for t in tests:
         t()
