@@ -205,7 +205,13 @@ class CashFlowMixin:
         return cash_flows
 
     def get_total_cash_flow_cny(self, account: str) -> float:
-        """获取账户累计出入金总额(人民币)"""
+        """获取账户累计出入金总额(人民币)（优先聚合缓存）"""
+        self._ensure_cash_flow_aggs_loaded(account)
+        aggs = self._cash_flow_agg_mem_cache.get(account)
+        if aggs and 'cumulative' in aggs:
+            return float(aggs['cumulative'])
+
+        # 兜底：缓存未就绪时直接查 API
         records = self.client.list_records(
             'cash_flow',
             filter_str=f'CurrentValue.[account] = "{self._escape_filter_value(account)}"'

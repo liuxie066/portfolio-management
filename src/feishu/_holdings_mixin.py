@@ -232,7 +232,27 @@ class HoldingsMixin:
         return holding
 
     def get_holdings(self, account: Optional[str] = None, asset_type: Optional[str] = None, include_empty: bool = False) -> List[Holding]:
-        """获取持仓列表"""
+        """获取持仓列表（优先使用内存缓存索引）"""
+        # 当缓存已加载且无 asset_type 过滤时，直接从缓存返回
+        cache_hit = (
+            not asset_type
+            and (
+                self._holdings_index_loaded_all
+                or (account and account in self._holdings_index_loaded_accounts)
+            )
+        )
+        if cache_hit:
+            holdings = []
+            for cache_key, fields in self._holding_fields_cache.items():
+                if account and fields.get('account') != account:
+                    continue
+                holding = self._dict_to_holding(fields)
+                if not include_empty and holding.quantity <= 0:
+                    continue
+                holdings.append(holding)
+            holdings.sort(key=lambda h: (h.asset_type.value if h.asset_type else '', h.asset_id))
+            return holdings
+
         conditions = []
         if account:
             conditions.append(f'CurrentValue.[account] = "{account}"')
@@ -254,6 +274,12 @@ class HoldingsMixin:
             if not include_empty and holding.quantity <= 0:
                 continue
             holdings.append(holding)
+
+        if not asset_type:
+            if account:
+                self._holdings_index_loaded_accounts.add(account)
+            else:
+                self._holdings_index_loaded_all = True
 
         holdings.sort(key=lambda h: (h.asset_type.value if h.asset_type else '', h.asset_id))
         return holdings

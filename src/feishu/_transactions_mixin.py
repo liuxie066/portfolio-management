@@ -149,13 +149,17 @@ class TransactionsMixin:
                         start_date: Optional[date] = None,
                         end_date: Optional[date] = None,
                         tx_type: Optional[str] = None) -> List[Transaction]:
-        """获取交易记录列表"""
+        """获取交易记录列表（日期过滤推到飞书服务端）"""
         conditions = []
 
         if account:
             conditions.append(f'CurrentValue.[account] = "{account}"')
         if tx_type:
             conditions.append(f'CurrentValue.[tx_type] = "{tx_type}"')
+        if start_date:
+            conditions.append(f'CurrentValue.[tx_date] >= "{start_date.strftime("%Y-%m-%d")}"')
+        if end_date:
+            conditions.append(f'CurrentValue.[tx_date] <= "{end_date.strftime("%Y-%m-%d")}"')
 
         filter_str = ' AND '.join(conditions) if conditions else None
         records = self.client.list_records('transactions', filter_str=filter_str)
@@ -165,10 +169,6 @@ class TransactionsMixin:
             fields = self._from_feishu_fields(record['fields'], 'transactions')
             fields['record_id'] = record['record_id']
             tx = self._dict_to_transaction(fields)
-            if start_date and tx.tx_date and tx.tx_date < start_date:
-                continue
-            if end_date and tx.tx_date and tx.tx_date > end_date:
-                continue
             transactions.append(tx)
 
         transactions.sort(key=lambda t: t.tx_date, reverse=True)
