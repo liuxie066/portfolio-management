@@ -90,5 +90,6 @@ class SnapshotService:
                 "snapshots": [snapshot.model_dump() for snapshot in snapshots],
             }
             out_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception:
-            pass
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning("_write_local_snapshot failed for %s/%s: %s", account, as_of, exc)

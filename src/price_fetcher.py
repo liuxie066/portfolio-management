@@ -711,6 +711,9 @@ class PriceFetcher:
         if not codes:
             return results
 
+        # batch_rates not available in this scope; always fetch on demand
+        batch_rates = None
+
         failure_lock = threading.Lock()
         consecutive_failures = [0]  # 使用列表以便在闭包中修改
         max_consecutive_failures = 3  # 连续失败3次则认为接口不可用

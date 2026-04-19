@@ -172,6 +172,11 @@ class FeishuClient:
 
         return app_token, table_id
 
+    # Public accessors for bitable_client.py and other internal consumers
+    get_table_config = _get_table_config
+    get_headers = _get_headers
+    rate_limit = _rate_limit
+
     def list_records(self, table_name: str, filter_str: str = None,
                      field_names: List[str] = None, page_size: int = 500) -> List[Dict]:
         """

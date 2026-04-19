@@ -207,7 +207,7 @@ class BitableClient:
             return BitableTarget(app_token=app_token, table_id=table_id)
 
         if table_name:
-            a_token, t_id = self._client._get_table_config(table_name)
+            a_token, t_id = self._client.get_table_config(table_name)
             return BitableTarget(app_token=a_token, table_id=t_id)
 
         cfg_url = (
@@ -238,9 +238,9 @@ class BitableClient:
         _retry_count: int = 0,
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        self._client._rate_limit()
+        self._client.rate_limit()
         url = f"{self._client.BASE_URL}{endpoint}"
-        headers = self._client._get_headers()
+        headers = self._client.get_headers()
 
         request_kwargs = dict(kwargs)
         request_kwargs.setdefault("timeout", self._client.request_timeout)
