@@ -62,6 +62,38 @@ def test_valuation_service_values_holdings_with_prices():
     assert result.holdings[0].weight == 0.173554
 
 
+def test_valuation_service_matches_price_keys_case_insensitively():
+    storage = Mock()
+    fetcher = Mock()
+    storage.get_holdings.return_value = [
+        Holding(
+            asset_id="baba",
+            asset_name="阿里巴巴",
+            asset_type=AssetType.US_STOCK,
+            account="a",
+            quantity=10,
+            currency="USD",
+            asset_class=AssetClass.US_ASSET,
+        ),
+    ]
+    fetcher.fetch_batch.return_value = {
+        "BABA": {"price": 80.0, "cny_price": 580.0, "currency": "USD"},
+    }
+    storage.get_total_shares.return_value = 1000
+    manager = _manager(storage, fetcher)
+    service = ValuationService(manager=manager, storage=storage, price_fetcher=fetcher)
+
+    result = service.calculate_valuation("a")
+
+    assert result.total_value_cny == 5800.0
+    assert result.us_asset_value == 5800.0
+    assert result.holdings[0].current_price == 80.0
+    fetcher.fetch_batch.assert_called_once()
+    kwargs = fetcher.fetch_batch.call_args.kwargs
+    assert kwargs["asset_type_map"]["baba"] == AssetType.US_STOCK
+    assert kwargs["asset_type_map"]["BABA"] == AssetType.US_STOCK
+
+
 def test_valuation_service_warns_for_missing_foreign_cash_fx():
     storage = Mock()
     fetcher = Mock()

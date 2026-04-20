@@ -31,6 +31,17 @@ class ValuationService:
         normalization_warnings = []
         if self.price_fetcher and fetch_prices:
             name_map = {h.asset_id: h.asset_name for h in holdings}
+            name_map.update({
+                str(h.asset_id).strip().upper(): h.asset_name
+                for h in holdings
+                if h.asset_id
+            })
+            asset_type_map = {h.asset_id: h.asset_type for h in holdings}
+            asset_type_map.update({
+                str(h.asset_id).strip().upper(): h.asset_type
+                for h in holdings
+                if h.asset_id
+            })
 
             try:
                 from src.market_time import MarketTimeUtil
@@ -54,7 +65,7 @@ class ValuationService:
                     fetch_result["prices"] = self.price_fetcher.fetch_batch(
                         [h.asset_id for h in holdings],
                         name_map=name_map,
-                        asset_type_map={h.asset_id: h.asset_type for h in holdings},
+                        asset_type_map=asset_type_map,
                         market_closed_ttl_multiplier=market_closed_ttl_multiplier,
                         accept_stale_when_closed=bool(accept_stale_when_closed_flag),
                         use_concurrent=True,
@@ -81,7 +92,7 @@ class ValuationService:
                     prices = self.price_fetcher.fetch_batch(
                         [h.asset_id for h in holdings],
                         name_map=name_map,
-                        asset_type_map={h.asset_id: h.asset_type for h in holdings},
+                        asset_type_map=asset_type_map,
                         market_closed_ttl_multiplier=market_closed_ttl_multiplier,
                         accept_stale_when_closed=bool(accept_stale_when_closed_flag),
                         use_concurrent=False,
@@ -93,6 +104,11 @@ class ValuationService:
                 price = self.storage.get_price(h.asset_id)
                 if price:
                     prices[h.asset_id] = price
+
+        price_lookup = dict(prices)
+        for code, payload in list(prices.items()):
+            if code:
+                price_lookup.setdefault(str(code).strip().upper(), payload)
 
         total_value_cny = Decimal("0")
         cash_value_cny = Decimal("0")
@@ -110,7 +126,7 @@ class ValuationService:
         }
 
         for holding in holdings:
-            price = prices.get(holding.asset_id, {})
+            price = price_lookup.get(holding.asset_id) or price_lookup.get(str(holding.asset_id).strip().upper(), {})
             normalized_type = normalize_holding_type(holding)
 
             if price and isinstance(price, dict):
