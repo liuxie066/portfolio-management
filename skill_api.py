@@ -1371,27 +1371,41 @@ def init_db(account: str = DEFAULT_ACCOUNT, initial_cash: float = 0) -> Dict[str
 
 # ========== 便捷函数（供 Skill 直接调用） ==========
 
-_default_skill = None
-_default_skill_lock = __import__('threading').Lock()
+_skill_instances: dict = {}
+_skill_lock = __import__('threading').Lock()
+
+def get_skill(account: str = None) -> PortfolioSkill:
+    """获取指定账户的 Skill 实例（线程安全，按 account 缓存）。
+
+    同一 account 共享实例；不同 account 的实例共享同一 FeishuClient 以复用连接和缓存。
+    account=None 时使用 config 中的默认账户。
+    """
+    acct = account or DEFAULT_ACCOUNT
+    if acct not in _skill_instances:
+        with _skill_lock:
+            if acct not in _skill_instances:
+                # 首个实例正常创建；后续实例复用首个实例的 feishu_client
+                if _skill_instances:
+                    first = next(iter(_skill_instances.values()))
+                    _skill_instances[acct] = PortfolioSkill(account=acct, feishu_client=first.storage.client)
+                else:
+                    _skill_instances[acct] = PortfolioSkill(account=acct)
+    return _skill_instances[acct]
+
 
 def _get_default_skill() -> PortfolioSkill:
-    """获取默认 Skill 实例（线程安全单例）"""
-    global _default_skill
-    if _default_skill is None:
-        with _default_skill_lock:
-            if _default_skill is None:
-                _default_skill = PortfolioSkill()
-    return _default_skill
+    """获取默认 Skill 实例（向后兼容）"""
+    return get_skill()
 
 
 # 交易记录
-def buy(code: str, name: str, quantity: float, price: float, **kwargs) -> Dict:
+def buy(code: str, name: str, quantity: float, price: float, account: str = None, **kwargs) -> Dict:
     """买入资产"""
-    return _get_default_skill().buy(code, name, quantity, price, **kwargs)
+    return get_skill(account).buy(code, name, quantity, price, **kwargs)
 
-def sell(code: str, quantity: float, price: float, **kwargs) -> Dict:
+def sell(code: str, quantity: float, price: float, account: str = None, **kwargs) -> Dict:
     """卖出资产"""
-    return _get_default_skill().sell(code, quantity, price, **kwargs)
+    return get_skill(account).sell(code, quantity, price, **kwargs)
 
 
 def record_transaction_from_message(message: str,
@@ -1400,7 +1414,8 @@ def record_transaction_from_message(message: str,
                                     auto_cash: bool = False,
                                     request_id: str = None,
                                     dry_run: bool = True,
-                                    skip_validation: bool = False) -> Dict:
+                                    skip_validation: bool = False,
+                                    account: str = None) -> Dict:
     """从券商成交提醒消息中解析并记录交易。
 
     当前支持（富途成交提醒，示例）：
@@ -1415,7 +1430,7 @@ def record_transaction_from_message(message: str,
       dry_run: True 时只返回解析结果，不写入交易表
       skip_validation: 是否跳过代码有效性校验
     """
-    return _get_default_skill().record_transaction_from_message(
+    return get_skill(account).record_transaction_from_message(
         message=message,
         broker=broker,
         fee=fee,
@@ -1425,78 +1440,78 @@ def record_transaction_from_message(message: str,
         skip_validation=skip_validation,
     )
 
-def deposit(amount: float, **kwargs) -> Dict:
+def deposit(amount: float, account: str = None, **kwargs) -> Dict:
     """入金"""
-    return _get_default_skill().deposit(amount, **kwargs)
+    return get_skill(account).deposit(amount, **kwargs)
 
-def withdraw(amount: float, **kwargs) -> Dict:
+def withdraw(amount: float, account: str = None, **kwargs) -> Dict:
     """出金"""
-    return _get_default_skill().withdraw(amount, **kwargs)
+    return get_skill(account).withdraw(amount, **kwargs)
 
 # 持仓查询
-def get_holdings(**kwargs) -> Dict:
+def get_holdings(account: str = None, **kwargs) -> Dict:
     """全部持仓"""
-    return _get_default_skill().get_holdings(**kwargs)
+    return get_skill(account).get_holdings(**kwargs)
 
-def get_position() -> Dict:
+def get_position(account: str = None) -> Dict:
     """仓位分析"""
-    return _get_default_skill().get_position()
+    return get_skill(account).get_position()
 
-def get_distribution() -> Dict:
+def get_distribution(account: str = None) -> Dict:
     """资产分布"""
-    return _get_default_skill().get_distribution()
+    return get_skill(account).get_distribution()
 
 # 净值收益
-def get_nav(days: int = 30) -> Dict:
+def get_nav(days: int = 30, account: str = None) -> Dict:
     """账户净值
 
     Args:
         days: 获取最近 N 天历史（默认 30）。对日报发布通常只需要 2 天即可。
     """
-    return _get_default_skill().get_nav(days=days)
+    return get_skill(account).get_nav(days=days)
 
-def get_return(period_type: str, period: str = None) -> Dict:
+def get_return(period_type: str, period: str = None, account: str = None) -> Dict:
     """查询收益率"""
-    return _get_default_skill().get_return(period_type, period)
+    return get_skill(account).get_return(period_type, period)
 
 # 现金管理
-def get_cash() -> Dict:
+def get_cash(account: str = None) -> Dict:
     """现金资产"""
-    return _get_default_skill().get_cash()
+    return get_skill(account).get_cash()
 
-def add_cash(amount: float, **kwargs) -> Dict:
+def add_cash(amount: float, account: str = None, **kwargs) -> Dict:
     """增加现金"""
-    return _get_default_skill().add_cash(amount, **kwargs)
+    return get_skill(account).add_cash(amount, **kwargs)
 
-def sub_cash(amount: float, **kwargs) -> Dict:
+def sub_cash(amount: float, account: str = None, **kwargs) -> Dict:
     """减少现金"""
-    return _get_default_skill().sub_cash(amount, **kwargs)
+    return get_skill(account).sub_cash(amount, **kwargs)
 
-def sync_futu_cash_mmf(**kwargs) -> Dict:
+def sync_futu_cash_mmf(account: str = None, **kwargs) -> Dict:
     """通过富途 OpenAPI 同步现金/货基余额到 holdings"""
-    return _get_default_skill().sync_futu_cash_mmf(**kwargs)
+    return get_skill(account).sync_futu_cash_mmf(**kwargs)
 
 # 报告
-def generate_report(report_type: str = "daily", record_nav: bool = False, price_timeout: int = 30, navs=None) -> Dict:
+def generate_report(report_type: str = "daily", record_nav: bool = False, price_timeout: int = 30, navs=None, account: str = None) -> Dict:
     """生成日报/月报/年报"""
-    return _get_default_skill().generate_report(report_type=report_type, record_nav=record_nav, price_timeout=price_timeout, navs=navs)
+    return get_skill(account).generate_report(report_type=report_type, record_nav=record_nav, price_timeout=price_timeout, navs=navs)
 
-def full_report(price_timeout: int = 30) -> Dict:
+def full_report(price_timeout: int = 30, account: str = None) -> Dict:
     """完整报告（只读，不记录净值）
 
     Args:
         price_timeout: 价格获取超时时间（秒），默认30秒
     """
-    return _get_default_skill().full_report(price_timeout=price_timeout)
+    return get_skill(account).full_report(price_timeout=price_timeout)
 
 def record_nav(price_timeout: int = 30, dry_run: bool = True, confirm: bool = False,
-               overwrite_existing: bool = True, use_bulk_persist: bool = False) -> Dict:
+               overwrite_existing: bool = True, use_bulk_persist: bool = False, account: str = None) -> Dict:
     """记录今日净值
 
     ⚠️ 默认 dry_run=True，避免误写入。
     真正写入必须传：dry_run=False 且 confirm=True。
     """
-    return _get_default_skill().record_nav(
+    return get_skill(account).record_nav(
         price_timeout=price_timeout,
         dry_run=dry_run,
         confirm=confirm,
@@ -1511,14 +1526,15 @@ def close_nav(date_str: str = None,
               stock_value: float = 0.0,
               overwrite_existing: bool = True,
               dry_run: bool = True,
-              confirm: bool = False) -> Dict:
+              confirm: bool = False,
+              account: str = None) -> Dict:
     """显式记录“清仓/关闭”净值点（shares=0, nav=1.0）。
 
     允许 total_value > 0（残余现金等）。
 
     ⚠️ 默认 dry_run=True；真正写入必须 dry_run=False 且 confirm=True。
     """
-    return _get_default_skill().close_nav(
+    return get_skill(account).close_nav(
         date_str=date_str,
         total_value=total_value,
         cash_value=cash_value,
@@ -1529,9 +1545,9 @@ def close_nav(date_str: str = None,
     )
 
 # 价格
-def get_price(code: str) -> Dict:
+def get_price(code: str, account: str = None) -> Dict:
     """查询价格"""
-    return _get_default_skill().get_price(code)
+    return get_skill(account).get_price(code)
 
 
 # 数据清理
@@ -1563,7 +1579,7 @@ def clean_data(table: str = None, account: str = None, dry_run: bool = True,
         clean_data(table='all', empty_only=True, dry_run=False, confirm=True)
     """
     try:
-        skill = _get_default_skill()
+        skill = get_skill(account)
         target_account = account or skill.account
         storage = skill.storage
 

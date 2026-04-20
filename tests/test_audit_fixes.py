@@ -146,9 +146,9 @@ def test_compensation_atomic_write_preserves_existing(tmp_path):
 
 # ── M11: thread-safe singleton ──────────────────────────────────────
 def test_singleton_lock_exists():
-    """M11: _default_skill_lock should exist for thread safety."""
+    """M11: _skill_lock should exist for thread safety."""
     import skill_api
-    assert hasattr(skill_api, '_default_skill_lock')
+    assert hasattr(skill_api, '_skill_lock')
 
 
 # ── H7: rate limiter thread safety ──────────────────────────────────

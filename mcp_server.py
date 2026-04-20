@@ -20,6 +20,7 @@ sys.path.insert(0, str(SKILL_DIR))
 from mcp.server.fastmcp import FastMCP
 
 from skill_api import (
+    get_skill,
     buy,
     sell,
     deposit,
@@ -64,6 +65,7 @@ def tool_buy(
     auto_deduct_cash: bool = False,
     request_id: str = None,
     skip_validation: bool = False,
+    account: str = None,
 ) -> str:
     """记录买入交易。
 
@@ -78,9 +80,11 @@ def tool_buy(
         auto_deduct_cash: 是否自动扣减现金，默认 False
         request_id: 幂等键（防重复提交）
         skip_validation: 是否跳过代码有效性校验
+        account: 账户标识，默认使用配置中的默认账户
     """
     result = buy(
         code, name, quantity, price,
+        account=account,
         date_str=date_str, broker=broker, fee=fee,
         auto_deduct_cash=auto_deduct_cash,
         request_id=request_id,
@@ -99,6 +103,7 @@ def tool_sell(
     fee: float = 0,
     auto_add_cash: bool = False,
     request_id: str = None,
+    account: str = None,
 ) -> str:
     """记录卖出交易。
 
@@ -111,9 +116,11 @@ def tool_sell(
         fee: 手续费，默认 0
         auto_add_cash: 是否自动增加现金
         request_id: 幂等键（防重复提交）
+        account: 账户标识，默认使用配置中的默认账户
     """
     result = sell(
         code, quantity, price,
+        account=account,
         date_str=date_str, broker=broker, fee=fee,
         auto_add_cash=auto_add_cash,
         request_id=request_id,
@@ -127,6 +134,7 @@ def tool_deposit(
     date_str: str = None,
     remark: str = "入金",
     currency: str = "CNY",
+    account: str = None,
 ) -> str:
     """记录入金（资金转入投资账户）。
 
@@ -135,8 +143,9 @@ def tool_deposit(
         date_str: 日期 (YYYY-MM-DD)，默认今天
         remark: 备注
         currency: 币种，默认 CNY
+        account: 账户标识，默认使用配置中的默认账户
     """
-    result = deposit(amount, date_str=date_str, remark=remark, currency=currency)
+    result = deposit(amount, account=account, date_str=date_str, remark=remark, currency=currency)
     return json.dumps(result, ensure_ascii=False, default=str)
 
 
@@ -146,6 +155,7 @@ def tool_withdraw(
     date_str: str = None,
     remark: str = "出金",
     currency: str = "CNY",
+    account: str = None,
 ) -> str:
     """记录出金（资金转出投资账户）。
 
@@ -154,8 +164,9 @@ def tool_withdraw(
         date_str: 日期 (YYYY-MM-DD)，默认今天
         remark: 备注
         currency: 币种，默认 CNY
+        account: 账户标识，默认使用配置中的默认账户
     """
-    result = withdraw(amount, date_str=date_str, remark=remark, currency=currency)
+    result = withdraw(amount, account=account, date_str=date_str, remark=remark, currency=currency)
     return json.dumps(result, ensure_ascii=False, default=str)
 
 
@@ -168,6 +179,7 @@ def tool_record_transaction_from_message(
     request_id: str = None,
     dry_run: bool = True,
     skip_validation: bool = False,
+    account: str = None,
 ) -> str:
     """从券商成交提醒消息中解析并记录交易。
 
@@ -181,11 +193,13 @@ def tool_record_transaction_from_message(
         request_id: 幂等键
         dry_run: True 时只解析不写入（默认 True）
         skip_validation: 是否跳过代码有效性校验
+        account: 账户标识，默认使用配置中的默认账户
     """
     result = record_transaction_from_message(
         message, broker=broker, fee=fee,
         auto_cash=auto_cash, request_id=request_id,
         dry_run=dry_run, skip_validation=skip_validation,
+        account=account,
     )
     return json.dumps(result, ensure_ascii=False, default=str)
 
@@ -198,6 +212,7 @@ def tool_get_holdings(
     include_cash: bool = True,
     group_by_market: bool = False,
     include_price: bool = False,
+    account: str = None,
 ) -> str:
     """获取当前持仓列表。
 
@@ -205,8 +220,10 @@ def tool_get_holdings(
         include_cash: 是否包含现金资产，默认 True
         group_by_market: 是否按券商分组
         include_price: 是否包含实时价格
+        account: 账户标识，默认使用配置中的默认账户
     """
     result = get_holdings(
+        account=account,
         include_cash=include_cash,
         group_by_market=group_by_market,
         include_price=include_price,
@@ -215,34 +232,47 @@ def tool_get_holdings(
 
 
 @mcp.tool()
-def tool_get_position() -> str:
-    """获取仓位分析（股票/现金/基金占比等）。"""
-    result = get_position()
+def tool_get_position(account: str = None) -> str:
+    """获取仓位分析（股票/现金/基金占比等）。
+
+    Args:
+        account: 账户标识，默认使用配置中的默认账户
+    """
+    result = get_position(account=account)
     return json.dumps(result, ensure_ascii=False, default=str)
 
 
 @mcp.tool()
-def tool_get_distribution() -> str:
-    """获取资产分布（按地域/行业）。"""
-    result = get_distribution()
+def tool_get_distribution(account: str = None) -> str:
+    """获取资产分布（按地域/行业）。
+
+    Args:
+        account: 账户标识，默认使用配置中的默认账户
+    """
+    result = get_distribution(account=account)
     return json.dumps(result, ensure_ascii=False, default=str)
 
 
 @mcp.tool()
-def tool_get_price(code: str) -> str:
+def tool_get_price(code: str, account: str = None) -> str:
     """查询资产实时价格或汇率。
 
     Args:
         code: 资产代码（如 600519、AAPL、USDCNY）
+        account: 账户标识，默认使用配置中的默认账户
     """
-    result = get_price(code)
+    result = get_price(code, account=account)
     return json.dumps(result, ensure_ascii=False, default=str)
 
 
 @mcp.tool()
-def tool_get_cash() -> str:
-    """获取现金资产明细（各币种余额）。"""
-    result = get_cash()
+def tool_get_cash(account: str = None) -> str:
+    """获取现金资产明细（各币种余额）。
+
+    Args:
+        account: 账户标识，默认使用配置中的默认账户
+    """
+    result = get_cash(account=account)
     return json.dumps(result, ensure_ascii=False, default=str)
 
 
@@ -250,25 +280,27 @@ def tool_get_cash() -> str:
 
 
 @mcp.tool()
-def tool_get_nav(days: int = 30) -> str:
+def tool_get_nav(days: int = 30, account: str = None) -> str:
     """获取账户净值及历史。
 
     Args:
         days: 获取最近 N 天历史，默认 30
+        account: 账户标识，默认使用配置中的默认账户
     """
-    result = get_nav(days=days)
+    result = get_nav(days=days, account=account)
     return json.dumps(result, ensure_ascii=False, default=str)
 
 
 @mcp.tool()
-def tool_get_return(period_type: str, period: str = None) -> str:
+def tool_get_return(period_type: str, period: str = None, account: str = None) -> str:
     """查询收益率。
 
     Args:
         period_type: 周期类型 - "month"（月度）、"year"（年度）、"since_inception"（成立以来）
         period: 具体周期 - 月份如 "2025-03"，年份如 "2025"；since_inception 时不需要
+        account: 账户标识，默认使用配置中的默认账户
     """
-    result = get_return(period_type, period)
+    result = get_return(period_type, period, account=account)
     return json.dumps(result, ensure_ascii=False, default=str)
 
 
@@ -278,6 +310,7 @@ def tool_record_nav(
     dry_run: bool = True,
     confirm: bool = False,
     overwrite_existing: bool = True,
+    account: str = None,
 ) -> str:
     """记录今日净值。
 
@@ -288,12 +321,14 @@ def tool_record_nav(
         dry_run: 预览模式（默认 True）
         confirm: 确认写入（与 dry_run=False 配合使用）
         overwrite_existing: 是否覆盖已有记录
+        account: 账户标识，默认使用配置中的默认账户
     """
     result = record_nav(
         price_timeout=price_timeout,
         dry_run=dry_run,
         confirm=confirm,
         overwrite_existing=overwrite_existing,
+        account=account,
     )
     return json.dumps(result, ensure_ascii=False, default=str)
 
@@ -307,6 +342,7 @@ def tool_close_nav(
     overwrite_existing: bool = True,
     dry_run: bool = True,
     confirm: bool = False,
+    account: str = None,
 ) -> str:
     """记录清仓/关闭净值点（shares=0, nav=1.0）。
 
@@ -320,6 +356,7 @@ def tool_close_nav(
         overwrite_existing: 是否覆盖已有记录
         dry_run: 预览模式（默认 True）
         confirm: 确认写入
+        account: 账户标识，默认使用配置中的默认账户
     """
     result = close_nav(
         date_str=date_str,
@@ -329,6 +366,7 @@ def tool_close_nav(
         overwrite_existing=overwrite_existing,
         dry_run=dry_run,
         confirm=confirm,
+        account=account,
     )
     return json.dumps(result, ensure_ascii=False, default=str)
 
@@ -341,6 +379,7 @@ def tool_generate_report(
     report_type: str = "daily",
     record_nav: bool = False,
     price_timeout: int = 30,
+    account: str = None,
 ) -> str:
     """生成投资报告（日报/月报/年报）。
 
@@ -348,11 +387,13 @@ def tool_generate_report(
         report_type: 报告类型 - "daily"（日报）、"monthly"（月报）、"yearly"（年报）
         record_nav: 是否同时记录净值，默认 False
         price_timeout: 价格获取超时（秒）
+        account: 账户标识，默认使用配置中的默认账户
     """
     result = generate_report(
         report_type=report_type,
         record_nav=record_nav,
         price_timeout=price_timeout,
+        account=account,
     )
     return json.dumps(result, ensure_ascii=False, default=str)
 
@@ -365,6 +406,7 @@ def tool_sync_futu_cash_mmf(
     dry_run: bool = False,
     cash_balance: float = None,
     mmf_balance: float = None,
+    account: str = None,
 ) -> str:
     """通过富途 OpenAPI 同步现金/货基余额到 holdings。
 
@@ -374,13 +416,14 @@ def tool_sync_futu_cash_mmf(
         dry_run: 预览模式
         cash_balance: 手动指定现金余额（跳过 API）
         mmf_balance: 手动指定货基余额（跳过 API）
+        account: 账户标识，默认使用配置中的默认账户
     """
     kwargs = {"dry_run": dry_run}
     if cash_balance is not None:
         kwargs["cash_balance"] = cash_balance
     if mmf_balance is not None:
         kwargs["mmf_balance"] = mmf_balance
-    result = sync_futu_cash_mmf(**kwargs)
+    result = sync_futu_cash_mmf(account=account, **kwargs)
     return json.dumps(result, ensure_ascii=False, default=str)
 
 
