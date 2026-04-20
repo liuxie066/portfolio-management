@@ -25,7 +25,7 @@ class PortfolioReadService:
                 "quantity": h.quantity,
                 "type": h.asset_type.value if h.asset_type else None,
                 "normalized_type": normalize_asset_type(h.asset_type, h.asset_id),
-                "market": h.market,
+                "broker": h.broker,
                 "currency": h.currency,
                 "price": h.current_price,
                 "cny_price": h.cny_price,
@@ -106,7 +106,7 @@ class PortfolioReadService:
                     "quantity": h.quantity,
                     "type": h.asset_type.value if h.asset_type else None,
                     "normalized_type": normalized_type,
-                    "market": h.market,
+                    "broker": h.broker,
                     "currency": h.currency,
                 })
 
@@ -141,15 +141,15 @@ class PortfolioReadService:
             result["holdings"] = holdings
             return result
 
-        by_market = {}
+        by_broker = {}
         for holding in holdings:
-            market = holding.get("market") or "未指定券商"
-            by_market.setdefault(market, []).append(holding)
+            broker = holding.get("broker") or "未指定券商"
+            by_broker.setdefault(broker, []).append(holding)
 
         if include_price:
             market_values = {
                 market: sum((item.get("market_value") or 0) for item in items)
-                for market, items in by_market.items()
+                for broker, items in by_broker.items()
             }
             sorted_markets = sorted(by_market.keys(), key=lambda m: market_values[m], reverse=True)
             result["by_market"] = {m: by_market[m] for m in sorted_markets}

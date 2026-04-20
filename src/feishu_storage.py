@@ -68,9 +68,9 @@ class FeishuStorage(
         self.client = client or FeishuClient()
 
         # 内存缓存：减少 API 调用次数
-        # key: "asset_id:account:market" -> value: record_id
+        # key: "asset_id:account:broker" -> value: record_id
         self._holding_id_cache: Dict[str, str] = {}
-        # key: "asset_id:account:market" -> value: holding fields snapshot（含 record_id）
+        # key: "asset_id:account:broker" -> value: holding fields snapshot（含 record_id）
         self._holding_fields_cache: Dict[str, Dict[str, Any]] = {}
         # 持仓索引预加载状态
         self._holdings_index_loaded_all: bool = False

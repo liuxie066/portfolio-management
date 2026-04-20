@@ -15,7 +15,7 @@ def test_get_holdings_with_price_reuses_snapshot_contract():
                 asset_name="Apple",
                 quantity=1,
                 asset_type=AssetType.US_STOCK,
-                market="富途",
+                broker="富途",
                 currency="USD",
                 current_price=100,
                 cny_price=720,
@@ -27,7 +27,7 @@ def test_get_holdings_with_price_reuses_snapshot_contract():
                 asset_name="人民币现金",
                 quantity=80,
                 asset_type=AssetType.CASH,
-                market="富途",
+                broker="富途",
                 currency="CNY",
                 current_price=1,
                 cny_price=1,
@@ -53,7 +53,7 @@ def test_get_holdings_with_price_reuses_snapshot_contract():
         reporting_service=Mock(),
     )
 
-    result = service.get_holdings(include_price=True, include_cash=False, group_by_market=True)
+    result = service.get_holdings(include_price=True, include_cash=False, group_by_broker=True)
 
     portfolio.calculate_valuation.assert_called_once_with("lx")
     storage.get_holdings.assert_not_called()
@@ -74,7 +74,7 @@ def test_get_holdings_without_price_keeps_light_storage_read():
                 asset_name="人民币现金",
                 asset_type=AssetType.CASH,
                 account="lx",
-                market="富途",
+                broker="富途",
                 quantity=10,
                 currency="CNY",
             ),
@@ -83,7 +83,7 @@ def test_get_holdings_without_price_keeps_light_storage_read():
                 asset_name="Apple",
                 asset_type=AssetType.US_STOCK,
                 account="lx",
-                market="富途",
+                broker="富途",
                 quantity=1,
                 currency="USD",
             ),
@@ -110,7 +110,7 @@ def test_get_holdings_without_price_keeps_light_storage_read():
                 "quantity": 1.0,
                 "type": "us_stock",
                 "normalized_type": "stock",
-                "market": "富途",
+                "broker": "富途",
                 "currency": "USD",
             }
         ],

@@ -18,13 +18,13 @@ def snapshot_digest(snapshots: Iterable[HoldingSnapshot]) -> str:
                 "account": snapshot.account,
                 "as_of": snapshot.as_of,
                 "asset_id": snapshot.asset_id,
-                "market": snapshot.market,
+                "broker": snapshot.broker,
                 "currency": snapshot.currency,
                 "quantity": snapshot.quantity,
                 "market_value_cny": snapshot.market_value_cny,
             }
         )
-    items.sort(key=lambda item: (item["account"], item["as_of"], item["market"], item["asset_id"]))
+    items.sort(key=lambda item: (item["account"], item["as_of"], item["broker"], item["asset_id"]))
     raw = json.dumps(items, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
 
@@ -39,19 +39,19 @@ class SnapshotService:
     def build_holdings_snapshots(self, *, account: str, as_of: str, valuation: Any) -> list[HoldingSnapshot]:
         snapshots = []
         for holding in valuation.holdings:
-            market = holding.market or ""
+            broker = holding.broker or ""
             snapshots.append(
                 HoldingSnapshot(
                     as_of=as_of,
                     account=account,
                     asset_id=holding.asset_id,
-                    market=market,
+                    broker=broker,
                     quantity=holding.quantity,
                     currency=holding.currency,
                     price=holding.current_price,
                     cny_price=holding.cny_price,
                     market_value_cny=holding.market_value_cny,
-                    dedup_key=f"{account}:{as_of}:{market}:{holding.asset_id}",
+                    dedup_key=f"{account}:{as_of}:{broker}:{holding.asset_id}",
                     asset_name=holding.asset_name,
                     avg_cost=holding.avg_cost,
                     source="record_nav",

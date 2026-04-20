@@ -37,7 +37,7 @@ class SnapshotsMixin:
                 'as_of': s.as_of,
                 'account': s.account,
                 'asset_id': s.asset_id,
-                'market': s.market,
+                'broker': s.broker,
                 'quantity': s.quantity,
                 'currency': s.currency,
                 'price': s.price,

@@ -31,7 +31,7 @@ class ParsedFill:
     quantity: Optional[float] = None
     price: Optional[float] = None
     currency: Optional[str] = None
-    market: Optional[str] = None
+    broker: Optional[str] = None
     tx_date: Optional[str] = None  # YYYY-MM-DD
     tx_time: Optional[str] = None  # HH:MM:SS
     request_id: Optional[str] = None
@@ -116,7 +116,7 @@ def parse_futu_fill_message(message: str, default_market: str = "富途") -> Par
         quantity=qty,
         price=price,
         currency=currency,
-        market=default_market,
+        broker=default_market,
         tx_date=tx_date,
         tx_time=tx_time,
         request_id=_mk_request_id(raw),

@@ -59,7 +59,7 @@ def tool_buy(
     quantity: float,
     price: float,
     date_str: str = None,
-    market: str = "平安证券",
+    broker: str = "平安证券",
     fee: float = 0,
     auto_deduct_cash: bool = False,
     request_id: str = None,
@@ -73,7 +73,7 @@ def tool_buy(
         quantity: 买入数量
         price: 买入价格
         date_str: 交易日期 (YYYY-MM-DD)，默认今天
-        market: 券商/平台，默认 "平安证券"
+        broker: 券商/平台，默认 "平安证券"
         fee: 手续费，默认 0
         auto_deduct_cash: 是否自动扣减现金，默认 False
         request_id: 幂等键（防重复提交）
@@ -81,7 +81,7 @@ def tool_buy(
     """
     result = buy(
         code, name, quantity, price,
-        date_str=date_str, market=market, fee=fee,
+        date_str=date_str, broker=broker, fee=fee,
         auto_deduct_cash=auto_deduct_cash,
         request_id=request_id,
         skip_validation=skip_validation,
@@ -95,7 +95,7 @@ def tool_sell(
     quantity: float,
     price: float,
     date_str: str = None,
-    market: str = None,
+    broker: str = None,
     fee: float = 0,
     auto_add_cash: bool = False,
     request_id: str = None,
@@ -107,14 +107,14 @@ def tool_sell(
         quantity: 卖出数量
         price: 卖出价格
         date_str: 交易日期 (YYYY-MM-DD)，默认今天
-        market: 券商/平台
+        broker: 券商/平台
         fee: 手续费，默认 0
         auto_add_cash: 是否自动增加现金
         request_id: 幂等键（防重复提交）
     """
     result = sell(
         code, quantity, price,
-        date_str=date_str, market=market, fee=fee,
+        date_str=date_str, broker=broker, fee=fee,
         auto_add_cash=auto_add_cash,
         request_id=request_id,
     )
@@ -162,7 +162,7 @@ def tool_withdraw(
 @mcp.tool()
 def tool_record_transaction_from_message(
     message: str,
-    market: str = "富途",
+    broker: str = "富途",
     fee: float = 0,
     auto_cash: bool = False,
     request_id: str = None,
@@ -175,7 +175,7 @@ def tool_record_transaction_from_message(
 
     Args:
         message: 原始消息全文
-        market: 交易渠道/券商，默认 "富途"
+        broker: 交易渠道/券商，默认 "富途"
         fee: 手续费，默认 0
         auto_cash: 是否自动增减现金
         request_id: 幂等键
@@ -183,7 +183,7 @@ def tool_record_transaction_from_message(
         skip_validation: 是否跳过代码有效性校验
     """
     result = record_transaction_from_message(
-        message, market=market, fee=fee,
+        message, broker=broker, fee=fee,
         auto_cash=auto_cash, request_id=request_id,
         dry_run=dry_run, skip_validation=skip_validation,
     )

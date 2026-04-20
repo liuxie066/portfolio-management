@@ -9,14 +9,14 @@ Field **names must match exactly** (case-sensitive, underscore-sensitive).
 
 ### holdings
 
-Key: `(asset_id, account, market)`
+Key: `(asset_id, account, broker)`
 
 Required fields:
 - `asset_id` (text)
 - `asset_name` (text)
 - `asset_type` (text/select)
 - `account` (text)
-- `market` (text)
+- `broker` (text)
 - `quantity` (number)
 - `currency` (text)
 
@@ -33,7 +33,7 @@ Required fields:
 - `asset_id` (text)
 - `asset_name` (text)
 - `asset_type` (text/select)
-- `market` (text)
+- `broker` (text)
 - `account` (text)
 - `quantity` (number)
 - `price` (number)
@@ -52,7 +52,7 @@ Required fields:
 - `direction` (text/select)
 - `amount` (number)
 - `currency` (text)
-- `market` (text)
+- `broker` (text)
 - `dedup_key` (text)
 
 ### nav_history
@@ -89,7 +89,7 @@ Required fields:
 - `asset_id` (text)
 - `asset_name` (text)
 - `asset_type` (text/select)
-- `market` (text)
+- `broker` (text)
 - `quantity` (number)
 - `currency` (text)
 - `price` (number)

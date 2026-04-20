@@ -261,7 +261,7 @@ class FeishuClient:
         'nav_history': ['date', 'account', 'total_value', 'shares', 'nav'],
         'price_cache': ['asset_id', 'price', 'currency', 'cny_price'],
         # Per-NAV-date holdings snapshot for audit/repro.
-        'holdings_snapshot': ['as_of', 'account', 'asset_id', 'market', 'quantity', 'currency', 'price', 'cny_price', 'market_value_cny', 'dedup_key'],
+        'holdings_snapshot': ['as_of', 'account', 'asset_id', 'broker', 'quantity', 'currency', 'price', 'cny_price', 'market_value_cny', 'dedup_key'],
     }
 
     def create_record(self, table_name: str, fields: Dict[str, Any]) -> Dict:

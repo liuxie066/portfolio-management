@@ -123,7 +123,7 @@ class PortfolioManager:
 
     def buy(self, tx_date: date, asset_id: str, asset_name: str, asset_type: AssetType,
             account: str, quantity: float, price: float, currency: str,
-            market: Optional[str] = None, fee: float = 0, remark: str = "",
+            broker: Optional[str] = None, fee: float = 0, remark: str = "",
             asset_class: Optional[AssetClass] = None, industry: Optional[str] = None,
             auto_deduct_cash: bool = True, request_id: str = None) -> Transaction:
         """
@@ -140,7 +140,7 @@ class PortfolioManager:
             quantity=quantity,
             price=price,
             currency=currency,
-            market=market,
+            broker=broker,
             fee=fee,
             remark=remark,
             asset_class=asset_class,
@@ -150,7 +150,7 @@ class PortfolioManager:
         )
 
     def sell(self, tx_date: date, asset_id: str, account: str, quantity: float,
-             price: float, currency: str, market: Optional[str] = None,
+             price: float, currency: str, broker: Optional[str] = None,
              fee: float = 0, remark: str = "",
              auto_add_cash: bool = True, request_id: str = None) -> Transaction:
         """
@@ -164,7 +164,7 @@ class PortfolioManager:
             quantity=quantity,
             price=price,
             currency=currency,
-            market=market,
+            broker=broker,
             fee=fee,
             remark=remark,
             auto_add_cash=auto_add_cash,

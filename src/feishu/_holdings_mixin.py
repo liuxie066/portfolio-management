@@ -11,12 +11,12 @@ from ..models import (
 class HoldingsMixin:
     """Holdings table operations + in-memory / persistent cache."""
 
-    def _get_holding_cache_key(self, asset_id: str, account: str, market: Optional[str]) -> str:
+    def _get_holding_cache_key(self, asset_id: str, account: str, broker: Optional[str]) -> str:
         """生成持仓缓存 key"""
-        return f"{asset_id}:{account}:{market or ''}"
+        return f"{asset_id}:{account}:{broker or ''}"
 
     HOLDING_PROJECTION_FIELDS: List[str] = [
-        'asset_id', 'asset_name', 'asset_type', 'account', 'market',
+        'asset_id', 'asset_name', 'asset_type', 'account', 'broker',
         'quantity', 'avg_cost', 'currency', 'asset_class', 'industry', 'tag',
         'created_at', 'updated_at'
     ]
@@ -27,7 +27,7 @@ class HoldingsMixin:
             'asset_id': holding.asset_id,
             'asset_name': holding.asset_name,
             'asset_type': holding.asset_type.value if holding.asset_type else None,
-            'market': holding.market or '',
+            'broker': holding.broker or '',
             'account': holding.account,
             'quantity': holding.quantity,
             'avg_cost': holding.avg_cost,
@@ -49,8 +49,8 @@ class HoldingsMixin:
                 continue
             asset_id = fields.get('asset_id', '')
             account = fields.get('account', '')
-            market = fields.get('market') or ''
-            cache_key = self._get_holding_cache_key(asset_id, account, market or None)
+            broker = fields.get('broker') or ''
+            cache_key = self._get_holding_cache_key(asset_id, account, broker or None)
             self._holding_id_cache[cache_key] = fields['record_id']
 
             mem_fields = dict(fields)
@@ -80,8 +80,8 @@ class HoldingsMixin:
         if flush_persistent:
             self._flush_persistent_holdings_index()
 
-    def _invalidate_holding_cache(self, asset_id: str, account: str, market: Optional[str], *, flush_persistent: bool = False):
-        cache_key = self._get_holding_cache_key(asset_id, account, market)
+    def _invalidate_holding_cache(self, asset_id: str, account: str, broker: Optional[str], *, flush_persistent: bool = False):
+        cache_key = self._get_holding_cache_key(asset_id, account, broker)
         self._holding_id_cache.pop(cache_key, None)
         self._holding_fields_cache.pop(cache_key, None)
         self._local_holdings_index_cache.delete(cache_key)
@@ -93,14 +93,14 @@ class HoldingsMixin:
         if not holding.record_id:
             return
 
-        cache_key = self._get_holding_cache_key(holding.asset_id, holding.account, holding.market)
+        cache_key = self._get_holding_cache_key(holding.asset_id, holding.account, holding.broker)
         self._holding_id_cache[cache_key] = holding.record_id
         self._holding_fields_cache[cache_key] = {
             'record_id': holding.record_id,
             'asset_id': holding.asset_id,
             'asset_name': holding.asset_name,
             'asset_type': holding.asset_type.value if holding.asset_type else None,
-            'market': holding.market or '',
+            'broker': holding.broker or '',
             'account': holding.account,
             'quantity': holding.quantity,
             'avg_cost': holding.avg_cost,
@@ -118,8 +118,8 @@ class HoldingsMixin:
             _flush=flush_persistent,
         )
 
-    def _get_holding_from_cache(self, asset_id: str, account: str, market: Optional[str]) -> Optional[Holding]:
-        cache_key = self._get_holding_cache_key(asset_id, account, market)
+    def _get_holding_from_cache(self, asset_id: str, account: str, broker: Optional[str]) -> Optional[Holding]:
+        cache_key = self._get_holding_cache_key(asset_id, account, broker)
         fields = self._holding_fields_cache.get(cache_key)
         if not fields:
             return None
@@ -133,7 +133,7 @@ class HoldingsMixin:
                 h = self._dict_to_holding(fields)
                 if best is None:
                     best = h
-                elif not (h.market or ''):
+                elif not (h.broker or ''):
                     best = h
                     break
         return best
@@ -173,18 +173,18 @@ class HoldingsMixin:
 
     # ========== holdings CRUD ==========
 
-    def get_holding(self, asset_id: str, account: str, market: Optional[str] = None) -> Optional[Holding]:
+    def get_holding(self, asset_id: str, account: str, broker: Optional[str] = None) -> Optional[Holding]:
         """获取单个持仓（优先使用内存索引与快照）"""
-        cached_holding = self._get_holding_from_cache(asset_id, account, market)
-        if not cached_holding and market is None:
+        cached_holding = self._get_holding_from_cache(asset_id, account, broker)
+        if not cached_holding and broker is None:
             cached_holding = self._get_holding_from_cache_any_market(asset_id, account)
         if cached_holding:
             return cached_holding
 
         if account and (not self._holdings_index_loaded_all) and (account not in self._holdings_index_loaded_accounts):
             self.preload_holdings_index(account=account)
-            cached_holding = self._get_holding_from_cache(asset_id, account, market)
-            if not cached_holding and market is None:
+            cached_holding = self._get_holding_from_cache(asset_id, account, broker)
+            if not cached_holding and broker is None:
                 cached_holding = self._get_holding_from_cache_any_market(asset_id, account)
             if cached_holding:
                 return cached_holding
@@ -192,11 +192,11 @@ class HoldingsMixin:
         if self._holdings_index_loaded_all or (account in self._holdings_index_loaded_accounts):
             return None
 
-        if market:
+        if broker:
             filter_str = (
                 f'CurrentValue.[asset_id] = "{self._escape_filter_value(asset_id)}" '
                 f'AND CurrentValue.[account] = "{self._escape_filter_value(account)}" '
-                f'AND CurrentValue.[market] = "{self._escape_filter_value(market)}"'
+                f'AND CurrentValue.[broker] = "{self._escape_filter_value(broker)}"'
             )
         else:
             filter_str = (
@@ -213,9 +213,9 @@ class HoldingsMixin:
             return None
 
         selected = records[0]
-        if not market:
+        if not broker:
             for record in records:
-                if not (record.get('fields') or {}).get('market'):
+                if not (record.get('fields') or {}).get('broker'):
                     selected = record
                     break
 
@@ -224,10 +224,10 @@ class HoldingsMixin:
         holding = self._dict_to_holding(fields)
         self._put_holding_cache(holding)
 
-        if market is None and holding.market:
+        if broker is None and holding.broker:
             default_key = self._get_holding_cache_key(asset_id, account, None)
             self._holding_id_cache[default_key] = holding.record_id
-            self._holding_fields_cache[default_key] = dict(self._holding_fields_cache[self._get_holding_cache_key(asset_id, account, holding.market)])
+            self._holding_fields_cache[default_key] = dict(self._holding_fields_cache[self._get_holding_cache_key(asset_id, account, holding.broker)])
 
         return holding
 
@@ -289,7 +289,7 @@ class HoldingsMixin:
         from ..time_utils import bj_now_naive
 
         now = bj_now_naive()
-        existing = self.get_holding(holding.asset_id, holding.account, holding.market)
+        existing = self.get_holding(holding.asset_id, holding.account, holding.broker)
 
         if existing and existing.record_id:
             is_cash_like = (existing.asset_type and existing.asset_type.value in ('cash', 'mmf'))
@@ -310,7 +310,7 @@ class HoldingsMixin:
             try:
                 self.client.update_record('holdings', existing.record_id, update_fields)
             except Exception:
-                self._invalidate_holding_cache(holding.asset_id, holding.account, holding.market, flush_persistent=True)
+                self._invalidate_holding_cache(holding.asset_id, holding.account, holding.broker, flush_persistent=True)
                 raise
 
             existing.quantity = new_quantity
@@ -346,7 +346,7 @@ class HoldingsMixin:
         if mode == 'additive':
             accounts_to_preload = set()
             for h in holdings:
-                cache_key = self._get_holding_cache_key(h.asset_id, h.account, h.market)
+                cache_key = self._get_holding_cache_key(h.asset_id, h.account, h.broker)
                 has_cache = cache_key in self._holding_fields_cache
                 if (not has_cache) and h.account and (not self._holdings_index_loaded_all) and (h.account not in self._holdings_index_loaded_accounts):
                     accounts_to_preload.add(h.account)
@@ -365,10 +365,10 @@ class HoldingsMixin:
         working_existing: Dict[str, Holding] = {}
 
         for incoming in holdings:
-            cache_key = self._get_holding_cache_key(incoming.asset_id, incoming.account, incoming.market)
+            cache_key = self._get_holding_cache_key(incoming.asset_id, incoming.account, incoming.broker)
             existing = working_existing.get(cache_key)
             if existing is None:
-                existing = self.get_holding(incoming.asset_id, incoming.account, incoming.market)
+                existing = self.get_holding(incoming.asset_id, incoming.account, incoming.broker)
                 if existing:
                     working_existing[cache_key] = Holding(**existing.model_dump())
                     existing = working_existing[cache_key]
@@ -412,7 +412,7 @@ class HoldingsMixin:
                 self.client.batch_update_records('holdings', update_payloads)
             except Exception:
                 for h in update_targets:
-                    self._invalidate_holding_cache(h.asset_id, h.account, h.market)
+                    self._invalidate_holding_cache(h.asset_id, h.account, h.broker)
                 self._flush_persistent_holdings_index()
                 raise
             for h in update_targets:
@@ -436,11 +436,11 @@ class HoldingsMixin:
             'preloaded_accounts': preloaded_accounts,
         }
 
-    def update_holding_quantity(self, asset_id: str, account: str, quantity_change: float, market: Optional[str] = None):
+    def update_holding_quantity(self, asset_id: str, account: str, quantity_change: float, broker: Optional[str] = None):
         """更新持仓数量（优先使用预加载索引与内存快照）"""
         from ..time_utils import bj_now_naive
 
-        holding = self.get_holding(asset_id, account, market)
+        holding = self.get_holding(asset_id, account, broker)
         if not holding or not holding.record_id:
             return
 
@@ -454,19 +454,19 @@ class HoldingsMixin:
         try:
             self.client.update_record('holdings', holding.record_id, update_fields)
         except Exception:
-            self._invalidate_holding_cache(asset_id, account, market, flush_persistent=True)
+            self._invalidate_holding_cache(asset_id, account, broker, flush_persistent=True)
             raise
 
         holding.quantity = new_quantity
         holding.updated_at = datetime.strptime(now_str, DATETIME_FORMAT)
         self._put_holding_cache(holding)
 
-    def delete_holding_if_zero(self, asset_id: str, account: str, market: Optional[str] = None):
+    def delete_holding_if_zero(self, asset_id: str, account: str, broker: Optional[str] = None):
         """如果持仓为0则删除（容忍极小浮点残值）"""
-        holding = self.get_holding(asset_id, account, market)
+        holding = self.get_holding(asset_id, account, broker)
         if holding and holding.record_id and abs(holding.quantity) <= 1e-8:
             self.client.delete_record('holdings', holding.record_id)
-            self._invalidate_holding_cache(asset_id, account, market, flush_persistent=True)
+            self._invalidate_holding_cache(asset_id, account, broker, flush_persistent=True)
 
     def delete_holding_by_record_id(self, record_id: str) -> bool:
         """通过记录ID删除持仓"""
@@ -483,7 +483,7 @@ class HoldingsMixin:
             'asset_id': holding.asset_id,
             'asset_name': holding.asset_name,
             'asset_type': holding.asset_type,
-            'market': holding.market or '',
+            'broker': holding.broker or '',
             'account': holding.account,
             'quantity': holding.quantity,
             'avg_cost': holding.avg_cost,
@@ -522,7 +522,7 @@ class HoldingsMixin:
             asset_id=data.get('asset_id', ''),
             asset_name=data.get('asset_name', ''),
             asset_type=AssetType(data.get('asset_type')) if data.get('asset_type') else AssetType.OTHER,
-            market=data.get('market') or None,
+            broker=data.get('broker') or None,
             account=data.get('account', ''),
             quantity=float(data.get('quantity', 0)),
             avg_cost=float(data.get('avg_cost')) if data.get('avg_cost') is not None else None,

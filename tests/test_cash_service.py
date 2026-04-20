@@ -79,7 +79,7 @@ def test_cash_service_sync_cash_like_balance_uses_absolute_target_delta():
         asset_name="货币基金",
         asset_type=AssetType.MMF,
         account="a",
-        market="富途",
+        broker="富途",
         quantity=10,
         currency="CNY",
     )
@@ -91,7 +91,7 @@ def test_cash_service_sync_cash_like_balance_uses_absolute_target_delta():
         asset_name="货币基金",
         asset_type=AssetType.MMF,
         target=15.005,
-        market="富途",
+        broker="富途",
     )
 
     assert result["current"] == 10.0
@@ -113,7 +113,7 @@ def test_cash_service_sync_cash_like_balance_dry_run_does_not_write():
         asset_name="人民币现金",
         asset_type=AssetType.CASH,
         target=20,
-        market="富途",
+        broker="富途",
         dry_run=True,
     )
 

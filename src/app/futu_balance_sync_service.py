@@ -61,7 +61,7 @@ class FutuOpenApiBalanceProvider:
         port: Optional[int] = None,
         trd_env: Optional[str] = None,
         acc_id: Optional[int] = None,
-        market: Optional[str] = None,
+        trd_market: Optional[str] = None,
         cash_currency: Optional[str] = None,
         mmf_codes: Optional[Iterable[str]] = None,
     ):
@@ -69,7 +69,7 @@ class FutuOpenApiBalanceProvider:
         self.port = int(port or os.environ.get("FUTU_OPEND_PORT", "11111"))
         self.trd_env = trd_env or os.environ.get("FUTU_TRD_ENV", "REAL")
         self.acc_id = int(acc_id) if acc_id is not None else _env_int("FUTU_ACC_ID")
-        self.market = market or os.environ.get("FUTU_TRD_MARKET", "HK")
+        self.trd_market = trd_market or os.environ.get("FUTU_TRD_MARKET", "HK")
         self.cash_currency = cash_currency or os.environ.get("FUTU_CASH_CURRENCY", "CNH")
         # Kept for constructor compatibility. MMF balance is authoritative from
         # accinfo.fund_assets, not position code matching.
@@ -121,7 +121,7 @@ class FutuOpenApiBalanceProvider:
 
     def _open_trade_context(self, futu_sdk: Any) -> Any:
         kwargs = {"host": self.host, "port": self.port}
-        trd_market = self._enum_value(futu_sdk, "TrdMarket", self.market)
+        trd_market = self._enum_value(futu_sdk, "TrdMarket", self.trd_market)
         if trd_market is not None:
             kwargs["filter_trdmarket"] = trd_market
         return futu_sdk.OpenSecTradeContext(**kwargs)
@@ -162,7 +162,7 @@ class FutuBalanceSyncService:
         self,
         *,
         account: str,
-        market: str = "富途",
+        broker: str = "富途",
         dry_run: bool = False,
         cash_balance: Optional[float] = None,
         mmf_balance: Optional[float] = None,
@@ -176,7 +176,7 @@ class FutuBalanceSyncService:
         items = []
         items.extend(self._sync_asset(
             account=account,
-            market=market,
+            broker=broker,
             asset_id=CASH_ASSET_ID,
             asset_name="人民币现金",
             asset_type=AssetType.CASH,
@@ -185,7 +185,7 @@ class FutuBalanceSyncService:
         ))
         items.extend(self._sync_asset(
             account=account,
-            market=market,
+            broker=broker,
             asset_id=MMF_ASSET_ID,
             asset_name="货币基金",
             asset_type=AssetType.MMF,
@@ -196,7 +196,7 @@ class FutuBalanceSyncService:
         return {
             "success": True,
             "account": account,
-            "market": market,
+            "broker": broker,
             "dry_run": dry_run,
             "source": snapshot.source,
             "items": [item.__dict__ for item in items],
@@ -212,7 +212,7 @@ class FutuBalanceSyncService:
         self,
         *,
         account: str,
-        market: str,
+        broker: str,
         asset_id: str,
         asset_name: str,
         asset_type: AssetType,
@@ -228,7 +228,7 @@ class FutuBalanceSyncService:
             asset_name=asset_name,
             asset_type=asset_type,
             target=target,
-            market=market,
+            broker=broker,
             dry_run=dry_run,
         )
 

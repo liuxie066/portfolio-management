@@ -113,7 +113,7 @@ class TestHolding:
             currency="CNY"
         )
         assert holding.avg_cost is None
-        assert holding.market == ""
+        assert holding.broker == ""
         assert holding.tag == []
 
 

@@ -145,9 +145,9 @@ def test_reporting_service_build_distribution_uses_snapshot_holdings():
         "valuation": valuation,
         "holdings_data": {
             "holdings": [
-                {"code": "AAPL", "normalized_type": "stock", "market": "富途", "currency": "USD", "market_value": 100.0},
-                {"code": "CNY-MMF", "normalized_type": "cash", "market": "富途", "currency": "CNY", "market_value": 50.0},
-                {"code": "110022", "normalized_type": "fund", "market": "平安", "currency": "CNY", "market_value": 150.0},
+                {"code": "AAPL", "normalized_type": "stock", "broker": "富途", "currency": "USD", "market_value": 100.0},
+                {"code": "CNY-MMF", "normalized_type": "cash", "broker": "富途", "currency": "CNY", "market_value": 50.0},
+                {"code": "110022", "normalized_type": "fund", "broker": "平安", "currency": "CNY", "market_value": 150.0},
             ],
         },
     }
@@ -162,8 +162,8 @@ def test_reporting_service_build_distribution_uses_snapshot_holdings():
         {"type": "cash", "value": 50.0, "ratio": 1 / 6},
     ]
     assert result["by_market"] == [
-        {"market": "富途", "value": 150.0, "ratio": 0.5},
-        {"market": "平安", "value": 150.0, "ratio": 0.5},
+        {"broker": "富途", "value": 150.0, "ratio": 0.5},
+        {"broker": "平安", "value": 150.0, "ratio": 0.5},
     ]
     assert result["by_currency"] == [
         {"currency": "CNY", "value": 200.0, "ratio": 2 / 3},

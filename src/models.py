@@ -5,7 +5,7 @@
 - 删除遗留字段 (id)
 - 删除未使用的计算字段 (pnl, current_price, weight)
 - 新增 dedup_key 防重字段 (Transaction, CashFlow)
-- Holding.market 默认值从 None 改为 ""
+- Holding.broker 默认值从 None 改为 ""
 - 精简 TransactionType 枚举
 - 新增 dedup_key 生成工具函数
 """
@@ -120,7 +120,7 @@ class Industry(str, Enum):
 class Holding(BaseModel):
     """持仓记录
 
-    业务主键: (asset_id, account, market)
+    业务主键: (asset_id, account, broker)
     """
     record_id: Optional[str] = None
 
@@ -129,7 +129,7 @@ class Holding(BaseModel):
     asset_name: str = Field(..., description="资产名称")
     asset_type: AssetType = Field(..., description="资产类型")
     account: str = Field(..., description="账户标识")
-    market: str = Field("", description="券商/平台")
+    broker: str = Field("", description="券商/平台")
     quantity: float = Field(0.0, description="持仓数量")
     avg_cost: Optional[float] = Field(None, description="平均成本价")
     currency: str = Field(..., description="币种")
@@ -149,7 +149,7 @@ class Holding(BaseModel):
     market_value_cny: Optional[float] = None
     weight: Optional[float] = None
 
-    @field_validator('market', mode='before')
+    @field_validator('broker', mode='before')
     @classmethod
     def coerce_market(cls, v):
         return v if v is not None else ""
@@ -178,7 +178,7 @@ class Transaction(BaseModel):
     asset_name: Optional[str] = None
     asset_type: Optional[AssetType] = None
     account: str = Field(..., description="账户标识")
-    market: str = Field("", description="券商/平台")
+    broker: str = Field("", description="券商/平台")
     quantity: float = Field(..., description="数量(买入为正,卖出为负)")
     price: float = Field(..., description="成交价格")
     amount: Optional[float] = Field(None, description="成交金额(自动计算)")
@@ -191,7 +191,7 @@ class Transaction(BaseModel):
     related_account: Optional[str] = Field(None, description="转账对方(预留)")
     source: str = Field("manual", description="来源")
 
-    @field_validator('market', mode='before')
+    @field_validator('broker', mode='before')
     @classmethod
     def coerce_market(cls, v):
         return v if v is not None else ""

@@ -52,16 +52,16 @@ def html_escape(s: Any) -> str:
 
 
 def build_market_breakdown(holdings: List[Dict[str, Any]], total_value: float) -> List[Dict[str, Any]]:
-    by_market: Dict[str, float] = {}
+    by_broker: Dict[str, float] = {}
     for h in holdings:
-        market = h.get("market") or "未分类"
+        broker = h.get("broker") or "未分类"
         mv = float(h.get("market_value") or 0)
-        by_market[market] = by_market.get(market, 0.0) + mv
+        by_broker[broker] = by_broker.get(broker, 0.0) + mv
 
     rows = []
-    for market, value in sorted(by_market.items(), key=lambda x: x[1], reverse=True):
+    for broker, value in sorted(by_broker.items(), key=lambda x: x[1], reverse=True):
         ratio = (value / total_value) if total_value > 0 else 0.0
-        rows.append({"market": market, "value": value, "ratio": ratio})
+        rows.append({"broker": broker, "value": value, "ratio": ratio})
     return rows
 
 
@@ -92,7 +92,7 @@ def render_html(bundle: Dict[str, Any]) -> str:
         f"<tr>"
         f"<td>{html_escape(h.get('code'))}</td>"
         f"<td>{html_escape(h.get('name'))}</td>"
-        f"<td>{html_escape(h.get('market') or '--')}</td>"
+        f"<td>{html_escape(h.get('broker') or '--')}</td>"
         f"<td>{html_escape(h.get('quantity'))}</td>"
         f"<td>{fmt_money(h.get('market_value'))}</td>"
         f"<td>{fmt_pct_ratio(h.get('weight'))}</td>"
@@ -102,7 +102,7 @@ def render_html(bundle: Dict[str, Any]) -> str:
 
     market_rows = "\n".join(
         f"<tr>"
-        f"<td>{html_escape(r['market'])}</td>"
+        f"<td>{html_escape(r['broker'])}</td>"
         f"<td>{fmt_money(r['value'])}</td>"
         f"<td>{fmt_pct_ratio(r['ratio'])}</td>"
         f"</tr>"

@@ -91,7 +91,7 @@ def test_bulk_upsert_additive_preloads_once_per_account_and_batches_updates():
                     'asset_name': 'Apple',
                     'asset_type': 'us_stock',
                     'account': 'lx',
-                    'market': 'futu',
+                    'broker': 'futu',
                     'quantity': 10,
                     'currency': 'USD',
                 },
@@ -103,7 +103,7 @@ def test_bulk_upsert_additive_preloads_once_per_account_and_batches_updates():
                     'asset_name': 'Microsoft',
                     'asset_type': 'us_stock',
                     'account': 'sy',
-                    'market': 'futu',
+                    'broker': 'futu',
                     'quantity': 7,
                     'currency': 'USD',
                 },
@@ -114,9 +114,9 @@ def test_bulk_upsert_additive_preloads_once_per_account_and_batches_updates():
     storage = FeishuStorage(client=client, local_holdings_index_cache=local_idx)
 
     payload = [
-        Holding(asset_id='AAPL', asset_name='Apple', asset_type=AssetType.US_STOCK, account='lx', market='futu', quantity=2, currency='USD'),
-        Holding(asset_id='AAPL', asset_name='Apple', asset_type=AssetType.US_STOCK, account='lx', market='futu', quantity=3, currency='USD'),
-        Holding(asset_id='MSFT', asset_name='Microsoft', asset_type=AssetType.US_STOCK, account='sy', market='futu', quantity=4, currency='USD'),
+        Holding(asset_id='AAPL', asset_name='Apple', asset_type=AssetType.US_STOCK, account='lx', broker='futu', quantity=2, currency='USD'),
+        Holding(asset_id='AAPL', asset_name='Apple', asset_type=AssetType.US_STOCK, account='lx', broker='futu', quantity=3, currency='USD'),
+        Holding(asset_id='MSFT', asset_name='Microsoft', asset_type=AssetType.US_STOCK, account='sy', broker='futu', quantity=4, currency='USD'),
     ]
 
     result = storage.upsert_holdings_bulk(payload, mode='additive')
@@ -155,7 +155,7 @@ def test_bulk_upsert_replace_mixed_update_create_updates_caches():
                     'asset_name': '腾讯控股',
                     'asset_type': 'hk_stock',
                     'account': 'lx',
-                    'market': 'futu',
+                    'broker': 'futu',
                     'quantity': 100,
                     'currency': 'HKD',
                 },
@@ -168,8 +168,8 @@ def test_bulk_upsert_replace_mixed_update_create_updates_caches():
     storage.preload_holdings_index(account='lx')
 
     payload = [
-        Holding(asset_id='00700', asset_name='腾讯控股', asset_type=AssetType.HK_STOCK, account='lx', market='futu', quantity=80, currency='HKD'),
-        Holding(asset_id='09988', asset_name='阿里巴巴', asset_type=AssetType.HK_STOCK, account='lx', market='futu', quantity=50, currency='HKD'),
+        Holding(asset_id='00700', asset_name='腾讯控股', asset_type=AssetType.HK_STOCK, account='lx', broker='futu', quantity=80, currency='HKD'),
+        Holding(asset_id='09988', asset_name='阿里巴巴', asset_type=AssetType.HK_STOCK, account='lx', broker='futu', quantity=50, currency='HKD'),
     ]
 
     result = storage.upsert_holdings_bulk(payload, mode='replace')

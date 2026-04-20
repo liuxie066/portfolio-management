@@ -292,7 +292,7 @@ class LocalHoldingsIndexCache:
     {
       "version": 1,
       "items": {
-        "asset:account:market": {
+        "asset:account:broker": {
           "record_id": "rec_xxx",
           "quantity": 100,
           "asset_type": "a_stock",

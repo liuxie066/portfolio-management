@@ -225,17 +225,17 @@ class TestFeishuStorageHoldingOperations:
                 'asset_name': '腾讯控股',
                 'asset_type': 'hk_stock',
                 'account': '港股账户',
-                'market': '富途',
+                'broker': '富途',
                 'quantity': '100',
                 'currency': 'HKD'
             }
         }]
 
-        result = self.storage.get_holding('00700', '港股账户', market='富途')
+        result = self.storage.get_holding('00700', '港股账户', broker='富途')
 
         assert result is not None
         assert result.asset_id == '00700'
-        assert result.market == '富途'
+        assert result.broker == '富途'
         assert result.quantity == 100.0
 
     def test_get_holding_without_market(self):
@@ -245,7 +245,7 @@ class TestFeishuStorageHoldingOperations:
                 'record_id': 'rec_1',
                 'fields': {
                     'asset_id': '000001',
-                    'market': '华泰',
+                    'broker': '华泰',
                     'quantity': '100',
                     'currency': 'CNY'
                 }
@@ -254,7 +254,7 @@ class TestFeishuStorageHoldingOperations:
                 'record_id': 'rec_2',
                 'fields': {
                     'asset_id': '000001',
-                    'market': '',
+                    'broker': '',
                     'quantity': '200',
                     'currency': 'CNY'
                 }
@@ -266,7 +266,7 @@ class TestFeishuStorageHoldingOperations:
         # 应该返回market为空的记录
         assert result is not None
         assert result.record_id == 'rec_2'
-        assert result.market == ""
+        assert result.broker == ""
 
     def test_get_holding_not_found(self):
         """测试持仓不存在"""

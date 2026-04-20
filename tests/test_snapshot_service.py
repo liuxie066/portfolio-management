@@ -14,7 +14,7 @@ def _valuation():
         asset_name="平安银行",
         asset_type=AssetType.A_STOCK,
         account="a",
-        market="CN",
+        broker="CN",
         quantity=12.345,
         avg_cost=9.876,
         currency="CNY",

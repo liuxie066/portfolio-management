@@ -17,7 +17,7 @@ from .models import _quantize_decimal, MONEY_QUANT
 class HoldingSnapshot(BaseModel):
     """A per-day holding snapshot row (one asset per row).
 
-    Business key (recommended): (as_of, account, asset_id, market)
+    Business key (recommended): (as_of, account, asset_id, broker)
     """
 
     record_id: Optional[str] = None
@@ -25,7 +25,7 @@ class HoldingSnapshot(BaseModel):
     as_of: str = Field(..., description="Business date (Asia/Shanghai) as YYYY-MM-DD")
     account: str
     asset_id: str
-    market: str = ""
+    broker: str = ""
 
     quantity: float
     currency: str

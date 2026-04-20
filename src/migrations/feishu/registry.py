@@ -10,7 +10,7 @@ def get_migrations() -> list[Migration]:
             id="0001_baseline",
             description="Baseline required production tables and idempotency fields.",
             required_tables={
-                "holdings": ["asset_id", "asset_name", "asset_type", "account", "market", "quantity", "currency"],
+                "holdings": ["asset_id", "asset_name", "asset_type", "account", "broker", "quantity", "currency"],
                 "transactions": ["tx_date", "tx_type", "asset_id", "account", "quantity", "price", "currency", "request_id", "dedup_key"],
                 "cash_flow": ["flow_date", "account", "amount", "currency", "cny_amount", "flow_type", "dedup_key"],
                 "nav_history": ["date", "account", "total_value", "shares", "nav"],

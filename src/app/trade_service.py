@@ -42,7 +42,7 @@ class TradeService:
         quantity: float,
         price: float,
         currency: str,
-        market: Optional[str] = None,
+        broker: Optional[str] = None,
         fee: float = 0,
         remark: str = "",
         asset_class: Optional[AssetClass] = None,
@@ -72,7 +72,7 @@ class TradeService:
             asset_name=full_asset_name,
             asset_type=asset_type,
             account=account,
-            market=market,
+            broker=broker,
             quantity=tx_payload["quantity"],
             price=tx_payload["price"],
             amount=tx_payload["amount"],
@@ -94,7 +94,7 @@ class TradeService:
             asset_name=full_asset_name,
             asset_type=asset_type,
             account=account,
-            market=market,
+            broker=broker,
             quantity=holding_payload["quantity"],
             currency=currency,
             asset_class=asset_class,
@@ -156,13 +156,13 @@ class TradeService:
         quantity: float,
         price: float,
         currency: str,
-        market: Optional[str] = None,
+        broker: Optional[str] = None,
         fee: float = 0,
         remark: str = "",
         auto_add_cash: bool = True,
         request_id: str = None,
     ) -> Transaction:
-        holding = self.storage.get_holding(asset_id, account, market)
+        holding = self.storage.get_holding(asset_id, account, broker)
         if holding:
             asset_name = holding.asset_name
             asset_type = holding.asset_type
@@ -179,7 +179,7 @@ class TradeService:
             asset_name=asset_name,
             asset_type=asset_type,
             account=account,
-            market=market,
+            broker=broker,
             quantity=tx_payload["quantity"],
             price=tx_payload["price"],
             amount=tx_payload["amount"],
@@ -197,7 +197,7 @@ class TradeService:
 
         sell_holding_payload = self.manager._normalize_holding_payload(quantity=-quantity)
         try:
-            self.storage.update_holding_quantity(asset_id, account, sell_holding_payload["quantity"], market)
+            self.storage.update_holding_quantity(asset_id, account, sell_holding_payload["quantity"], broker)
         except Exception as exc:
             print(f"[警告] 持仓更新失败，但交易已记录: {exc}")
             self.manager._record_compensation(
@@ -207,14 +207,14 @@ class TradeService:
                 payload={
                     "transaction": tx.model_dump(mode="json"),
                     "asset_id": asset_id,
-                    "market": market,
+                    "broker": broker,
                     "quantity_delta": sell_holding_payload["quantity"],
                 },
                 error=exc,
             )
 
         try:
-            self.storage.delete_holding_if_zero(asset_id, account, market)
+            self.storage.delete_holding_if_zero(asset_id, account, broker)
         except Exception as exc:
             print(f"[警告] 零持仓清理失败，但交易已记录: {exc}")
             self.manager._record_compensation(
@@ -224,7 +224,7 @@ class TradeService:
                 payload={
                     "transaction": tx.model_dump(mode="json"),
                     "asset_id": asset_id,
-                    "market": market,
+                    "broker": broker,
                 },
                 error=exc,
             )

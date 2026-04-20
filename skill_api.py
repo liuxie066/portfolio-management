@@ -94,7 +94,7 @@ class PortfolioSkill:
     # ---------- 交易记录 ----------
 
     def buy(self, code: str, name: str, quantity: float, price: float,
-            date_str: str = None, market: str = "平安证券", fee: float = 0,
+            date_str: str = None, broker: str = "平安证券", fee: float = 0,
             auto_deduct_cash: bool = False, request_id: str = None,
             skip_validation: bool = False) -> Dict[str, Any]:
         """
@@ -106,7 +106,7 @@ class PortfolioSkill:
             quantity: 买入数量
             price: 买入价格
             date_str: 交易日期 (YYYY-MM-DD)，默认今天
-            market: 券商/平台，默认 "平安证券"
+            broker: 券商/平台，默认 "平安证券"
             fee: 手续费
             auto_deduct_cash: 是否自动扣减现金，默认 False
             request_id: 请求唯一标识（用于幂等性控制）
@@ -142,7 +142,7 @@ class PortfolioSkill:
                 quantity=quantity,
                 price=price,
                 currency=currency,
-                market=market,
+                broker=broker,
                 fee=fee,
                 asset_class=asset_class,
                 industry=Industry.OTHER,
@@ -172,7 +172,7 @@ class PortfolioSkill:
             return {"success": False, "error": str(e), "message": f"记录失败: {e}"}
 
     def sell(self, code: str, quantity: float, price: float,
-             date_str: str = None, market: str = None, fee: float = 0,
+             date_str: str = None, broker: str = None, fee: float = 0,
              auto_add_cash: bool = False, request_id: str = None) -> Dict[str, Any]:
         """
         记录卖出交易
@@ -182,7 +182,7 @@ class PortfolioSkill:
             quantity: 卖出数量
             price: 卖出价格
             date_str: 交易日期 (YYYY-MM-DD)
-            market: 券商/平台
+            broker: 券商/平台
             fee: 手续费
             auto_add_cash: 是否自动增加现金
             request_id: 请求唯一标识（用于幂等性控制）
@@ -197,7 +197,7 @@ class PortfolioSkill:
             validated_code = validate_asset_code(code)
 
             # 获取持仓信息
-            holding = self.storage.get_holding(validated_code, self.account, market)
+            holding = self.storage.get_holding(validated_code, self.account, broker)
             if not holding:
                 return {
                     "success": False,
@@ -212,7 +212,7 @@ class PortfolioSkill:
                 quantity=quantity,
                 price=price,
                 currency=holding.currency,
-                market=market or holding.market,
+                broker=broker or holding.broker,
                 fee=fee,
                 auto_add_cash=auto_add_cash,
                 request_id=request_id
@@ -290,7 +290,7 @@ class PortfolioSkill:
     # ---------- 持仓查询 ----------
 
     def record_transaction_from_message(self, message: str,
-                                        market: str = "富途",
+                                        broker: str = "富途",
                                         fee: float = 0,
                                         auto_cash: bool = False,
                                         request_id: str = None,
@@ -303,7 +303,7 @@ class PortfolioSkill:
 
         dry_run=True 时只返回解析结构，不写入。
         """
-        parsed = parse_futu_fill_message(message, default_market=market)
+        parsed = parse_futu_fill_message(message, default_market=broker)
         if not parsed.ok:
             return {"success": False, "error": parsed.error, "parsed": parsed.__dict__}
 
@@ -334,7 +334,7 @@ class PortfolioSkill:
                     "quantity": parsed.quantity,
                     "price": parsed.price,
                     "date_str": date_str,
-                    "market": market,
+                    "broker": broker,
                     "fee": fee,
                     "request_id": rid,
                     "auto_cash": auto_cash,
@@ -348,7 +348,7 @@ class PortfolioSkill:
                 quantity=float(parsed.quantity),
                 price=float(parsed.price),
                 date_str=date_str,
-                market=market,
+                broker=broker,
                 fee=fee,
                 auto_deduct_cash=auto_cash,
                 request_id=rid,
@@ -360,7 +360,7 @@ class PortfolioSkill:
                 quantity=float(parsed.quantity),
                 price=float(parsed.price),
                 date_str=date_str,
-                market=market,
+                broker=broker,
                 fee=fee,
                 auto_add_cash=auto_cash,
                 request_id=rid,
@@ -682,7 +682,7 @@ class PortfolioSkill:
             holding = self.storage.get_holding(asset, self.account)
             if holding:
                 new_qty = holding.quantity + amount
-                self.storage.update_holding_quantity(asset, self.account, amount, getattr(holding, 'market', None))
+                self.storage.update_holding_quantity(asset, self.account, amount, getattr(holding, 'broker', None))
                 return {
                     "success": True,
                     "asset": asset,
@@ -709,7 +709,7 @@ class PortfolioSkill:
                 }
 
             new_qty = holding.quantity - amount
-            self.storage.update_holding_quantity(asset, self.account, -amount, getattr(holding, 'market', None))
+            self.storage.update_holding_quantity(asset, self.account, -amount, getattr(holding, 'broker', None))
             return {
                 "success": True,
                 "asset": asset,
@@ -722,7 +722,7 @@ class PortfolioSkill:
 
     def sync_futu_cash_mmf(
         self,
-        market: str = "富途",
+        broker: str = "富途",
         dry_run: bool = False,
         cash_balance: float = None,
         mmf_balance: float = None,
@@ -735,7 +735,7 @@ class PortfolioSkill:
             service = FutuBalanceSyncService(self.storage)
             return service.sync_cash_and_mmf(
                 account=self.account,
-                market=market,
+                broker=broker,
                 dry_run=dry_run,
                 cash_balance=cash_balance,
                 mmf_balance=mmf_balance,
@@ -875,7 +875,7 @@ class PortfolioSkill:
             "quantity": 0.0,
             "type": "cash",
             "normalized_type": "cash",
-            "market": "多券商汇总",
+            "broker": "多券商汇总",
             "currency": "MIXED",
             "price": None,
             "cny_price": None,
@@ -909,7 +909,7 @@ class PortfolioSkill:
                     "quantity": qty,
                     "type": raw_type,
                     "normalized_type": normalized_type,
-                    "market": "多券商汇总",
+                    "broker": "多券商汇总",
                     "currency": h.get("currency") or "MIXED",
                     "price": None,
                     "cny_price": None,
@@ -1395,7 +1395,7 @@ def sell(code: str, quantity: float, price: float, **kwargs) -> Dict:
 
 
 def record_transaction_from_message(message: str,
-                                    market: str = "富途",
+                                    broker: str = "富途",
                                     fee: float = 0,
                                     auto_cash: bool = False,
                                     request_id: str = None,
@@ -1417,7 +1417,7 @@ def record_transaction_from_message(message: str,
     """
     return _get_default_skill().record_transaction_from_message(
         message=message,
-        market=market,
+        broker=broker,
         fee=fee,
         auto_cash=auto_cash,
         request_id=request_id,

@@ -73,7 +73,7 @@ class CashService:
         asset_name: str,
         asset_type: AssetType,
         target: float,
-        market: str = "",
+        broker: str = "",
         dry_run: bool = False,
     ) -> dict[str, Any]:
         """Sync a cash-like holding to an absolute target balance.
@@ -82,7 +82,7 @@ class CashService:
         keep using ``update_cash_holding`` / ``add_cash`` / ``deduct_cash``.
         """
         target_qty = float(self.quantize_money(target))
-        existing = self.storage.get_holding(asset_id, account, market)
+        existing = self.storage.get_holding(asset_id, account, broker)
         current_qty = float(self.quantize_money(existing.quantity if existing else 0))
         delta = float(self.quantize_money(target_qty - current_qty))
         created = existing is None
@@ -90,14 +90,14 @@ class CashService:
 
         if not dry_run and updated:
             if existing:
-                self.storage.update_holding_quantity(asset_id, account, delta, market)
+                self.storage.update_holding_quantity(asset_id, account, delta, broker)
             else:
                 self.storage.upsert_holding(Holding(
                     asset_id=asset_id,
                     asset_name=asset_name,
                     asset_type=asset_type,
                     account=account,
-                    market=market,
+                    broker=broker,
                     quantity=target_qty,
                     currency="CNY",
                     asset_class=AssetClass.CASH,

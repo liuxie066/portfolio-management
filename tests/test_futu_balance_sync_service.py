@@ -22,17 +22,17 @@ class FakeStorage:
         self.updates = []
         self.creates = []
 
-    def get_holding(self, asset_id, account, market=None):
+    def get_holding(self, asset_id, account, broker=None):
         return self.holdings.get((asset_id, account, market))
 
-    def update_holding_quantity(self, asset_id, account, quantity_change, market=None):
+    def update_holding_quantity(self, asset_id, account, quantity_change, broker=None):
         self.updates.append((asset_id, account, quantity_change, market))
         holding = self.holdings[(asset_id, account, market)]
         holding.quantity += quantity_change
 
     def upsert_holding(self, holding):
         self.creates.append(holding)
-        self.holdings[(holding.asset_id, holding.account, holding.market)] = holding
+        self.holdings[(holding.asset_id, holding.account, holding.broker)] = holding
         return holding
 
 
@@ -43,7 +43,7 @@ def test_sync_cash_and_mmf_updates_existing_holdings_by_delta():
         asset_name="人民币现金",
         asset_type=AssetType.CASH,
         account="lx",
-        market="富途",
+        broker="富途",
         quantity=20,
         currency="CNY",
     )
@@ -52,7 +52,7 @@ def test_sync_cash_and_mmf_updates_existing_holdings_by_delta():
         asset_name="货币基金",
         asset_type=AssetType.MMF,
         account="lx",
-        market="富途",
+        broker="富途",
         quantity=50,
         currency="CNY",
     )
@@ -89,7 +89,7 @@ def test_sync_cash_and_mmf_dry_run_does_not_write():
         asset_name="人民币现金",
         asset_type=AssetType.CASH,
         account="lx",
-        market="富途",
+        broker="富途",
         quantity=20,
         currency="CNY",
     )

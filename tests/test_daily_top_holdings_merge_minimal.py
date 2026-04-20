@@ -32,13 +32,13 @@ def test_full_report_top_holdings_merge_duplicates_and_cash_mmf_bucket():
     )
 
     holdings = [
-        {"code": "AAPL", "name": "Apple", "quantity": 1, "type": "us_stock", "normalized_type": "stock", "market": "futu", "currency": "USD", "market_value": 100.0},
-        {"code": "AAPL", "name": "Apple", "quantity": 2, "type": "us_stock", "normalized_type": "stock", "market": "ib", "currency": "USD", "market_value": 200.0},
-        {"code": "00700", "name": "腾讯控股", "quantity": 100, "type": "hk_stock", "normalized_type": "stock", "market": "futu", "currency": "HKD", "market_value": 150.0},
-        {"code": "00700", "name": "腾讯控股", "quantity": 20, "type": "hk_stock", "normalized_type": "stock", "market": "pingan", "currency": "HKD", "market_value": 50.0},
-        {"code": "CNY-CASH", "name": "人民币现金", "quantity": 80, "type": "cash", "normalized_type": "cash", "market": "futu", "currency": "CNY", "market_value": 80.0},
-        {"code": "USD-CASH", "name": "美元现金", "quantity": 20, "type": "cash", "normalized_type": "cash", "market": "ib", "currency": "USD", "market_value": 20.0},
-        {"code": "CNY-MMF", "name": "货基", "quantity": 50, "type": "mmf", "normalized_type": "cash", "market": "pingan", "currency": "CNY", "market_value": 50.0},
+        {"code": "AAPL", "name": "Apple", "quantity": 1, "type": "us_stock", "normalized_type": "stock", "broker": "futu", "currency": "USD", "market_value": 100.0},
+        {"code": "AAPL", "name": "Apple", "quantity": 2, "type": "us_stock", "normalized_type": "stock", "broker": "ib", "currency": "USD", "market_value": 200.0},
+        {"code": "00700", "name": "腾讯控股", "quantity": 100, "type": "hk_stock", "normalized_type": "stock", "broker": "futu", "currency": "HKD", "market_value": 150.0},
+        {"code": "00700", "name": "腾讯控股", "quantity": 20, "type": "hk_stock", "normalized_type": "stock", "broker": "pingan", "currency": "HKD", "market_value": 50.0},
+        {"code": "CNY-CASH", "name": "人民币现金", "quantity": 80, "type": "cash", "normalized_type": "cash", "broker": "futu", "currency": "CNY", "market_value": 80.0},
+        {"code": "USD-CASH", "name": "美元现金", "quantity": 20, "type": "cash", "normalized_type": "cash", "broker": "ib", "currency": "USD", "market_value": 20.0},
+        {"code": "CNY-MMF", "name": "货基", "quantity": 50, "type": "mmf", "normalized_type": "cash", "broker": "pingan", "currency": "CNY", "market_value": 50.0},
     ]
 
     total_value = 650.0
