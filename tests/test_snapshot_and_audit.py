@@ -107,11 +107,13 @@ def test_repair_nav_history_metrics_dry_run_does_not_apply():
             'status': 'anomaly',
             'anomalies': ['mismatch'],
             'exemptions': [],
+            'expected_daily_pnl': 5.67,
         }],
         'exempt_rows': [],
         'ok_rows': [],
     })
     skill.storage.client = Mock()
+    skill.storage.patch_nav_derived_fields = Mock()
 
     res = skill.repair_nav_history_metrics(dry_run=True, write_report=False)
 
@@ -119,3 +121,4 @@ def test_repair_nav_history_metrics_dry_run_does_not_apply():
     assert res['dry_run'] is True
     assert res['count'] == 1
     skill.storage.client.update_record.assert_not_called()
+    skill.storage.patch_nav_derived_fields.assert_not_called()

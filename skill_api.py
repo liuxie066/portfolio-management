@@ -1164,7 +1164,7 @@ class PortfolioSkill:
                 details={"status": "CLOSED"},
             )
 
-            storage_preview = self.storage.save_nav(nav_record, overwrite_existing=overwrite_existing, dry_run=True)
+            storage_preview = self.storage.write_nav_record(nav_record, overwrite_existing=overwrite_existing, dry_run=True)
             if dry_run:
                 return {
                     "success": True,
@@ -1178,7 +1178,7 @@ class PortfolioSkill:
                 }
 
             # real write
-            self.storage.save_nav(nav_record, overwrite_existing=overwrite_existing, dry_run=False)
+            self.storage.write_nav_record(nav_record, overwrite_existing=overwrite_existing, dry_run=False)
             return {
                 "success": True,
                 "dry_run": False,

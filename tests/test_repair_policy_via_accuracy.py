@@ -28,6 +28,7 @@ def test_repair_uses_accuracy_audit_pipeline():
                 'status': 'anomaly',
                 'anomalies': ['bad'],
                 'exemptions': [],
+                'expected_daily_pnl': 23.45,
             }
         ],
         'exempt_rows': [
@@ -47,7 +48,7 @@ def test_repair_uses_accuracy_audit_pipeline():
             }
         ],
     })
-    skill.storage.update_nav_fields = Mock()
+    skill.storage.patch_nav_derived_fields = Mock()
 
     result = skill.repair_nav_history_metrics(dry_run=False, write_report=False)
 
@@ -55,10 +56,15 @@ def test_repair_uses_accuracy_audit_pipeline():
     assert result['count'] == 1
     update = result['updates'][0]
     assert update['record_id'] == 'rec-bad'
+    assert update['fields']['pnl'] == 23.45
     assert update['fields']['mtd_nav_change'] == 0.3
     assert update['fields']['mtd_pnl'] == 30.0
     assert update['fields']['ytd_nav_change'] is None
     assert update['fields']['ytd_pnl'] is None
     assert result['accuracy_report']['repair_candidates'] == 1
     assert result['skipped_count'] == 2
-    skill.storage.update_nav_fields.assert_called_once_with('rec-bad', update['fields'], dry_run=False)
+    skill.storage.patch_nav_derived_fields.assert_called_once_with(
+        'rec-bad',
+        update['fields'],
+        dry_run=False,
+    )

@@ -132,6 +132,16 @@ src/
 - Schema 变更必须登记到 `src/migrations/feishu/registry.py`，并更新 `docs/schema.md`。
 - `PortfolioManager` 和 `PriceFetcher` 是兼容 facade，新逻辑不要继续塞回巨型文件。
 
+## NAV 写入约定
+
+- 完整 `nav_history` 记录写入统一使用：
+  - `FeishuStorage.write_nav_record()`
+  - `FeishuStorage.write_nav_records()`
+- 派生字段修复统一使用：
+  - `FeishuStorage.patch_nav_derived_fields()`
+- `update_nav_fields()` 已删除；派生字段 patch 只保留 `patch_nav_derived_fields()`。
+- `save_nav()`、`upsert_nav_bulk()`、`update_nav_fields()` 已删除。
+
 ## 常用命令
 
 ```bash

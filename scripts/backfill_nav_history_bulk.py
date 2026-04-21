@@ -6,7 +6,7 @@ for new automation.
 
 Design:
 - Recompute target dates with existing PortfolioManager.record_nav(...) logic (persist=False)
-- Persist in one/batched call via FeishuStorage.upsert_nav_bulk(...)
+- Persist in one/batched call via FeishuStorage.write_nav_records(...)
 - Supports input JSON (audit/recompute output) OR date range over existing nav_history
 
 Examples:
@@ -275,10 +275,11 @@ def main(argv=None) -> None:
     }
 
     if args.apply:
-        write_result = skill.storage.upsert_nav_bulk(
+        write_result = skill.storage.write_nav_records(
             recomputed,
             mode=args.mode,
             allow_partial=bool(args.allow_partial),
+            dry_run=False,
         )
         payload["write"] = write_result
     else:

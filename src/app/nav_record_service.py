@@ -127,9 +127,9 @@ class NavRecordService:
 
         if persist:
             if use_bulk_persist and (not dry_run) and overwrite_existing:
-                self.storage.upsert_nav_bulk([nav_record], mode="replace", allow_partial=False)
+                self.storage.write_nav_records([nav_record], mode="replace", allow_partial=False, dry_run=False)
             else:
-                self.storage.save_nav(nav_record, overwrite_existing=overwrite_existing, dry_run=dry_run)
+                self.storage.write_nav_record(nav_record, overwrite_existing=overwrite_existing, dry_run=dry_run)
 
         # Snapshot after NAV record to avoid orphaned snapshots on NAV write failure
         if persist:

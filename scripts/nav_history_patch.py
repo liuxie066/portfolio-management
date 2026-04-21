@@ -434,7 +434,7 @@ def main(argv=None):
         existing = nav_by_date.get(p.d)
         if not existing:
             continue
-        backup.append(ps.storage.save_nav(existing, overwrite_existing=True, dry_run=True))
+        backup.append(ps.storage.write_nav_record(existing, overwrite_existing=True, dry_run=True))
     Path(backup_file).write_text(json.dumps(backup, ensure_ascii=False, indent=2), encoding="utf-8")
     print("backup wrote", backup_file)
 
@@ -449,7 +449,7 @@ def main(argv=None):
         for f in ["cash_value", "stock_value", "fund_value", "cn_stock_value", "us_stock_value", "hk_stock_value", "total_value"]:
             if getattr(existing, f) != getattr(cand, f):
                 raise SystemExit(f"safety abort: non-target field changed: {p.d} {f}")
-        ps.storage.save_nav(cand, overwrite_existing=True, dry_run=False)
+        ps.storage.write_nav_record(cand, overwrite_existing=True, dry_run=False)
         updated += 1
 
     print("applied patches; updated", updated, "records")

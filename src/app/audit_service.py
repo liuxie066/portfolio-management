@@ -310,6 +310,7 @@ class AuditService:
                 'audit_exemptions': row.get('audit_exemptions'),
                 'anomalies': rec.get('anomalies', []),
                 'exemptions': rec.get('exemptions', []),
+                'expected_daily_pnl': ((rec.get('recomputed') or {}).get('expected_daily_pnl')),
             }
             if status == 'anomaly':
                 repair_candidates.append(item)
@@ -370,6 +371,10 @@ class AuditService:
                 continue
 
             fields: Dict[str, Any] = {}
+            expected_daily_pnl = item.get('expected_daily_pnl')
+
+            if 'non_consecutive_daily_pnl' not in (item.get('exemptions') or []):
+                fields['pnl'] = expected_daily_pnl
 
             if row.get('base_missing', {}).get('month'):
                 fields['mtd_nav_change'] = None
@@ -405,7 +410,11 @@ class AuditService:
 
         if not dry_run:
             for item in updates:
-                self.storage.update_nav_fields(item['record_id'], item['fields'], dry_run=False)
+                self.storage.patch_nav_derived_fields(
+                    item['record_id'],
+                    item['fields'],
+                    dry_run=False,
+                )
 
         repair_account = account or self.account
         result = {

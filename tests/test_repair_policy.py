@@ -31,23 +31,31 @@ def test_repair_only_updates_anomaly_rows():
             ]
         },
         'repair_candidates': [
-            {'record_id': 'rec-bad', 'date': '2026-03-19', 'status': 'anomaly', 'anomalies': ['mtd mismatch'], 'exemptions': []},
+            {
+                'record_id': 'rec-bad',
+                'date': '2026-03-19',
+                'status': 'anomaly',
+                'anomalies': ['mtd mismatch', 'pnl mismatch'],
+                'exemptions': [],
+                'expected_daily_pnl': 12.34,
+            },
         ],
         'exempt_rows': [],
         'ok_rows': [
             {'record_id': 'rec-ok', 'date': '2026-03-18', 'status': 'ok', 'exemptions': []},
         ],
     })
-    skill.storage.update_nav_fields = Mock()
+    skill.storage.patch_nav_derived_fields = Mock()
 
     result = skill.repair_nav_history_metrics(dry_run=True, write_report=False)
 
     assert result['repair_policy'] == 'anomaly_only_via_accuracy_audit'
     assert result['count'] == 1
     assert result['updates'][0]['record_id'] == 'rec-bad'
+    assert result['updates'][0]['fields']['pnl'] == 12.34
     assert result['skipped_count'] == 1
     assert result['skipped'][0]['record_id'] == 'rec-ok'
-    skill.storage.update_nav_fields.assert_not_called()
+    skill.storage.patch_nav_derived_fields.assert_not_called()
 
 
 def test_repair_clears_fields_when_base_missing_on_anomaly():
@@ -72,9 +80,10 @@ def test_repair_clears_fields_when_base_missing_on_anomaly():
             'status': 'anomaly',
             'exemptions': [],
             'anomalies': ['month base issue'],
+            'recomputed': {'expected_daily_pnl': 8.88},
         }]
     })
-    skill.storage.update_nav_fields = Mock()
+    skill.storage.patch_nav_derived_fields = Mock()
 
     result = skill.repair_nav_history_metrics(dry_run=False, write_report=False)
 
@@ -84,4 +93,9 @@ def test_repair_clears_fields_when_base_missing_on_anomaly():
     assert fields['mtd_pnl'] is None
     assert fields['ytd_nav_change'] == 0.05
     assert fields['ytd_pnl'] == 5.0
-    skill.storage.update_nav_fields.assert_called_once_with('rec1', fields, dry_run=False)
+    assert fields['pnl'] == 8.88
+    skill.storage.patch_nav_derived_fields.assert_called_once_with(
+        'rec1',
+        fields,
+        dry_run=False,
+    )

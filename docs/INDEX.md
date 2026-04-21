@@ -34,6 +34,10 @@ Keep docs short, executable, and reality-checked.
   - cache valid → MUST NOT call realtime sources (unless `force_refresh`)
   - cache expired → try realtime; if fails, may fallback to stale cache but MUST mark `is_stale=true`
 - Valuation identity (within tolerance): `total ≈ cash + stock + fund`
+- NAV write surfaces:
+  - full write → `FeishuStorage.write_nav_record()` / `write_nav_records()`
+  - derived-field patch → `FeishuStorage.patch_nav_derived_fields()`
+  - legacy `save_nav()` / `upsert_nav_bulk()` / `update_nav_fields()` are removed
 
 ## Common commands
 

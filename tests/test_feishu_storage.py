@@ -736,7 +736,7 @@ class TestFeishuStorageNAVOperations:
             nav=1.0
         )
 
-        self.storage.save_nav(nav)
+        self.storage.write_nav_record(nav)
 
         assert nav.record_id == 'nav_rec_123'
         self.mock_client.create_record.assert_called_once()
@@ -759,7 +759,7 @@ class TestFeishuStorageNAVOperations:
             nav=1.0
         )
 
-        self.storage.save_nav(nav)
+        self.storage.write_nav_record(nav)
 
         assert nav.record_id == 'existing_nav'
         self.mock_client.update_record.assert_called_once()

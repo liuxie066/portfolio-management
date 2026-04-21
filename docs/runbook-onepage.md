@@ -102,4 +102,6 @@ nohup python3 -m http.server 3000 --bind 0.0.0.0 --directory /home/node/.opencla
 
 ## 6) 写入保护（避免污染 nav_history）
 - `record_nav()` 默认 `dry_run=True`，只有 `dry_run=False && confirm=True` 才真正写。
-- `FeishuStorage.save_nav()` 会对 `nav_history` 做写入前校验（missing ≠ 0，关键字段缺失直接 fail-fast）。
+- 完整 `nav_history` 写入统一走 `FeishuStorage.write_nav_record()` / `write_nav_records()`。
+- 派生字段修复统一走 `FeishuStorage.patch_nav_derived_fields()`。
+- 旧入口 `save_nav()` / `upsert_nav_bulk()` / `update_nav_fields()` 已删除。

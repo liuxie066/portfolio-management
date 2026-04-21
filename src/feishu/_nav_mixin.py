@@ -20,6 +20,16 @@ class NavMixin:
         'exchange_rate', 'flow_type', 'updated_at',
     ]
 
+    NAV_DERIVED_PATCH_FIELDS = {
+        'cash_flow',
+        'share_change',
+        'pnl',
+        'mtd_nav_change',
+        'ytd_nav_change',
+        'mtd_pnl',
+        'ytd_pnl',
+    }
+
     def _build_nav_index_payload(self, account: str, records: List[Dict[str, any]]) -> Dict[str, any]:
         navs: List[NAVHistory] = []
         nav_records: List[Dict[str, any]] = []
@@ -219,8 +229,8 @@ class NavMixin:
         self._local_nav_index_cache.upsert_nav_records(account, rows, _flush=True)
         self._invalidate_nav_index(account)
 
-    def save_nav(self, nav: NAVHistory, overwrite_existing: bool = True, dry_run: bool = False):
-        """保存净值记录"""
+    def _validate_nav_write(self, nav: NAVHistory):
+        """Validate a full nav record write before persisting."""
         nav.date = self._normalize_nav_date(nav.date)
 
         if not getattr(nav, 'account', None):
@@ -252,41 +262,50 @@ class NavMixin:
                 raise
             except Exception:
                 raise ValueError('nav_history write validation failed: shares must be a number when status=CLOSED')
-        else:
-            if nav.shares is None:
-                raise ValueError('nav_history write validation failed: shares is required')
-            if nav.nav is None:
-                raise ValueError('nav_history write validation failed: nav is required')
-            try:
-                if float(nav.shares) <= 0:
-                    raise ValueError('nav_history write validation failed: shares must be > 0')
-            except ValueError:
-                raise
-            except Exception:
-                raise ValueError('nav_history write validation failed: shares must be a number')
-            try:
-                if float(nav.nav) <= 0:
-                    raise ValueError('nav_history write validation failed: nav must be > 0')
-            except ValueError:
-                raise
-            except Exception:
-                raise ValueError('nav_history write validation failed: nav must be a number')
+            return
 
-        existing = self.get_nav_on_date(nav.account, nav.date)
-        if existing and existing.record_id and not overwrite_existing:
-            raise ValueError(f"nav_history 已存在同日记录，拒绝覆盖: account={nav.account}, date={nav.date}")
+        if nav.shares is None:
+            raise ValueError('nav_history write validation failed: shares is required')
+        if nav.nav is None:
+            raise ValueError('nav_history write validation failed: nav is required')
+        try:
+            if float(nav.shares) <= 0:
+                raise ValueError('nav_history write validation failed: shares must be > 0')
+        except ValueError:
+            raise
+        except Exception:
+            raise ValueError('nav_history write validation failed: shares must be a number')
+        try:
+            if float(nav.nav) <= 0:
+                raise ValueError('nav_history write validation failed: nav must be > 0')
+        except ValueError:
+            raise
+        except Exception:
+            raise ValueError('nav_history write validation failed: nav must be a number')
 
+    def _execute_single_nav_write(self, nav: NAVHistory, existing_row: Optional[Dict[str, Any]], preserve_none_for_update: bool, dry_run: bool = False) -> Dict[str, Any]:
+        """Execute one full nav write with the same semantics as bulk replace/upsert."""
+        existing_record_id = (existing_row or {}).get('record_id')
         fields = self._nav_to_dict(nav)
-        feishu_fields = self._to_feishu_fields(fields, 'nav_history', preserve_none=bool(existing and existing.record_id))
+        feishu_fields = self._to_feishu_fields(
+            fields,
+            'nav_history',
+            preserve_none=bool(existing_record_id and preserve_none_for_update),
+        )
 
         if dry_run:
-            return {"existing": bool(existing and existing.record_id), "fields": feishu_fields}
+            return {
+                'existing': bool(existing_record_id),
+                'record_id': existing_record_id,
+                'fields': feishu_fields,
+                'cache_row': self._nav_to_index_row(nav, updated_at=feishu_fields.get('updated_at')),
+            }
 
         used_fields = feishu_fields
         try:
-            if existing and existing.record_id:
-                self.client.update_record('nav_history', existing.record_id, feishu_fields)
-                nav.record_id = existing.record_id
+            if existing_record_id:
+                self.client.update_record('nav_history', existing_record_id, feishu_fields)
+                nav.record_id = existing_record_id
             else:
                 result = self.client.create_record('nav_history', feishu_fields)
                 nav.record_id = result['record_id']
@@ -296,49 +315,64 @@ class NavMixin:
                 raise
 
             fallback_fields = dict(feishu_fields)
-            for k in ['details']:
-                fallback_fields.pop(k, None)
+            fallback_fields.pop('details', None)
             used_fields = fallback_fields
 
-            if existing and existing.record_id:
-                self.client.update_record('nav_history', existing.record_id, fallback_fields)
-                nav.record_id = existing.record_id
+            if existing_record_id:
+                self.client.update_record('nav_history', existing_record_id, fallback_fields)
+                nav.record_id = existing_record_id
             else:
                 result = self.client.create_record('nav_history', fallback_fields)
                 nav.record_id = result['record_id']
 
-        nav_row = self._nav_to_index_row(nav, updated_at=used_fields.get('updated_at'))
-        self._apply_nav_rows_to_local_cache(nav.account, [nav_row])
-        return
+        cache_row = self._nav_to_index_row(nav, updated_at=used_fields.get('updated_at'))
+        if existing_record_id and (not preserve_none_for_update):
+            existing_cache_row = dict(existing_row or {})
+            merged_row = dict(existing_cache_row)
+            merged_row.update(cache_row)
+            for k, v in list(merged_row.items()):
+                if v is None and k in existing_cache_row:
+                    merged_row[k] = existing_cache_row.get(k)
+            cache_row = merged_row
+        return {
+            'existing': bool(existing_record_id),
+            'record_id': nav.record_id,
+            'fields': used_fields,
+            'cache_row': cache_row,
+        }
 
-    def upsert_nav_bulk(
+    def _write_nav_full_records(
         self,
         nav_list: List[NAVHistory],
+        *,
         mode: str = 'replace',
         allow_partial: bool = False,
-    ) -> Dict[str, any]:
-        """批量 upsert nav_history。"""
+        dry_run: bool = False,
+        use_batch_api: bool = True,
+    ) -> Dict[str, Any]:
+        """Unified full-record nav writer used by both single and bulk APIs."""
         if mode not in ('replace', 'upsert'):
             raise ValueError("mode must be 'replace' or 'upsert'")
 
         if not nav_list:
             return {
                 'mode': mode, 'total': 0, 'updated': 0, 'created': 0,
-                'preloaded_accounts': [], 'accounts': {}, 'errors': [],
+                'preloaded_accounts': [], 'accounts': {}, 'errors': [], 'dry_run': dry_run,
             }
 
         grouped: Dict[str, List[NAVHistory]] = {}
         for nav in nav_list:
-            if not nav or not nav.account:
+            if not nav:
                 continue
-            nav.date = self._normalize_nav_date(nav.date)
+            self._validate_nav_write(nav)
             grouped.setdefault(nav.account, []).append(nav)
 
         total_updated = 0
         total_created = 0
         preloaded_accounts: List[str] = []
-        errors: List[Dict[str, any]] = []
-        account_results: Dict[str, Dict[str, any]] = {}
+        errors: List[Dict[str, Any]] = []
+        account_results: Dict[str, Dict[str, Any]] = {}
+        previews: List[Dict[str, Any]] = []
 
         for account in sorted(grouped.keys()):
             navs_raw = grouped.get(account) or []
@@ -346,100 +380,129 @@ class NavMixin:
             for n in navs_raw:
                 by_date_nav[self._safe_date_str(n.date)] = n
             navs = [by_date_nav[d] for d in sorted(by_date_nav.keys())]
+
             try:
-                self.preload_nav_index(account)
+                self.preload_nav_index(account, force_refresh=True)
                 preloaded_accounts.append(account)
                 idx = self.get_nav_index(account)
-                existing_by_date: Dict[str, str] = {}
-                existing_row_by_date: Dict[str, Dict[str, any]] = {}
+                existing_row_by_date: Dict[str, Dict[str, Any]] = {}
                 for row in idx.get('nav_history') or []:
                     ds = str((row or {}).get('date') or '')
-                    rid = (row or {}).get('record_id')
                     if ds:
                         existing_row_by_date[ds] = dict(row or {})
-                    if ds and rid:
-                        existing_by_date[ds] = rid
-
-                update_payloads: List[Dict[str, any]] = []
-                update_rows_for_cache: List[Dict[str, any]] = []
-                create_payloads: List[Dict[str, any]] = []
-                create_rows_for_cache: List[Dict[str, any]] = []
 
                 preserve_none_for_update = (mode == 'replace')
 
-                for nav in sorted(navs, key=lambda x: x.date):
-                    ds = self._safe_date_str(nav.date)
-                    fields = self._nav_to_dict(nav)
-                    rid = existing_by_date.get(ds)
-                    if rid:
-                        feishu_fields = self._to_feishu_fields(fields, 'nav_history', preserve_none=preserve_none_for_update)
-                        update_payloads.append({'record_id': rid, 'fields': feishu_fields})
-                        nav.record_id = rid
+                if use_batch_api:
+                    update_payloads: List[Dict[str, Any]] = []
+                    update_rows_for_cache: List[Dict[str, Any]] = []
+                    create_payloads: List[Dict[str, Any]] = []
+                    create_rows_for_cache: List[Dict[str, Any]] = []
+                    created_navs: List[NAVHistory] = []
 
-                        existing_row = dict(existing_row_by_date.get(ds) or {})
-                        merged_row = dict(existing_row)
-                        merged_row.update(self._nav_to_index_row(nav, updated_at=feishu_fields.get('updated_at')))
-                        if not preserve_none_for_update:
-                            for k, v in list(merged_row.items()):
-                                if v is None and k in existing_row:
-                                    merged_row[k] = existing_row.get(k)
-                        update_rows_for_cache.append(merged_row)
-                    else:
-                        feishu_fields = self._to_feishu_fields(fields, 'nav_history', preserve_none=False)
-                        create_payloads.append({'fields': feishu_fields})
-                        create_rows_for_cache.append(self._nav_to_index_row(nav, updated_at=feishu_fields.get('updated_at')))
+                    for nav in sorted(navs, key=lambda x: x.date):
+                        ds = self._safe_date_str(nav.date)
+                        existing_row = existing_row_by_date.get(ds)
+                        rid = (existing_row or {}).get('record_id')
+                        fields = self._nav_to_dict(nav)
+                        if rid:
+                            feishu_fields = self._to_feishu_fields(fields, 'nav_history', preserve_none=preserve_none_for_update)
+                            update_payloads.append({'record_id': rid, 'fields': feishu_fields})
+                            nav.record_id = rid
 
-                if update_payloads:
-                    try:
-                        self.client.batch_update_records('nav_history', update_payloads)
-                    except Exception as e:
-                        msg = str(e)
-                        if 'FieldNameNotFound' not in msg:
-                            raise
-                        fallback_updates = []
-                        fallback_rows = []
-                        for p, row in zip(update_payloads, update_rows_for_cache):
-                            f = dict(p.get('fields') or {})
-                            f.pop('details', None)
-                            fallback_updates.append({'record_id': p['record_id'], 'fields': f})
-                            r = dict(row)
-                            r['updated_at'] = f.get('updated_at')
-                            fallback_rows.append(r)
-                        self.client.batch_update_records('nav_history', fallback_updates)
-                        update_rows_for_cache = fallback_rows
+                            merged_row = dict(existing_row or {})
+                            merged_row.update(self._nav_to_index_row(nav, updated_at=feishu_fields.get('updated_at')))
+                            if not preserve_none_for_update:
+                                for k, v in list(merged_row.items()):
+                                    if v is None and k in (existing_row or {}):
+                                        merged_row[k] = existing_row.get(k)
+                            update_rows_for_cache.append(merged_row)
+                            if dry_run:
+                                previews.append({'account': account, 'date': ds, 'existing': True, 'fields': feishu_fields})
+                        else:
+                            feishu_fields = self._to_feishu_fields(fields, 'nav_history', preserve_none=False)
+                            create_payloads.append({'fields': feishu_fields})
+                            create_rows_for_cache.append(self._nav_to_index_row(nav, updated_at=feishu_fields.get('updated_at')))
+                            created_navs.append(nav)
+                            if dry_run:
+                                previews.append({'account': account, 'date': ds, 'existing': False, 'fields': feishu_fields})
 
-                if create_payloads:
-                    try:
-                        created = self.client.batch_create_records('nav_history', create_payloads)
-                    except Exception as e:
-                        msg = str(e)
-                        if 'FieldNameNotFound' not in msg:
-                            raise
-                        fallback_creates = []
-                        for p in create_payloads:
-                            f = dict((p.get('fields') or {}))
-                            f.pop('details', None)
-                            fallback_creates.append({'fields': f})
-                        created = self.client.batch_create_records('nav_history', fallback_creates)
-                        for i, p in enumerate(fallback_creates):
-                            if i < len(create_rows_for_cache):
-                                create_rows_for_cache[i]['updated_at'] = (p.get('fields') or {}).get('updated_at')
+                    if not dry_run:
+                        if update_payloads:
+                            try:
+                                self.client.batch_update_records('nav_history', update_payloads)
+                            except Exception as e:
+                                msg = str(e)
+                                if 'FieldNameNotFound' not in msg:
+                                    raise
+                                fallback_updates = []
+                                fallback_rows = []
+                                for p, row in zip(update_payloads, update_rows_for_cache):
+                                    f = dict(p.get('fields') or {})
+                                    f.pop('details', None)
+                                    fallback_updates.append({'record_id': p['record_id'], 'fields': f})
+                                    r = dict(row)
+                                    r['updated_at'] = f.get('updated_at')
+                                    fallback_rows.append(r)
+                                self.client.batch_update_records('nav_history', fallback_updates)
+                                update_rows_for_cache = fallback_rows
 
-                    for i, nav in enumerate([n for n in navs if self._safe_date_str(n.date) not in existing_by_date]):
-                        rec = created[i] if i < len(created) else {}
-                        rid = rec.get('record_id') or ((rec.get('record') or {}).get('record_id') if isinstance(rec, dict) else None)
-                        nav.record_id = rid
-                        if i < len(create_rows_for_cache):
-                            create_rows_for_cache[i]['record_id'] = rid
+                        if create_payloads:
+                            try:
+                                created = self.client.batch_create_records('nav_history', create_payloads)
+                            except Exception as e:
+                                msg = str(e)
+                                if 'FieldNameNotFound' not in msg:
+                                    raise
+                                fallback_creates = []
+                                for p in create_payloads:
+                                    f = dict((p.get('fields') or {}))
+                                    f.pop('details', None)
+                                    fallback_creates.append({'fields': f})
+                                created = self.client.batch_create_records('nav_history', fallback_creates)
+                                for i, p in enumerate(fallback_creates):
+                                    if i < len(create_rows_for_cache):
+                                        create_rows_for_cache[i]['updated_at'] = (p.get('fields') or {}).get('updated_at')
 
-                all_rows = []
-                all_rows.extend(update_rows_for_cache)
-                all_rows.extend(create_rows_for_cache)
-                if all_rows:
-                    self._apply_nav_rows_to_local_cache(account, all_rows)
+                            for i, nav in enumerate(created_navs):
+                                rec = created[i] if i < len(created) else {}
+                                rid = rec.get('record_id') or ((rec.get('record') or {}).get('record_id') if isinstance(rec, dict) else None)
+                                nav.record_id = rid
+                                if i < len(create_rows_for_cache):
+                                    create_rows_for_cache[i]['record_id'] = rid
 
-                updated_n = len(update_payloads)
-                created_n = len(create_payloads)
+                        all_rows = []
+                        all_rows.extend(update_rows_for_cache)
+                        all_rows.extend(create_rows_for_cache)
+                        if all_rows:
+                            self._apply_nav_rows_to_local_cache(account, all_rows)
+
+                    updated_n = len(update_payloads)
+                    created_n = len(create_payloads)
+                else:
+                    account_rows_for_cache: List[Dict[str, Any]] = []
+                    updated_n = 0
+                    created_n = 0
+                    for nav in sorted(navs, key=lambda x: x.date):
+                        ds = self._safe_date_str(nav.date)
+                        existing_row = existing_row_by_date.get(ds)
+                        outcome = self._execute_single_nav_write(nav, existing_row, preserve_none_for_update, dry_run=dry_run)
+                        previews.append({
+                            'account': account,
+                            'date': ds,
+                            'existing': outcome['existing'],
+                            'fields': outcome['fields'],
+                            'existing_row': dict(existing_row or {}),
+                        })
+                        if outcome['existing']:
+                            updated_n += 1
+                        else:
+                            created_n += 1
+                        if not dry_run:
+                            account_rows_for_cache.append(outcome['cache_row'])
+                    if account_rows_for_cache:
+                        self._apply_nav_rows_to_local_cache(account, account_rows_for_cache)
+
                 total_updated += updated_n
                 total_created += created_n
                 account_results[account] = {
@@ -457,11 +520,62 @@ class NavMixin:
                 }
 
         return {
-            'mode': mode, 'total': len(nav_list),
-            'updated': total_updated, 'created': total_created,
+            'mode': mode,
+            'total': len(nav_list),
+            'updated': total_updated,
+            'created': total_created,
             'preloaded_accounts': preloaded_accounts,
-            'accounts': account_results, 'errors': errors,
+            'accounts': account_results,
+            'errors': errors,
+            'dry_run': dry_run,
+            'previews': previews,
         }
+
+    def _write_one_nav_record(self, nav: NAVHistory, overwrite_existing: bool = True, dry_run: bool = False):
+        preview_result = self._write_nav_full_records(
+            [nav],
+            mode='replace',
+            allow_partial=False,
+            dry_run=True,
+            use_batch_api=False,
+        )
+        preview = (preview_result.get('previews') or [{}])[0]
+        if preview.get('existing') and not overwrite_existing:
+            raise ValueError(f"nav_history 已存在同日记录，拒绝覆盖: account={nav.account}, date={nav.date}")
+        if dry_run:
+            return {"existing": bool(preview.get('existing')), "fields": preview.get('fields')}
+        outcome = self._execute_single_nav_write(
+            nav,
+            preview.get('existing_row') or None,
+            preserve_none_for_update=True,
+            dry_run=False,
+        )
+        self._apply_nav_rows_to_local_cache(nav.account, [outcome['cache_row']])
+        return
+
+    def write_nav_record(self, nav: NAVHistory, overwrite_existing: bool = True, dry_run: bool = False):
+        """Public semantic alias for writing one full nav record."""
+        return self._write_one_nav_record(nav, overwrite_existing=overwrite_existing, dry_run=dry_run)
+
+    def write_nav_records(
+        self,
+        nav_list: List[NAVHistory],
+        mode: str = 'replace',
+        allow_partial: bool = False,
+        dry_run: bool = False,
+    ) -> Dict[str, any]:
+        """Public semantic alias for writing full nav records in bulk."""
+        result = self._write_nav_full_records(
+            nav_list,
+            mode=mode,
+            allow_partial=allow_partial,
+            dry_run=dry_run,
+            use_batch_api=not dry_run,
+        )
+        if not dry_run:
+            result.pop('previews', None)
+            result.pop('dry_run', None)
+        return result
 
     def get_nav_history(self, account: str, days: int = 365) -> List[NAVHistory]:
         """获取净值历史（优先本地预加载索引）。"""
@@ -503,14 +617,13 @@ class NavMixin:
 
         return matches[0] if matches else None
 
-    def update_nav_fields(
+    def _patch_nav_fields(
         self,
         record_id: str,
         fields: Dict[str, any],
         dry_run: bool = False,
         allowed_fields: Optional[set] = None,
     ):
-        """更新 nav_history 指定字段（patch 语义）。"""
         if allowed_fields is not None:
             illegal = [k for k in fields.keys() if k not in allowed_fields]
             if illegal:
@@ -532,6 +645,15 @@ class NavMixin:
         self._nav_index_loaded_accounts.clear()
         self._nav_index_mem_cache.clear()
         return {"record_id": record_id, "fields": feishu_fields}
+
+    def patch_nav_derived_fields(self, record_id: str, fields: Dict[str, any], dry_run: bool = False):
+        """Patch only derived nav fields with an explicit allowlist."""
+        return self._patch_nav_fields(
+            record_id,
+            fields,
+            dry_run=dry_run,
+            allowed_fields=self.NAV_DERIVED_PATCH_FIELDS,
+        )
 
     def get_latest_nav_before(self, account: str, before_date: date) -> Optional[NAVHistory]:
         """获取指定日期之前的最新净值记录（优先索引）。"""
