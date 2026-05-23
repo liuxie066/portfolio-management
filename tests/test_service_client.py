@@ -61,6 +61,7 @@ def test_service_client_uses_query_routes_for_account_values():
         client.get_holdings(account="alice/bob & co", include_cash=False, group_by_market=True, include_price=True)
         client.get_cash(account="alice/bob & co")
         client.get_nav(account="alice/bob & co", days=14)
+        client.get_distribution(account="alice/bob & co")
         client.full_report(account="alice/bob & co", price_timeout=9)
         client.generate_report(account="alice/bob & co", report_type="monthly/special", price_timeout=11)
     finally:
@@ -71,9 +72,102 @@ def test_service_client_uses_query_routes_for_account_values():
         (f"http://127.0.0.1:8765/holdings?account={encoded_account}&include_cash=False&group_by_market=True&include_price=True", 1.0),
         (f"http://127.0.0.1:8765/cash?account={encoded_account}", 1.0),
         (f"http://127.0.0.1:8765/nav?account={encoded_account}&days=14", 1.0),
+        (f"http://127.0.0.1:8765/distribution?account={encoded_account}", 1.0),
         (f"http://127.0.0.1:8765/report/full?account={encoded_account}&price_timeout=9", 1.0),
         (f"http://127.0.0.1:8765/report/monthly%2Fspecial?account={encoded_account}&price_timeout=11", 1.0),
     ]
+
+
+def test_service_client_posts_nav_record_payload():
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        calls.append((
+            request.full_url,
+            request.get_method(),
+            json.loads(request.data.decode("utf-8")),
+            timeout,
+        ))
+        return FakeResponse({"success": True, "dry_run": False})
+
+    old_urlopen = client_module.urlopen
+    try:
+        client_module.urlopen = fake_urlopen
+        client = PortfolioServiceClient(base_url="http://127.0.0.1:8765", timeout=2.0)
+        result = client.record_nav(
+            account="alice",
+            price_timeout=9,
+            dry_run=False,
+            confirm=True,
+            overwrite_existing=False,
+            use_bulk_persist=True,
+            run_id="run-nav-1",
+        )
+    finally:
+        client_module.urlopen = old_urlopen
+
+    assert result["success"] is True
+    assert calls == [(
+        "http://127.0.0.1:8765/nav/record",
+        "POST",
+        {
+            "account": "alice",
+            "price_timeout": 9,
+            "dry_run": False,
+            "confirm": True,
+            "overwrite_existing": False,
+            "use_bulk_persist": True,
+            "run_id": "run-nav-1",
+        },
+        2.0,
+    )]
+
+
+def test_service_client_posts_daily_report_bundle_payload():
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        calls.append((
+            request.full_url,
+            request.get_method(),
+            json.loads(request.data.decode("utf-8")),
+            timeout,
+        ))
+        return FakeResponse({"success": True, "account": "alice"})
+
+    old_urlopen = client_module.urlopen
+    try:
+        client_module.urlopen = fake_urlopen
+        client = PortfolioServiceClient(base_url="http://127.0.0.1:8765", timeout=2.0)
+        result = client.daily_report_bundle(
+            account="alice",
+            price_timeout=9,
+            dry_run=False,
+            confirm=True,
+            use_bulk_persist=True,
+            sync_futu_cash_mmf=True,
+            sync_futu_dry_run=False,
+            run_id="run-report-1",
+        )
+    finally:
+        client_module.urlopen = old_urlopen
+
+    assert result["account"] == "alice"
+    assert calls == [(
+        "http://127.0.0.1:8765/report/daily-bundle",
+        "POST",
+        {
+            "account": "alice",
+            "price_timeout": 9,
+            "dry_run": False,
+            "confirm": True,
+            "use_bulk_persist": True,
+            "sync_futu_cash_mmf": True,
+            "sync_futu_dry_run": False,
+            "run_id": "run-report-1",
+        },
+        2.0,
+    )]
 
 
 def test_service_client_normalizes_accounts_list_query_value():
@@ -148,5 +242,19 @@ def test_service_client_raises_response_error_on_invalid_payload():
             client.health()
         with pytest.raises(PortfolioServiceResponseError, match="non-object JSON"):
             client.health()
+    finally:
+        client_module.urlopen = old_urlopen
+
+
+def test_service_client_raises_response_error_on_success_false_payload():
+    def fake_urlopen(_request, **_kwargs):
+        return FakeResponse({"success": False, "error": "missing holdings table"})
+
+    old_urlopen = client_module.urlopen
+    try:
+        client_module.urlopen = fake_urlopen
+        client = PortfolioServiceClient(base_url="http://127.0.0.1:8765", timeout=0.1)
+        with pytest.raises(PortfolioServiceResponseError, match="success=false"):
+            client.get_distribution(account="alice")
     finally:
         client_module.urlopen = old_urlopen

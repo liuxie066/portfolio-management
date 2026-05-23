@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import ast
+import io
 import json
 from pathlib import Path
 import sys
 import types
+from contextlib import redirect_stdout
 from tempfile import TemporaryDirectory
 
 from pytest import MonkeyPatch
@@ -67,7 +69,7 @@ def test_publish_daily_report_returns_renderer_bundle_shape():
     tree = _module_ast("scripts/publish_daily_report.py")
     build_report = next(
         node for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == "build_report_data"
+        if isinstance(node, ast.FunctionDef) and node.name == "_build_report_data_direct"
     )
     return_dicts = [node.value for node in ast.walk(build_report) if isinstance(node, ast.Return) and isinstance(node.value, ast.Dict)]
     keys = {
@@ -98,7 +100,7 @@ def test_publish_daily_report_build_report_data_passes_account():
             return {"valuation": None}
 
         def record_nav(self, **kwargs):
-            calls.append(("record_nav", self.account, kwargs["dry_run"]))
+            calls.append(("record_nav", self.account, kwargs["dry_run"], kwargs.get("run_id")))
             return {"success": True}
 
         def generate_report(self, **kwargs):
@@ -117,11 +119,16 @@ def test_publish_daily_report_build_report_data_passes_account():
             price_timeout=5,
             dry_run=True,
             account="alice",
+            no_service=True,
+            run_id="run-report-1",
         )
 
     assert bundle["account"] == "alice"
+    assert bundle["run_id"] == "run-report-1"
+    assert bundle["snapshot"]["run_id"] == "run-report-1"
+    assert bundle["report"]["run_id"] == "run-report-1"
     assert ("build_snapshot", "alice") in calls
-    assert ("record_nav", "alice", True) in calls
+    assert ("record_nav", "alice", True, "run-report-1") in calls
     assert ("generate_report", "alice", "daily") in calls
     assert ("get_nav", "alice", 2) in calls
 
@@ -163,10 +170,144 @@ def test_publish_daily_report_futu_sync_defaults_to_dry_run():
             dry_run=True,
             sync_futu_cash_mmf=True,
             account="alice",
+            no_service=True,
         )
 
     assert bundle["futu_sync_result"] == {"success": True, "dry_run": True}
     assert calls == [("sync_futu_cash_mmf", True)]
+
+
+def test_publish_daily_report_prefers_service_bundle():
+    calls = []
+
+    class FakeClient:
+        def __init__(self, base_url=None, timeout=0.5):
+            calls.append(("client", base_url, timeout))
+
+        def daily_report_bundle(self, **kwargs):
+            calls.append(("daily_report_bundle", kwargs))
+            return {
+                "success": True,
+                "account": kwargs["account"],
+                "snapshot": {"snapshot_time": "2026-04-20T08:00:00", "holdings_data": {"holdings": []}},
+                "nav_result": {"success": True},
+                "report": {"success": True, "date": "2026-04-20"},
+                "nav_snapshot": {"success": True},
+                "stage_timings": {},
+                "futu_sync_result": None,
+            }
+
+    import src.service.client as client_module
+
+    patch = MonkeyPatch()
+    try:
+        patch.setattr(client_module, "PortfolioServiceClient", FakeClient)
+        bundle = publish_daily_report.build_report_data(
+            price_timeout=5,
+            dry_run=False,
+            use_bulk_nav_upsert=True,
+            sync_futu_cash_mmf=True,
+            sync_futu_dry_run=False,
+            account="alice",
+            service_url="http://127.0.0.1:9999",
+            service_timeout=1.5,
+            run_id="run-report-1",
+        )
+    finally:
+        patch.undo()
+
+    assert bundle["account"] == "alice"
+    assert bundle["run_id"] == "run-report-1"
+    assert calls == [
+        ("client", "http://127.0.0.1:9999", 1.5),
+        ("daily_report_bundle", {
+            "account": "alice",
+            "price_timeout": 5,
+            "dry_run": False,
+            "confirm": True,
+            "use_bulk_persist": True,
+            "sync_futu_cash_mmf": True,
+            "sync_futu_dry_run": False,
+            "run_id": "run-report-1",
+        }),
+    ]
+
+
+def test_publish_daily_report_main_prints_result_while_suppressing_internal_stdout():
+    def fake_build_report_data(**kwargs):
+        print("internal price log")
+        return {
+            "account": kwargs["account"],
+            "run_id": kwargs["run_id"],
+            "nav_result": {"success": True, "nav": 1.23},
+            "report": {"success": True, "date": "2026-05-23"},
+            "nav_snapshot": {"success": True},
+            "stage_timings": {"snapshot_ms": 1},
+            "futu_sync_result": None,
+        }
+
+    patch = MonkeyPatch()
+    try:
+        patch.setattr(publish_daily_report, "build_report_data", fake_build_report_data)
+        patch.setattr(sys, "argv", [
+            "publish_daily_report.py",
+            "--account",
+            "alice",
+            "--dry-run",
+            "--no-html",
+            "--run-id",
+            "run-main-1",
+        ])
+
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            publish_daily_report.main()
+    finally:
+        patch.undo()
+
+    output = stdout.getvalue()
+    assert "internal price log" not in output
+    payload = json.loads(output)
+    assert payload["success"] is True
+    assert payload["account"] == "alice"
+    assert payload["run_id"] == "run-main-1"
+    assert payload["nav_result"]["nav"] == 1.23
+
+
+def test_publish_daily_report_main_quiet_suppresses_success_output():
+    patch = MonkeyPatch()
+    try:
+        patch.setattr(
+            publish_daily_report,
+            "build_report_data",
+            lambda **kwargs: {
+                "account": kwargs["account"],
+                "run_id": kwargs["run_id"],
+                "nav_result": {"success": True},
+                "report": {"success": True, "date": "2026-05-23"},
+                "nav_snapshot": {"success": True},
+                "stage_timings": {},
+                "futu_sync_result": None,
+            },
+        )
+        patch.setattr(sys, "argv", [
+            "publish_daily_report.py",
+            "--account",
+            "alice",
+            "--dry-run",
+            "--no-html",
+            "--quiet",
+            "--run-id",
+            "run-main-quiet",
+        ])
+
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            publish_daily_report.main()
+    finally:
+        patch.undo()
+
+    assert stdout.getvalue() == ""
 
 
 def test_publish_daily_report_parse_args_uses_config_defaults_and_cli_overrides():

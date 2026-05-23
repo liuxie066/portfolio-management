@@ -28,9 +28,25 @@ python scripts/pm.py report daily --preview
 python scripts/pm.py report daily --preview --timeout 25 --json
 ```
 
+核心日净值命令（默认 dry-run，真实写入必须显式确认）：
+```bash
+# 计算今日 NAV 并输出仓位分布，不写入
+python scripts/pm.py daily
+
+# 真实记录今日 nav_history，并输出仓位分布
+python scripts/pm.py daily --write --confirm
+
+# 只记录今日 NAV
+python scripts/pm.py nav record --write --confirm
+
+# 统计仓位分布
+python scripts/pm.py positions distribution
+```
+
 说明：
 - `--json` 适合做自动化/二次处理；默认输出对人更友好。
-- CLI 目前仅暴露只读命令；涉及写入的动作（如 `record_nav/close_nav`）仍需走显式 confirm 语义。
+- CLI 常用命令优先走本地服务；可用 `--no-service` 强制直连，或用 `--require-service` 禁止 fallback。
+- 涉及写入的动作（如 `nav record`）默认 dry-run，真实写入必须走显式 `--write --confirm` 语义。
 - 正式日报数据/HTML/发布入口只有 `scripts/publish_daily_report.py`；`pm report` 仅作 preview。
 
 ## 清仓 / 关闭账户：写入 shares=0 的净值点（close_nav）
@@ -69,7 +85,7 @@ python scripts/pm.py report daily --preview --timeout 25 --json
 ## 3) Missing price for US tickers
 
 - Ensure `finnhub_api_key` is set.
-- If Finnhub fails, Yahoo chart API may be rate-limited.
+- If Finnhub fails, Yahoo Chart may be rate-limited.
 
 ## 4) Date off by one day
 

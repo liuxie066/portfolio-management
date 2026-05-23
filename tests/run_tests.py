@@ -53,6 +53,18 @@ def main() -> None:
     from tests.test_price_fetcher_single_fetch_cache_only import (
         test_single_fetch_cache_only_and_stale_fallback,
     )
+    from tests.test_pricing_service import (
+        test_batch_planner_fetch_non_us_uses_provider_batch,
+        test_fetch_batch_wraps_optimized_legacy_payloads,
+        test_fetch_quote_falls_back_to_stale_cache_when_realtime_fails,
+        test_fetch_quote_returns_structured_failure_without_cache_or_realtime,
+        test_fetch_quote_returns_valid_cache_without_realtime_call,
+        test_fetch_quote_saves_realtime_payload_and_returns_market_type,
+    )
+    from tests.test_pricing_providers import (
+        test_tencent_batch_provider_fetches_cn_quote,
+        test_us_batch_provider_falls_back_to_stale_cache,
+    )
     from tests.test_holdings_preload_minimal import (
         test_preload_builds_index_and_projection_and_avoids_refetch,
         test_upsert_uses_preloaded_cache_for_batch_updates,
@@ -66,6 +78,9 @@ def main() -> None:
         test_nav_base_cache_month_boundary_and_invalidation_flag,
         test_cash_flow_agg_cache_updates_on_new_record,
         test_record_nav_avoids_get_nav_history_full_scan_when_preloaded,
+    )
+    from tests.test_nav_record_service import (
+        test_nav_record_service_persists_run_id_in_details,
     )
     from tests.test_nav_bulk_upsert_minimal import (
         test_nav_bulk_upsert_uses_single_preload_and_batch_ops_for_n_le_500,
@@ -89,6 +104,9 @@ def main() -> None:
         test_prev_close_not_overwritten_when_valid,
         test_escape_filter_value_handles_quotes,
     )
+    from tests.test_cash_service import (
+        test_cash_service_get_cash_formats_cash_and_mmf_holdings,
+    )
     from tests.test_feishu_efficiency import (
         test_get_holdings_uses_cache_when_loaded,
         test_get_holdings_includes_empty_when_requested,
@@ -101,21 +119,45 @@ def main() -> None:
         test_pm_report_requires_preview_flag,
         test_pm_report_preview_marks_noncanonical_output,
         test_pm_cash_passes_account,
+        test_pm_json_suppresses_internal_stdout_by_default,
+        test_pm_failure_payload_returns_nonzero_exit_code,
         test_pm_accounts_lists_discovered_accounts,
         test_pm_overview_passes_accounts_and_timeout,
         test_pm_cash_prefers_service_when_available,
         test_pm_init_nav_passes_account_and_write_flags,
         test_pm_init_nav_write_requires_confirm,
+        test_pm_nav_record_passes_account_and_write_flags,
+        test_pm_nav_record_write_requires_confirm,
+        test_pm_daily_runs_nav_record_and_distribution,
+        test_pm_daily_write_requires_confirm,
+        test_pm_daily_failure_payload_returns_nonzero_exit_code,
+        test_pm_positions_distribution_prefers_service_when_available,
+        test_pm_nav_record_prefers_service_when_available,
+        test_pm_daily_prefers_service_for_nav_and_distribution,
     )
     from tests.test_multi_account import (
         test_list_accounts_discovers_accounts_across_read_models,
         test_multi_account_overview_aggregates_successful_accounts,
     )
     from tests.test_service_application import (
-        test_portfolio_service_delegates_read_use_cases_to_backend,
+        test_portfolio_service_generate_report_uses_direct_app_service_not_backend,
+        test_portfolio_service_get_cash_uses_direct_cash_service_not_backend,
+        test_portfolio_service_get_distribution_uses_direct_read_service_not_backend,
+        test_portfolio_service_full_report_uses_direct_app_service_not_backend,
+        test_portfolio_service_get_holdings_uses_direct_read_service_not_backend,
+        test_portfolio_service_get_nav_uses_direct_storage_path_not_backend,
+        test_portfolio_service_list_accounts_uses_direct_account_service_not_backend,
+        test_portfolio_service_multi_account_overview_uses_direct_account_service_not_backend_overview,
+        test_portfolio_service_daily_report_bundle_reuses_one_snapshot,
+        test_portfolio_service_record_nav_uses_direct_portfolio_path_not_backend,
+    )
+    from tests.test_portfolio_read_service import (
+        test_build_snapshot_passes_price_timeout_to_valuation,
     )
     from tests.test_service_client import (
         test_service_client_builds_local_request_urls,
+        test_service_client_posts_daily_report_bundle_payload,
+        test_service_client_posts_nav_record_payload,
         test_service_client_marks_unavailable_on_connection_error,
     )
     from tests.test_service_http import (
@@ -126,6 +168,10 @@ def main() -> None:
         test_generate_daily_report_html_is_renderer_only,
         test_publish_daily_report_returns_renderer_bundle_shape,
         test_publish_daily_report_build_report_data_passes_account,
+        test_publish_daily_report_futu_sync_defaults_to_dry_run,
+        test_publish_daily_report_main_prints_result_while_suppressing_internal_stdout,
+        test_publish_daily_report_main_quiet_suppresses_success_output,
+        test_publish_daily_report_prefers_service_bundle,
         test_publish_daily_report_parse_args_uses_config_defaults_and_cli_overrides,
     )
     from tests.test_futu_balance_sync_service import (
@@ -142,6 +188,14 @@ def main() -> None:
         test_validate_code_strips_market_suffix_and_normalizes_hk,
         test_detect_market_type_respects_suffix,
         test_single_fetch_cache_only_and_stale_fallback,
+        test_fetch_quote_returns_valid_cache_without_realtime_call,
+        test_fetch_quote_falls_back_to_stale_cache_when_realtime_fails,
+        test_fetch_quote_saves_realtime_payload_and_returns_market_type,
+        test_fetch_quote_returns_structured_failure_without_cache_or_realtime,
+        test_fetch_batch_wraps_optimized_legacy_payloads,
+        test_batch_planner_fetch_non_us_uses_provider_batch,
+        test_tencent_batch_provider_fetches_cn_quote,
+        test_us_batch_provider_falls_back_to_stale_cache,
         test_preload_builds_index_and_projection_and_avoids_refetch,
         test_upsert_uses_preloaded_cache_for_batch_updates,
         test_upsert_create_after_preload_missing_key_without_refetch,
@@ -150,6 +204,7 @@ def main() -> None:
         test_nav_base_cache_month_boundary_and_invalidation_flag,
         test_cash_flow_agg_cache_updates_on_new_record,
         test_record_nav_avoids_get_nav_history_full_scan_when_preloaded,
+        test_nav_record_service_persists_run_id_in_details,
         test_nav_bulk_upsert_uses_single_preload_and_batch_ops_for_n_le_500,
         test_nav_bulk_upsert_upsert_mode_keeps_existing_cache_values_for_none_fields,
         test_nav_bulk_upsert_updates_nav_index_cache_incrementally,
@@ -167,6 +222,7 @@ def main() -> None:
         test_rate_limiter_has_lock,
         test_prev_close_not_overwritten_when_valid,
         test_escape_filter_value_handles_quotes,
+        test_cash_service_get_cash_formats_cash_and_mmf_holdings,
         # feishu efficiency tests
         test_get_holdings_uses_cache_when_loaded,
         test_get_holdings_includes_empty_when_requested,
@@ -178,21 +234,47 @@ def main() -> None:
         test_pm_report_requires_preview_flag,
         test_pm_report_preview_marks_noncanonical_output,
         test_pm_cash_passes_account,
+        test_pm_json_suppresses_internal_stdout_by_default,
+        test_pm_failure_payload_returns_nonzero_exit_code,
         test_pm_accounts_lists_discovered_accounts,
         test_pm_overview_passes_accounts_and_timeout,
         test_pm_cash_prefers_service_when_available,
         test_pm_init_nav_passes_account_and_write_flags,
         test_pm_init_nav_write_requires_confirm,
+        test_pm_nav_record_passes_account_and_write_flags,
+        test_pm_nav_record_write_requires_confirm,
+        test_pm_daily_runs_nav_record_and_distribution,
+        test_pm_daily_write_requires_confirm,
+        test_pm_daily_failure_payload_returns_nonzero_exit_code,
+        test_pm_positions_distribution_prefers_service_when_available,
+        test_pm_nav_record_prefers_service_when_available,
+        test_pm_daily_prefers_service_for_nav_and_distribution,
         test_list_accounts_discovers_accounts_across_read_models,
         test_multi_account_overview_aggregates_successful_accounts,
-        test_portfolio_service_delegates_read_use_cases_to_backend,
+        test_portfolio_service_generate_report_uses_direct_app_service_not_backend,
+        test_portfolio_service_get_cash_uses_direct_cash_service_not_backend,
+        test_portfolio_service_get_distribution_uses_direct_read_service_not_backend,
+        test_portfolio_service_full_report_uses_direct_app_service_not_backend,
+        test_portfolio_service_get_holdings_uses_direct_read_service_not_backend,
+        test_portfolio_service_get_nav_uses_direct_storage_path_not_backend,
+        test_portfolio_service_list_accounts_uses_direct_account_service_not_backend,
+        test_portfolio_service_multi_account_overview_uses_direct_account_service_not_backend_overview,
+        test_portfolio_service_daily_report_bundle_reuses_one_snapshot,
+        test_portfolio_service_record_nav_uses_direct_portfolio_path_not_backend,
+        test_build_snapshot_passes_price_timeout_to_valuation,
         test_service_client_builds_local_request_urls,
+        test_service_client_posts_daily_report_bundle_payload,
+        test_service_client_posts_nav_record_payload,
         test_service_client_marks_unavailable_on_connection_error,
         test_http_service_routes_delegate_to_portfolio_service,
         test_http_service_rejects_unknown_report_type,
         test_generate_daily_report_html_is_renderer_only,
         test_publish_daily_report_returns_renderer_bundle_shape,
         test_publish_daily_report_build_report_data_passes_account,
+        test_publish_daily_report_futu_sync_defaults_to_dry_run,
+        test_publish_daily_report_main_prints_result_while_suppressing_internal_stdout,
+        test_publish_daily_report_main_quiet_suppresses_success_output,
+        test_publish_daily_report_prefers_service_bundle,
         test_publish_daily_report_parse_args_uses_config_defaults_and_cli_overrides,
         test_futu_openapi_provider_reads_defaults_from_config_file,
         test_config_typed_getters_use_file_then_env_overrides,

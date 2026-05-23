@@ -33,6 +33,14 @@ class FakePortfolioService:
         self.calls.append(("nav", kwargs))
         return {"success": True, "days": kwargs["days"]}
 
+    def record_nav(self, **kwargs):
+        self.calls.append(("record_nav", kwargs))
+        return {"success": True, "dry_run": kwargs["dry_run"], "account": kwargs["account"]}
+
+    def get_distribution(self, **kwargs):
+        self.calls.append(("distribution", kwargs))
+        return {"success": True, "account": kwargs["account"]}
+
     def full_report(self, **kwargs):
         self.calls.append(("full_report", kwargs))
         return {"success": True, "account": kwargs["account"]}
@@ -40,6 +48,10 @@ class FakePortfolioService:
     def generate_report(self, **kwargs):
         self.calls.append(("generate_report", kwargs))
         return {"success": True, "report_type": kwargs["report_type"]}
+
+    def daily_report_bundle(self, **kwargs):
+        self.calls.append(("daily_report_bundle", kwargs))
+        return {"success": True, "account": kwargs["account"], "dry_run": kwargs["dry_run"]}
 
 
 def test_http_service_routes_delegate_to_portfolio_service():
@@ -52,12 +64,18 @@ def test_http_service_routes_delegate_to_portfolio_service():
     assert client.get("/holdings", params={"account": "alice/bob", "include_cash": False, "group_by_market": True, "include_price": True}).json()["account"] == "alice/bob"
     assert client.get("/cash", params={"account": "alice/bob"}).json()["account"] == "alice/bob"
     assert client.get("/nav", params={"account": "alice/bob", "days": 14}).json()["days"] == 14
+    assert client.post("/nav/record", json={"account": "alice/bob", "price_timeout": 8, "dry_run": False, "confirm": True, "overwrite_existing": False, "run_id": "run-nav-1"}).json()["dry_run"] is False
+    assert client.get("/distribution", params={"account": "alice/bob"}).json()["account"] == "alice/bob"
     assert client.get("/report/full", params={"account": "alice/bob", "price_timeout": 9}).json()["account"] == "alice/bob"
+    assert client.post("/report/daily-bundle", json={"account": "alice/bob", "price_timeout": 10, "dry_run": False, "confirm": True, "use_bulk_persist": True, "sync_futu_cash_mmf": True, "sync_futu_dry_run": False, "run_id": "run-report-1"}).json()["dry_run"] is False
     assert client.get("/report/monthly", params={"account": "alice/bob", "price_timeout": 11}).json()["report_type"] == "monthly"
     assert client.get("/accounts/alice/holdings", params={"include_cash": False, "group_by_market": True, "include_price": True}).json()["account"] == "alice"
     assert client.get("/accounts/alice/cash").json()["account"] == "alice"
     assert client.get("/accounts/alice/nav", params={"days": 14}).json()["days"] == 14
+    assert client.post("/accounts/alice/nav/record", json={"price_timeout": 9, "dry_run": True, "confirm": False, "use_bulk_persist": True}).json()["account"] == "alice"
+    assert client.get("/accounts/alice/distribution").json()["account"] == "alice"
     assert client.get("/accounts/alice/report/full", params={"price_timeout": 9}).json()["account"] == "alice"
+    assert client.post("/accounts/alice/report/daily-bundle", json={"price_timeout": 10, "dry_run": True, "confirm": False}).json()["account"] == "alice"
     assert client.get("/accounts/alice/report/monthly", params={"price_timeout": 11}).json()["report_type"] == "monthly"
 
     assert service.calls == [
@@ -67,12 +85,18 @@ def test_http_service_routes_delegate_to_portfolio_service():
         ("holdings", {"account": "alice/bob", "include_cash": False, "group_by_market": True, "include_price": True}),
         ("cash", {"account": "alice/bob"}),
         ("nav", {"account": "alice/bob", "days": 14}),
+        ("record_nav", {"account": "alice/bob", "price_timeout": 8, "dry_run": False, "confirm": True, "overwrite_existing": False, "use_bulk_persist": False, "run_id": "run-nav-1"}),
+        ("distribution", {"account": "alice/bob"}),
         ("full_report", {"account": "alice/bob", "price_timeout": 9}),
+        ("daily_report_bundle", {"account": "alice/bob", "price_timeout": 10, "dry_run": False, "confirm": True, "use_bulk_persist": True, "sync_futu_cash_mmf": True, "sync_futu_dry_run": False, "run_id": "run-report-1"}),
         ("generate_report", {"account": "alice/bob", "report_type": "monthly", "price_timeout": 11}),
         ("holdings", {"account": "alice", "include_cash": False, "group_by_market": True, "include_price": True}),
         ("cash", {"account": "alice"}),
         ("nav", {"account": "alice", "days": 14}),
+        ("record_nav", {"account": "alice", "price_timeout": 9, "dry_run": True, "confirm": False, "overwrite_existing": True, "use_bulk_persist": True}),
+        ("distribution", {"account": "alice"}),
         ("full_report", {"account": "alice", "price_timeout": 9}),
+        ("daily_report_bundle", {"account": "alice", "price_timeout": 10, "dry_run": True, "confirm": False, "use_bulk_persist": False, "sync_futu_cash_mmf": False, "sync_futu_dry_run": True}),
         ("generate_report", {"account": "alice", "report_type": "monthly", "price_timeout": 11}),
     ]
 

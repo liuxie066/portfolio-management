@@ -1,13 +1,13 @@
 from unittest.mock import Mock
 
-from src.price_fetcher import PriceFetcher
+from src.pricing.cache import price_cache_to_payload
+from src.pricing.fixed import get_cash_price
 
 
 def test_cash_price_branch_uses_normalized_output():
-    fetcher = PriceFetcher(storage=None, use_cache=False)
-    fetcher._fetch_exchange_rates = Mock(return_value={'USDCNY': 7.1234567})
+    fetch_exchange_rates = Mock(return_value={'USDCNY': 7.1234567})
 
-    result = fetcher._get_cash_price('USD-CASH')
+    result = get_cash_price('USD-CASH', fetch_exchange_rates)
 
     assert result['price'] == 1.0
     assert result['cny_price'] == 7.12
@@ -15,8 +15,7 @@ def test_cash_price_branch_uses_normalized_output():
     assert result['source'] == 'fixed'
 
 
-def test_price_cache_to_dict_is_normalized_on_fetch_path():
-    fetcher = PriceFetcher(storage=None, use_cache=False)
+def test_price_cache_to_payload_is_normalized_on_fetch_path():
     cached = Mock(
         asset_id='AAPL',
         asset_name='Apple',
@@ -30,7 +29,7 @@ def test_price_cache_to_dict_is_normalized_on_fetch_path():
         expires_at=None,
     )
 
-    result = fetcher._normalize_price_payload(fetcher._price_cache_to_dict(cached))
+    result = price_cache_to_payload(cached)
 
     assert result['price'] == 123.46
     assert result['cny_price'] == 888.89

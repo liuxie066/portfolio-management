@@ -6,8 +6,6 @@ from typing import Optional
 
 import requests
 
-from src.time_utils import bj_now_naive
-
 from ..payload import normalize_price_payload
 from ..types import PriceRequest, ProviderResult
 
@@ -40,13 +38,6 @@ class HKStockProvider:
         except Exception as exc:
             print(f"[腾讯API失败] 获取港股价格 {code}: {exc}")
 
-        print(f"[备用源] 尝试AKShare获取港股 {code}...")
-        try:
-            result = self.fetch_from_akshare(code)
-            if result:
-                return result
-        except Exception as exc:
-            print(f"[AKShare失败] 获取港股价格 {code}: {exc}")
         return None
 
     def fetch_from_tencent(self, code: str) -> Optional[dict]:
@@ -81,45 +72,3 @@ class HKStockProvider:
                 }
             )
         return None
-
-    def fetch_from_akshare(self, code: str) -> Optional[dict]:
-        try:
-            import akshare as ak
-            import pandas as pd
-
-            pure_code = code[2:].zfill(5) if code.startswith("HK") else code.zfill(5)
-            df = ak.stock_hk_spot_em()
-            row = df[df["代码"] == pure_code]
-            if row.empty:
-                return None
-
-            data = row.iloc[0]
-            price = float(data["最新价"]) if pd.notna(data["最新价"]) else 0.0
-            hkd_cny = self.fetcher._fetch_exchange_rates()["HKDCNY"]
-
-            return normalize_price_payload(
-                {
-                    "code": code,
-                    "name": data["名称"],
-                    "price": price,
-                    "prev_close": float(data["昨收"]) if pd.notna(data["昨收"]) else 0.0,
-                    "open": float(data["今开"]) if pd.notna(data["今开"]) else 0.0,
-                    "high": float(data["最高"]) if pd.notna(data["最高"]) else 0.0,
-                    "low": float(data["最低"]) if pd.notna(data["最低"]) else 0.0,
-                    "change": float(data["涨跌额"]) if pd.notna(data["涨跌额"]) else 0.0,
-                    "change_pct": float(data["涨跌幅"]) if pd.notna(data["涨跌幅"]) else 0.0,
-                    "volume": float(data["成交量"]) if pd.notna(data["成交量"]) else 0.0,
-                    "time": data.get("时间", bj_now_naive().strftime("%H:%M:%S")),
-                    "currency": "HKD",
-                    "cny_price": price * hkd_cny,
-                    "exchange_rate": hkd_cny,
-                    "market_type": "hk",
-                    "source": "akshare",
-                }
-            )
-        except ImportError:
-            print("[AKShare] 未安装akshare，跳过备用源")
-            return None
-        except Exception as exc:
-            print(f"[AKShare] 获取港股失败: {exc}")
-            return None

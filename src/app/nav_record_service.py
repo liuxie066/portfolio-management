@@ -72,6 +72,7 @@ class NavRecordService:
         overwrite_existing: bool = True,
         dry_run: bool = False,
         use_bulk_persist: bool = False,
+        run_id: Optional[str] = None,
     ) -> NAVHistory:
         if valuation is None:
             valuation = self.manager.calculate_valuation(account)
@@ -151,6 +152,10 @@ class NavRecordService:
             start_year=start_year,
             **calc,
         )
+        if run_id:
+            details = dict(nav_record.details or {})
+            details["run_id"] = run_id
+            nav_record.details = details
 
         if not config.get_bool("nav.disable_runtime_validation", False):
             self.manager._validate_nav_record(

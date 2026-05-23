@@ -13,14 +13,19 @@ flowchart TB
     end
 
     subgraph Entry["入口与编排层"]
-        SkillAPI["skill_api.py<br/>PortfolioSkill<br/>统一 API / 参数适配 / 报告编排"]
-        CLI["scripts/pm.py<br/>只读命令行入口"]
+        SkillAPI["skill_api.py<br/>PortfolioSkill<br/>兼容 API / 参数适配"]
+        CLI["scripts/pm.py<br/>CLI 产品入口"]
+        ServiceRunner["scripts/service.py<br/>本地服务进程"]
+        ServiceClient["src/service/client.py<br/>本地服务客户端"]
+        ServiceHTTP["src/service/http.py<br/>HTTP 路由"]
+        ServiceApp["src/service/application.py<br/>服务应用边界"]
         Publish["scripts/publish_daily_report.py<br/>记录 NAV + 生成 HTML + 发布"]
         Doctor["scripts/doctor.py / migrate_schema.py<br/>环境与 Schema 诊断"]
     end
 
     subgraph Domain["领域层"]
         PM["src/portfolio.py<br/>PortfolioManager<br/>交易 / 现金 / 估值 / NAV / 收益"]
+        AppRead["src/app/account_service.py + portfolio_read_service.py + nav_read_service.py + cash_service.py + full_report_service.py + report_generation_service.py<br/>账户发现 / 多账户概览 / 估值快照 / NAV / 持仓 / 现金 / 仓位分布 / 报告"]
         Guard["src/write_guard.py<br/>写入前校验"]
         Models["src/models.py<br/>Pydantic 领域模型"]
         Snapshot["src/snapshot_models.py<br/>每日持仓快照模型"]
@@ -28,11 +33,17 @@ flowchart TB
     end
 
     subgraph Pricing["行情层"]
-        PF["src/price_fetcher.py<br/>统一行情获取 + TTL 策略"]
+        PF["src/price_fetcher.py<br/>兼容门面"]
+        PS["src/pricing/service.py<br/>结构化报价入口"]
+        PBatch["src/pricing/batch.py<br/>批量编排"]
+        PCache["src/pricing/cache.py<br/>TTL / stale fallback"]
+        PFixed["src/pricing/fixed.py<br/>现金 / MMF 固定报价"]
+        PFX["src/pricing/fx.py<br/>汇率服务"]
+        PProviders["src/pricing/providers/*<br/>单笔 / 批量数据源"]
         MarketTime["src/market_time.py<br/>交易时段判断"]
         Tencent["Tencent Finance<br/>A/H 股批量报价"]
-        YF["yfinance / Finnhub<br/>美股报价"]
-        AK["AKShare / East Money<br/>基金报价"]
+        USQuote["Finnhub / Yahoo Chart<br/>美股报价"]
+        FundQuote["Tencent Fund / East Money<br/>基金报价"]
         FX["Exchange Rate API<br/>汇率"]
     end
 
@@ -63,12 +74,22 @@ flowchart TB
     Human --> Doctor
     Scheduler --> Publish
 
-    CLI --> SkillAPI
-    Publish --> SkillAPI
+    CLI --> ServiceClient
+    CLI -.fallback.-> SkillAPI
+    ServiceRunner --> ServiceHTTP
+    ServiceClient --> ServiceHTTP
+    ServiceHTTP --> ServiceApp
+    ServiceApp --> Factory
+    ServiceApp --> PM
+    ServiceApp --> AppRead
+    Publish --> ServiceClient
+    Publish -.fallback.-> SkillAPI
     SkillAPI --> Factory
     Factory --> FS
     SkillAPI --> PM
     SkillAPI --> PF
+    AppRead --> PM
+    AppRead --> PF
     PM --> Guard
     PM --> Models
     PM --> Snapshot
@@ -76,12 +97,22 @@ flowchart TB
     PM --> FS
     PM --> PF
 
-    PF --> MarketTime
-    PF --> LocalCache
-    PF --> Tencent
-    PF --> YF
-    PF --> AK
-    PF --> FX
+    PF --> PS
+    PF --> PBatch
+    PBatch --> PCache
+    PBatch --> PFixed
+    PBatch --> PProviders
+    PS --> PBatch
+    PS --> PProviders
+    PS --> PCache
+    PS --> PFixed
+    PCache --> MarketTime
+    PF --> PFX
+    PProviders --> Tencent
+    PProviders --> USQuote
+    PProviders --> FundQuote
+    PFX --> LocalCache
+    PFX --> FX
 
     FS --> LocalCache
     FS --> FC
@@ -105,7 +136,7 @@ flowchart TB
 ### 优点
 
 1. **职责分层清晰**
-   - 入口层：`skill_api.py`、`scripts/pm.py`、`scripts/publish_daily_report.py`
+   - 入口层：`scripts/pm.py`、`scripts/service.py`、`src/service/*`、`skill_api.py`、`scripts/publish_daily_report.py`
    - 领域层：`PortfolioManager`、`models.py`、`write_guard.py`
    - 行情层：`PriceFetcher`、`market_time.py`
    - 存储层：`FeishuStorage`、`FeishuClient`、本地 JSON 缓存
@@ -147,12 +178,13 @@ flowchart TB
    - 建议：优先拆分报告编排、NAV 计算、现金流聚合、行情 Provider、Feishu 表映射。
 
 3. **PriceFetcher 复杂度高**
-   - 多源回退（腾讯 / yfinance / Finnhub / AKShare / East Money）、并发线程、市场时间感知 TTL、汇率接口等逻辑仍较多。
-   - 已迁出行情分类到 `src/pricing/classifier.py`，建议继续把汇率和各数据源实现拆成独立 `PriceProvider`。
+   - 多源回退（腾讯 / Finnhub / Yahoo Chart / East Money）、并发线程、市场时间感知 TTL、汇率接口等逻辑仍较多。
+   - 已迁出行情分类、缓存策略、固定报价、汇率服务和优化批量路径到 `src/pricing/`，建议继续把剩余兼容适配器迁出 `PriceFetcher`。
 
-4. **缺少依赖注入**
-   - `PortfolioManager` 已支持注入 `storage` 和 `price_fetcher`，但 `PortfolioSkill` 仍主要直接创建 `create_storage()` 和 `PriceFetcher`。
-   - 建议：`PortfolioSkill.__init__` 支持显式注入 `storage`、`portfolio`、`price_fetcher`，保留默认工厂，测试时用假实现。
+4. **服务主路径已基本脱离 Skill facade**
+   - `PortfolioService.list_accounts()`、`multi_account_overview()`、`record_nav()`、`get_nav()`、`get_holdings()`、`get_cash()`、`get_distribution()`、`full_report()`、`generate_report()` 和 `daily_report_bundle()` 已经直接走 `src/app` / `PortfolioManager`。
+   - 日报发布器优先调用服务端 bundle，在同一次估值快照中完成 NAV 写入、日报 payload 和页面返回字段组装；`skill_api.py` 只保留服务不可用时的兼容 fallback。
+   - 建议：后续新产品能力继续先进 `src/service/application.py` 和 `src/app/*`，`skill_api.py` 只保留兼容入口。
 
 5. **无自动 Schema 迁移**
    - Bitable 表结构变更目前通过手工操作和 `doctor.py` / `audit_*.py` 脚本管理，没有版本化的迁移系统。
@@ -173,21 +205,20 @@ flowchart TB
 ### P0：可靠性与数据安全
 
 1. 为写入链路增加补偿记录：当交易已写入但持仓或现金扣减失败时，落一条可查询、可重试的 repair task。
-2. 为 `record_nav` 和日报发布增加运行级 `run_id`，贯穿 snapshot、NAV、HTML bundle 和日志。
+2. 为写入/发布任务增加结构化运行日志：至少包含 `run_id`、account、stage、latency、source/fallback。
 3. 给 `doctor.py` 增加关键表字段完整性检查结果的非零退出码，方便接入自动化任务。
 4. 增加本地只读快照导出：至少包含最近持仓、最近 NAV、最近日报输入 bundle。
 
 ### P1：模块拆分
 
-1. 从 `skill_api.py` 拆出 `report_service.py`：负责 `full_report`、日报/月报/年报组装。
-2. 从 `portfolio.py` 拆出 `nav_calculator.py`：只处理份额、现金流、NAV、MTD/YTD、CAGR 等公式。
-3. 从 `portfolio.py` 拆出 `trade_service.py` 和 `cash_service.py`：隔离买卖、现金扣减、现金流记录。
-4. 从 `feishu_storage.py` 拆出表级 Repository：`HoldingsRepository`、`TransactionRepository`、`NavRepository`、`CashFlowRepository`、`SnapshotRepository`。
+1. 从 `portfolio.py` 拆出 `nav_calculator.py`：只处理份额、现金流、NAV、MTD/YTD、CAGR 等公式。
+2. 从 `portfolio.py` 拆出 `trade_service.py` 和 `cash_service.py`：隔离买卖、现金扣减、现金流记录。
+3. 从 `feishu_storage.py` 拆出表级 Repository：`HoldingsRepository`、`TransactionRepository`、`NavRepository`、`CashFlowRepository`、`SnapshotRepository`。
 
 ### P1：行情服务插件化
 
 1. 定义 `PriceProvider` 接口：`supports(asset)`、`fetch_one()`、`fetch_batch()`、`healthcheck()`。
-2. 将 Tencent、yfinance/Finnhub、AKShare/EastMoney、FX 拆成独立 Provider。
+2. 将 Tencent、Finnhub/Yahoo Chart、East Money、FX 拆成独立 Provider。
 3. 将缓存 TTL、stale fallback、cache-only 策略上移到 `PriceService`，Provider 只负责实时数据。
 4. 统一输出价格诊断元数据：`source_chain`、`cache_status`、`latency_ms`、`error_type`。
 
@@ -209,10 +240,10 @@ flowchart TB
 
 ## 总体结论
 
-当前架构**合理且适合当前规模**：作为个人或小团队使用的 Claude Code Skill，它在数据安全、审计追踪、时区正确性和多源行情聚合方面已经做得比较扎实。
+当前架构**适合继续收敛成 CLI + 本地服务产品**：核心数据安全、审计追踪、时区正确性和多源行情聚合已经比较扎实；`skill_api.py` 应继续降级为兼容入口，而不是承载新的核心产品逻辑。
 
 若未来功能持续扩展（支持多账户、策略回测、更多报表类型），优先建议：
-1. 拆分 `skill_api.py` 和 `portfolio.py` 中的报告/NAV 逻辑；
+1. 继续将 `skill_api.py` 和 `portfolio.py` 中的报告/NAV 逻辑迁入 `src/service`、`src/app`、`src/domain`；
 2. 引入 `PriceProvider` 插件化设计；
 3. 补齐写入补偿机制与本地只读快照；
 4. 将 Schema 变更从“文档 + doctor”升级为“版本 + 迁移 + 自动检查”。

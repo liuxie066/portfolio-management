@@ -6,14 +6,19 @@ flowchart TB
     end
 
     subgraph Entry["入口与编排层"]
-        SkillAPI["skill_api.py<br/>PortfolioSkill<br/>统一 API / 参数适配 / 报告编排"]
-        CLI["scripts/pm.py<br/>只读命令行入口"]
+        SkillAPI["skill_api.py<br/>PortfolioSkill<br/>兼容 API / 参数适配"]
+        CLI["scripts/pm.py<br/>CLI 产品入口"]
+        ServiceRunner["scripts/service.py<br/>本地服务进程"]
+        ServiceClient["src/service/client.py<br/>本地服务客户端"]
+        ServiceHTTP["src/service/http.py<br/>HTTP 路由"]
+        ServiceApp["src/service/application.py<br/>服务应用边界"]
         Publish["scripts/publish_daily_report.py<br/>记录 NAV + 生成 HTML + 发布"]
         Doctor["scripts/doctor.py / schema_doctor.py<br/>环境与 Schema 诊断"]
     end
 
     subgraph Domain["领域层"]
         PM["src/portfolio.py<br/>PortfolioManager<br/>交易 / 现金 / 估值 / NAV / 收益"]
+        AppRead["src/app/account_service.py + portfolio_read_service.py + nav_read_service.py + cash_service.py + full_report_service.py + report_generation_service.py<br/>账户发现 / 多账户概览 / 估值快照 / NAV / 持仓 / 现金 / 仓位分布 / 报告"]
         Guard["src/write_guard.py<br/>写入前校验"]
         Models["src/models.py<br/>Pydantic 领域模型"]
         Snapshot["src/snapshot_models.py<br/>每日持仓快照模型"]
@@ -21,11 +26,17 @@ flowchart TB
     end
 
     subgraph Pricing["行情层"]
-        PF["src/price_fetcher.py<br/>统一行情获取 + TTL 策略"]
+        PF["src/price_fetcher.py<br/>兼容门面"]
+        PS["src/pricing/service.py<br/>结构化报价入口"]
+        PBatch["src/pricing/batch.py<br/>批量编排"]
+        PCache["src/pricing/cache.py<br/>TTL / stale fallback"]
+        PFixed["src/pricing/fixed.py<br/>现金 / MMF 固定报价"]
+        PFX["src/pricing/fx.py<br/>汇率服务"]
+        PProviders["src/pricing/providers/*<br/>单笔 / 批量数据源"]
         MarketTime["src/market_time.py<br/>交易时段判断"]
         Tencent["Tencent Finance<br/>A/H 股批量报价"]
-        YF["yfinance / Finnhub<br/>美股报价"]
-        AK["AKShare / East Money<br/>基金报价"]
+        USQuote["Finnhub / Yahoo Chart<br/>美股报价"]
+        FundQuote["Tencent Fund / East Money<br/>基金报价"]
         FX["Exchange Rate API<br/>汇率"]
     end
 
@@ -56,12 +67,22 @@ flowchart TB
     Human --> Doctor
     Scheduler --> Publish
 
-    CLI --> SkillAPI
-    Publish --> SkillAPI
+    CLI --> ServiceClient
+    CLI -.fallback.-> SkillAPI
+    ServiceRunner --> ServiceHTTP
+    ServiceClient --> ServiceHTTP
+    ServiceHTTP --> ServiceApp
+    ServiceApp --> Factory
+    ServiceApp --> PM
+    ServiceApp --> AppRead
+    Publish --> ServiceClient
+    Publish -.fallback.-> SkillAPI
     SkillAPI --> Factory
     Factory --> FS
     SkillAPI --> PM
     SkillAPI --> PF
+    AppRead --> PM
+    AppRead --> PF
     PM --> Guard
     PM --> Models
     PM --> Snapshot
@@ -69,12 +90,22 @@ flowchart TB
     PM --> FS
     PM --> PF
 
-    PF --> MarketTime
-    PF --> LocalCache
-    PF --> Tencent
-    PF --> YF
-    PF --> AK
-    PF --> FX
+    PF --> PS
+    PF --> PBatch
+    PBatch --> PCache
+    PBatch --> PFixed
+    PBatch --> PProviders
+    PS --> PBatch
+    PS --> PProviders
+    PS --> PCache
+    PS --> PFixed
+    PCache --> MarketTime
+    PF --> PFX
+    PProviders --> Tencent
+    PProviders --> USQuote
+    PProviders --> FundQuote
+    PFX --> LocalCache
+    PFX --> FX
 
     FS --> LocalCache
     FS --> FC

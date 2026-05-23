@@ -5,6 +5,7 @@ import src.domain as domain
 def test_app_exports_public_services():
     expected = {
         "AuditService",
+        "AccountService",
         "AssetNameService",
         "CashFlowSummaryService",
         "CashService",
@@ -13,10 +14,13 @@ def test_app_exports_public_services():
         "FutuBalanceSnapshot",
         "FutuBalanceSyncService",
         "FutuOpenApiBalanceProvider",
+        "FullReportService",
         "NavBaselineService",
+        "NavReadService",
         "NavRecordService",
         "NavSummaryPrinter",
         "PortfolioReadService",
+        "ReportGenerationService",
         "ReportingService",
         "ShareService",
         "SnapshotService",

@@ -84,7 +84,11 @@ def render_html(bundle: Dict[str, Any]) -> str:
     mtd_pnl = report.get("mtd_pnl")
     ytd_pnl = report.get("ytd_pnl")
     snapshot_time = report.get("snapshot_time") or snapshot.get("snapshot_time")
+    run_id = report.get("run_id") or snapshot.get("run_id") or full.get("run_id")
     date_text = report.get("date") or datetime.now().strftime("%Y-%m-%d")
+    trace_text = f"snapshot_time: {html_escape(snapshot_time)}"
+    if run_id:
+        trace_text += f" · run_id: {html_escape(run_id)}"
 
     market_breakdown = build_market_breakdown(holdings, total_value)
 
@@ -180,7 +184,7 @@ def render_html(bundle: Dict[str, Any]) -> str:
   <div class='wrap'>
     <div class='header'>
       <h1 class='title'>Portfolio Daily Report · {html_escape(date_text)}</h1>
-      <div class='sub'>snapshot_time: {html_escape(snapshot_time)}</div>
+      <div class='sub'>{trace_text}</div>
     </div>
 
     <div class='grid'>

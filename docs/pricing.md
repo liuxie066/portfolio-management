@@ -4,8 +4,8 @@
 
 1) **Tencent batch** for CN/HK/exchange-traded funds (`asset_type=exchange_fund`): `qt.gtimg.cn` (fast, low dependency)
 2) **Tencent jj** for open-end fund NAV (`asset_type=otc_fund`) (fast, low dependency)
-3) US: Finnhub (if API key) → Yahoo chart API fallback
-4) akshare / eastmoney as slow fallbacks for specific assets
+3) US: Finnhub (if API key) → Yahoo Chart fallback
+4) Open-end funds: Tencent fund NAV → East Money fallback
 
 ## Cache policy
 
@@ -13,6 +13,17 @@
 - If cache expired: try realtime.
   - If realtime succeeds: update cache.
   - If realtime fails: may fallback to stale cache, but MUST set `is_stale=true`.
+
+Runtime ownership is now split as:
+
+- `src/pricing/service.py`: public structured quote entry (`fetch_quote`, `fetch_batch`) and diagnostics.
+- `src/pricing/batch.py`: optimized batch planner used by `PriceService.fetch_batch()` and the legacy facade.
+- `src/pricing/providers/tencent_batch.py`: Tencent batch implementation for CN/HK/exchange funds/open-end fund NAV.
+- `src/pricing/providers/us_batch.py`: fast US batch implementation with Finnhub/Yahoo Chart and stale fallback.
+- `src/pricing/cache.py`: cache hit, stale fallback, TTL, and cache writes.
+- `src/pricing/fixed.py`: fixed-price cash/MMF quote construction.
+- `src/pricing/fx.py`: USD/HKD exchange-rate cache and multi-source fallback.
+- `src/price_fetcher.py`: compatibility facade for existing callers.
 
 ## TTL
 

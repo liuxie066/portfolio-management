@@ -35,14 +35,30 @@ class PortfolioServiceClient:
         self.base_url = (base_url or config.get_service_url()).rstrip("/")
         self.timeout = timeout
 
-    def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        params: Optional[Dict[str, Any]] = None,
+        body: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         clean_params = {
             key: value
             for key, value in (params or {}).items()
             if value is not None
         }
         query = f"?{urlencode(clean_params)}" if clean_params else ""
-        request = Request(f"{self.base_url}{path}{query}", headers={"Accept": "application/json"})
+        data = None
+        headers = {"Accept": "application/json"}
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        request = Request(
+            f"{self.base_url}{path}{query}",
+            data=data,
+            headers=headers,
+            method=method,
+        )
 
         try:
             with urlopen(request, timeout=self.timeout) as response:
@@ -60,7 +76,16 @@ class PortfolioServiceClient:
 
         if not isinstance(decoded, dict):
             raise PortfolioServiceResponseError("service returned non-object JSON")
+        if decoded.get("success") is False:
+            message = decoded.get("error") or decoded.get("message") or decoded.get("detail") or "unknown service error"
+            raise PortfolioServiceResponseError(f"service returned success=false: {message}")
         return decoded
+
+    def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return self._request("GET", path, params=params)
+
+    def _post(self, path: str, body: Dict[str, Any]) -> Dict[str, Any]:
+        return self._request("POST", path, body=body)
 
     def health(self) -> Dict[str, Any]:
         return self._get("/health")
@@ -115,6 +140,32 @@ class PortfolioServiceClient:
     def get_nav(self, *, account: str, days: int = 30) -> Dict[str, Any]:
         return self._get("/nav", {"account": account, "days": days})
 
+    def record_nav(
+        self,
+        *,
+        account: str,
+        price_timeout: int = 30,
+        dry_run: bool = True,
+        confirm: bool = False,
+        overwrite_existing: bool = True,
+        use_bulk_persist: bool = False,
+        run_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        body = {
+            "account": account,
+            "price_timeout": price_timeout,
+            "dry_run": dry_run,
+            "confirm": confirm,
+            "overwrite_existing": overwrite_existing,
+            "use_bulk_persist": use_bulk_persist,
+        }
+        if run_id is not None:
+            body["run_id"] = run_id
+        return self._post("/nav/record", body)
+
+    def get_distribution(self, *, account: str) -> Dict[str, Any]:
+        return self._get("/distribution", {"account": account})
+
     def full_report(self, *, account: str, price_timeout: int = 30) -> Dict[str, Any]:
         return self._get("/report/full", {"account": account, "price_timeout": price_timeout})
 
@@ -123,3 +174,28 @@ class PortfolioServiceClient:
             f"/report/{quote(report_type, safe='')}",
             {"account": account, "price_timeout": price_timeout},
         )
+
+    def daily_report_bundle(
+        self,
+        *,
+        account: Optional[str],
+        price_timeout: int = 30,
+        dry_run: bool = True,
+        confirm: bool = False,
+        use_bulk_persist: bool = False,
+        sync_futu_cash_mmf: bool = False,
+        sync_futu_dry_run: bool = True,
+        run_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        body = {
+            "account": account,
+            "price_timeout": price_timeout,
+            "dry_run": dry_run,
+            "confirm": confirm,
+            "use_bulk_persist": use_bulk_persist,
+            "sync_futu_cash_mmf": sync_futu_cash_mmf,
+            "sync_futu_dry_run": sync_futu_dry_run,
+        }
+        if run_id is not None:
+            body["run_id"] = run_id
+        return self._post("/report/daily-bundle", body)

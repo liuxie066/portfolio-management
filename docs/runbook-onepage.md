@@ -5,16 +5,18 @@
 ## 0) Repo / 入口
 - repo：`/home/node/.openclaw/workspace/portfolio-management`
 - 定时任务入口：`scripts/publish_daily_report.py`
-- CLI（只读查询为主）：`scripts/pm.py`；`pm report` 仅作 preview
+- CLI 产品入口：`scripts/pm.py`；`pm report` 仅作 preview
 
 ---
 
 ## 1) 业务主流程（按 IO 顺序）
-1) `skill.build_snapshot()`：生成统一快照（持仓 + 价格/汇率 + 估值）
-2) `record_nav()`：写入 `nav_history`（cron 模式会写；默认安全约束是 dry_run）
-3) `generate_report(daily)`：生成日报结构化数据
+1) `POST /report/daily-bundle`：优先通过本地服务生成统一快照（持仓 + 价格/汇率 + 估值）
+2) `record_nav()`：用同一快照写入 `nav_history`（cron 模式会写；默认安全约束是 dry_run）
+3) `generate_report(daily)`：用同一快照生成日报结构化数据
 4) `render_html()`：渲染 GitHub 风格 HTML
 5) publish：把 HTML 写入对外静态目录，并返回链接
+
+服务不可用时，发布器才回退到直连 `skill_api` 兼容路径；不要把 `/nav/record`、`/report/daily`、`/nav` 串成三个独立调用，否则会重复构建估值快照。每次运行都会生成或接收一个 `run_id`，用于串联 NAV `details`、report bundle、HTML 和发布输出。
 
 ---
 
@@ -65,6 +67,16 @@ cd /home/node/.openclaw/workspace/portfolio-management
 ./.venv/bin/python scripts/publish_daily_report.py \
   --dry-run --price-timeout 10 \
   --publish-root /home/node/.openclaw/workspace/prototypes
+```
+
+如果要确认正式任务一定走服务：
+```bash
+./.venv/bin/python scripts/publish_daily_report.py --dry-run --require-service
+```
+
+需要人工指定追踪 ID 时：
+```bash
+./.venv/bin/python scripts/publish_daily_report.py --dry-run --run-id manual-YYYYMMDD
 ```
 
 ### 4.3 本地验证（不走外网）

@@ -28,13 +28,13 @@ class USStockProvider:
             return ProviderResult(None, self.name, f"{type(exc).__name__}: {exc}", int((time.time() - started) * 1000))
 
     def fetch_us_stock(self, code: str) -> Optional[dict]:
-        yf_code = code.replace(".", "-")
+        quote_code = code.replace(".", "-")
         errors = []
 
         finnhub_key = _config.get("finnhub_api_key")
         if finnhub_key:
             try:
-                result = self.fetch_finnhub(yf_code, finnhub_key)
+                result = self.fetch_finnhub(quote_code, finnhub_key)
                 if result:
                     return result
             except Exception as exc:
@@ -42,52 +42,14 @@ class USStockProvider:
 
         try:
             result = self.fetcher._retry_with_backoff(
-                lambda: self.fetch_yahoo_api(yf_code),
+                lambda: self.fetch_yahoo_chart(quote_code),
                 max_retries=2,
                 base_delay=1.0,
             )
             if result:
                 return result
         except Exception as exc:
-            errors.append(f"Yahoo API: {exc}")
-
-        try:
-            import yfinance as yf
-
-            ticker = yf.Ticker(yf_code)
-            info = ticker.info
-            hist = ticker.history(period="1d")
-            if not hist.empty:
-                latest = hist.iloc[-1]
-                prev_close = info.get("previousClose", latest["Open"])
-                current = latest["Close"]
-                change = current - prev_close
-                change_pct = (change / prev_close * 100) if prev_close else 0
-
-                usd_cny = self.fetcher._fetch_exchange_rates()["USDCNY"]
-                return normalize_price_payload(
-                    {
-                        "code": code,
-                        "name": info.get("shortName", yf_code),
-                        "price": current,
-                        "prev_close": prev_close,
-                        "open": latest["Open"],
-                        "high": latest["High"],
-                        "low": latest["Low"],
-                        "change": change,
-                        "change_pct": change_pct,
-                        "volume": int(latest["Volume"]),
-                        "currency": info.get("currency", "USD"),
-                        "cny_price": current * usd_cny,
-                        "exchange_rate": usd_cny,
-                        "market_type": "us",
-                        "source": "yfinance",
-                    }
-                )
-        except ImportError:
-            errors.append("yfinance未安装")
-        except Exception as exc:
-            errors.append(f"yfinance: {exc}")
+            errors.append(f"Yahoo Chart: {exc}")
 
         print(f"获取美股价格失败 {code}: {'; '.join(errors)}")
         return None
@@ -129,7 +91,7 @@ class USStockProvider:
             }
         )
 
-    def fetch_yahoo_api(self, code: str) -> Optional[dict]:
+    def fetch_yahoo_chart(self, code: str) -> Optional[dict]:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}?interval=1d&range=2d"
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -193,6 +155,6 @@ class USStockProvider:
                 "cny_price": current * usd_cny,
                 "exchange_rate": usd_cny,
                 "market_type": "us",
-                "source": "yahoo_api",
+                "source": "yahoo_chart",
             }
         )

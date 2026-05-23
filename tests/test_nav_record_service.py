@@ -61,6 +61,24 @@ def test_nav_record_service_records_nav_through_legacy_patch_points():
     manager._print_nav_summary.assert_not_called()
 
 
+def test_nav_record_service_persists_run_id_in_details():
+    storage = _storage()
+    manager = _manager(storage)
+    service = NavRecordService(manager=manager, storage=storage)
+
+    result = service.record_nav(
+        account="a",
+        valuation=_valuation(),
+        nav_date=date(2026, 3, 19),
+        persist=True,
+        dry_run=True,
+        run_id="run-nav-1",
+    )
+
+    assert result.details["run_id"] == "run-nav-1"
+    storage.save_nav.assert_called_once_with(result, overwrite_existing=True, dry_run=True)
+
+
 def test_nav_record_service_uses_bulk_persist_when_requested():
     storage = _storage()
     manager = _manager(storage)
@@ -142,9 +160,10 @@ def test_portfolio_manager_record_nav_delegates_to_service():
     expected = NAVHistory(date=date(2026, 3, 19), account="a", total_value=1.0)
     manager.nav_record_service.record_nav.return_value = expected
 
-    result = manager.record_nav("a", valuation=_valuation(), nav_date=date(2026, 3, 19), persist=False)
+    result = manager.record_nav("a", valuation=_valuation(), nav_date=date(2026, 3, 19), persist=False, run_id="run-nav-1")
 
     assert result is expected
     manager.nav_record_service.record_nav.assert_called_once()
     assert manager.nav_record_service.record_nav.call_args.kwargs["account"] == "a"
     assert manager.nav_record_service.record_nav.call_args.kwargs["persist"] is False
+    assert manager.nav_record_service.record_nav.call_args.kwargs["run_id"] == "run-nav-1"

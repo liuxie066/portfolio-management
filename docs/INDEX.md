@@ -7,12 +7,14 @@ Keep docs short, executable, and reality-checked.
 ## Core entrypoints
 
 - HTTP service (primary surface): `src/service/http.py`
+- Service manager: `scripts/service.py`
 - Service runner: `scripts/serve.py`
 - Service API notes: `docs/service.md`
+- Dependency graph: `docs/dependency-graph.md`
 - Skill API (compatibility adapter): `skill_api.py`
 - Storage backend (Feishu only): `src/feishu_storage.py` + `src/feishu_client.py`
 - Portfolio logic: `src/portfolio.py`
-- Pricing + caching: `src/price_fetcher.py` + `src/market_time.py`
+- Pricing + caching: `src/price_fetcher.py` + `src/pricing/*` + `src/market_time.py`
 - Timezone helpers (Beijing time semantics): `src/time_utils.py`
 
 ## Daily report
@@ -63,8 +65,10 @@ Keep docs short, executable, and reality-checked.
 
 - Publish daily report:
   - `python scripts/publish_daily_report.py`
+  - `python scripts/publish_daily_report.py --run-id manual-20260523`
+  - Prefer local service `POST /report/daily-bundle`; use `--no-service` only for direct recovery.
 
 ## Natural language adapter (stub)
 
 - `scripts/nl.py "..."` converts natural language into a structured intent JSON.
-- It has **no side effects**; execution must be done by calling `scripts/pm.py` or `skill_api` explicitly.
+- It has **no side effects**; execution must be done by calling `scripts/pm.py`, the local service, or the compatibility API explicitly.

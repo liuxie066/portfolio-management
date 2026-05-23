@@ -4,6 +4,7 @@
 
 ## 入口
 
+- CLI 产品入口：`./pm`（人类日常操作）
 - 人类使用：`README.md`、`docs/INDEX.md`
 - Agent 使用：`SKILL.md`
 - HTTP Service：`src/service/http.py`（主服务入口）
@@ -30,6 +31,18 @@ curl http://127.0.0.1:8765/health
 curl http://127.0.0.1:8765/accounts
 curl 'http://127.0.0.1:8765/accounts/overview?accounts=alice,bob'
 ```
+
+日常 CLI：
+
+```bash
+./pm daily                         # 计算今日净值并输出仓位分布；默认 dry-run
+./pm daily --write --confirm       # 真实记录今日 nav_history
+./pm nav                           # 查看最近净值
+./pm nav record --write --confirm  # 只记录今日净值
+./pm positions distribution        # 统计仓位分布
+```
+
+`./pm` 会优先使用仓库内 `.venv/bin/python`，否则回退到系统 `python3`。常用命令优先访问本地 HTTP 服务，服务不可用时回退到直连 `skill_api.py`；写入命令默认 dry-run，真实写入必须显式 `--write --confirm`。
 
 HTTP 服务默认只允许绑定 `127.0.0.1`/`localhost`/`::1`。该服务当前不带鉴权；
 如果必须绑定到非 loopback 地址，需要显式传 `--allow-remote`，并确保外层网络边界已鉴权。
@@ -94,17 +107,21 @@ withdraw(10000, remark="出金")
 
 日报数据与 HTML 统一从 `scripts/publish_daily_report.py` 生成；`scripts/generate_daily_report_html.py` 仅负责渲染已准备好的 bundle。
 
-HTTP 服务是新的主产品入口；CLI、MCP 和 `skill_api.py` 保持兼容，作为服务/应用层的适配入口逐步收敛。
-`scripts/pm.py` 的只读命令和 MCP 只读工具会优先尝试本地服务，服务不可用时自动回退到直连 `skill_api.py`；CLI 可用 `--no-service` 强制直连，或用 `--require-service` 在服务不可用时直接失败。
+HTTP 服务是新的主产品入口；CLI、MCP 和 `skill_api.py` 保持兼容，作为服务/应用层的适配入口逐步收敛。当前核心路径中，账户发现、多账户概览、NAV 记录/读取、现金、持仓、仓位分布、完整报告和日报/月报/年报 payload 已经由 service application 直接调用 `src/app` / `src/portfolio.py`，不再把 `skill_api.py` 作为主路径。
+`scripts/pm.py` 的常用命令会优先尝试本地服务，服务不可用时自动回退到直连 `skill_api.py`；CLI 可用 `--no-service` 强制直连，或用 `--require-service` 在服务不可用时直接失败。`scripts/publish_daily_report.py` 也优先调用服务端 `daily_report_bundle`，在一次估值快照内完成 NAV 写入、日报 payload 和页面返回字段组装。
 
 常用 CLI 也支持显式指定账户：
 
 ```bash
-python scripts/pm.py accounts --json
-python scripts/pm.py overview --accounts alice,bob --json
-python scripts/pm.py cash --account alice
-python scripts/pm.py holdings --account alice --json
+./pm accounts --json
+./pm overview --accounts alice,bob --json
+./pm cash --account alice
+./pm holdings --account alice --json
+./pm daily --account alice --json
+./pm daily --account alice --run-id manual-20260523 --json
+./pm positions distribution --account alice --json
 python scripts/publish_daily_report.py --account alice
+python scripts/publish_daily_report.py --account alice --run-id manual-20260523
 ```
 
 ## MCP Server

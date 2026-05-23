@@ -4,9 +4,10 @@ from datetime import datetime, timedelta
 from unittest.mock import Mock, patch, MagicMock
 import pytz
 
-from src.price_fetcher import MarketTimeUtil, PriceFetcher, _market_type_from_asset_type
+from src.price_fetcher import MarketTimeUtil, PriceFetcher
 from src.asset_utils import detect_market_type
 from src.models import AssetType, PriceCache
+from src.pricing.cache import market_type_from_asset_type
 from src.pricing.providers.cn import CNStockProvider
 from src.pricing.providers.hk import HKStockProvider
 
@@ -167,11 +168,9 @@ class TestPriceFetcher:
         assert result["currency"] == "CNY"
 
     @patch.object(CNStockProvider, 'fetch_from_tencent')
-    @patch.object(CNStockProvider, 'fetch_from_akshare')
-    def test_fetch_a_stock_failure(self, mock_akshare, mock_tencent):
+    def test_fetch_a_stock_failure(self, mock_tencent):
         """测试获取A股价格失败"""
         mock_tencent.return_value = None
-        mock_akshare.return_value = None
 
         fetcher = PriceFetcher()
         result = fetcher._fetch_a_stock("000001")
@@ -209,7 +208,7 @@ class TestPriceFetcher:
             "change": 2.5,
             "change_pct": 0.0145,
             "currency": "USD",
-            "source": "yahoo_api"
+            "source": "yahoo_chart"
         }
 
         fetcher = PriceFetcher()
@@ -218,7 +217,7 @@ class TestPriceFetcher:
         assert result is not None
         assert result["price"] == 175.0
         assert result["currency"] == "USD"
-        assert result["source"] == "yahoo_api"
+        assert result["source"] == "yahoo_chart"
 
     def test_get_cash_price(self):
         """测试获取现金价格"""
@@ -259,10 +258,10 @@ class TestPriceFetcher:
         assert fetcher._is_etf("000001") == False
 
     def test_asset_type_market_routing_for_split_funds(self):
-        assert _market_type_from_asset_type("510300", AssetType.EXCHANGE_FUND, "cn") == "cn"
-        assert _market_type_from_asset_type("110022", AssetType.OTC_FUND, "fund") == "fund"
-        assert _market_type_from_asset_type("510300", AssetType.FUND, "fund") == "cn"
-        assert _market_type_from_asset_type("SPY", AssetType.EXCHANGE_FUND, "us") == "us"
+        assert market_type_from_asset_type("510300", AssetType.EXCHANGE_FUND, "cn") == "cn"
+        assert market_type_from_asset_type("110022", AssetType.OTC_FUND, "fund") == "fund"
+        assert market_type_from_asset_type("510300", AssetType.FUND, "fund") == "cn"
+        assert market_type_from_asset_type("SPY", AssetType.EXCHANGE_FUND, "us") == "us"
 
     def test_is_otc_fund(self):
         """测试场外基金识别"""
@@ -313,3 +312,32 @@ class TestPriceFetcher:
         assert result is not None
         assert result["price"] == 10.5
         assert result["code"] == "000001"
+
+    def test_fetch_batch_cache_only_uses_stale_fallback_policy(self):
+        """批量路径应复用统一缓存策略，cache-only 不触发实时请求。"""
+        mock_storage = Mock()
+        mock_storage.get_price.return_value = PriceCache(
+            asset_id="000001",
+            asset_name="平安银行",
+            asset_type=AssetType.A_STOCK,
+            price=10.5,
+            cny_price=10.5,
+            currency="CNY",
+            data_source="tencent",
+            expires_at=datetime.now() - timedelta(hours=1),
+        )
+
+        fetcher = PriceFetcher(storage=mock_storage, use_cache=True)
+        fetcher._fetch_realtime = Mock(return_value=None)
+
+        result = fetcher.fetch_batch(
+            ["000001"],
+            accept_stale_when_closed=True,
+            max_stale_after_expiry_sec=7200,
+            use_cache_only=True,
+        )
+
+        assert result["000001"]["source"] == "cache_fallback"
+        assert result["000001"]["cache_status"] == "stale_fallback"
+        assert result["000001"]["is_stale"] is True
+        fetcher._fetch_realtime.assert_not_called()

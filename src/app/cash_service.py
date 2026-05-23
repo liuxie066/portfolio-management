@@ -119,6 +119,34 @@ class CashService:
         mmf_holding = self.storage.get_holding(MMF_ASSET_ID, account)
         return cash_holding, mmf_holding
 
+    def get_cash(self, account: str) -> dict[str, Any]:
+        try:
+            holdings = self.storage.get_holdings(account=account)
+            cash_holdings = [h for h in holdings if h.asset_type in [AssetType.CASH, AssetType.MMF]]
+
+            items = []
+            by_currency = {}
+            for holding in cash_holdings:
+                currency = holding.currency or "CNY"
+                asset_type = holding.asset_type.value if hasattr(holding.asset_type, "value") else holding.asset_type
+                items.append({
+                    "code": holding.asset_id,
+                    "name": holding.asset_name,
+                    "amount": holding.quantity,
+                    "currency": currency,
+                    "type": asset_type,
+                })
+                by_currency[currency] = by_currency.get(currency, 0) + holding.quantity
+
+            return {
+                "success": True,
+                "by_currency": by_currency,
+                "items": items,
+                "count": len(items),
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
     def has_sufficient_cash(self, account: str, amount: float) -> bool:
         if amount <= 0:
             return True

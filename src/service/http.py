@@ -4,11 +4,33 @@ from __future__ import annotations
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
+from pydantic import BaseModel
 
 from .application import PortfolioService
 
 
 REPORT_TYPES = {"daily", "monthly", "yearly"}
+
+
+class NavRecordRequest(BaseModel):
+    account: Optional[str] = None
+    price_timeout: int = 30
+    dry_run: bool = True
+    confirm: bool = False
+    overwrite_existing: bool = True
+    use_bulk_persist: bool = False
+    run_id: Optional[str] = None
+
+
+class DailyReportBundleRequest(BaseModel):
+    account: Optional[str] = None
+    price_timeout: int = 30
+    dry_run: bool = True
+    confirm: bool = False
+    use_bulk_persist: bool = False
+    sync_futu_cash_mmf: bool = False
+    sync_futu_dry_run: bool = True
+    run_id: Optional[str] = None
 
 
 def _service(request: Request) -> PortfolioService:
@@ -101,6 +123,42 @@ def create_app(service: Optional[PortfolioService] = None) -> FastAPI:
     ):
         return _service(request).get_nav(account=account, days=days)
 
+    @app.post("/nav/record", tags=["nav"])
+    def record_nav_query(request: Request, payload: NavRecordRequest):
+        kwargs = dict(
+            account=payload.account,
+            price_timeout=payload.price_timeout,
+            dry_run=payload.dry_run,
+            confirm=payload.confirm,
+            overwrite_existing=payload.overwrite_existing,
+            use_bulk_persist=payload.use_bulk_persist,
+        )
+        if payload.run_id is not None:
+            kwargs["run_id"] = payload.run_id
+        return _service(request).record_nav(**kwargs)
+
+    @app.post("/accounts/{account}/nav/record", tags=["nav"])
+    def record_nav(request: Request, account: str, payload: NavRecordRequest):
+        kwargs = dict(
+            account=account,
+            price_timeout=payload.price_timeout,
+            dry_run=payload.dry_run,
+            confirm=payload.confirm,
+            overwrite_existing=payload.overwrite_existing,
+            use_bulk_persist=payload.use_bulk_persist,
+        )
+        if payload.run_id is not None:
+            kwargs["run_id"] = payload.run_id
+        return _service(request).record_nav(**kwargs)
+
+    @app.get("/distribution", tags=["positions"])
+    def get_distribution_query(request: Request, account: str = Query(...)):
+        return _service(request).get_distribution(account=account)
+
+    @app.get("/accounts/{account}/distribution", tags=["positions"])
+    def get_distribution(request: Request, account: str):
+        return _service(request).get_distribution(account=account)
+
     @app.get("/report/full", tags=["reports"])
     def full_report_query(
         request: Request,
@@ -116,6 +174,36 @@ def create_app(service: Optional[PortfolioService] = None) -> FastAPI:
         price_timeout: int = Query(30, ge=1, le=300),
     ):
         return _service(request).full_report(account=account, price_timeout=price_timeout)
+
+    @app.post("/report/daily-bundle", tags=["reports"])
+    def daily_report_bundle_query(request: Request, payload: DailyReportBundleRequest):
+        kwargs = dict(
+            account=payload.account,
+            price_timeout=payload.price_timeout,
+            dry_run=payload.dry_run,
+            confirm=payload.confirm,
+            use_bulk_persist=payload.use_bulk_persist,
+            sync_futu_cash_mmf=payload.sync_futu_cash_mmf,
+            sync_futu_dry_run=payload.sync_futu_dry_run,
+        )
+        if payload.run_id is not None:
+            kwargs["run_id"] = payload.run_id
+        return _service(request).daily_report_bundle(**kwargs)
+
+    @app.post("/accounts/{account}/report/daily-bundle", tags=["reports"])
+    def daily_report_bundle(request: Request, account: str, payload: DailyReportBundleRequest):
+        kwargs = dict(
+            account=account,
+            price_timeout=payload.price_timeout,
+            dry_run=payload.dry_run,
+            confirm=payload.confirm,
+            use_bulk_persist=payload.use_bulk_persist,
+            sync_futu_cash_mmf=payload.sync_futu_cash_mmf,
+            sync_futu_dry_run=payload.sync_futu_dry_run,
+        )
+        if payload.run_id is not None:
+            kwargs["run_id"] = payload.run_id
+        return _service(request).daily_report_bundle(**kwargs)
 
     @app.get("/report/{report_type}", tags=["reports"])
     def generate_report_query(

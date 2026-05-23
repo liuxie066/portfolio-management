@@ -21,7 +21,7 @@ from src.feishu_storage import FeishuStorage, FeishuClient
 from src.portfolio import PortfolioManager
 from src.price_fetcher import PriceFetcher
 from src.storage import create_storage
-from src.reporting_utils import normalize_asset_type, normalization_warning, is_cash_like
+from src.reporting_utils import normalize_asset_type, normalization_warning
 from src.models import AssetType, AssetClass, Industry, Holding, NAVHistory
 from src.asset_utils import (
     validate_code as validate_asset_code,
@@ -29,7 +29,7 @@ from src.asset_utils import (
     parse_date,
 )
 from src.broker_message_parser import parse_futu_fill_message
-from src.app import FutuBalanceSyncService, PortfolioReadService
+from src.app import FutuBalanceSyncService, FullReportService, PortfolioReadService, ReportGenerationService
 from src.app.audit_service import AuditService
 from src.write_guard import validate_and_normalize_trade_input, validate_and_normalize_nav_input
 from src import config
@@ -904,106 +904,19 @@ class PortfolioSkill:
             record_nav: 是否自动记录今日净值
             price_timeout: 价格获取超时时间（秒）
         """
-        snapshot = snapshot or self.build_snapshot()
-        full = self.full_report(price_timeout=price_timeout, snapshot=snapshot, navs=navs)
-        if not full.get("success"):
-            return full
-
-        # 记录净值在报告生成之后，避免影响报告数据
-        nav_recorded = None
-        if record_nav:
-            nav_recorded = self.record_nav(
-                price_timeout=price_timeout,
-                snapshot=snapshot,
-                overwrite_existing=overwrite_existing,
-                dry_run=dry_run,
-            )
-
-        nav = full.get("nav") or {}
-        nav_details = nav.get("details") or {}
-        returns = full.get("returns") or {}
-        since_inception = returns.get("since_inception") or {}
-        cagr_value = nav_details.get("cagr")
-        cagr_pct_value = nav_details.get("cagr_pct")
-        if cagr_value is None and since_inception.get("success"):
-            # 兼容 nav_history 表没有 details 字段的情况
-            cagr_pct_value = since_inception.get("cagr_pct")
-            cagr_value = (cagr_pct_value / 100) if cagr_pct_value is not None else since_inception.get("cagr")
-
-        report_warnings = list(full.get("warnings") or [])
-
-        if report_type == "daily":
-            return {
-                "success": True,
-                "snapshot_time": snapshot.get("snapshot_time"),
-                "report_type": "日报",
-                "date": nav.get("date"),
-                "overview": full["overview"],
-                "nav": nav.get("nav"),
-                "total_value": nav.get("total_value"),
-                "cash_flow": nav.get("cash_flow"),
-                # 与 full_report()['nav'] 对齐，补充净值收益指标（向后兼容：仅新增字段）
-                "pnl": nav.get("pnl"),
-                "mtd_nav_change": nav.get("mtd_nav_change"),
-                "ytd_nav_change": nav.get("ytd_nav_change"),
-                "mtd_pnl": nav.get("mtd_pnl"),
-                "ytd_pnl": nav.get("ytd_pnl"),
-                "top_holdings": full.get("top_holdings"),
-                "cagr": cagr_value,
-                "cagr_pct": cagr_pct_value,
-                "warnings": report_warnings,
-            }
-
-        elif report_type == "monthly":
-            return {
-                "success": True,
-                "snapshot_time": snapshot.get("snapshot_time"),
-                "report_type": "月报",
-                "date": nav.get("date"),
-                "overview": full["overview"],
-                "nav": nav.get("nav"),
-                "total_value": nav.get("total_value"),
-                "monthly_return": returns.get("monthly"),
-                "mtd_nav_change": nav.get("mtd_nav_change"),
-                "mtd_pnl": nav.get("mtd_pnl"),
-                "top_holdings": full.get("top_holdings"),
-                "distribution": full.get("distribution"),
-                "cagr": cagr_value,
-                "cagr_pct": cagr_pct_value,
-            }
-
-        elif report_type == "yearly":
-            # 收集各年份涨幅和升值（从 nav.details 读取）
-            yearly_breakdown = {}
-            for k, v in nav_details.items():
-                if k.startswith(("nav_change_", "appreciation_", "cash_flow_")):
-                    yearly_breakdown[k] = v
-
-            return {
-                "success": True,
-                "snapshot_time": snapshot.get("snapshot_time"),
-                "report_type": "年报",
-                "date": nav.get("date"),
-                "overview": full["overview"],
-                "nav": nav.get("nav"),
-                "total_value": nav.get("total_value"),
-                "yearly_return": returns.get("yearly"),
-                "ytd_nav_change": nav.get("ytd_nav_change"),
-                "ytd_pnl": nav.get("ytd_pnl"),
-                "since_inception": returns.get("since_inception"),
-                "risk": {
-                    "volatility": returns.get("historical_volatility"),
-                    "max_drawdown": returns.get("max_drawdown"),
-                },
-                "yearly_breakdown": yearly_breakdown,
-                "cumulative_nav_change": nav_details.get("cumulative_nav_change"),
-                "cumulative_appreciation": nav_details.get("cumulative_appreciation"),
-                "top_holdings": full.get("top_holdings"),
-                "distribution": full.get("distribution"),
-            }
-
-        else:
-            return {"success": False, "error": f"不支持的报告类型: {report_type}，可选: daily/monthly/yearly"}
+        return ReportGenerationService(
+            build_snapshot_func=self.build_snapshot,
+            full_report_func=self.full_report,
+            record_nav_func=self.record_nav,
+        ).generate_report(
+            report_type=report_type,
+            record_nav=record_nav,
+            price_timeout=price_timeout,
+            snapshot=snapshot,
+            navs=navs,
+            overwrite_existing=overwrite_existing,
+            dry_run=dry_run,
+        )
 
     def _merge_daily_top_holdings(self, holdings: list, total_value: float, top_n: int = 10) -> list:
         """日报 Top 持仓合并口径：
@@ -1011,80 +924,11 @@ class PortfolioSkill:
         2) 现金/货基（asset_type= cash/mmf 或代码后缀 -CASH/-MMF）合并为一行
         3) 权重按 total_value 重新计算
         """
-        if not holdings:
-            return []
-
-        merged_by_code: Dict[str, Dict[str, Any]] = {}
-        cash_bucket: Dict[str, Any] = {
-            "code": "CASH+MMF",
-            "name": "现金及货基",
-            "quantity": 0.0,
-            "type": "cash",
-            "normalized_type": "cash",
-            "broker": "多券商汇总",
-            "currency": "MIXED",
-            "price": None,
-            "cny_price": None,
-            "market_value": 0.0,
-            "weight": 0.0,
-            "_parts": set(),
-        }
-
-        for h in holdings:
-            code = str(h.get("code") or "").strip()
-            if not code:
-                continue
-
-            normalized_type = h.get("normalized_type")
-            raw_type = h.get("type")
-            is_cash = bool(normalized_type == "cash" or is_cash_like(raw_type, code))
-            mv = float(h.get("market_value") or 0.0)
-            qty = float(h.get("quantity") or 0.0)
-
-            if is_cash:
-                cash_bucket["quantity"] += qty
-                cash_bucket["market_value"] += mv
-                cash_bucket["_parts"].add(code)
-                continue
-
-            key = code.upper()
-            if key not in merged_by_code:
-                merged_by_code[key] = {
-                    "code": code,
-                    "name": h.get("name"),
-                    "quantity": qty,
-                    "type": raw_type,
-                    "normalized_type": normalized_type,
-                    "broker": "多券商汇总",
-                    "currency": h.get("currency") or "MIXED",
-                    "price": None,
-                    "cny_price": None,
-                    "market_value": mv,
-                    "weight": 0.0,
-                    "_parts": {code},
-                }
-            else:
-                row = merged_by_code[key]
-                row["quantity"] += qty
-                row["market_value"] += mv
-                row["_parts"].add(code)
-                # 若币种不一致，标记 MIXED
-                if row.get("currency") != (h.get("currency") or "MIXED"):
-                    row["currency"] = "MIXED"
-
-        merged_rows = list(merged_by_code.values())
-        if cash_bucket["_parts"]:
-            cash_bucket["code"] = "CASH+MMF"
-            cash_bucket["name"] = "现金及货基(合并)"
-            merged_rows.append(cash_bucket)
-
-        for row in merged_rows:
-            row.pop("_parts", None)
-            mv = float(row.get("market_value") or 0.0)
-            row["weight"] = (mv / total_value) if total_value > 0 else 0.0
-
-        merged_rows.sort(key=lambda x: float(x.get("market_value") or 0.0), reverse=True)
-        return merged_rows[:top_n]
+        return FullReportService.merge_daily_top_holdings(
+            holdings=holdings,
+            total_value=total_value,
+            top_n=top_n,
+        )
 
     def full_report(self, price_timeout: int = 30, snapshot: Optional[Dict[str, Any]] = None, navs: Optional[list] = None) -> Dict[str, Any]:
         """生成完整报告（只读，不记录净值）
@@ -1095,151 +939,12 @@ class PortfolioSkill:
         Args:
             price_timeout: 价格获取超时时间（秒），默认30秒
         """
-        try:
-            snapshot = snapshot or self.build_snapshot()
-            valuation = snapshot["valuation"]
-            holdings_data = snapshot["holdings_data"]
-            position_data = snapshot["position_data"]
-
-            # 一次性获取全部净值历史（1 次 API 调用）
-            all_navs = navs if navs is not None else self.storage.get_nav_history(self.account, days=9999)
-
-            # --- 合成实时虚拟净值 ---
-            # 用统一估值结果 + 最近一次记录的份额，推算当前净值与四个派生指标
-            today = bj_today()
-            live_total = valuation.total_value_cny
-            live_cash = valuation.cash_value_cny
-            live_stock = valuation.stock_value_cny + valuation.fund_value_cny
-
-            working_navs = [n for n in all_navs if n.date < today]
-            synthetic_nav = None
-            if all_navs and live_total > 0:
-                last_nav = all_navs[-1]
-                if last_nav.shares and last_nav.shares > 0:
-                    current_year = str(today.year)
-                    yesterday_nav = self.portfolio._find_latest_nav_before(all_navs, today)
-                    prev_year_end_nav = self.portfolio._find_year_end_nav(all_navs, str(today.year - 1))
-                    prev_month_end_nav = self.portfolio._find_prev_month_end_nav(all_navs, today.year, today.month)
-                    daily_cash_flow = self.portfolio._get_daily_cash_flow(self.account, today)
-                    monthly_cash_flow = self.portfolio._get_monthly_cash_flow(self.account, today.year, today.month)
-                    yearly_cash_flow = self.portfolio._get_yearly_cash_flow(self.account, current_year)
-                    if last_nav and last_nav.date < today:
-                        from datetime import timedelta
-                        gap_start = last_nav.date + timedelta(days=1)
-                        gap_cash_flow = self.portfolio._get_period_cash_flow(self.account, gap_start, today)
-                        base_shares = last_nav.shares or 0
-                        base_nav = last_nav.nav
-                    else:
-                        gap_cash_flow = daily_cash_flow
-                        base_shares = last_nav.shares or 0
-                        base_nav = last_nav.nav
-
-                    synthetic_share_change = (gap_cash_flow / base_nav) if base_nav else 0.0
-                    synthetic_shares = base_shares + synthetic_share_change
-                    synthetic_nav_value = live_total / synthetic_shares if synthetic_shares > 0 else 1.0
-                    synthetic_mtd_nav_change = self.portfolio._calc_mtd_nav_change(synthetic_nav_value, prev_month_end_nav)
-                    synthetic_ytd_nav_change = self.portfolio._calc_ytd_nav_change(synthetic_nav_value, prev_year_end_nav)
-                    synthetic_mtd_pnl = self.portfolio._calc_mtd_pnl(live_total, prev_month_end_nav, monthly_cash_flow)
-                    synthetic_ytd_pnl = self.portfolio._calc_ytd_pnl(live_total, prev_year_end_nav, yearly_cash_flow)
-                    synthetic_daily_pnl = None
-                    if yesterday_nav and yesterday_nav.date and (today - yesterday_nav.date).days == 1:
-                        synthetic_daily_pnl = live_total - yesterday_nav.total_value - gap_cash_flow
-
-                    synthetic_nav = NAVHistory(
-                        date=today,
-                        account=self.account,
-                        total_value=round(live_total, 2),
-                        cash_value=round(live_cash, 2),
-                        stock_value=round(live_stock, 2),
-                        fund_value=round(valuation.fund_value_cny, 2),
-                        cn_stock_value=round(valuation.cn_asset_value, 2),
-                        us_stock_value=round(valuation.us_asset_value, 2),
-                        hk_stock_value=round(valuation.hk_asset_value, 2),
-                        shares=round(synthetic_shares, 2),
-                        nav=round(synthetic_nav_value, 6),
-                        stock_weight=round(live_stock / live_total, 6) if live_total > 0 else 0,
-                        cash_weight=round(live_cash / live_total, 6) if live_total > 0 else 0,
-                        cash_flow=round(daily_cash_flow, 2),
-                        share_change=round(synthetic_share_change, 2),
-                        mtd_nav_change=round(synthetic_mtd_nav_change, 6) if synthetic_mtd_nav_change is not None else None,
-                        ytd_nav_change=round(synthetic_ytd_nav_change, 6) if synthetic_ytd_nav_change is not None else None,
-                        pnl=round(synthetic_daily_pnl, 2) if synthetic_daily_pnl is not None else None,
-                        mtd_pnl=round(synthetic_mtd_pnl, 2) if synthetic_mtd_pnl is not None else None,
-                        ytd_pnl=round(synthetic_ytd_pnl, 2) if synthetic_ytd_pnl is not None else None,
-                        details={"is_synthetic": True},
-                    )
-                    working_navs.append(synthetic_nav)
-
-            # 从 working_navs（含虚拟今日）构建 nav_latest
-            nav_latest = None
-            if working_navs:
-                latest = working_navs[-1]
-                nav_latest = {
-                    "date": latest.date.isoformat(),
-                    "nav": latest.nav,
-                    "shares": latest.shares,
-                    "total_value": latest.total_value,
-                    "stock_value": latest.stock_value,
-                    "cash_value": latest.cash_value,
-                    "stock_weight": latest.stock_weight,
-                    "cash_weight": latest.cash_weight,
-                }
-                # 这些字段仅在已记录的 NAV 中有值（虚拟 NAV 为 None）
-                if latest.mtd_nav_change is not None:
-                    nav_latest["mtd_nav_change"] = latest.mtd_nav_change
-                    nav_latest["ytd_nav_change"] = latest.ytd_nav_change
-                    nav_latest["pnl"] = latest.pnl
-                    nav_latest["mtd_pnl"] = latest.mtd_pnl
-                    nav_latest["ytd_pnl"] = latest.ytd_pnl
-                    nav_latest["cash_flow"] = latest.cash_flow
-                    nav_latest["share_change"] = latest.share_change
-                if latest.details:
-                    nav_latest["details"] = latest.details
-
-            # 计算风险指标（复用 all_navs，不含虚拟净值）
-            hist_volatility, hist_max_dd = self._calc_risk_metrics(all_navs)
-
-            # 获取资产分布（复用持仓数据）
-            distribution_data = self.get_distribution(holdings_data=holdings_data)
-            distribution_result = distribution_data.get("by_type", []) if distribution_data.get("success") else []
-
-            # 计算收益率（使用 working_navs，含虚拟今日净值）
-            current_year = str(today.year)
-            current_month = today.strftime('%Y-%m')
-
-            monthly_return = self._calc_month_return(current_month, _navs=working_navs)
-            yearly_return = self._calc_year_return(current_year, _navs=working_navs)
-            since_inception = self._calc_since_inception_return(_navs=working_navs)
-
-            # 获取 top10 持仓列表（日报口径：同代码跨券商合并 + 现金/货基合并）
-            top_holdings_list = self._merge_daily_top_holdings(
-                holdings=holdings_data.get("holdings", []),
-                total_value=holdings_data.get("total_value", 0) or 0,
-                top_n=10,
-            )
-
-            return {
-                "success": True,
-                "generated_at": bj_now_naive().isoformat(),
-                "overview": {
-                    "total_value": holdings_data.get("total_value", 0),
-                    "cash_ratio": position_data.get("cash_ratio", 0),
-                    "stock_ratio": position_data.get("stock_ratio", 0),
-                    "fund_ratio": position_data.get("fund_ratio", 0)
-                },
-                "nav": nav_latest,
-                "returns": {
-                    "monthly": monthly_return,
-                    "yearly": yearly_return,
-                    "since_inception": since_inception,
-                    "historical_volatility": hist_volatility,
-                    "max_drawdown": hist_max_dd
-                },
-                "top_holdings": top_holdings_list,
-                "distribution": distribution_result
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        return FullReportService(
+            account=self.account,
+            storage=self.storage,
+            portfolio=self.portfolio,
+            read_service=self._read_service(),
+        ).full_report(price_timeout=price_timeout, snapshot=snapshot, navs=navs)
 
     def close_nav(self, date_str: str = None,
                   total_value: float = None,
@@ -1339,7 +1044,8 @@ class PortfolioSkill:
 
     def record_nav(self, price_timeout: int = 30, snapshot: Optional[Dict[str, Any]] = None,
                    overwrite_existing: bool = True, dry_run: bool = True,
-                   confirm: bool = False, use_bulk_persist: bool = False) -> Dict[str, Any]:
+                   confirm: bool = False, use_bulk_persist: bool = False,
+                   run_id: Optional[str] = None) -> Dict[str, Any]:
         """记录今日净值（独立方法，与报告生成解耦）
 
         ⚠️ 安全约束：默认 dry_run=True，避免被日报/调试调用误写入历史。
@@ -1354,6 +1060,8 @@ class PortfolioSkill:
         """
         try:
             snapshot = snapshot or self.build_snapshot()
+            if run_id:
+                snapshot["run_id"] = run_id
             valuation = snapshot["valuation"]
             today = bj_today()
 
@@ -1362,6 +1070,7 @@ class PortfolioSkill:
                     "success": False,
                     "error": "Refuse to write nav_history without confirm=True (safety guard).",
                     "date": today.isoformat(),
+                    "run_id": run_id,
                     "dry_run": dry_run,
                     "confirm": confirm,
                 }
@@ -1374,11 +1083,13 @@ class PortfolioSkill:
                 overwrite_existing=overwrite_existing,
                 dry_run=dry_run,
                 use_bulk_persist=use_bulk_persist,
+                run_id=run_id,
             )
             storage_result = None
             result = {
                 "success": True,
                 "date": today.isoformat(),
+                "run_id": run_id,
                 "nav": nav_record.nav,
                 "total_value": nav_record.total_value,
                 "shares": nav_record.shares,
@@ -1386,6 +1097,8 @@ class PortfolioSkill:
             }
             result["snapshot_time"] = snapshot.get("snapshot_time")
             result["dry_run"] = dry_run
+            if result.get("run_id") is None:
+                result.pop("run_id", None)
             if storage_result is not None:
                 result["storage"] = storage_result
             if valuation.warnings:
@@ -1506,33 +1219,7 @@ class PortfolioSkill:
 
     def _calc_risk_metrics(self, navs) -> tuple:
         """计算风险指标：波动率和最大回撤"""
-        import statistics
-
-        if len(navs) < 2:
-            return 0, 0
-
-        # 过滤无效 nav
-        valid_navs = [n for n in navs if n.nav and n.nav > 0]
-        if len(valid_navs) < 2:
-            return 0, 0
-
-        returns = []
-        for i in range(1, len(valid_navs)):
-            r = (valid_navs[i].nav - valid_navs[i-1].nav) / valid_navs[i-1].nav
-            returns.append(r)
-
-        volatility = statistics.stdev(returns) * (252 ** 0.5) * 100 if len(returns) > 1 else 0
-
-        max_dd = 0
-        peak = valid_navs[0].nav
-        for nav in valid_navs[1:]:
-            if nav.nav > peak:
-                peak = nav.nav
-            dd = (peak - nav.nav) / peak
-            if dd > max_dd:
-                max_dd = dd
-
-        return volatility, max_dd * 100
+        return FullReportService.calc_risk_metrics(navs)
 
     # ---------- 价格查询 ----------
 
@@ -1891,7 +1578,8 @@ def multi_account_overview(accounts: Any = None, price_timeout: int = 30,
         return {"success": False, "error": str(e)}
 
 def record_nav(price_timeout: int = 30, dry_run: bool = True, confirm: bool = False,
-               overwrite_existing: bool = True, use_bulk_persist: bool = False, account: str = None) -> Dict:
+               overwrite_existing: bool = True, use_bulk_persist: bool = False,
+               account: str = None, run_id: Optional[str] = None) -> Dict:
     """记录今日净值
 
     ⚠️ 默认 dry_run=True，避免误写入。
@@ -1903,6 +1591,7 @@ def record_nav(price_timeout: int = 30, dry_run: bool = True, confirm: bool = Fa
         confirm=confirm,
         overwrite_existing=overwrite_existing,
         use_bulk_persist=use_bulk_persist,
+        run_id=run_id,
     )
 
 

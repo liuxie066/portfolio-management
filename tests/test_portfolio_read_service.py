@@ -65,6 +65,32 @@ def test_get_holdings_with_price_reuses_snapshot_contract():
     assert [h["code"] for h in result["by_market"]["富途"]] == ["AAPL"]
 
 
+def test_build_snapshot_passes_price_timeout_to_valuation():
+    valuation = SimpleNamespace(
+        holdings=[],
+        total_value_cny=0,
+        cash_value_cny=0,
+        stock_value_cny=0,
+        fund_value_cny=0,
+        cash_ratio=0,
+        stock_ratio=0,
+        fund_ratio=0,
+        warnings=[],
+    )
+    portfolio = SimpleNamespace(calculate_valuation=Mock(return_value=valuation))
+    service = PortfolioReadService(
+        account="lx",
+        storage=Mock(),
+        portfolio=portfolio,
+        reporting_service=Mock(),
+    )
+
+    result = service.build_snapshot(price_timeout_seconds=9)
+
+    assert result["valuation"] is valuation
+    portfolio.calculate_valuation.assert_called_once_with("lx", price_timeout_seconds=9)
+
+
 def test_get_holdings_without_price_keeps_light_storage_read():
     portfolio = SimpleNamespace(calculate_valuation=Mock())
     storage = SimpleNamespace(

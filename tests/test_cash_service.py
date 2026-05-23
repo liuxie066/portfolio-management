@@ -121,3 +121,47 @@ def test_cash_service_sync_cash_like_balance_dry_run_does_not_write():
     assert result["delta"] == 20.0
     storage.update_holding_quantity.assert_not_called()
     storage.upsert_holding.assert_not_called()
+
+
+def test_cash_service_get_cash_formats_cash_and_mmf_holdings():
+    storage = Mock()
+    storage.get_holdings.return_value = [
+        Holding(
+            asset_id="CNY-CASH",
+            asset_name="人民币现金",
+            asset_type=AssetType.CASH,
+            account="a",
+            quantity=100.0,
+            currency="CNY",
+        ),
+        Holding(
+            asset_id="CNY-MMF",
+            asset_name="货币基金",
+            asset_type=AssetType.MMF,
+            account="a",
+            quantity=50.0,
+            currency="CNY",
+        ),
+        Holding(
+            asset_id="AAPL",
+            asset_name="Apple",
+            asset_type=AssetType.US_STOCK,
+            account="a",
+            quantity=1.0,
+            currency="USD",
+        ),
+    ]
+    service = CashService(storage)
+
+    result = service.get_cash("a")
+
+    assert result == {
+        "success": True,
+        "by_currency": {"CNY": 150.0},
+        "items": [
+            {"code": "CNY-CASH", "name": "人民币现金", "amount": 100.0, "currency": "CNY", "type": "cash"},
+            {"code": "CNY-MMF", "name": "货币基金", "amount": 50.0, "currency": "CNY", "type": "mmf"},
+        ],
+        "count": 2,
+    }
+    storage.get_holdings.assert_called_once_with(account="a")
