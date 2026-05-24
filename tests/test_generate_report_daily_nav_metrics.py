@@ -58,6 +58,70 @@ class TestGenerateReportDailyNavMetrics(unittest.TestCase):
         self.assertEqual(result['mtd_pnl'], 12.3)
         self.assertEqual(result['ytd_pnl'], 45.6)
 
+    def test_generate_report_returns_record_nav_failure_when_requested(self):
+        skill = PortfolioSkill.__new__(PortfolioSkill)
+        snapshot = {'snapshot_time': '2026-03-29T08:00:00'}
+        skill.full_report = Mock(return_value={
+            'success': True,
+            'overview': {},
+            'nav': {},
+            'returns': {},
+            'top_holdings': [],
+        })
+        skill.record_nav = Mock(return_value={
+            'success': False,
+            'error': 'NAV 写入拒绝：估值存在阻断性告警',
+        })
+
+        result = skill.generate_report(report_type='daily', record_nav=True, snapshot=snapshot, navs=[])
+
+        self.assertFalse(result['success'])
+        self.assertIn('NAV 写入拒绝', result['error'])
+
+    def test_generate_report_daily_uses_nav_override_for_recorded_nav(self):
+        skill = PortfolioSkill.__new__(PortfolioSkill)
+        snapshot = {
+            'snapshot_time': '2026-03-29T08:00:00',
+            'overview': {},
+        }
+
+        skill.full_report = Mock(return_value={
+            'success': True,
+            'overview': {'total_value': 1000.0},
+            'nav': {
+                'date': '2026-03-29',
+                'nav': 9.999999,
+                'total_value': 9999.0,
+                'pnl': 999.0,
+                'details': {'is_synthetic': True},
+            },
+            'returns': {},
+            'top_holdings': [],
+            'warnings': [],
+        })
+
+        result = skill.generate_report(
+            report_type='daily',
+            snapshot=snapshot,
+            navs=[],
+            nav_override={
+                'date': '2026-03-29',
+                'nav': 1.234567,
+                'total_value': 1000.0,
+                'cash_flow': 10.0,
+                'pnl': 5.0,
+                'mtd_nav_change': 0.0123,
+                'details': {'cagr_pct': 8.88},
+            },
+        )
+
+        self.assertTrue(result['success'])
+        self.assertEqual(result['nav'], 1.234567)
+        self.assertEqual(result['total_value'], 1000.0)
+        self.assertEqual(result['pnl'], 5.0)
+        self.assertEqual(result['mtd_nav_change'], 0.0123)
+        self.assertEqual(result['cagr_pct'], 8.88)
+
 
 if __name__ == '__main__':
     unittest.main()

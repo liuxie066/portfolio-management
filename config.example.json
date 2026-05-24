@@ -2,9 +2,6 @@
   "account": "lx",
   "initial_value": 0,
   "start_year": 2024,
-  "storage": {
-    "backend": "auto"
-  },
   "nav": {
     "disable_runtime_validation": false
   },
@@ -17,7 +14,6 @@
     "account_label": "lx",
     "reports_dir": "reports",
     "publish_root": "../prototypes",
-    "publish_base_url": "",
     "sync_futu_cash_mmf": false,
     "sync_futu_dry_run": true,
     "disable_nav_runtime_validation": false

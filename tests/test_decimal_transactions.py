@@ -29,8 +29,8 @@ def test_buy_uses_decimal_quantized_total_cost(mock_get_name):
         quantity=1,
         currency='CNY',
     )
-    manager._has_sufficient_cash = Mock(return_value=True)
-    manager._deduct_cash = Mock(return_value=True)
+    manager.cash_service.has_sufficient_cash = Mock(return_value=True)
+    manager.cash_service.deduct_cash = Mock(return_value=True)
 
     manager.buy(
         tx_date=date(2025, 3, 14),
@@ -45,8 +45,8 @@ def test_buy_uses_decimal_quantized_total_cost(mock_get_name):
         auto_deduct_cash=True,
     )
 
-    manager._has_sufficient_cash.assert_called_once_with('测试账户', 1.02)
-    manager._deduct_cash.assert_called_once_with('测试账户', 1.02)
+    manager.cash_service.has_sufficient_cash.assert_called_once_with('测试账户', 1.02)
+    manager.cash_service.deduct_cash.assert_called_once_with('测试账户', 1.02)
 
 
 def test_sell_uses_decimal_quantized_proceeds():
@@ -62,7 +62,7 @@ def test_sell_uses_decimal_quantized_proceeds():
         currency='CNY',
     )
     storage.add_transaction.return_value = Mock()
-    manager._add_cash = Mock()
+    manager.cash_service.add_cash = Mock()
 
     manager.sell(
         tx_date=date(2025, 3, 14),
@@ -75,4 +75,4 @@ def test_sell_uses_decimal_quantized_proceeds():
         auto_add_cash=True,
     )
 
-    manager._add_cash.assert_called_once_with('测试账户', 1.0)
+    manager.cash_service.add_cash.assert_called_once_with('测试账户', 1.0)

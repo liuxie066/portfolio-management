@@ -17,13 +17,13 @@
 Runtime ownership is now split as:
 
 - `src/pricing/service.py`: public structured quote entry (`fetch_quote`, `fetch_batch`) and diagnostics.
-- `src/pricing/batch.py`: optimized batch planner used by `PriceService.fetch_batch()` and the legacy facade.
+- `src/pricing/batch.py`: optimized batch planner used by `PriceService.fetch_batch()` and the `PriceFetcher` facade.
 - `src/pricing/providers/tencent_batch.py`: Tencent batch implementation for CN/HK/exchange funds/open-end fund NAV.
 - `src/pricing/providers/us_batch.py`: fast US batch implementation with Finnhub/Yahoo Chart and stale fallback.
 - `src/pricing/cache.py`: cache hit, stale fallback, TTL, and cache writes.
 - `src/pricing/fixed.py`: fixed-price cash/MMF quote construction.
 - `src/pricing/fx.py`: USD/HKD exchange-rate cache and multi-source fallback.
-- `src/price_fetcher.py`: compatibility facade for existing callers.
+- `src/price_fetcher.py`: facade for existing `fetch`/`fetch_batch` callers; provider/classifier adapters live under `src/pricing/`.
 
 ## TTL
 

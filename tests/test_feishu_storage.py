@@ -7,7 +7,7 @@ import json
 from src.feishu_storage import FeishuStorage
 from src.models import (
     Holding, Transaction, CashFlow, NAVHistory, PriceCache,
-    AssetType, TransactionType, AssetClass, Industry
+    AssetType, TransactionType, AssetClass, Industry, make_cf_dedup_key
 )
 
 
@@ -513,7 +513,7 @@ class TestFeishuStorageTransactionOperations:
 
     def test_get_transaction(self):
         """测试获取单条交易记录"""
-        self.mock_client.get_record.return_value = {
+        self.mock_client.get_record_strict.return_value = {
             'record_id': 'tx_rec',
             'fields': {
                 'asset_id': '000001',
@@ -533,7 +533,7 @@ class TestFeishuStorageTransactionOperations:
 
     def test_get_transaction_not_found(self):
         """测试交易记录不存在"""
-        self.mock_client.get_record.return_value = None
+        self.mock_client.get_record_strict.side_effect = Exception('not found')
 
         result = self.storage.get_transaction('non_existent')
 
@@ -645,7 +645,7 @@ class TestFeishuStorageCashFlowOperations:
 
     def test_get_cash_flow(self):
         """测试获取单条出入金记录"""
-        self.mock_client.get_record.return_value = {
+        self.mock_client.get_record_strict.return_value = {
             'record_id': 'cf_rec',
             'fields': {
                 'flow_date': '2025-03-14',
@@ -702,6 +702,23 @@ class TestFeishuStorageCashFlowOperations:
 
         assert total == 120000.0  # 100000 - 30000 + 50000
 
+    def test_preload_cash_flow_aggs_rejects_foreign_without_cny_amount(self):
+        """外币现金流未补人民币金额时，聚合不能静默按原币金额计算。"""
+        self.mock_client.list_records.return_value = [
+            {
+                'record_id': 'cf_usd',
+                'fields': {
+                    'flow_date': '2025-03-14',
+                    'account': '测试账户',
+                    'amount': '10',
+                    'currency': 'USD',
+                },
+            }
+        ]
+
+        with pytest.raises(ValueError, match='pm cash-flow reconcile'):
+            self.storage.preload_cash_flow_aggs('测试账户', force_refresh=True)
+
     def test_delete_cash_flow_by_record_id(self):
         """测试通过记录ID删除出入金"""
         self.mock_client.delete_record.return_value = True
@@ -709,6 +726,165 @@ class TestFeishuStorageCashFlowOperations:
         result = self.storage.delete_cash_flow_by_record_id('cf_rec')
 
         assert result == True
+
+    def test_reconcile_cash_flows_dry_run_fills_manual_cny_row(self):
+        """手工现金流只填人工字段时，reconcile dry-run 应补齐系统字段预览。"""
+        self.mock_client.list_records.return_value = [
+            {
+                'record_id': 'cf_1',
+                'fields': {
+                    'flow_date': '2025-03-14',
+                    'account': '测试账户',
+                    'amount': '100000',
+                    'currency': 'CNY',
+                    'remark': 'manual row',
+                },
+            }
+        ]
+
+        result = self.storage.reconcile_cash_flows(account='测试账户', dry_run=True)
+
+        expected_key = make_cf_dedup_key(CashFlow(
+            flow_date=date(2025, 3, 14),
+            account='测试账户',
+            amount=100000,
+            currency='CNY',
+            cny_amount=100000,
+            exchange_rate=1,
+            flow_type='DEPOSIT',
+            source='manual',
+            remark='manual row',
+        ))
+        assert result['success'] is True
+        assert result['dry_run'] is True
+        assert result['change_count'] == 1
+        assert result['updated_count'] == 0
+        assert result['rows'][0]['updates'] == {
+            'flow_type': 'DEPOSIT',
+            'exchange_rate': 1.0,
+            'cny_amount': 100000.0,
+            'dedup_key': expected_key,
+            'source': 'manual',
+        }
+        self.mock_client.batch_update_records.assert_not_called()
+        self.mock_client.list_records.assert_called_once()
+        assert self.mock_client.list_records.call_args.kwargs['field_names'] == self.storage.CASH_FLOW_RECONCILE_FIELDS
+
+    def test_reconcile_cash_flows_falls_back_when_updated_at_missing(self):
+        """live cash_flow 表没有 updated_at 时，reconcile 应降级投影字段继续读。"""
+        self.mock_client.list_records.side_effect = [
+            Exception('FieldNameNotFound'),
+            [
+                {
+                    'record_id': 'cf_1',
+                    'fields': {
+                        'flow_date': '2025-03-14',
+                        'account': '测试账户',
+                        'amount': '100000',
+                        'currency': 'CNY',
+                    },
+                }
+            ],
+        ]
+
+        result = self.storage.reconcile_cash_flows(account='测试账户', dry_run=True)
+
+        assert result['change_count'] == 1
+        assert self.mock_client.list_records.call_count == 2
+        fallback_fields = self.mock_client.list_records.call_args.kwargs['field_names']
+        assert 'updated_at' not in fallback_fields
+
+    def test_reconcile_cash_flows_uses_fx_rates_for_foreign_manual_row(self):
+        """外币手工现金流缺人民币金额时，用注入汇率补齐。"""
+        self.mock_client.list_records.return_value = [
+            {
+                'record_id': 'cf_usd',
+                'fields': {
+                    'flow_date': '2025-03-14',
+                    'account': '测试账户',
+                    'amount': '10',
+                    'currency': 'USD',
+                },
+            }
+        ]
+
+        result = self.storage.reconcile_cash_flows(
+            account='测试账户',
+            dry_run=True,
+            fx_rates={'USDCNY': 7.2},
+        )
+
+        updates = result['rows'][0]['updates']
+        assert updates['exchange_rate'] == 7.2
+        assert updates['cny_amount'] == 72.0
+        assert updates['flow_type'] == 'DEPOSIT'
+
+    def test_reconcile_cash_flows_recomputes_system_fields_after_manual_amount_edit(self):
+        """已补齐行被手工改 amount 后，reconcile 应保留汇率并重算系统字段。"""
+        stale_key = make_cf_dedup_key(CashFlow(
+            flow_date=date(2025, 3, 14),
+            account='测试账户',
+            amount=5,
+            currency='USD',
+            cny_amount=36,
+            exchange_rate=7.2,
+            flow_type='DEPOSIT',
+        ))
+        self.mock_client.list_records.return_value = [
+            {
+                'record_id': 'cf_usd',
+                'fields': {
+                    'flow_date': '2025-03-14',
+                    'account': '测试账户',
+                    'amount': '10',
+                    'currency': 'USD',
+                    'exchange_rate': '7.2',
+                    'cny_amount': '36',
+                    'flow_type': 'WITHDRAW',
+                    'dedup_key': stale_key,
+                    'source': 'manual',
+                },
+            }
+        ]
+
+        result = self.storage.reconcile_cash_flows(account='测试账户', dry_run=True)
+
+        updates = result['rows'][0]['updates']
+        assert updates['flow_type'] == 'DEPOSIT'
+        assert updates['cny_amount'] == 72.0
+        assert updates['dedup_key'] != stale_key
+        assert 'exchange_rate' not in updates
+
+    def test_reconcile_cash_flows_apply_updates_and_invalidates_cache(self):
+        """apply 写回飞书后，应失效现金流聚合缓存，避免净值继续读旧值。"""
+        self.mock_client.list_records.return_value = [
+            {
+                'record_id': 'cf_1',
+                'fields': {
+                    'flow_date': '2025-03-14',
+                    'account': '测试账户',
+                    'amount': '-100',
+                    'currency': 'CNY',
+                },
+            }
+        ]
+        self.mock_client.batch_update_records.return_value = []
+        self.storage._cash_flow_agg_loaded_accounts.add('测试账户')
+        self.storage._cash_flow_agg_mem_cache['测试账户'] = {'cumulative': 1.0}
+        self.storage._local_cash_flow_agg_cache.set_account('测试账户', {'cumulative': 1.0}, _flush=True)
+
+        result = self.storage.reconcile_cash_flows(account='测试账户', dry_run=False)
+
+        assert result['updated_count'] == 1
+        self.mock_client.batch_update_records.assert_called_once()
+        table, payload = self.mock_client.batch_update_records.call_args.args
+        assert table == 'cash_flow'
+        assert payload[0]['record_id'] == 'cf_1'
+        assert payload[0]['fields']['flow_type'] == 'WITHDRAW'
+        assert payload[0]['fields']['cny_amount'] == -100.0
+        assert '测试账户' not in self.storage._cash_flow_agg_loaded_accounts
+        assert '测试账户' not in self.storage._cash_flow_agg_mem_cache
+        assert self.storage._local_cash_flow_agg_cache.get_account('测试账户') == {}
 
 
 class TestFeishuStorageNAVOperations:
@@ -718,8 +894,8 @@ class TestFeishuStorageNAVOperations:
         self.mock_client = Mock()
         self.storage = FeishuStorage(client=self.mock_client)
 
-    def test_save_nav_create(self):
-        """测试保存新净值记录"""
+    def test_write_nav_record_create(self):
+        """测试写入新净值记录"""
         self.mock_client.list_records.return_value = []  # 不存在
         self.mock_client.create_record.return_value = {
             'record_id': 'nav_rec_123',
@@ -741,7 +917,7 @@ class TestFeishuStorageNAVOperations:
         assert nav.record_id == 'nav_rec_123'
         self.mock_client.create_record.assert_called_once()
 
-    def test_save_nav_update(self):
+    def test_write_nav_record_update(self):
         """测试更新现有净值记录"""
         self.mock_client.list_records.return_value = [{
             'record_id': 'existing_nav',

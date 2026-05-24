@@ -12,19 +12,12 @@
 import requests
 import time
 import random
-from typing import Dict, Optional, List, Tuple, Any
+from typing import Dict, Optional, List, Any
 
-from .market_time import MarketTimeUtil  # re-exported for legacy tests/callers
 from .pricing import PriceRequest, PriceService
-from .pricing.cache import market_type_from_asset_type as _market_type_from_asset_type
-from .pricing.cache import price_cache_to_payload
-from .pricing.fixed import get_cash_price, get_cash_price_with_rates, get_mmf_price
 from .pricing.fx import FxRateService
 from .pricing.classifier import (
-    get_exchange_prefix,
     get_type_hints_from_name,
-    is_etf,
-    is_otc_fund,
     normalize_code_with_name,
 )
 from .pricing.payload import (
@@ -111,7 +104,7 @@ class PriceFetcher:
         self.fx_service = FxRateService(self.session)
         # last-batch meta for observability
         self._last_tencent_batch_meta = None
-        self.price_service = PriceService.for_legacy_fetcher(self)
+        self.price_service = PriceService.for_price_fetcher(self)
         self._last_price_service_diagnostics = []
 
     def fetch(
@@ -187,50 +180,6 @@ class PriceFetcher:
             use_cache_only=use_cache_only,
         ).payloads()
 
-    def _fetch_concurrent(self, codes: List[str], name_map: Dict[str, str],
-                          max_workers: int = 5, _nested: bool = False,
-                          asset_type_map: Dict[str, Any] = None) -> Dict[str, Dict]:
-        """Compatibility adapter for non-US batch quotes."""
-        from .pricing.batch import BatchPricePlanner
-
-        return BatchPricePlanner(self).fetch_non_us(
-            codes,
-            name_map,
-            max_workers=max_workers,
-            _nested=_nested,
-            asset_type_map=asset_type_map,
-        )
-
-    def _fetch_tencent_quotes_batch(
-        self,
-        codes: List[str],
-        name_map: Dict[str, str] = None,
-        asset_type_map: Dict[str, Any] = None,
-    ) -> Tuple[Dict[str, Dict], List[str]]:
-        """Compatibility adapter for Tencent batch quotes."""
-        from .pricing.providers.tencent_batch import fetch_tencent_quotes_batch
-
-        return fetch_tencent_quotes_batch(self, codes, name_map=name_map, asset_type_map=asset_type_map)
-
-    def _fetch_us_batch(self, codes: List[str], name_map: Dict[str, str],
-                        expired_cache: Dict[str, Dict], max_workers: int = 3,
-                        _nested: bool = False) -> Dict[str, Dict]:
-        """Compatibility adapter for fast US batch quotes."""
-        from .pricing.providers.us_batch import fetch_us_batch
-
-        return fetch_us_batch(
-            self,
-            codes,
-            name_map,
-            expired_cache,
-            max_workers=max_workers,
-            _nested=_nested,
-        )
-
-    def _price_cache_to_dict(self, cached) -> Dict:
-        """将PriceCache对象转为字典"""
-        return price_cache_to_payload(cached)
-
     def _retry_with_backoff(self, func, max_retries: int = 3, base_delay: float = 1.0):
         """带指数退避的重试机制
 
@@ -276,25 +225,13 @@ class PriceFetcher:
 
         raise last_exception
 
-    def _get_cash_price_with_rates(self, code: str, rates: Dict[str, float]) -> Dict:
-        """获取现金价格（使用外部传入的汇率，避免重复请求）"""
-        return get_cash_price_with_rates(code, rates)
-
-    def _get_cash_price(self, code: str) -> Dict:
-        """获取现金价格"""
-        return get_cash_price(code, self._fetch_exchange_rates)
-
-    def _get_mmf_price(self, code: str) -> Dict:
-        """获取货币基金价格"""
-        return get_mmf_price(code)
-
     def _fetch_realtime(self, code: str, asset_name: str, asset_type: Any = None) -> Optional[Dict]:
         """获取实时价格 (内部方法)"""
         # 根据名称辅助判断类型
-        name_hints = self._get_type_hints_from_name(asset_name)
+        name_hints = get_type_hints_from_name(asset_name)
 
         # 根据名称辅助判断并补全代码前缀
-        normalized_code = self._normalize_code_with_name(code, asset_name)
+        normalized_code = normalize_code_with_name(code, asset_name)
         request = PriceRequest(
             code=code,
             asset_name=asset_name or "",
@@ -305,39 +242,6 @@ class PriceFetcher:
         result = self.price_service.fetch_realtime(request)
         self._last_price_service_diagnostics = list(self.price_service.last_diagnostics)
         return result
-
-    def _normalize_code_with_name(self, code: str, name: str) -> str:
-        """根据资产名称给代码添加交易所前缀"""
-        return normalize_code_with_name(code, name)
-
-    def _get_type_hints_from_name(self, name: str) -> Dict:
-        """从资产名称中提取类型提示"""
-        return get_type_hints_from_name(name)
-
-    def _is_etf(self, code: str) -> bool:
-        """检测是否为ETF/场内基金"""
-        return is_etf(code)
-
-    def _is_otc_fund(self, code: str) -> bool:
-        """检测是否为场外基金代码
-
-        注意: 000/002/003 开头的代码与A股重叠（如 000001 既是平安银行也是华夏成长），
-        无法仅凭代码区分。此方法仅识别不含歧义的场外基金代码。
-        歧义代码需依赖 name_hints 在 _fetch_realtime 中判断。
-        """
-        return is_otc_fund(code)
-
-    def _get_exchange_prefix(self, code: str) -> str:
-        """获取交易所前缀"""
-        return get_exchange_prefix(code)
-
-    def _load_rate_cache_from_file(self) -> Optional[Dict]:
-        """从 JSON 文件加载汇率缓存"""
-        return self.fx_service.load_cache_from_file()
-
-    def _save_rate_cache_to_file(self, rates: Dict[str, float]):
-        """保存汇率缓存到 JSON 文件"""
-        self.fx_service.save_cache_to_file(rates)
 
     def _fetch_exchange_rates(self, max_retries: int = 3) -> Dict[str, float]:
         """获取汇率 (带24小时缓存，并发请求+重试机制)
@@ -350,71 +254,3 @@ class PriceFetcher:
             完全没有缓存时抛出 RuntimeError。
         """
         return self.fx_service.fetch_exchange_rates(max_retries=max_retries)
-
-    # ========== Provider compatibility adapters ==========
-
-    def _fetch_a_stock(self, code: str) -> Optional[Dict]:
-        """兼容旧调用：A 股实时价格实现已迁移到 CNStockProvider。"""
-        from .pricing.providers.cn import CNStockProvider
-
-        return CNStockProvider(self).fetch_a_stock(code)
-
-    def _fetch_a_stock_from_tencent(self, code: str) -> Optional[Dict]:
-        """兼容旧调用：腾讯 A 股源已迁移到 CNStockProvider。"""
-        from .pricing.providers.cn import CNStockProvider
-
-        return CNStockProvider(self).fetch_from_tencent(code)
-
-    def _fetch_hk_stock(self, code: str) -> Optional[Dict]:
-        """兼容旧调用：港股实时价格实现已迁移到 HKStockProvider。"""
-        from .pricing.providers.hk import HKStockProvider
-
-        return HKStockProvider(self).fetch_hk_stock(code)
-
-    def _fetch_hk_stock_from_tencent(self, code: str) -> Optional[Dict]:
-        """兼容旧调用：腾讯港股源已迁移到 HKStockProvider。"""
-        from .pricing.providers.hk import HKStockProvider
-
-        return HKStockProvider(self).fetch_from_tencent(code)
-
-    def _fetch_us_stock(self, code: str) -> Optional[Dict]:
-        """兼容旧调用：美股实时价格实现已迁移到 USStockProvider。"""
-        from .pricing.providers.us import USStockProvider
-
-        return USStockProvider(self).fetch_us_stock(code)
-
-    def _fetch_us_stock_finnhub(self, code: str, api_key: str) -> Optional[Dict]:
-        """兼容旧调用：Finnhub 源已迁移到 USStockProvider。"""
-        from .pricing.providers.us import USStockProvider
-
-        return USStockProvider(self).fetch_finnhub(code, api_key)
-
-    def _fetch_us_stock_yahoo_chart(self, code: str) -> Optional[Dict]:
-        """兼容旧调用：Yahoo Chart 源已迁移到 USStockProvider。"""
-        from .pricing.providers.us import USStockProvider
-
-        return USStockProvider(self).fetch_yahoo_chart(code)
-
-    def _fetch_etf(self, code: str) -> Optional[Dict]:
-        """兼容旧调用：ETF 实时价格实现已迁移到 ETFProvider。"""
-        from .pricing.providers.etf import ETFProvider
-
-        return ETFProvider(self).fetch_etf(code)
-
-    def _fetch_fund(self, code: str) -> Optional[Dict]:
-        """兼容旧调用：场外基金净值实现已迁移到 FundProvider。"""
-        from .pricing.providers.fund import FundProvider
-
-        return FundProvider(self).fetch_fund(code)
-
-    def _fetch_fund_from_tencent(self, code: str) -> Optional[Dict]:
-        """兼容旧调用：腾讯基金源已迁移到 FundProvider。"""
-        from .pricing.providers.fund import FundProvider
-
-        return FundProvider(self).fetch_from_tencent(code)
-
-    def _fetch_fund_from_eastmoney(self, code: str) -> Optional[Dict]:
-        """兼容旧调用：东方财富基金源已迁移到 FundProvider。"""
-        from .pricing.providers.fund import FundProvider
-
-        return FundProvider(self).fetch_from_eastmoney(code)

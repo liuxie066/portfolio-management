@@ -324,7 +324,9 @@ def test_pm_nav_record_write_requires_confirm():
 
 def test_pm_daily_runs_nav_record_and_distribution():
     calls = []
-    fake_skill_api = types.SimpleNamespace(
+    snapshot = {"valuation": object(), "holdings_data": {"total_value": 123.45}}
+    fake_skill = types.SimpleNamespace(
+        build_snapshot=lambda **kwargs: calls.append(("build_snapshot", kwargs)) or snapshot,
         record_nav=lambda **kwargs: calls.append(("record_nav", kwargs)) or {
             "success": True,
             "date": "2026-05-23",
@@ -339,6 +341,9 @@ def test_pm_daily_runs_nav_record_and_distribution():
             "by_type": [{"type": "stock", "value": 100, "ratio": 0.81}],
         },
     )
+    fake_skill_api = types.SimpleNamespace(
+        get_skill=lambda account=None: calls.append(("get_skill", account)) or fake_skill,
+    )
     stdout = io.StringIO()
     with _SysModulesPatch("skill_api", fake_skill_api), redirect_stdout(stdout):
         assert pm.main(["daily", "--account", "alice", "--timeout", "8", "--no-service", "--json"]) == 0
@@ -351,15 +356,18 @@ def test_pm_daily_runs_nav_record_and_distribution():
     assert out["nav"]["nav"] == 1.2345
     assert out["distribution"]["by_type"][0]["type"] == "stock"
     assert calls == [
+        ("get_skill", "alice"),
+        ("build_snapshot", {"price_timeout_seconds": 8}),
         ("record_nav", {
             "price_timeout": 8,
             "dry_run": True,
             "confirm": False,
             "overwrite_existing": True,
             "use_bulk_persist": False,
-            "account": "alice",
+            "snapshot": snapshot,
+            "run_id": None,
         }),
-        ("get_distribution", {"account": "alice"}),
+        ("get_distribution", {"holdings_data": snapshot}),
     ]
 
 
@@ -373,9 +381,13 @@ def test_pm_daily_write_requires_confirm():
 
 
 def test_pm_daily_failure_payload_returns_nonzero_exit_code():
+    snapshot = {"valuation": object(), "holdings_data": {}}
     fake_skill_api = types.SimpleNamespace(
-        record_nav=lambda **_kwargs: {"success": False, "error": "nav failed"},
-        get_distribution=lambda **_kwargs: {"success": True, "total_value": 1},
+        get_skill=lambda account=None: types.SimpleNamespace(
+            build_snapshot=lambda **_kwargs: snapshot,
+            record_nav=lambda **_kwargs: {"success": False, "error": "nav failed"},
+            get_distribution=lambda **_kwargs: (_ for _ in ()).throw(AssertionError("distribution should not run")),
+        ),
     )
     stdout = io.StringIO()
     with _SysModulesPatch("skill_api", fake_skill_api), redirect_stdout(stdout):
@@ -474,13 +486,14 @@ def test_pm_daily_prefers_service_for_nav_and_distribution():
         def __init__(self, base_url=None, timeout=0.5):
             calls.append(("init", base_url, timeout))
 
-        def record_nav(self, **kwargs):
-            calls.append(("record_nav", kwargs))
-            return {"success": True, "nav": 1.23, "dry_run": kwargs["dry_run"]}
-
-        def get_distribution(self, **kwargs):
-            calls.append(("get_distribution", kwargs))
-            return {"success": True, "total_value": 10}
+        def daily_report_bundle(self, **kwargs):
+            calls.append(("daily_report_bundle", kwargs))
+            return {
+                "success": True,
+                "run_id": kwargs["run_id"],
+                "nav_result": {"success": True, "nav": 1.23, "dry_run": kwargs["dry_run"], "run_id": kwargs["run_id"]},
+                "distribution": {"success": True, "total_value": 10},
+            }
 
     old_client = client_module.PortfolioServiceClient
     try:
@@ -497,7 +510,7 @@ def test_pm_daily_prefers_service_for_nav_and_distribution():
     assert out["run_id"] == "run-daily-1"
     assert calls == [
         ("init", "http://local", 0.5),
-        ("record_nav", {
+        ("daily_report_bundle", {
             "account": "alice",
             "price_timeout": 8,
             "dry_run": True,
@@ -506,5 +519,4 @@ def test_pm_daily_prefers_service_for_nav_and_distribution():
             "use_bulk_persist": False,
             "run_id": "run-daily-1",
         }),
-        ("get_distribution", {"account": "alice"}),
     ]

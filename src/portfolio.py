@@ -105,12 +105,11 @@ class PortfolioManager:
 
     # ========== 交易处理 ==========
 
-    def _get_asset_name(self, asset_id: str, asset_type: AssetType, user_provided_name: str = None, timeout: float = 5.0) -> str:
+    def _get_asset_name(self, asset_id: str, user_provided_name: str = None, timeout: float = 5.0) -> str:
         """根据代码获取资产完整名称
 
         Args:
             asset_id: 资产代码
-            asset_type: 资产类型
             user_provided_name: 用户提供的名称（作为备选）
             timeout: 超时时间（秒），默认5秒
 
@@ -119,7 +118,6 @@ class PortfolioManager:
         """
         return self.asset_name_service.get_asset_name(
             asset_id=asset_id,
-            asset_type=asset_type,
             user_provided_name=user_provided_name,
             timeout=timeout,
         )
@@ -203,37 +201,6 @@ class PortfolioManager:
             remark=remark,
         )
 
-    def _update_cash_holding(self, account: str, amount: float, currency: str, cny_amount: float):
-        """更新现金持仓（旧版方法，保持兼容）"""
-        return self.cash_service.update_cash_holding(account, amount, currency, cny_amount)
-
-    def _get_cash_like_holdings(self, account: str):
-        """一次性获取人民币现金与货币基金持仓，供现金校验/扣减复用。"""
-        return self.cash_service.get_cash_like_holdings(account)
-
-    def _deduct_cash(self, account: str, amount: float) -> bool:
-        """
-        扣减现金
-        逻辑：先扣 CASH_ASSET_ID，不足部分扣 MMF_ASSET_ID
-        返回：是否成功
-        """
-        return self.cash_service.deduct_cash(account, amount)
-
-    def _has_sufficient_cash(self, account: str, amount: float) -> bool:
-        """
-        检查现金是否充足（仅检查，不扣减）
-        逻辑：先检查 CASH_ASSET_ID，再检查 MMF_ASSET_ID
-        返回：是否充足
-        """
-        return self.cash_service.has_sufficient_cash(account, amount)
-
-    def _add_cash(self, account: str, amount: float) -> bool:
-        """
-        增加现金到 CNY-CASH
-        返回：是否成功
-        """
-        return self.cash_service.add_cash(account, amount)
-
     # ========== 估值计算 ==========
 
     def calculate_valuation(self, account: str, fetch_prices: bool = True, price_timeout_seconds: int = 25,
@@ -283,7 +250,7 @@ class PortfolioManager:
 
     @classmethod
     def _calc_period_return(cls, current_value: float, base_value: Optional[float]) -> float:
-        """计算通用区间收益率；内部用 Decimal，返回 float 兼容旧接口。"""
+        """计算通用区间收益率；内部用 Decimal，返回 float。"""
         return NavCalculator.calc_period_return(current_value, base_value)
 
     @classmethod
@@ -469,7 +436,7 @@ class PortfolioManager:
 
     @classmethod
     def _sum_cash_flows(cls, flows) -> float:
-        """汇总 cash_flow 列表的人民币金额；内部用 Decimal，输出 float 兼容。"""
+        """汇总 cash_flow 列表的人民币金额；内部用 Decimal，输出 float。"""
         return CashFlowSummaryService.sum_cash_flows(flows)
 
     def _summarize_cash_flows(self, account: str, today: date, start_year: int, last_nav=None) -> dict:

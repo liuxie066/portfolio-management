@@ -255,6 +255,10 @@ class AccountService:
                 result["discovery"] = discovery
             if errors:
                 result["errors"] = errors
+                if not success:
+                    result["error"] = "; ".join(
+                        f"{item['account']}: {item['error']}" for item in errors
+                    )
             return result
         except Exception as e:
             return {"success": False, "error": str(e)}

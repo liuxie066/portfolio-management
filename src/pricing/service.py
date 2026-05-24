@@ -15,13 +15,13 @@ from .types import PriceRequest
 class PriceService:
     """Coordinate providers, cache policy, and quote diagnostics."""
 
-    def __init__(self, providers: Iterable[PriceProvider], *, legacy_fetcher: Any = None):
+    def __init__(self, providers: Iterable[PriceProvider], *, fetcher_context: Any = None):
         self.providers: List[PriceProvider] = list(providers)
-        self.legacy_fetcher = legacy_fetcher
+        self.fetcher_context = fetcher_context
         self.last_diagnostics: list[dict] = []
 
     @classmethod
-    def for_legacy_fetcher(cls, fetcher) -> "PriceService":
+    def for_price_fetcher(cls, fetcher) -> "PriceService":
         from .providers import CNStockProvider, ETFProvider, FundProvider, HKStockProvider, USStockProvider
 
         return cls(
@@ -32,7 +32,7 @@ class PriceService:
                 HKStockProvider(fetcher),
                 USStockProvider(fetcher),
             ],
-            legacy_fetcher=fetcher,
+            fetcher_context=fetcher,
         )
 
     def fetch_realtime(self, request: PriceRequest) -> Optional[dict]:
@@ -80,7 +80,7 @@ class PriceService:
         if code == "CASH" or code.endswith("-CASH"):
             try:
                 return PriceQuote.from_payload(
-                    get_cash_price(code, getattr(self.legacy_fetcher, "_fetch_exchange_rates", None)),
+                    get_cash_price(code, getattr(self.fetcher_context, "_fetch_exchange_rates", None)),
                     code=code,
                     cache_status="realtime",
                     source_chain=["cash"],
@@ -101,17 +101,17 @@ class PriceService:
                 source_chain=["mmf"],
             )
 
-        if self.legacy_fetcher is None:
+        if self.fetcher_context is None:
             failure = PriceFailure(
                 code=code,
                 error_type="unsupported",
-                message="PriceService.fetch_quote requires a legacy fetcher until providers own cache context",
+                message="PriceService.fetch_quote requires fetcher context until providers own cache context",
             )
             return failure
 
         cache_policy = PriceCachePolicy(
-            getattr(self.legacy_fetcher, "storage", None),
-            enabled=bool(getattr(self.legacy_fetcher, "use_cache", False)),
+            getattr(self.fetcher_context, "storage", None),
+            enabled=bool(getattr(self.fetcher_context, "use_cache", False)),
         )
         stale_quote: PriceQuote | None = None
 
@@ -144,9 +144,9 @@ class PriceService:
 
         try:
             if asset_type is not None:
-                payload = self.legacy_fetcher._fetch_realtime(code, asset_name, asset_type)
+                payload = self.fetcher_context._fetch_realtime(code, asset_name, asset_type)
             else:
-                payload = self.legacy_fetcher._fetch_realtime(code, asset_name)
+                payload = self.fetcher_context._fetch_realtime(code, asset_name)
         except Exception as exc:
             payload = None
             self.last_diagnostics.append(
@@ -200,7 +200,7 @@ class PriceService:
         force_refresh: bool = False,
         **kwargs,
     ) -> Optional[dict]:
-        """Compatibility helper returning the legacy dict payload or None."""
+        """Return a dict payload for callers that do not need structured results."""
         result = self.fetch_quote(code, asset_name, force_refresh, **kwargs)
         if isinstance(result, PriceQuote):
             return result.to_payload()
@@ -224,14 +224,14 @@ class PriceService:
     ) -> BatchPriceResult:
         """Fetch a structured batch result.
 
-        With a legacy fetcher, this uses the optimized batch planner and wraps
-        legacy payload dicts into structured quote results.
+        With a fetcher context, this uses the optimized batch planner and wraps
+        payload dicts into structured quote results.
         """
         name_map = name_map or {}
         result = BatchPriceResult()
 
-        if self.legacy_fetcher is not None:
-            payloads = BatchPricePlanner(self.legacy_fetcher).fetch_batch(
+        if self.fetcher_context is not None:
+            payloads = BatchPricePlanner(self.fetcher_context).fetch_batch(
                 codes,
                 name_map=name_map,
                 asset_type_map=asset_type_map,
@@ -251,16 +251,17 @@ class PriceService:
                     source_chain=payload.get("source_chain"),
                 )
 
+            quote_norms = {str(code).strip().upper() for code in result.quotes}
             for raw_code in codes or []:
                 norm = (raw_code or "").strip().upper()
-                if norm and raw_code not in result.quotes:
+                if norm and raw_code not in result.quotes and norm not in quote_norms:
                     result.failures[raw_code] = PriceFailure(
                         code=raw_code,
                         error_type="quote_unavailable",
                         message="batch quote unavailable",
                     )
 
-            result.diagnostics = list(getattr(self.legacy_fetcher, "_last_price_service_diagnostics", []))
+            result.diagnostics = list(getattr(self.fetcher_context, "_last_price_service_diagnostics", []))
             return result
 
         diagnostics: list[dict] = []

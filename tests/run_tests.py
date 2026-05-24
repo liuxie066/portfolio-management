@@ -55,7 +55,8 @@ def main() -> None:
     )
     from tests.test_pricing_service import (
         test_batch_planner_fetch_non_us_uses_provider_batch,
-        test_fetch_batch_wraps_optimized_legacy_payloads,
+        test_fetch_batch_wraps_optimized_payloads,
+        test_fetch_batch_does_not_fail_when_payload_key_is_normalized,
         test_fetch_quote_falls_back_to_stale_cache_when_realtime_fails,
         test_fetch_quote_returns_structured_failure_without_cache_or_realtime,
         test_fetch_quote_returns_valid_cache_without_realtime_call,
@@ -64,6 +65,8 @@ def main() -> None:
     from tests.test_pricing_providers import (
         test_tencent_batch_provider_fetches_cn_quote,
         test_us_batch_provider_falls_back_to_stale_cache,
+        test_yahoo_chart_empty_quote_does_not_fetch_exchange_rate,
+        test_yahoo_chart_single_and_batch_share_normalized_payload,
     )
     from tests.test_holdings_preload_minimal import (
         test_preload_builds_index_and_projection_and_avoids_refetch,
@@ -81,6 +84,7 @@ def main() -> None:
     )
     from tests.test_nav_record_service import (
         test_nav_record_service_persists_run_id_in_details,
+        test_nav_record_service_rejects_real_write_on_unreliable_valuation,
     )
     from tests.test_nav_bulk_upsert_minimal import (
         test_nav_bulk_upsert_uses_single_preload_and_batch_ops_for_n_le_500,
@@ -89,6 +93,10 @@ def main() -> None:
     )
     from tests.test_daily_top_holdings_merge_minimal import (
         test_full_report_top_holdings_merge_duplicates_and_cash_mmf_bucket,
+    )
+    from tests.test_full_report_service import (
+        test_full_report_prefers_recorded_today_nav_over_synthetic,
+        test_full_report_synthetic_nav_reuses_core_nav_calculation,
     )
     from tests.test_audit_fixes import (
         test_round_none_guard_in_nav_record_fields,
@@ -173,6 +181,7 @@ def main() -> None:
         test_publish_daily_report_main_quiet_suppresses_success_output,
         test_publish_daily_report_prefers_service_bundle,
         test_publish_daily_report_parse_args_uses_config_defaults_and_cli_overrides,
+        test_publish_report_returns_local_artifact_without_public_url,
     )
     from tests.test_futu_balance_sync_service import (
         test_futu_openapi_provider_reads_defaults_from_config_file,
@@ -192,10 +201,13 @@ def main() -> None:
         test_fetch_quote_falls_back_to_stale_cache_when_realtime_fails,
         test_fetch_quote_saves_realtime_payload_and_returns_market_type,
         test_fetch_quote_returns_structured_failure_without_cache_or_realtime,
-        test_fetch_batch_wraps_optimized_legacy_payloads,
+        test_fetch_batch_wraps_optimized_payloads,
+        test_fetch_batch_does_not_fail_when_payload_key_is_normalized,
         test_batch_planner_fetch_non_us_uses_provider_batch,
         test_tencent_batch_provider_fetches_cn_quote,
         test_us_batch_provider_falls_back_to_stale_cache,
+        test_yahoo_chart_empty_quote_does_not_fetch_exchange_rate,
+        test_yahoo_chart_single_and_batch_share_normalized_payload,
         test_preload_builds_index_and_projection_and_avoids_refetch,
         test_upsert_uses_preloaded_cache_for_batch_updates,
         test_upsert_create_after_preload_missing_key_without_refetch,
@@ -205,10 +217,13 @@ def main() -> None:
         test_cash_flow_agg_cache_updates_on_new_record,
         test_record_nav_avoids_get_nav_history_full_scan_when_preloaded,
         test_nav_record_service_persists_run_id_in_details,
+        test_nav_record_service_rejects_real_write_on_unreliable_valuation,
         test_nav_bulk_upsert_uses_single_preload_and_batch_ops_for_n_le_500,
         test_nav_bulk_upsert_upsert_mode_keeps_existing_cache_values_for_none_fields,
         test_nav_bulk_upsert_updates_nav_index_cache_incrementally,
         test_full_report_top_holdings_merge_duplicates_and_cash_mmf_bucket,
+        test_full_report_prefers_recorded_today_nav_over_synthetic,
+        test_full_report_synthetic_nav_reuses_core_nav_calculation,
         # audit fix regression tests
         test_round_none_guard_in_nav_record_fields,
         test_zero_is_not_none_in_truthiness_check,
@@ -276,6 +291,7 @@ def main() -> None:
         test_publish_daily_report_main_quiet_suppresses_success_output,
         test_publish_daily_report_prefers_service_bundle,
         test_publish_daily_report_parse_args_uses_config_defaults_and_cli_overrides,
+        test_publish_report_returns_local_artifact_without_public_url,
         test_futu_openapi_provider_reads_defaults_from_config_file,
         test_config_typed_getters_use_file_then_env_overrides,
     ]

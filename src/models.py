@@ -3,7 +3,7 @@
 
 变更记录:
 - 删除遗留字段 (id)
-- 删除未使用的计算字段 (pnl, current_price, weight)
+- 保留运行时估值字段 (current_price, cny_price, market_value_cny, weight)，不持久化
 - 新增 dedup_key 防重字段 (Transaction, CashFlow)
 - Holding.broker 默认值从 None 改为 ""
 - 精简 TransactionType 枚举

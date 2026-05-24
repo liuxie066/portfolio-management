@@ -11,11 +11,8 @@ class AssetNameService:
     def __init__(self, manager: Any):
         self.manager = manager
 
-    def get_asset_name(self, asset_id: str, asset_type=None, user_provided_name: str = None, timeout: float = 5.0) -> str:
-        """Resolve asset name via price lookup with timeout fallback.
-
-        ``asset_type`` is accepted for API compatibility but currently unused.
-        """
+    def get_asset_name(self, asset_id: str, user_provided_name: str = None, timeout: float = 5.0) -> str:
+        """Resolve asset name via price lookup with timeout fallback."""
         result = {"data": None, "error": None}
 
         def fetch_name():

@@ -1,9 +1,6 @@
 """存储后端工厂：仅保留 Feishu 多维表作为唯一存储后端。"""
 from __future__ import annotations
 
-from typing import Optional
-
-from . import config
 from .feishu_storage import FeishuStorage
 
 
@@ -17,20 +14,8 @@ def _feishu_healthcheck(storage: FeishuStorage) -> None:
     )
 
 
-def create_storage(prefer: Optional[str] = None, *, healthcheck: bool = True):
-    """创建存储后端。
-
-    兼容历史参数：prefer / storage.backend 仍可传入，但只接受 feishu/auto。
-    传入 sqlite 将直接报错，避免误用。
-    """
-    backend = (prefer or config.get_storage_backend() or 'auto').lower()
-
-    if backend in ('sqlite',):
-        raise ValueError("SQLite 后端已移除：当前仅支持 Feishu 多维表存储")
-
-    if backend not in ('feishu', 'auto'):
-        raise ValueError(f"不支持的 storage.backend={backend}：当前仅支持 feishu/auto")
-
+def create_storage(*, healthcheck: bool = True):
+    """创建 Feishu 存储后端。"""
     storage = FeishuStorage()
     if healthcheck:
         _feishu_healthcheck(storage)

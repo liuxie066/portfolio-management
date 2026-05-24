@@ -94,14 +94,12 @@ class TestPortfolioManagerBuy:
         self.mock_storage.add_transaction.assert_called_once()
         self.mock_storage.upsert_holding.assert_called_once()
 
-    @patch.object(PortfolioManager, '_has_sufficient_cash')
-    @patch.object(PortfolioManager, '_deduct_cash')
     @patch.object(PortfolioManager, '_get_asset_name')
-    def test_buy_with_cash_deduction(self, mock_get_name, mock_deduct, mock_has_cash):
+    def test_buy_with_cash_deduction(self, mock_get_name):
         """测试买入自动扣减现金"""
         mock_get_name.return_value = '平安银行'
-        mock_has_cash.return_value = True  # 现金充足
-        mock_deduct.return_value = True
+        self.manager.cash_service.has_sufficient_cash = Mock(return_value=True)
+        self.manager.cash_service.deduct_cash = Mock(return_value=True)
 
         self.mock_storage.add_transaction.return_value = Mock()
         self.mock_storage.upsert_holding.return_value = Mock()
@@ -119,17 +117,15 @@ class TestPortfolioManagerBuy:
             auto_deduct_cash=True
         )
 
-        mock_has_cash.assert_called_once_with('测试账户', 10505.0)  # 1000 * 10.5 + 5
-        mock_deduct.assert_called_once()
+        self.manager.cash_service.has_sufficient_cash.assert_called_once_with('测试账户', 10505.0)  # 1000 * 10.5 + 5
+        self.manager.cash_service.deduct_cash.assert_called_once()
         # 扣减金额 = 1000 * 10.5 + 5 = 10505
 
-    @patch.object(PortfolioManager, '_has_sufficient_cash')
-    @patch.object(PortfolioManager, '_deduct_cash')
     @patch.object(PortfolioManager, '_get_asset_name')
-    def test_buy_insufficient_cash(self, mock_get_name, mock_deduct, mock_has_cash):
+    def test_buy_insufficient_cash(self, mock_get_name):
         """测试买入现金不足"""
         mock_get_name.return_value = '平安银行'
-        mock_has_cash.return_value = False  # 现金不足，应在扣减前检查
+        self.manager.cash_service.has_sufficient_cash = Mock(return_value=False)
 
         with pytest.raises(ValueError) as exc_info:
             self.manager.buy(
@@ -204,8 +200,7 @@ class TestPortfolioManagerSell:
             price_fetcher=self.mock_fetcher
         )
 
-    @patch.object(PortfolioManager, '_add_cash')
-    def test_sell_success(self, mock_add_cash):
+    def test_sell_success(self):
         """测试卖出成功"""
         self.mock_storage.get_holding.return_value = Holding(
             asset_id='000001',
@@ -240,8 +235,7 @@ class TestPortfolioManagerSell:
         assert result.quantity == -500
         self.mock_storage.update_holding_quantity.assert_called_once_with('000001', '测试账户', -500, None)
 
-    @patch.object(PortfolioManager, '_add_cash')
-    def test_sell_with_cash_addition(self, mock_add_cash):
+    def test_sell_with_cash_addition(self):
         """测试卖出自动增加现金"""
         self.mock_storage.get_holding.return_value = Holding(
             asset_id='000001',
@@ -252,6 +246,7 @@ class TestPortfolioManagerSell:
             currency='CNY'
         )
         self.mock_storage.add_transaction.return_value = Mock()
+        self.manager.cash_service.add_cash = Mock()
 
         result = self.manager.sell(
             tx_date=date(2025, 3, 14),
@@ -264,7 +259,7 @@ class TestPortfolioManagerSell:
             auto_add_cash=True
         )
 
-        mock_add_cash.assert_called_once()
+        self.manager.cash_service.add_cash.assert_called_once()
         # 增加金额 = 500 * 11 - 5 = 5495
 
     def test_sell_no_holding(self):
@@ -386,117 +381,6 @@ class TestPortfolioManagerDepositWithdraw:
         assert result is not None
         assert result.amount == -50000
         assert result.flow_type == 'WITHDRAW'
-
-    def test_update_cash_holding_cny(self):
-        """测试更新人民币现金持仓"""
-        self.mock_storage.get_holding.return_value = Holding(
-            asset_id='CNY-CASH',
-            asset_name='人民币现金',
-            asset_type=AssetType.CASH,
-            account='测试账户',
-            quantity=50000,
-            currency='CNY'
-        )
-
-        self.manager._update_cash_holding('测试账户', 10000, 'CNY', 10000)
-
-        self.mock_storage.update_holding_quantity.assert_called_once()
-
-    def test_update_cash_holding_usd(self):
-        """测试更新美元现金持仓"""
-        self.mock_storage.get_holding.return_value = None
-        self.mock_storage.upsert_holding.return_value = Mock()
-
-        self.manager._update_cash_holding('测试账户', 1000, 'USD', 7200)
-
-        call_args = self.mock_storage.upsert_holding.call_args
-        assert call_args[0][0].asset_id == 'USD-CASH'
-        assert call_args[0][0].currency == 'USD'
-
-
-class TestPortfolioManagerCashOperations:
-    """测试现金操作"""
-
-    def setup_method(self):
-        self.mock_storage = Mock()
-        self.manager = PortfolioManager(storage=self.mock_storage)
-
-    def test_deduct_cash_success(self):
-        """测试扣减现金成功"""
-        self.mock_storage.get_holding.side_effect = [
-            Holding(asset_id='CNY-CASH', asset_name='人民币现金', asset_type=AssetType.CASH, account='测试账户', quantity=10000, currency='CNY'),
-            None  # 没有MMF
-        ]
-
-        result = self.manager._deduct_cash('测试账户', 5000)
-
-        assert result == True
-        self.mock_storage.update_holding_quantity.assert_called_once_with('CNY-CASH', '测试账户', -5000)
-
-    def test_deduct_cash_with_mmf(self):
-        """测试先扣现金再扣货币基金"""
-        self.mock_storage.get_holding.side_effect = [
-            Holding(asset_id='CNY-CASH', asset_name='人民币现金', asset_type=AssetType.CASH, account='测试账户', quantity=3000, currency='CNY'),
-            Holding(asset_id='CNY-MMF', asset_name='货币基金', asset_type=AssetType.MMF, account='测试账户', quantity=10000, currency='CNY')
-        ]
-
-        result = self.manager._deduct_cash('测试账户', 5000)
-
-        assert result == True
-        # 现金扣3000，货币基金扣2000
-        assert self.mock_storage.update_holding_quantity.call_count == 2
-
-    def test_deduct_cash_insufficient(self):
-        """测试现金不足"""
-        self.mock_storage.get_holding.side_effect = [
-            Holding(asset_id='CNY-CASH', asset_name='人民币现金', asset_type=AssetType.CASH, account='测试账户', quantity=1000, currency='CNY'),
-            Holding(asset_id='CNY-MMF', asset_name='货币基金', asset_type=AssetType.MMF, account='测试账户', quantity=1000, currency='CNY')
-        ]
-
-        result = self.manager._deduct_cash('测试账户', 5000)
-
-        assert result == False
-
-    def test_deduct_cash_zero_amount(self):
-        """测试扣减金额为0"""
-        result = self.manager._deduct_cash('测试账户', 0)
-        assert result == True
-        self.mock_storage.get_holding.assert_not_called()
-
-    def test_add_cash_existing(self):
-        """测试增加现有现金持仓"""
-        self.mock_storage.get_holding.return_value = Holding(
-            asset_id='CNY-CASH',
-            asset_name='人民币现金',
-            asset_type=AssetType.CASH,
-            account='测试账户',
-            quantity=10000,
-            currency='CNY'
-        )
-
-        result = self.manager._add_cash('测试账户', 5000)
-
-        assert result == True
-        self.mock_storage.update_holding_quantity.assert_called_once_with('CNY-CASH', '测试账户', 5000)
-
-    def test_add_cash_create_new(self):
-        """测试创建新现金持仓"""
-        self.mock_storage.get_holding.return_value = None
-        self.mock_storage.upsert_holding.return_value = Mock()
-
-        result = self.manager._add_cash('测试账户', 5000)
-
-        assert result == True
-        call_args = self.mock_storage.upsert_holding.call_args
-        assert call_args[0][0].asset_id == 'CNY-CASH'
-        assert call_args[0][0].quantity == 5000
-
-    def test_add_cash_zero_amount(self):
-        """测试增加现金为0"""
-        result = self.manager._add_cash('测试账户', 0)
-        assert result == True
-        self.mock_storage.get_holding.assert_not_called()
-
 
 class TestPortfolioManagerValuation:
     """测试组合估值"""
@@ -703,11 +587,15 @@ class TestPortfolioManagerAssetDistribution:
             '000001': {'price': 10.5, 'cny_price': 10.5, 'currency': 'CNY'},
             '00700': {'price': 440, 'cny_price': 400, 'currency': 'HKD'}
         })
+        self.mock_storage.get_total_shares.return_value = 1000.0
 
         result = self.manager.get_industry_distribution('测试账户')
 
         assert '金融' in result
         assert '互联网' in result
+        total = 10500.0 + 40000.0
+        assert result['金融'] == 10500.0 / total
+        assert result['互联网'] == 40000.0 / total
 
 
 class TestPortfolioManagerNAVRecord:
@@ -730,7 +618,7 @@ class TestPortfolioManagerNAVRecord:
             stock_value_cny=900000.0
         )
         self.mock_storage.get_cash_flows.return_value = []
-        self.mock_storage.save_nav.return_value = None
+        self.mock_storage.write_nav_record.return_value = None
         self.mock_storage.get_nav_history.return_value = []  # 无历史记录
         self.mock_storage.get_latest_nav_before.return_value = None  # 无之前记录
 
@@ -763,7 +651,7 @@ class TestPortfolioManagerNAVRecord:
         )
         self.mock_storage.get_latest_nav_before.return_value = existing_nav
         self.mock_storage.get_cash_flows.return_value = []
-        self.mock_storage.save_nav.return_value = None
+        self.mock_storage.write_nav_record.return_value = None
         self.mock_storage.get_nav_history.return_value = [existing_nav]
 
         result = self.manager.record_nav('测试账户', valuation, nav_date=date(2025, 3, 14))
@@ -790,7 +678,7 @@ class TestPortfolioManagerNAVRecord:
         )
         deposit = CashFlow(flow_date=date(2025, 3, 14), account='测试账户', amount=50000, currency='CNY', cny_amount=50000, flow_type='DEPOSIT')
         self.mock_storage.get_cash_flows.return_value = [deposit]
-        self.mock_storage.save_nav.return_value = None
+        self.mock_storage.write_nav_record.return_value = None
         self.mock_storage.get_nav_history.return_value = [existing_nav]
 
         result = self.manager.record_nav('测试账户', valuation, nav_date=date(2025, 3, 14))

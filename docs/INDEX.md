@@ -27,6 +27,7 @@ Keep docs short, executable, and reality-checked.
 - Environment doctor: `scripts/doctor.py`
 - Schema doctor (Feishu fields vs docs/schema.md): `scripts/migrate_schema.py check-live`
 - Pricing diagnosis: `scripts/diagnose_pricing.py`
+- NAV history repair/backfill: `scripts/nav_history_repair.py`
 
 ## Schema truth source
 

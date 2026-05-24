@@ -1,6 +1,8 @@
 from datetime import date
 from unittest.mock import Mock
 
+import pytest
+
 from src.app.cash_flow_summary_service import CashFlowSummaryService
 from src.models import CashFlow, NAVHistory
 
@@ -55,4 +57,13 @@ def test_cash_flow_summary_service_sums_cash_flow_objects():
         CashFlow(flow_date=date(2025, 3, 3), account="a", amount=-20, currency="CNY", cny_amount=-20, flow_type="WITHDRAW"),
     ]
 
-    assert CashFlowSummaryService.sum_cash_flows(flows) == 80.0
+    assert CashFlowSummaryService.sum_cash_flows(flows) == 130.0
+
+
+def test_cash_flow_summary_service_rejects_foreign_flow_without_cny_amount():
+    flows = [
+        CashFlow(flow_date=date(2025, 3, 1), account="a", amount=10, currency="USD", cny_amount=None, flow_type="DEPOSIT"),
+    ]
+
+    with pytest.raises(ValueError, match="run `pm cash-flow reconcile"):
+        CashFlowSummaryService.sum_cash_flows(flows)

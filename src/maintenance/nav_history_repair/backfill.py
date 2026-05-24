@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Bulk recompute + backfill nav_history derived fields.
 
-Compatibility wrapper target: prefer ``scripts/nav_history_repair.py backfill``
-for new automation.
+This module contains the implementation behind
+``scripts/nav_history_repair.py backfill``.
 
 Design:
 - Recompute target dates with existing PortfolioManager.record_nav(...) logic (persist=False)
@@ -11,10 +11,10 @@ Design:
 
 Examples:
   # Dry-run from date range
-  ./.venv/bin/python scripts/backfill_nav_history_bulk.py --account lx --from 2025-01-01 --to 2025-12-31 --dry-run
+  ./.venv/bin/python scripts/nav_history_repair.py backfill --account lx --from 2025-01-01 --to 2025-12-31 --dry-run
 
   # Apply from audit output
-  ./.venv/bin/python scripts/backfill_nav_history_bulk.py --account lx --input audit/rebuild_strong_consistency_lx.json --apply
+  ./.venv/bin/python scripts/nav_history_repair.py backfill --account lx --input audit/rebuild_strong_consistency_lx.json --apply
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -180,6 +180,13 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 def main(argv=None) -> None:
     args = parse_args(argv)
+    run(args)
+
+
+def run(args: argparse.Namespace) -> None:
+    if args.apply and args.dry_run:
+        raise ValueError("--apply and --dry-run are mutually exclusive")
+
     skill = PortfolioSkill(account=args.account)
 
     # Build base points

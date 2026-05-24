@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Patch Feishu nav_history safely (merge + validate + dry-run).
 
-Compatibility wrapper target: prefer ``scripts/nav_history_repair.py patch``
-for new automation.
+This module contains the implementation behind
+``scripts/nav_history_repair.py patch``.
 
 Design goals
 - Never overwrite non-target fields with model defaults (e.g., cash_value/stock_value becoming 0).
@@ -10,13 +10,13 @@ Design goals
 - Optional mathematical validations; abort apply if any invariant fails.
 
 Typical usage
-  ./.venv/bin/python scripts/nav_history_patch.py \
+  ./.venv/bin/python scripts/nav_history_repair.py patch \
     --account lx \
     --patch-file audit/rebuild_strong_consistency_lx.json \
     --mode strong-consistency-gap \
     --dry-run
 
-  ./.venv/bin/python scripts/nav_history_patch.py \
+  ./.venv/bin/python scripts/nav_history_repair.py patch \
     --account lx \
     --patch-file audit/rebuild_strong_consistency_lx.json \
     --mode strong-consistency-gap \
@@ -44,9 +44,8 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-# Ensure repo root is importable when running from scripts/
 import sys
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
 
 from skill_api import PortfolioSkill
@@ -318,15 +317,16 @@ def main(argv=None):
         ),
     )
     args = ap.parse_args(argv)
+    run(args)
 
+
+def run(args: argparse.Namespace) -> None:
     if not args.dry_run and not args.apply:
         raise SystemExit("must pass --dry-run or --apply")
     if args.dry_run and args.apply:
         raise SystemExit("choose only one of --dry-run / --apply")
 
-    ps = PortfolioSkill()
-    if args.account:
-        ps.account = args.account
+    ps = PortfolioSkill(account=args.account) if args.account else PortfolioSkill()
 
     patches = load_patch_rows(args.patch_file, args.mode)
 
@@ -410,7 +410,7 @@ def main(argv=None):
     out_dir = Path("audit")
     out_dir.mkdir(exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    diff_path = out_dir / f"nav_history_patch_diff_{ps.account}_{stamp}.json"
+    diff_path = out_dir / f"nav_history_repair_patch_diff_{ps.account}_{stamp}.json"
     diff_path.write_text(json.dumps({"account": ps.account, "mode": args.mode, "diffs": diffs, "violations": violations}, ensure_ascii=False, indent=2), encoding="utf-8")
     print("wrote", diff_path)
 
@@ -428,7 +428,7 @@ def main(argv=None):
         return
 
     # apply
-    backup_file = args.backup_file or str(out_dir / f"nav_history_patch_backup_{ps.account}_{stamp}.json")
+    backup_file = args.backup_file or str(out_dir / f"nav_history_repair_patch_backup_{ps.account}_{stamp}.json")
     backup = []
     for p in patches:
         existing = nav_by_date.get(p.d)

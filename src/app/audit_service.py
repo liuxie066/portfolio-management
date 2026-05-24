@@ -41,6 +41,36 @@ class AuditService:
             return not portfolio._nav_equal(a, b)
         return not portfolio._money_equal(a, b)
 
+    def _recompute_period_metrics(self, *, account: str, nav, all_navs: list, nav_index: dict) -> Dict[str, Any]:
+        pm = self.portfolio._find_prev_month_end_nav(all_navs, nav.date.year, nav.date.month, nav_index=nav_index)
+        py = self.portfolio._find_year_end_nav(all_navs, str(nav.date.year - 1), nav_index=nav_index)
+        monthly_cf = self.portfolio._get_monthly_cash_flow(account, nav.date.year, nav.date.month) if pm else None
+        yearly_cf = self.portfolio._get_yearly_cash_flow(account, str(nav.date.year)) if py else None
+
+        raw_mtd_nav_change = self.portfolio._calc_mtd_nav_change(nav.nav, pm) if (nav.nav is not None and pm) else None
+        raw_ytd_nav_change = self.portfolio._calc_ytd_nav_change(nav.nav, py) if (nav.nav is not None and py) else None
+        raw_mtd_pnl = (
+            self.portfolio._calc_mtd_pnl(nav.total_value, pm, monthly_cf)
+            if (nav.total_value is not None and pm is not None and monthly_cf is not None)
+            else None
+        )
+        raw_ytd_pnl = (
+            self.portfolio._calc_ytd_pnl(nav.total_value, py, yearly_cf)
+            if (nav.total_value is not None and py is not None and yearly_cf is not None)
+            else None
+        )
+
+        return {
+            "pm": pm,
+            "py": py,
+            "monthly_cf": monthly_cf,
+            "yearly_cf": yearly_cf,
+            "mtd_nav_change": round(raw_mtd_nav_change, 6) if raw_mtd_nav_change is not None else None,
+            "ytd_nav_change": round(raw_ytd_nav_change, 6) if raw_ytd_nav_change is not None else None,
+            "mtd_pnl": round(raw_mtd_pnl, 2) if raw_mtd_pnl is not None else None,
+            "ytd_pnl": round(raw_ytd_pnl, 2) if raw_ytd_pnl is not None else None,
+        }
+
     # ------------------------------------------------------------------
     # metrics audit
     # ------------------------------------------------------------------
@@ -58,18 +88,18 @@ class AuditService:
         rows: List[Dict[str, Any]] = []
         nav_index = self.portfolio._build_nav_lookup(all_navs)
         for n in target_navs:
-            pm = self.portfolio._find_prev_month_end_nav(all_navs, n.date.year, n.date.month, nav_index=nav_index)
-            py = self.portfolio._find_year_end_nav(all_navs, str(n.date.year - 1), nav_index=nav_index)
-            monthly_cf = self.portfolio._get_monthly_cash_flow(audit_account, n.date.year, n.date.month) if pm else None
-            yearly_cf = self.portfolio._get_yearly_cash_flow(audit_account, str(n.date.year)) if py else None
-            raw_mtd_nav_change = self.portfolio._calc_mtd_nav_change(n.nav, pm) if (n.nav is not None and pm) else None
-            raw_ytd_nav_change = self.portfolio._calc_ytd_nav_change(n.nav, py) if (n.nav is not None and py) else None
-            raw_mtd_pnl = self.portfolio._calc_mtd_pnl(n.total_value, pm, monthly_cf) if (n.total_value is not None and pm is not None and monthly_cf is not None) else None
-            raw_ytd_pnl = self.portfolio._calc_ytd_pnl(n.total_value, py, yearly_cf) if (n.total_value is not None and py is not None and yearly_cf is not None) else None
-            recomputed_mtd_nav_change = round(raw_mtd_nav_change, 6) if raw_mtd_nav_change is not None else None
-            recomputed_ytd_nav_change = round(raw_ytd_nav_change, 6) if raw_ytd_nav_change is not None else None
-            recomputed_mtd_pnl = round(raw_mtd_pnl, 2) if raw_mtd_pnl is not None else None
-            recomputed_ytd_pnl = round(raw_ytd_pnl, 2) if raw_ytd_pnl is not None else None
+            recomputed = self._recompute_period_metrics(
+                account=audit_account,
+                nav=n,
+                all_navs=all_navs,
+                nav_index=nav_index,
+            )
+            pm = recomputed["pm"]
+            py = recomputed["py"]
+            recomputed_mtd_nav_change = recomputed["mtd_nav_change"]
+            recomputed_ytd_nav_change = recomputed["ytd_nav_change"]
+            recomputed_mtd_pnl = recomputed["mtd_pnl"]
+            recomputed_ytd_pnl = recomputed["ytd_pnl"]
 
             is_initial_without_month_base = (pm is None)
             is_january_same_period_return = (
@@ -148,11 +178,17 @@ class AuditService:
         rows: List[Dict[str, Any]] = []
         for n in target_navs:
             prev_nav = self.portfolio._find_latest_nav_before(all_navs, n.date, nav_index=nav_index)
-            pm = self.portfolio._find_prev_month_end_nav(all_navs, n.date.year, n.date.month, nav_index=nav_index)
-            py = self.portfolio._find_year_end_nav(all_navs, str(n.date.year - 1), nav_index=nav_index)
             daily_cf = self.portfolio._get_daily_cash_flow(audit_account, n.date)
-            monthly_cf = self.portfolio._get_monthly_cash_flow(audit_account, n.date.year, n.date.month) if pm else None
-            yearly_cf = self.portfolio._get_yearly_cash_flow(audit_account, str(n.date.year)) if py else None
+            recomputed = self._recompute_period_metrics(
+                account=audit_account,
+                nav=n,
+                all_navs=all_navs,
+                nav_index=nav_index,
+            )
+            pm = recomputed["pm"]
+            py = recomputed["py"]
+            monthly_cf = recomputed["monthly_cf"]
+            yearly_cf = recomputed["yearly_cf"]
 
             anomalies: List[str] = []
             exemptions: List[str] = []
@@ -175,15 +211,10 @@ class AuditService:
                     else:
                         anomalies.append(f"nav != total_value / shares ({n.nav} != {expected_nav})")
 
-            raw_mtd = self.portfolio._calc_mtd_nav_change(n.nav, pm) if (n.nav is not None and pm) else None
-            raw_ytd = self.portfolio._calc_ytd_nav_change(n.nav, py) if (n.nav is not None and py) else None
-            raw_mtd_pnl = self.portfolio._calc_mtd_pnl(n.total_value, pm, monthly_cf) if (n.total_value is not None and pm is not None and monthly_cf is not None) else None
-            raw_ytd_pnl = self.portfolio._calc_ytd_pnl(n.total_value, py, yearly_cf) if (n.total_value is not None and py is not None and yearly_cf is not None) else None
-
-            recomputed_mtd = round(raw_mtd, 6) if raw_mtd is not None else None
-            recomputed_ytd = round(raw_ytd, 6) if raw_ytd is not None else None
-            recomputed_mtd_pnl = round(raw_mtd_pnl, 2) if raw_mtd_pnl is not None else None
-            recomputed_ytd_pnl = round(raw_ytd_pnl, 2) if raw_ytd_pnl is not None else None
+            recomputed_mtd = recomputed["mtd_nav_change"]
+            recomputed_ytd = recomputed["ytd_nav_change"]
+            recomputed_mtd_pnl = recomputed["mtd_pnl"]
+            recomputed_ytd_pnl = recomputed["ytd_pnl"]
 
             if pm is None:
                 exemptions.append('missing_month_base')

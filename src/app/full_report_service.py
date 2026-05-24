@@ -6,7 +6,9 @@ from datetime import date, timedelta
 from typing import Any, Dict, Optional
 
 from src import config
+from src.domain.nav_calculator import NavCalculator
 from src.models import NAVHistory
+from src.app.nav_payload import format_nav_payload
 from src.reporting_utils import is_cash_like
 from src.time_utils import bj_now_naive, bj_today
 
@@ -39,7 +41,7 @@ class FullReportService:
             holdings_data = snapshot["holdings_data"]
             position_data = snapshot["position_data"]
 
-            all_navs = navs if navs is not None else self.storage.get_nav_history(self.account, days=9999)
+            all_navs = self._sort_navs(navs if navs is not None else self.storage.get_nav_history(self.account, days=9999))
 
             today = bj_today()
             live_total = valuation.total_value_cny
@@ -47,10 +49,13 @@ class FullReportService:
             live_stock = valuation.stock_value_cny + valuation.fund_value_cny
 
             working_navs = [nav for nav in all_navs if nav.date < today]
-            if all_navs and live_total > 0:
+            today_nav = self._latest_nav_on(all_navs, today)
+            if today_nav is not None:
+                working_navs.append(today_nav)
+            elif working_navs and live_total > 0:
                 synthetic_nav = self._build_synthetic_nav(
                     today=today,
-                    all_navs=all_navs,
+                    all_navs=working_navs,
                     valuation=valuation,
                     live_total=live_total,
                     live_cash=live_cash,
@@ -109,6 +114,15 @@ class FullReportService:
             return {"success": False, "error": "read_service is required to build distribution"}
         return self.read_service.get_distribution(holdings_data=holdings_data)
 
+    @staticmethod
+    def _sort_navs(navs: list) -> list:
+        return sorted(list(navs or []), key=lambda nav: nav.date or date.min)
+
+    @staticmethod
+    def _latest_nav_on(navs: list, target_date: date):
+        matches = [nav for nav in navs if nav.date == target_date]
+        return matches[-1] if matches else None
+
     def _build_synthetic_nav(
         self,
         *,
@@ -119,86 +133,131 @@ class FullReportService:
         live_cash: float,
         live_stock: float,
     ) -> Optional[NAVHistory]:
-        last_nav = all_navs[-1]
+        history_navs = [nav for nav in self._sort_navs(all_navs) if nav.date < today]
+        if not history_navs:
+            return None
+
+        last_nav = self.portfolio._find_latest_nav_before(history_navs, today) or history_navs[-1]
         if not last_nav.shares or last_nav.shares <= 0:
             return None
 
         current_year = str(today.year)
-        yesterday_nav = self.portfolio._find_latest_nav_before(all_navs, today)
-        prev_year_end_nav = self.portfolio._find_year_end_nav(all_navs, str(today.year - 1))
-        prev_month_end_nav = self.portfolio._find_prev_month_end_nav(all_navs, today.year, today.month)
-        daily_cash_flow = self.portfolio._get_daily_cash_flow(self.account, today)
-        monthly_cash_flow = self.portfolio._get_monthly_cash_flow(self.account, today.year, today.month)
-        yearly_cash_flow = self.portfolio._get_yearly_cash_flow(self.account, current_year)
+        start_year = config.get_start_year()
+        yesterday_nav = last_nav
+        prev_year_end_nav = self.portfolio._find_year_end_nav(history_navs, str(today.year - 1))
+        prev_month_end_nav = self.portfolio._find_prev_month_end_nav(history_navs, today.year, today.month)
 
-        if last_nav and last_nav.date < today:
-            gap_start = last_nav.date + timedelta(days=1)
-            gap_cash_flow = self.portfolio._get_period_cash_flow(self.account, gap_start, today)
-            base_shares = last_nav.shares or 0
-            base_nav = last_nav.nav
-        else:
-            gap_cash_flow = daily_cash_flow
-            base_shares = last_nav.shares or 0
-            base_nav = last_nav.nav
+        yearly_data = {}
+        for yr in range(start_year, today.year + 1):
+            yr_str = str(yr)
+            yearly_data[yr_str] = {
+                "prev_end": self.portfolio._find_year_end_nav(history_navs, str(yr - 1)),
+                "end": self.portfolio._find_year_end_nav(history_navs, yr_str),
+            }
 
-        synthetic_share_change = (gap_cash_flow / base_nav) if base_nav else 0.0
-        synthetic_shares = base_shares + synthetic_share_change
-        synthetic_nav_value = live_total / synthetic_shares if synthetic_shares > 0 else 1.0
-        synthetic_mtd_nav_change = self.portfolio._calc_mtd_nav_change(synthetic_nav_value, prev_month_end_nav)
-        synthetic_ytd_nav_change = self.portfolio._calc_ytd_nav_change(synthetic_nav_value, prev_year_end_nav)
-        synthetic_mtd_pnl = self.portfolio._calc_mtd_pnl(live_total, prev_month_end_nav, monthly_cash_flow)
-        synthetic_ytd_pnl = self.portfolio._calc_ytd_pnl(live_total, prev_year_end_nav, yearly_cash_flow)
-        synthetic_daily_pnl = None
-        if yesterday_nav and yesterday_nav.date and (today - yesterday_nav.date).days == 1:
-            synthetic_daily_pnl = live_total - yesterday_nav.total_value - gap_cash_flow
+        cash_flow_summary = self._summarize_cash_flows_for_synthetic(
+            today=today,
+            start_year=start_year,
+            last_nav=last_nav,
+        )
+        daily_cash_flow = cash_flow_summary["daily"]
+        monthly_cash_flow = cash_flow_summary["monthly"]
+        yearly_cash_flow = cash_flow_summary["yearly"].get(current_year, 0.0)
+        for yr_str, yd in yearly_data.items():
+            yd["cash_flow"] = cash_flow_summary["yearly"].get(yr_str, 0.0)
+        cumulative_cash_flow = cash_flow_summary["cumulative"]
+        gap_cash_flow = cash_flow_summary["gap"]
 
-        return NAVHistory(
+        stock_ratio = live_stock / live_total if live_total > 0 else 0
+        cash_ratio = live_cash / live_total if live_total > 0 else 0
+
+        calc = self._calc_nav_metrics_for_synthetic(
+            today=today,
+            total_value=live_total,
+            yesterday_nav=yesterday_nav,
+            prev_year_end_nav=prev_year_end_nav,
+            prev_month_end_nav=prev_month_end_nav,
+            last_nav=last_nav,
+            yearly_data=yearly_data,
+            daily_cash_flow=daily_cash_flow,
+            monthly_cash_flow=monthly_cash_flow,
+            yearly_cash_flow=yearly_cash_flow,
+            cumulative_cash_flow=cumulative_cash_flow,
+            start_year=start_year,
+            gap_cash_flow=gap_cash_flow,
+            all_navs=history_navs,
+        )
+
+        nav_record = self._build_nav_record_for_synthetic(
             date=today,
             account=self.account,
-            total_value=round(live_total, 2),
-            cash_value=round(live_cash, 2),
-            stock_value=round(live_stock, 2),
-            fund_value=round(valuation.fund_value_cny, 2),
-            cn_stock_value=round(valuation.cn_asset_value, 2),
-            us_stock_value=round(valuation.us_asset_value, 2),
-            hk_stock_value=round(valuation.hk_asset_value, 2),
-            shares=round(synthetic_shares, 2),
-            nav=round(synthetic_nav_value, 6),
-            stock_weight=round(live_stock / live_total, 6) if live_total > 0 else 0,
-            cash_weight=round(live_cash / live_total, 6) if live_total > 0 else 0,
-            cash_flow=round(daily_cash_flow, 2),
-            share_change=round(synthetic_share_change, 2),
-            mtd_nav_change=round(synthetic_mtd_nav_change, 6) if synthetic_mtd_nav_change is not None else None,
-            ytd_nav_change=round(synthetic_ytd_nav_change, 6) if synthetic_ytd_nav_change is not None else None,
-            pnl=round(synthetic_daily_pnl, 2) if synthetic_daily_pnl is not None else None,
-            mtd_pnl=round(synthetic_mtd_pnl, 2) if synthetic_mtd_pnl is not None else None,
-            ytd_pnl=round(synthetic_ytd_pnl, 2) if synthetic_ytd_pnl is not None else None,
-            details={"is_synthetic": True},
+            valuation=valuation,
+            stock_value=live_stock,
+            cash_value=live_cash,
+            total_value=live_total,
+            stock_ratio=stock_ratio,
+            cash_ratio=cash_ratio,
+            daily_cash_flow=daily_cash_flow,
+            monthly_cash_flow=monthly_cash_flow,
+            yearly_cash_flow=yearly_cash_flow,
+            yearly_data=yearly_data,
+            cumulative_cash_flow=cumulative_cash_flow,
+            start_year=start_year,
+            **calc,
         )
+        details = dict(nav_record.details or {})
+        details["is_synthetic"] = True
+        nav_record.details = details
+        return nav_record
+
+    def _summarize_cash_flows_for_synthetic(self, *, today: date, start_year: int, last_nav: NAVHistory) -> dict:
+        summarize = getattr(self.portfolio, "_summarize_cash_flows", None)
+        if callable(summarize):
+            try:
+                return summarize(account=self.account, today=today, start_year=start_year, last_nav=last_nav)
+            except Exception:
+                pass
+
+        current_year = today.strftime("%Y")
+        daily = self.portfolio._get_daily_cash_flow(self.account, today)
+        monthly = self.portfolio._get_monthly_cash_flow(self.account, today.year, today.month)
+        yearly = {current_year: self.portfolio._get_yearly_cash_flow(self.account, current_year)}
+        gap_start = last_nav.date + timedelta(days=1)
+        gap = self.portfolio._get_period_cash_flow(self.account, gap_start, today)
+        cumulative_func = getattr(self.portfolio, "_get_cumulative_cash_flow_from_year", None)
+        if callable(cumulative_func):
+            cumulative = cumulative_func(self.account, str(start_year), today)
+        else:
+            cumulative = self.portfolio._get_period_cash_flow(self.account, date(start_year, 1, 1), today)
+        return {
+            "daily": daily,
+            "monthly": monthly,
+            "yearly": yearly,
+            "cumulative": cumulative,
+            "gap": gap,
+        }
+
+    def _calc_nav_metrics_for_synthetic(self, **kwargs) -> dict:
+        calc = getattr(self.portfolio, "_calc_nav_metrics", None)
+        if callable(calc):
+            return calc(account=self.account, **kwargs)
+
+        all_navs = kwargs.pop("all_navs", None)
+        initial_value = None
+        get_initial_value = getattr(self.portfolio, "_get_initial_value", None)
+        if callable(get_initial_value):
+            initial_value = get_initial_value(self.account, all_navs=all_navs)
+        return NavCalculator.calc_nav_metrics(initial_value=initial_value, **kwargs)
+
+    def _build_nav_record_for_synthetic(self, *, date: date, **kwargs) -> NAVHistory:
+        build = getattr(self.portfolio, "_build_nav_record", None)
+        if callable(build):
+            return build(today=date, **kwargs)
+        return NavCalculator.build_nav_record(today=date, **kwargs)
 
     @staticmethod
     def _format_latest_nav(nav: Any) -> Dict[str, Any]:
-        latest = {
-            "date": nav.date.isoformat(),
-            "nav": nav.nav,
-            "shares": nav.shares,
-            "total_value": nav.total_value,
-            "stock_value": nav.stock_value,
-            "cash_value": nav.cash_value,
-            "stock_weight": nav.stock_weight,
-            "cash_weight": nav.cash_weight,
-        }
-        if nav.mtd_nav_change is not None:
-            latest["mtd_nav_change"] = nav.mtd_nav_change
-            latest["ytd_nav_change"] = nav.ytd_nav_change
-            latest["pnl"] = nav.pnl
-            latest["mtd_pnl"] = nav.mtd_pnl
-            latest["ytd_pnl"] = nav.ytd_pnl
-            latest["cash_flow"] = nav.cash_flow
-            latest["share_change"] = nav.share_change
-        if nav.details:
-            latest["details"] = nav.details
-        return latest
+        return format_nav_payload(nav)
 
     @staticmethod
     def calc_risk_metrics(navs: list) -> tuple:

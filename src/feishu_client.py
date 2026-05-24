@@ -1,6 +1,6 @@
 """
 飞书多维表 API 客户端
-支持读写 5 张核心表：holdings, transactions, price_cache, nav_history, cash_flow
+支持读写核心表 holdings/cash_flow/nav_history/holdings_snapshot，以及可选 transactions/repair/schema 表。
 """
 import json
 import time
@@ -172,18 +172,13 @@ class FeishuClient:
 
         return app_token, table_id
 
-    # Public accessors for bitable_client.py and other internal consumers
-    get_table_config = _get_table_config
-    get_headers = _get_headers
-    rate_limit = _rate_limit
-
     def list_records(self, table_name: str, filter_str: str = None,
                      field_names: List[str] = None, page_size: int = 500) -> List[Dict]:
         """
         查询记录列表
 
         Args:
-            table_name: 表名（holdings/transactions/price_cache/nav_history/cash_flow）
+            table_name: 表名（核心 holdings/cash_flow/nav_history/holdings_snapshot；可选 transactions 等）
             filter_str: 筛选条件（飞书 filter 语法）
             field_names: 指定返回的字段列表（减少数据传输）
             page_size: 每页数量
@@ -219,18 +214,6 @@ class FeishuClient:
                 break
 
         return records
-
-    def get_record(self, table_name: str, record_id: str) -> Optional[Dict]:
-        """获取单条记录（宽松模式）。
-
-        Notes:
-        - This method returns None on errors to preserve backward compatibility.
-        - Prefer get_record_strict() for write-paths where "None" is dangerous.
-        """
-        try:
-            return self.get_record_strict(table_name, record_id)
-        except Exception:
-            return None
 
     def get_record_strict(self, table_name: str, record_id: str) -> Dict:
         """获取单条记录（严格模式）：任何错误直接抛出。"""

@@ -1,5 +1,3 @@
-"""Feishu wrappers."""
+"""Feishu package internals."""
 
-from .bitable_client import BitableClient, BitableClientError
-
-__all__ = ["BitableClient", "BitableClientError"]
+__all__ = []

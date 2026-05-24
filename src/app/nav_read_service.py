@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from src.app.nav_payload import format_nav_history_item, format_nav_payload
+
 
 class NavReadService:
     def __init__(self, *, storage: Any):
@@ -25,38 +27,8 @@ class NavReadService:
 
     @staticmethod
     def _format_latest(nav: Any) -> Dict[str, Any]:
-        latest = {
-            "date": nav.date.isoformat(),
-            "nav": nav.nav,
-            "shares": nav.shares,
-            "total_value": nav.total_value,
-            "stock_value": nav.stock_value,
-            "cash_value": nav.cash_value,
-            "stock_weight": nav.stock_weight,
-            "cash_weight": nav.cash_weight,
-            "cash_flow": nav.cash_flow,
-            "share_change": nav.share_change,
-            "mtd_nav_change": nav.mtd_nav_change,
-            "ytd_nav_change": nav.ytd_nav_change,
-            "mtd_pnl": nav.mtd_pnl,
-            "ytd_pnl": nav.ytd_pnl,
-        }
-
-        details = getattr(nav, "details", None)
-        if details:
-            latest["details"] = details
-            for key, value in details.items():
-                if key.startswith(("nav_change_", "appreciation_", "cash_flow_")) and key not in latest:
-                    latest[key] = value
-            for key in ("cumulative_appreciation", "cumulative_nav_change", "year_cash_flow", "initial_value"):
-                if key in details:
-                    latest[key] = details[key]
-        return latest
+        return format_nav_payload(nav)
 
     @staticmethod
     def _format_history_item(nav: Any) -> Dict[str, Any]:
-        return {
-            "date": nav.date.isoformat(),
-            "nav": nav.nav,
-            "share_change": nav.share_change,
-        }
+        return format_nav_history_item(nav)

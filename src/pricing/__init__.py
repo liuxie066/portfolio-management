@@ -1,7 +1,7 @@
 """Pricing service package.
 
-The legacy public entrypoint remains ``src.price_fetcher.PriceFetcher``.
-New provider-based code lives here and is wired in gradually.
+The public fetcher facade remains ``src.price_fetcher.PriceFetcher``.
+Provider-based code lives here.
 """
 
 from .provider import PriceProvider

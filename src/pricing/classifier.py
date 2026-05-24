@@ -1,7 +1,7 @@
 """Pricing request classification helpers.
 
-These helpers are provider-facing. ``PriceFetcher`` keeps compatibility wrapper
-methods, but routing/classification should live in ``src.pricing``.
+These helpers are provider-facing. Routing/classification should live in
+``src.pricing`` instead of the fetcher facade.
 """
 from __future__ import annotations
 

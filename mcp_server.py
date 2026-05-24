@@ -42,7 +42,6 @@ from skill_api import (
     close_nav,
     generate_report,
     sync_futu_cash_mmf,
-    clean_data,
 )
 
 mcp = FastMCP(
@@ -512,40 +511,6 @@ def tool_sync_futu_cash_mmf(
     if mmf_balance is not None:
         kwargs["mmf_balance"] = mmf_balance
     result = sync_futu_cash_mmf(account=account, **kwargs)
-    return json.dumps(result, ensure_ascii=False, default=str)
-
-
-# ========== 数据管理 Tools ==========
-
-
-@mcp.tool()
-def tool_clean_data(
-    table: str = None,
-    account: str = None,
-    dry_run: bool = True,
-    code: str = None,
-    date_before: str = None,
-    empty_only: bool = False,
-    confirm: bool = False,
-) -> str:
-    """清理测试数据。
-
-    ⚠️ 默认 dry_run=True。实际删除需 dry_run=False 且 confirm=True。
-
-    Args:
-        table: 目标表 - 'holdings', 'transactions', 'cash_flow', 'nav_history', 'all'
-        account: 按账户过滤
-        dry_run: 预览模式（默认 True）
-        code: 按资产代码过滤（如 'TEST'）
-        date_before: 删除指定日期之前的数据 (YYYY-MM-DD)
-        empty_only: 只清理空记录
-        confirm: 确认删除
-    """
-    result = clean_data(
-        table=table, account=account, dry_run=dry_run,
-        code=code, date_before=date_before,
-        empty_only=empty_only, confirm=confirm,
-    )
     return json.dumps(result, ensure_ascii=False, default=str)
 
 

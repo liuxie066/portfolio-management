@@ -45,7 +45,7 @@ class StubStorage:
         self.saved = price
 
 
-class LegacyFetcher:
+class FetcherContext:
     def __init__(self, storage, realtime_payload=None):
         self.storage = storage
         self.use_cache = True
@@ -72,8 +72,8 @@ def _cache(expires_delta, *, source="tencent"):
 
 def test_fetch_quote_returns_valid_cache_without_realtime_call():
     storage = StubStorage(cached=_cache(timedelta(hours=1)))
-    fetcher = LegacyFetcher(storage, realtime_payload={"code": "000001", "price": 99})
-    service = PriceService([], legacy_fetcher=fetcher)
+    fetcher = FetcherContext(storage, realtime_payload={"code": "000001", "price": 99})
+    service = PriceService([], fetcher_context=fetcher)
 
     quote = service.fetch_quote("000001")
 
@@ -85,7 +85,7 @@ def test_fetch_quote_returns_valid_cache_without_realtime_call():
     assert service.last_diagnostics == []
 
 
-def test_fetch_quote_returns_fixed_cash_without_legacy_fetcher():
+def test_fetch_quote_returns_fixed_cash_without_fetcher_context():
     service = PriceService([])
 
     quote = service.fetch_quote("CNY-CASH")
@@ -99,8 +99,8 @@ def test_fetch_quote_returns_fixed_cash_without_legacy_fetcher():
 
 def test_fetch_quote_falls_back_to_stale_cache_when_realtime_fails():
     storage = StubStorage(cached=_cache(timedelta(hours=-1)))
-    fetcher = LegacyFetcher(storage, realtime_payload=None)
-    service = PriceService([], legacy_fetcher=fetcher)
+    fetcher = FetcherContext(storage, realtime_payload=None)
+    service = PriceService([], fetcher_context=fetcher)
 
     quote = service.fetch_quote(
         "000001",
@@ -118,7 +118,7 @@ def test_fetch_quote_falls_back_to_stale_cache_when_realtime_fails():
 
 def test_fetch_quote_saves_realtime_payload_and_returns_market_type():
     storage = StubStorage()
-    fetcher = LegacyFetcher(
+    fetcher = FetcherContext(
         storage,
         realtime_payload={
             "code": "AAPL",
@@ -130,7 +130,7 @@ def test_fetch_quote_saves_realtime_payload_and_returns_market_type():
             "source": "yahoo_chart",
         },
     )
-    service = PriceService([], legacy_fetcher=fetcher)
+    service = PriceService([], fetcher_context=fetcher)
 
     quote = service.fetch_quote("AAPL", asset_type_map={"AAPL": AssetType.US_STOCK})
 
@@ -146,8 +146,8 @@ def test_fetch_quote_saves_realtime_payload_and_returns_market_type():
 
 def test_fetch_quote_returns_structured_failure_without_cache_or_realtime():
     storage = StubStorage()
-    fetcher = LegacyFetcher(storage, realtime_payload=None)
-    service = PriceService([], legacy_fetcher=fetcher)
+    fetcher = FetcherContext(storage, realtime_payload=None)
+    service = PriceService([], fetcher_context=fetcher)
 
     failure = service.fetch_quote("MISSING")
 
@@ -156,10 +156,10 @@ def test_fetch_quote_returns_structured_failure_without_cache_or_realtime():
     assert failure.to_payload()["success"] is False
 
 
-def test_fetch_batch_wraps_optimized_legacy_payloads():
+def test_fetch_batch_wraps_optimized_payloads():
     storage = StubStorage(cached=_cache(timedelta(hours=1)))
-    fetcher = LegacyFetcher(storage, realtime_payload=None)
-    service = PriceService([], legacy_fetcher=fetcher)
+    fetcher = FetcherContext(storage, realtime_payload=None)
+    service = PriceService([], fetcher_context=fetcher)
 
     result = service.fetch_batch(["000001"], use_cache_only=True)
 
@@ -168,8 +168,21 @@ def test_fetch_batch_wraps_optimized_legacy_payloads():
     assert result.quotes["000001"].to_payload()["cache_status"] == "hit"
 
 
+def test_fetch_batch_does_not_fail_when_payload_key_is_normalized():
+    fetcher = FetcherContext(StubStorage(), realtime_payload=None)
+    service = PriceService([], fetcher_context=fetcher)
+    payload = {"code": "BABA", "price": 80.0, "currency": "USD", "cny_price": 580.0}
+
+    with patch("src.pricing.service.BatchPricePlanner.fetch_batch", return_value={"BABA": payload}):
+        result = service.fetch_batch(["baba"])
+
+    assert result.ok
+    assert "BABA" in result.quotes
+    assert result.failures == {}
+
+
 def test_batch_planner_fetch_non_us_uses_provider_batch():
-    fetcher = LegacyFetcher(StubStorage(), realtime_payload=None)
+    fetcher = FetcherContext(StubStorage(), realtime_payload=None)
     payload = {"code": "000001", "price": 10.5, "currency": "CNY", "cny_price": 10.5, "source": "tencent_batch"}
 
     with patch("src.pricing.batch.fetch_tencent_quotes_batch", return_value=({"000001": payload}, [])) as mocked:

@@ -506,20 +506,11 @@ class FeishuStorage(
         return None
 
     def _read_record(self, table_name: str, record_id: str) -> Optional[Dict[str, Any]]:
-        """Read one record, accepting both strict and legacy client shapes."""
+        """Read one record through the strict client API."""
         strict = getattr(self.client, 'get_record_strict', None)
         if callable(strict):
             try:
                 record = strict(table_name, record_id)
-                if isinstance(record, dict):
-                    return record
-            except Exception:
-                pass
-
-        legacy = getattr(self.client, 'get_record', None)
-        if callable(legacy):
-            try:
-                record = legacy(table_name, record_id)
                 if isinstance(record, dict):
                     return record
             except Exception:

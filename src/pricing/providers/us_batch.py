@@ -7,6 +7,9 @@ from typing import Dict, List
 
 from src import config as _config
 
+from .us import USStockProvider
+from .yahoo_chart import fetch_yahoo_chart_quote
+
 
 def fetch_us_batch(
     fetcher,
@@ -25,6 +28,7 @@ def fetch_us_batch(
     consecutive_failures = [0]
     max_consecutive_failures = 3
     finnhub_key = _config.get("finnhub_api_key")
+    us_provider = USStockProvider(fetcher)
 
     def fetch_single_us(code):
         try:
@@ -32,7 +36,7 @@ def fetch_us_batch(
 
             if finnhub_key:
                 try:
-                    result = fetcher._fetch_us_stock_finnhub(quote_code, finnhub_key)
+                    result = us_provider.fetch_finnhub(quote_code, finnhub_key)
                     if result:
                         result["code"] = code
                         return code, result
@@ -40,44 +44,9 @@ def fetch_us_batch(
                     pass
 
             try:
-                url = f"https://query1.finance.yahoo.com/v8/finance/chart/{quote_code}?interval=1d&range=2d"
-                headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    "Accept": "application/json",
-                }
-                response = fetcher.session.get(url, headers=headers, timeout=5)
-
-                if response.status_code == 200:
-                    data = response.json()
-                    chart = data.get("chart", {})
-                    if not chart.get("error"):
-                        result = chart.get("result", [{}])[0]
-                        meta = result.get("meta", {})
-                        quotes = result.get("indicators", {}).get("quote", [{}])[0]
-                        closes = [c for c in quotes.get("close", []) if c is not None]
-
-                        if closes:
-                            current = closes[-1]
-                            prev_close = meta.get("previousClose") or meta.get("chartPreviousClose") or current
-                            change = current - prev_close
-                            change_pct = (change / prev_close * 100) if prev_close else 0
-                            usd_cny = fetcher._fetch_exchange_rates()["USDCNY"]
-
-                            return code, fetcher._normalize_price_payload(
-                                {
-                                    "code": code,
-                                    "name": meta.get("shortName") or meta.get("longName") or code,
-                                    "price": current,
-                                    "prev_close": prev_close,
-                                    "change": change,
-                                    "change_pct": change_pct,
-                                    "currency": meta.get("currency", "USD"),
-                                    "cny_price": current * usd_cny,
-                                    "exchange_rate": usd_cny,
-                                    "market_type": "us",
-                                    "source": "yahoo_chart",
-                                }
-                            )
+                result = fetch_yahoo_chart_quote(fetcher, quote_code, code=code, timeout=5)
+                if result:
+                    return code, result
             except Exception:
                 pass
 

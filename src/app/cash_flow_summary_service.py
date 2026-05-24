@@ -22,9 +22,22 @@ class CashFlowSummaryService:
     def sum_cash_flows(cls, flows) -> float:
         total = Decimal("0")
         for flow in flows:
-            if flow.cny_amount:
-                total += cls.to_decimal(flow.cny_amount)
+            total += cls.to_decimal(cls._cny_amount(flow))
         return float(total)
+
+    @staticmethod
+    def _cny_amount(flow) -> float:
+        amount = getattr(flow, "cny_amount", None)
+        if amount is not None:
+            return amount
+        currency = str(getattr(flow, "currency", "CNY") or "CNY").upper()
+        if currency == "CNY":
+            return getattr(flow, "amount", 0)
+        record_id = getattr(flow, "record_id", None) or "(unknown)"
+        raise ValueError(
+            f"cash_flow record {record_id} currency={currency} lacks cny_amount; "
+            "run `pm cash-flow reconcile --apply --confirm` before NAV calculation"
+        )
 
     def summarize(self, account: str, today: date, start_year: int, last_nav=None) -> dict:
         agg = self._load_aggs(account, start_date=date(start_year, 1, 1), end_date=today)
@@ -117,9 +130,7 @@ class CashFlowSummaryService:
             flow_date = getattr(flow, "flow_date", None)
             if not flow_date:
                 continue
-            amount = getattr(flow, "cny_amount", None)
-            if amount is None:
-                amount = getattr(flow, "amount", 0)
+            amount = self._cny_amount(flow)
             amount_dec = self.to_decimal(amount)
             day_key = flow_date.strftime("%Y-%m-%d")
             month_key = flow_date.strftime("%Y-%m")

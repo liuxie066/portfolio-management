@@ -273,7 +273,7 @@ def test_nav_bulk_upsert_upsert_mode_keeps_existing_cache_values_for_none_fields
     assert row.get('ytd_pnl') == 56.78
 
 
-def test_save_nav_refreshes_remote_once_before_create_to_avoid_same_day_duplicates():
+def test_write_nav_record_refreshes_remote_once_before_create_to_avoid_same_day_duplicates():
     client = StubNavSingleWriteClient(
         initial_records=[
             {
@@ -320,7 +320,7 @@ def test_save_nav_refreshes_remote_once_before_create_to_avoid_same_day_duplicat
     assert nav.record_id == 'rec_nav_1'
 
 
-def test_save_nav_respects_overwrite_existing_false_before_write():
+def test_write_nav_record_respects_overwrite_existing_false_before_write():
     client = StubNavSingleWriteClient(
         initial_records=[
             {
@@ -355,7 +355,7 @@ def test_save_nav_respects_overwrite_existing_false_before_write():
     assert len(client.create_record_calls) == 0
 
 
-def test_write_nav_record_alias_matches_single_full_write_behavior():
+def test_write_nav_record_matches_single_full_write_behavior():
     client = StubNavSingleWriteClient()
     storage = FeishuStorage(client=client, local_nav_index_cache=StubLocalNavIndexCache())
 

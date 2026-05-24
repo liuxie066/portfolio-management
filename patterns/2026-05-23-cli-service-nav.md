@@ -18,3 +18,5 @@
 - Keep scheduled publishers service-first but retain an explicit direct mode for local recovery, with tests proving both paths.
 - For write/report workflows, generate the trace id once at the outer workflow boundary and pass it downward; do not let each internal stage create its own unrelated id.
 - Keep internal diagnostic stdout suppression scoped to noisy computation only; final CLI/publisher JSON output must remain outside the suppression block, with `--quiet` tested explicitly.
+- When a service method can fail because storage/config is incomplete, catch at the application boundary and include account/date/run_id context so CLI and HTTP validation stay diagnosable.
+- Client-side service errors should extract the first structured item from `errors` or `items`; otherwise multi-account failures degrade into unhelpful `unknown service error` messages.

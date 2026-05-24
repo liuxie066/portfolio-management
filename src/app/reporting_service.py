@@ -9,7 +9,7 @@ from src.reporting_utils import normalize_asset_type
 class ReportingService:
     """Build lightweight portfolio distribution reports.
 
-    ``manager`` is used as a compatibility facade so runtime changes to
+    ``manager`` is used as the runtime facade so changes to
     ``manager.price_fetcher`` and ``manager.calculate_valuation`` are respected.
     """
 
@@ -32,42 +32,13 @@ class ReportingService:
         }
 
     def get_industry_distribution(self, account: str) -> Dict[str, float]:
-        holdings = self.storage.get_holdings(account=account)
-
-        prices = {}
-        price_fetcher = getattr(self.manager, "price_fetcher", None)
-        if price_fetcher and holdings:
-            name_map = {holding.asset_id: holding.asset_name for holding in holdings}
-            import threading
-            fetch_result = {"prices": None}
-
-            def _fetch():
-                try:
-                    fetch_result["prices"] = price_fetcher.fetch_batch(
-                        [holding.asset_id for holding in holdings],
-                        name_map=name_map,
-                        use_concurrent=True,
-                        skip_us=False,
-                    )
-                except Exception:
-                    pass
-
-            t = threading.Thread(target=_fetch, daemon=True)
-            t.start()
-            t.join(timeout=30)
-            if fetch_result["prices"] is not None:
-                prices = fetch_result["prices"]
+        valuation = self.manager.calculate_valuation(account)
+        holdings = valuation.holdings or []
 
         industry_values = {}
         total_value = 0.0
         for holding in holdings:
-            price_data = prices.get(holding.asset_id, {})
-            if price_data and "cny_price" in price_data:
-                cny_price = price_data["cny_price"]
-            else:
-                cny_price = 1.0 if holding.currency == "CNY" else None
-
-            market_value = holding.quantity * cny_price if cny_price else 0
+            market_value = holding.market_value_cny or 0
             industry = holding.industry.value if holding.industry else "其他"
             industry_values[industry] = industry_values.get(industry, 0) + market_value
             total_value += market_value

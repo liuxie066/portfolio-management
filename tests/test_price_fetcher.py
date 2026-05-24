@@ -4,12 +4,16 @@ from datetime import datetime, timedelta
 from unittest.mock import Mock, patch, MagicMock
 import pytz
 
-from src.price_fetcher import MarketTimeUtil, PriceFetcher
+from src.market_time import MarketTimeUtil
+from src.price_fetcher import PriceFetcher
 from src.asset_utils import detect_market_type
 from src.models import AssetType, PriceCache
 from src.pricing.cache import market_type_from_asset_type
+from src.pricing.classifier import get_exchange_prefix, is_etf, is_otc_fund
+from src.pricing.fixed import get_cash_price
 from src.pricing.providers.cn import CNStockProvider
 from src.pricing.providers.hk import HKStockProvider
+from src.pricing.providers.us import USStockProvider
 
 
 class TestMarketTimeUtil:
@@ -158,7 +162,7 @@ class TestPriceFetcher:
         }
 
         fetcher = PriceFetcher()
-        result = fetcher._fetch_a_stock("000001")
+        result = CNStockProvider(fetcher).fetch_a_stock("000001")
 
         assert result is not None
         assert result["price"] == 10.5
@@ -173,7 +177,7 @@ class TestPriceFetcher:
         mock_tencent.return_value = None
 
         fetcher = PriceFetcher()
-        result = fetcher._fetch_a_stock("000001")
+        result = CNStockProvider(fetcher).fetch_a_stock("000001")
 
         assert result is None
 
@@ -190,16 +194,15 @@ class TestPriceFetcher:
         }
 
         fetcher = PriceFetcher()
-        result = fetcher._fetch_hk_stock("00700")
+        result = HKStockProvider(fetcher).fetch_hk_stock("00700")
 
         assert result is not None
         assert result["price"] == 400.0
         assert result["name"] == "腾讯控股"
         assert result["currency"] == "HKD"
 
-    @patch.object(PriceFetcher, '_fetch_us_stock_finnhub', return_value=None)
     @patch.object(PriceFetcher, '_retry_with_backoff')
-    def test_fetch_us_stock_success(self, mock_retry, mock_finnhub):
+    def test_fetch_us_stock_success(self, mock_retry):
         """测试获取美股价格成功"""
         mock_retry.return_value = {
             "code": "AAPL",
@@ -212,7 +215,7 @@ class TestPriceFetcher:
         }
 
         fetcher = PriceFetcher()
-        result = fetcher._fetch_us_stock("AAPL")
+        result = USStockProvider(fetcher).fetch_us_stock("AAPL")
 
         assert result is not None
         assert result["price"] == 175.0
@@ -221,15 +224,13 @@ class TestPriceFetcher:
 
     def test_get_cash_price(self):
         """测试获取现金价格"""
-        fetcher = PriceFetcher()
-
-        result = fetcher._get_cash_price("CNY-CASH")
+        result = get_cash_price("CNY-CASH")
         assert result is not None
         assert result["price"] == 1.0
         assert result["cny_price"] == 1.0
         assert result["currency"] == "CNY"
 
-        result = fetcher._get_cash_price("USD-CASH")
+        result = get_cash_price("USD-CASH", lambda: {"USDCNY": 7.2})
         assert result is not None
         assert result["price"] == 1.0
         assert result["currency"] == "USD"
@@ -250,12 +251,11 @@ class TestPriceFetcher:
 
     def test_is_etf(self):
         """测试ETF识别"""
-        fetcher = PriceFetcher()
         # 场内ETF（股票代码形式）
-        assert fetcher._is_etf("510300") == True  # 300ETF
-        assert fetcher._is_etf("159915") == True  # 创业板ETF
+        assert is_etf("510300") == True  # 300ETF
+        assert is_etf("159915") == True  # 创业板ETF
         # 非ETF
-        assert fetcher._is_etf("000001") == False
+        assert is_etf("000001") == False
 
     def test_asset_type_market_routing_for_split_funds(self):
         assert market_type_from_asset_type("510300", AssetType.EXCHANGE_FUND, "cn") == "cn"
@@ -265,29 +265,27 @@ class TestPriceFetcher:
 
     def test_is_otc_fund(self):
         """测试场外基金识别"""
-        fetcher = PriceFetcher()
         # 明确的场外基金代码（不与A股重叠）
-        assert fetcher._is_otc_fund("004001") == True  # 004开头
-        assert fetcher._is_otc_fund("010001") == True  # 01开头
-        assert fetcher._is_otc_fund("160106") == True  # 16开头
-        assert fetcher._is_otc_fund("270042") == True  # 27开头
+        assert is_otc_fund("004001") == True  # 004开头
+        assert is_otc_fund("010001") == True  # 01开头
+        assert is_otc_fund("160106") == True  # 16开头
+        assert is_otc_fund("270042") == True  # 27开头
         # 与A股重叠的代码返回False，需依赖name_hints判断
-        assert fetcher._is_otc_fund("000001") == False  # 000开头，与A股重叠
-        assert fetcher._is_otc_fund("001001") == False  # 001开头，与A股重叠
-        assert fetcher._is_otc_fund("002001") == False  # 002开头，与A股重叠
+        assert is_otc_fund("000001") == False  # 000开头，与A股重叠
+        assert is_otc_fund("001001") == False  # 001开头，与A股重叠
+        assert is_otc_fund("002001") == False  # 002开头，与A股重叠
         # 明确非场外基金
-        assert fetcher._is_otc_fund("600519") == False  # 沪市A股
-        assert fetcher._is_otc_fund("300750") == False  # 创业板
-        assert fetcher._is_otc_fund("688981") == False  # 科创板
-        assert fetcher._is_otc_fund("301039") == False  # 创业板注册制
-        assert fetcher._is_otc_fund("510300") == False  # 场内ETF
+        assert is_otc_fund("600519") == False  # 沪市A股
+        assert is_otc_fund("300750") == False  # 创业板
+        assert is_otc_fund("688981") == False  # 科创板
+        assert is_otc_fund("301039") == False  # 创业板注册制
+        assert is_otc_fund("510300") == False  # 场内ETF
 
     def test_get_exchange_prefix(self):
         """测试交易所前缀"""
-        fetcher = PriceFetcher()
-        assert fetcher._get_exchange_prefix("600000") == "sh"
-        assert fetcher._get_exchange_prefix("000001") == "sz"
-        assert fetcher._get_exchange_prefix("300750") == "sz"
+        assert get_exchange_prefix("600000") == "sh"
+        assert get_exchange_prefix("000001") == "sz"
+        assert get_exchange_prefix("300750") == "sz"
 
     def test_fetch_with_storage_cache(self):
         """测试带存储的缓存获取"""

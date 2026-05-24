@@ -161,6 +161,7 @@ def test_service_client_posts_daily_report_bundle_payload():
             "price_timeout": 9,
             "dry_run": False,
             "confirm": True,
+            "overwrite_existing": True,
             "use_bulk_persist": True,
             "sync_futu_cash_mmf": True,
             "sync_futu_dry_run": False,
@@ -256,5 +257,23 @@ def test_service_client_raises_response_error_on_success_false_payload():
         client = PortfolioServiceClient(base_url="http://127.0.0.1:8765", timeout=0.1)
         with pytest.raises(PortfolioServiceResponseError, match="success=false"):
             client.get_distribution(account="alice")
+    finally:
+        client_module.urlopen = old_urlopen
+
+
+def test_service_client_uses_first_structured_error_on_success_false_payload():
+    def fake_urlopen(_request, **_kwargs):
+        return FakeResponse({
+            "success": False,
+            "status": "failed",
+            "errors": [{"account": "default", "error": "missing holdings table"}],
+        })
+
+    old_urlopen = client_module.urlopen
+    try:
+        client_module.urlopen = fake_urlopen
+        client = PortfolioServiceClient(base_url="http://127.0.0.1:8765", timeout=0.1)
+        with pytest.raises(PortfolioServiceResponseError, match="default: missing holdings table"):
+            client.multi_account_overview()
     finally:
         client_module.urlopen = old_urlopen

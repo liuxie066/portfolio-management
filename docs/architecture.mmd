@@ -6,14 +6,14 @@ flowchart TB
     end
 
     subgraph Entry["入口与编排层"]
-        SkillAPI["skill_api.py<br/>PortfolioSkill<br/>兼容 API / 参数适配"]
+        SkillAPI["skill_api.py<br/>PortfolioSkill<br/>调用适配 / 参数适配"]
         CLI["scripts/pm.py<br/>CLI 产品入口"]
         ServiceRunner["scripts/service.py<br/>本地服务进程"]
         ServiceClient["src/service/client.py<br/>本地服务客户端"]
         ServiceHTTP["src/service/http.py<br/>HTTP 路由"]
         ServiceApp["src/service/application.py<br/>服务应用边界"]
         Publish["scripts/publish_daily_report.py<br/>记录 NAV + 生成 HTML + 发布"]
-        Doctor["scripts/doctor.py / schema_doctor.py<br/>环境与 Schema 诊断"]
+        Doctor["scripts/doctor.py / migrate_schema.py check-live<br/>环境与 Schema 诊断"]
     end
 
     subgraph Domain["领域层"]
@@ -26,7 +26,7 @@ flowchart TB
     end
 
     subgraph Pricing["行情层"]
-        PF["src/price_fetcher.py<br/>兼容门面"]
+        PF["src/price_fetcher.py<br/>行情门面"]
         PS["src/pricing/service.py<br/>结构化报价入口"]
         PBatch["src/pricing/batch.py<br/>批量编排"]
         PCache["src/pricing/cache.py<br/>TTL / stale fallback"]
@@ -49,7 +49,7 @@ flowchart TB
 
     subgraph Bitable["Feishu Bitable 云端主存储"]
         Holdings["holdings<br/>当前持仓"]
-        Tx["transactions<br/>交易流水"]
+        Tx["transactions<br/>可选交易流水"]
         CashFlow["cash_flow<br/>出入金"]
         NAV["nav_history<br/>净值历史"]
         HoldingsSnapshot["holdings_snapshot<br/>每日持仓快照"]

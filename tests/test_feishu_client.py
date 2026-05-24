@@ -402,29 +402,30 @@ class TestFeishuClientRecords:
 
     @patch('src.feishu_client.FeishuClient._request')
     @patch('src.feishu_client.FeishuClient._get_table_config')
-    def test_get_record(self, mock_config, mock_request):
-        """测试获取单条记录"""
+    def test_get_record_strict(self, mock_config, mock_request):
+        """测试严格获取单条记录"""
         mock_config.return_value = ('app_token', 'table_id')
         mock_request.return_value = {
-            'record_id': 'rec_123',
-            'fields': {'asset_id': '000001', 'quantity': 100}
+            'record': {
+                'record_id': 'rec_123',
+                'fields': {'asset_id': '000001', 'quantity': 100}
+            }
         }
 
         client = FeishuClient(app_id='test', app_secret='test')
-        result = client.get_record('holdings', 'rec_123')
+        result = client.get_record_strict('holdings', 'rec_123')
 
         assert result['record_id'] == 'rec_123'
         assert result['fields']['asset_id'] == '000001'
 
     @patch('src.feishu_client.FeishuClient._get_table_config')
-    def test_get_record_not_configured(self, mock_config):
-        """测试获取未配置表的记录"""
+    def test_get_record_strict_not_configured(self, mock_config):
+        """测试严格获取未配置表时直接抛错"""
         mock_config.side_effect = ValueError('未配置表')
 
         client = FeishuClient(app_id='test', app_secret='test')
-        result = client.get_record('holdings', 'rec_123')
-
-        assert result is None
+        with pytest.raises(ValueError, match='未配置表'):
+            client.get_record_strict('holdings', 'rec_123')
 
 
 class TestFeishuClientBatchOperations:

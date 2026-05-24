@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, Optional
 
+from src.app.nav_payload import format_nav_payload
+
 
 class ReportGenerationService:
     """Build daily/monthly/yearly report payloads from a full report."""
@@ -26,6 +28,7 @@ class ReportGenerationService:
         price_timeout: int = 30,
         snapshot: Optional[Dict[str, Any]] = None,
         navs: Optional[list] = None,
+        nav_override: Optional[Any] = None,
         overwrite_existing: bool = True,
         dry_run: bool = False,
     ) -> Dict[str, Any]:
@@ -37,14 +40,17 @@ class ReportGenerationService:
         if record_nav:
             if self.record_nav_func is None:
                 return {"success": False, "error": "record_nav_func is required when record_nav=True"}
-            self.record_nav_func(
+            record_nav_result = self.record_nav_func(
                 price_timeout=price_timeout,
                 snapshot=snapshot,
                 overwrite_existing=overwrite_existing,
                 dry_run=dry_run,
             )
+            if isinstance(record_nav_result, dict) and not record_nav_result.get("success", True):
+                return record_nav_result
+            nav_override = nav_override or record_nav_result
 
-        nav = full.get("nav") or {}
+        nav = self._normalize_nav_override(nav_override) or full.get("nav") or {}
         nav_details = nav.get("details") or {}
         returns = full.get("returns") or {}
         since_inception = returns.get("since_inception") or {}
@@ -125,6 +131,17 @@ class ReportGenerationService:
             }
 
         return {"success": False, "error": f"不支持的报告类型: {report_type}，可选: daily/monthly/yearly"}
+
+    @staticmethod
+    def _normalize_nav_override(nav_override: Optional[Any]) -> Optional[Dict[str, Any]]:
+        if not nav_override:
+            return None
+        if isinstance(nav_override, dict):
+            latest = nav_override.get("latest")
+            if isinstance(latest, dict):
+                return dict(latest)
+            return dict(nav_override)
+        return format_nav_payload(nav_override)
 
     def _build_snapshot(self, price_timeout: int) -> Dict[str, Any]:
         try:

@@ -17,3 +17,4 @@
 - `daily_report_bundle` records NAV, assembles the daily report payload, and returns recent NAV page fields from one priced snapshot so the published HTML and stored NAV are consistent.
 - `record_nav` and the official daily publisher now carry a `run_id`; callers may supply one, otherwise service/publisher code generates it and propagates it into snapshot, NAV result, report payload, HTML trace text, publish output, and persisted NAV `details`.
 - `scripts/publish_daily_report.py` now suppresses noisy internal stdout only while building the bundle; the final success JSON is emitted by default and `--quiet` is the explicit no-output mode.
+- Service-first validation treats business/data configuration failures as structured `success=false` payloads, not HTTP 500s or opaque client errors.

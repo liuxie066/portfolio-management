@@ -10,8 +10,8 @@ import json
 from pathlib import Path
 from datetime import date, datetime, timedelta
 
-from src.time_utils import bj_today, bj_now_naive
-from typing import Dict, Any, Optional, Iterable, List
+from src.time_utils import bj_today
+from typing import Dict, Any, Optional
 
 # 确保能 import 到 src 模块
 SKILL_DIR = Path(__file__).parent.resolve()
@@ -30,7 +30,9 @@ from src.asset_utils import (
 )
 from src.broker_message_parser import parse_futu_fill_message
 from src.app import FutuBalanceSyncService, FullReportService, PortfolioReadService, ReportGenerationService
+from src.app.account_service import AccountService, normalize_accounts
 from src.app.audit_service import AuditService
+from src.app.nav_payload import format_nav_payload
 from src.write_guard import validate_and_normalize_trade_input, validate_and_normalize_nav_input
 from src import config
 
@@ -38,64 +40,6 @@ from src import config
 # ========== 配置 ==========
 
 DEFAULT_ACCOUNT = config.get_account()
-
-
-def _iter_account_values(value: Any) -> Iterable[str]:
-    """Yield normalized account strings from raw storage/client field shapes."""
-    if value is None:
-        return
-    if isinstance(value, str):
-        account = value.strip()
-        if account:
-            yield account
-        return
-    if isinstance(value, (list, tuple, set)):
-        for item in value:
-            yield from _iter_account_values(item)
-        return
-    if isinstance(value, dict):
-        for key in ("text", "name", "value"):
-            if key in value:
-                yield from _iter_account_values(value.get(key))
-        return
-
-    account = str(value).strip()
-    if account:
-        yield account
-
-
-def _normalize_accounts(accounts: Any) -> Optional[List[str]]:
-    """Normalize account input from Python callers, CLI comma strings, or MCP JSON."""
-    if accounts is None:
-        return None
-    if isinstance(accounts, str):
-        raw_items = accounts.split(",")
-    elif isinstance(accounts, (list, tuple, set)):
-        raw_items = list(accounts)
-    else:
-        raw_items = [accounts]
-
-    normalized: List[str] = []
-    seen = set()
-    for item in raw_items:
-        for account in _iter_account_values(item):
-            if account not in seen:
-                seen.add(account)
-                normalized.append(account)
-    return normalized
-
-
-def _as_float(value: Any, default: float = 0.0) -> float:
-    try:
-        if value is None:
-            return default
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _round_money(value: float) -> float:
-    return round(float(value or 0.0), 2)
 
 
 def _snapshot_failure(nav_record: NAVHistory) -> Optional[Dict[str, Any]]:
@@ -118,13 +62,9 @@ class PortfolioSkill:
     额外能力：支持从券商成交提醒消息（如富途成交提醒）解析并写入 transactions 表。
     """
 
-    def build_snapshot(self) -> Dict[str, Any]:
+    def build_snapshot(self, price_timeout_seconds: Optional[int] = None) -> Dict[str, Any]:
         """构建统一估值快照，供 full_report / record_nav 复用，避免时点差。"""
-        return self._read_service().build_snapshot()
-
-    # backward compatibility
-    def _build_snapshot(self) -> Dict[str, Any]:
-        return self.build_snapshot()
+        return self._read_service().build_snapshot(price_timeout_seconds=price_timeout_seconds)
 
     def audit_nav_history_metrics(self, account: Optional[str] = None, days: int = 900, write_report: bool = True) -> Dict[str, Any]:
         """审计 nav_history 四个核心派生字段，与当前代码公式逐条比对。"""
@@ -474,63 +414,10 @@ class PortfolioSkill:
         现金流和净值表中的 account 字段。任一来源失败时返回 warning，不阻断
         其他来源和默认账户。
         """
-        accounts = set()
-        sources: Dict[str, List[str]] = {}
-        warnings = []
-
-        def remember(source: str, account_values: Iterable[str]) -> None:
-            source_accounts = set()
-            for account in account_values:
-                if not account:
-                    continue
-                accounts.add(account)
-                source_accounts.add(account)
-            sources[source] = sorted(source_accounts)
-
-        try:
-            get_holdings_fn = getattr(self.storage, "get_holdings")
-            try:
-                holdings = get_holdings_fn(account=None, include_empty=True)
-            except TypeError:
-                holdings = get_holdings_fn(account=None)
-            remember("holdings", (getattr(h, "account", None) for h in holdings or []))
-        except Exception as e:
-            warnings.append({"source": "holdings", "error": str(e)})
-
-        client = getattr(self.storage, "client", None)
-        list_records = getattr(client, "list_records", None)
-        if callable(list_records):
-            for table in ("transactions", "cash_flow", "nav_history"):
-                try:
-                    records = list_records(table, field_names=["account"])
-                    values = []
-                    for record in records or []:
-                        raw_fields = record.get("fields") or {}
-                        fields = raw_fields
-                        convert_fields = getattr(self.storage, "_from_feishu_fields", None)
-                        if callable(convert_fields):
-                            try:
-                                fields = convert_fields(raw_fields, table)
-                            except Exception:
-                                fields = raw_fields
-                        values.extend(_iter_account_values(fields.get("account")))
-                    remember(table, values)
-                except Exception as e:
-                    warnings.append({"source": table, "error": str(e)})
-
-        if include_default and self.account:
-            accounts.add(self.account)
-
-        result = {
-            "success": True,
-            "default_account": self.account,
-            "accounts": sorted(accounts),
-            "count": len(accounts),
-            "sources": sources,
-        }
-        if warnings:
-            result["warnings"] = warnings
-        return result
+        return AccountService(
+            storage=self.storage,
+            default_account=self.account,
+        ).list_accounts(include_default=include_default)
 
     def _read_service(self) -> PortfolioReadService:
         return PortfolioReadService(
@@ -539,23 +426,6 @@ class PortfolioSkill:
             portfolio=self.portfolio,
             reporting_service=self.portfolio.reporting_service,
         )
-
-    # Backward-compatible helper for tests and old callers.
-    @staticmethod
-    def _format_holdings_result(
-        *,
-        result: Dict[str, Any],
-        holdings: list,
-        group_by_market: bool,
-        include_price: bool,
-    ) -> Dict[str, Any]:
-        return PortfolioReadService._format_holdings_result(
-            result=result,
-            holdings=holdings,
-            group_by_market=group_by_market,
-            include_price=include_price,
-        )
-
 
     def get_position(self, holdings_data: Dict[str, Any] = None) -> Dict[str, Any]:
         """获取仓位分析
@@ -578,10 +448,6 @@ class PortfolioSkill:
             return self._read_service().get_distribution(holdings_data=holdings_data)
         except Exception as e:
             return {"success": False, "error": str(e)}
-
-    @staticmethod
-    def _snapshot_from_holdings_data(holdings_data: Dict[str, Any]) -> Dict[str, Any]:
-        return PortfolioReadService._snapshot_from_holdings_data(holdings_data)
 
     # ---------- 净值和收益 ----------
 
@@ -671,126 +537,27 @@ class PortfolioSkill:
     def _calc_month_return(self, month: str, _navs: list = None) -> Dict:
         """计算月收益率（环比：较上月末的变化）"""
         navs = _navs if _navs is not None else self.storage.get_nav_history(self.account, days=365)
-        month_navs = [n for n in navs if n.date.strftime('%Y-%m') == month]
-
-        if len(month_navs) < 1:
-            return {"success": False, "message": f"{month} 数据不足"}
-
-        # 当月最后一天净值
-        end_nav = max(month_navs, key=lambda x: x.date)
-
-        # 获取上月最后一天净值（作为基准）
-        year, mon = int(month[:4]), int(month[5:7])
-        if mon == 1:
-            prev_month = f"{year-1}-12"
-        else:
-            prev_month = f"{year}-{mon-1:02d}"
-
-        prev_month_navs = [n for n in navs if n.date.strftime('%Y-%m') == prev_month]
-        if prev_month_navs:
-            # 上月有数据，使用上月最后一天作为基准
-            start_nav = max(prev_month_navs, key=lambda x: x.date)
-            start_nav_label = "上月末"
-        else:
-            # 上月无数据，使用当月第一天作为基准（首次记录）
-            start_nav = min(month_navs, key=lambda x: x.date)
-            start_nav_label = "月初"
-
-        ret = (end_nav.nav - start_nav.nav) / start_nav.nav * 100 if start_nav.nav > 0 else 0
-
-        return {
-            "success": True,
-            "period": month,
-            "return_pct": ret,
-            "start_nav": start_nav.nav,
-            "end_nav": end_nav.nav,
-            "start_date": start_nav.date.isoformat(),
-            "end_date": end_nav.date.isoformat(),
-            "base": start_nav_label
-        }
+        return FullReportService(account=self.account, storage=self.storage, portfolio=self.portfolio)._calc_month_return(
+            month,
+            navs=navs,
+        )
 
     def _calc_year_return(self, year: str, _navs: list = None) -> Dict:
         """计算年收益率（环比：较上年末的变化）"""
         navs = _navs if _navs is not None else self.storage.get_nav_history(self.account, days=730)
-        year_navs = [n for n in navs if n.date.strftime('%Y') == year]
-
-        if len(year_navs) < 1:
-            return {"success": False, "message": f"{year} 数据不足"}
-
-        # 当年最后一天净值
-        end_nav = max(year_navs, key=lambda x: x.date)
-
-        # 获取上年最后一天净值（作为基准）
-        prev_year = str(int(year) - 1)
-        prev_year_navs = [n for n in navs if n.date.strftime('%Y') == prev_year]
-
-        if prev_year_navs:
-            # 上年有数据，使用上年最后一天作为基准
-            start_nav = max(prev_year_navs, key=lambda x: x.date)
-            start_nav_label = "上年末"
-        else:
-            # 上年无数据，使用当年第一天作为基准（首次记录）
-            start_nav = min(year_navs, key=lambda x: x.date)
-            start_nav_label = "年初"
-
-        ret = (end_nav.nav - start_nav.nav) / start_nav.nav * 100 if start_nav.nav > 0 else 0
-
-        return {
-            "success": True,
-            "period": year,
-            "return_pct": ret,
-            "start_nav": start_nav.nav,
-            "end_nav": end_nav.nav,
-            "start_date": start_nav.date.isoformat(),
-            "end_date": end_nav.date.isoformat(),
-            "base": start_nav_label
-        }
+        return FullReportService(account=self.account, storage=self.storage, portfolio=self.portfolio)._calc_year_return(
+            year,
+            navs=navs,
+        )
 
     def _calc_since_inception_return(self, _navs: list = None) -> Dict:
         """计算自 start_year 以来收益（以上年末净值为基准，标准化为1）"""
-        start_year = config.get_start_year()
-        BASE_DATE = date(start_year - 1, 12, 31)
-
-        if _navs is not None:
-            # 使用预获取的净值数据
-            base_candidates = [n for n in _navs if n.date <= BASE_DATE]
-            base_nav = max(base_candidates, key=lambda n: n.date) if base_candidates else None
-            latest = _navs[-1] if _navs else None
-        else:
-            base_nav = self.storage.get_nav_on_date(self.account, BASE_DATE)
-            if not base_nav:
-                base_nav = self.storage.get_latest_nav_before(self.account, BASE_DATE)
-            latest = self.storage.get_latest_nav(self.account)
-
-        if not base_nav or not latest:
-            return {"success": False, "message": "数据不足"}
-
-        actual_start_nav = base_nav.nav
-        actual_latest_nav = latest.nav
-        if not actual_start_nav or actual_start_nav <= 0:
-            return {"success": False, "message": "基准净值无效"}
-        normalized_nav = actual_latest_nav / actual_start_nav
-
-        total_ret = (normalized_nav - 1.0) * 100
-        days = (latest.date - BASE_DATE).days
-        years = days / 365.25
-        cagr = ((normalized_nav) ** (1/years) - 1) * 100 if years > 0 else 0
-
-        return {
-            "success": True,
-            "period": f"{start_year}至今",
-            "return_pct": total_ret,
-            "total_return_pct": total_ret,
-            "cagr": cagr,
-            "cagr_pct": cagr,
-            "days": days,
-            "start_nav": 1.0,
-            "start_date": BASE_DATE.isoformat(),
-            "latest_nav": round(normalized_nav, 4),
-            "actual_start_nav": actual_start_nav,
-            "actual_latest_nav": actual_latest_nav,
-            "base": f"{start_year - 1}年末"
-        }
+        navs = _navs if _navs is not None else self.storage.get_nav_history(self.account, days=9999)
+        return FullReportService(
+            account=self.account,
+            storage=self.storage,
+            portfolio=self.portfolio,
+        )._calc_since_inception_return(navs=navs)
 
     # ---------- 现金管理 ----------
 
@@ -895,6 +662,7 @@ class PortfolioSkill:
                         record_nav: bool = False, price_timeout: int = 30,
                         snapshot: Optional[Dict[str, Any]] = None,
                         navs: Optional[list] = None,
+                        nav_override: Optional[Any] = None,
                         overwrite_existing: bool = True,
                         dry_run: bool = False) -> Dict[str, Any]:
         """生成日报/月报/年报
@@ -914,6 +682,7 @@ class PortfolioSkill:
             price_timeout=price_timeout,
             snapshot=snapshot,
             navs=navs,
+            nav_override=nav_override,
             overwrite_existing=overwrite_existing,
             dry_run=dry_run,
         )
@@ -1059,7 +828,7 @@ class PortfolioSkill:
             confirm: 明确确认写入（默认 False）
         """
         try:
-            snapshot = snapshot or self.build_snapshot()
+            snapshot = snapshot or self.build_snapshot(price_timeout_seconds=price_timeout)
             if run_id:
                 snapshot["run_id"] = run_id
             valuation = snapshot["valuation"]
@@ -1086,13 +855,12 @@ class PortfolioSkill:
                 run_id=run_id,
             )
             storage_result = None
+            nav_payload = format_nav_payload(nav_record)
             result = {
                 "success": True,
+                **nav_payload,
                 "date": today.isoformat(),
                 "run_id": run_id,
-                "nav": nav_record.nav,
-                "total_value": nav_record.total_value,
-                "shares": nav_record.shares,
                 "message": (f"已演练 {today} 净值写入: {nav_record.nav:.4f}" if dry_run else f"已记录 {today} 净值: {nav_record.nav:.4f}")
             }
             result["snapshot_time"] = snapshot.get("snapshot_time")
@@ -1336,11 +1104,6 @@ def get_skill(account: str = None) -> PortfolioSkill:
     return _skill_instances[acct]
 
 
-def _get_default_skill() -> PortfolioSkill:
-    """获取默认 Skill 实例（向后兼容）"""
-    return get_skill()
-
-
 # 交易记录
 def buy(code: str, name: str, quantity: float, price: float, account: str = None, **kwargs) -> Dict:
     """买入资产"""
@@ -1439,9 +1202,16 @@ def sync_futu_cash_mmf(account: str = None, **kwargs) -> Dict:
     return get_skill(account).sync_futu_cash_mmf(**kwargs)
 
 # 报告
-def generate_report(report_type: str = "daily", record_nav: bool = False, price_timeout: int = 30, navs=None, account: str = None) -> Dict:
+def generate_report(report_type: str = "daily", record_nav: bool = False, price_timeout: int = 30,
+                    navs=None, nav_override: Optional[Any] = None, account: str = None) -> Dict:
     """生成日报/月报/年报"""
-    return get_skill(account).generate_report(report_type=report_type, record_nav=record_nav, price_timeout=price_timeout, navs=navs)
+    return get_skill(account).generate_report(
+        report_type=report_type,
+        record_nav=record_nav,
+        price_timeout=price_timeout,
+        navs=navs,
+        nav_override=nav_override,
+    )
 
 def full_report(price_timeout: int = 30, account: str = None) -> Dict:
     """完整报告（只读，不记录净值）
@@ -1450,33 +1220,6 @@ def full_report(price_timeout: int = 30, account: str = None) -> Dict:
         price_timeout: 价格获取超时时间（秒），默认30秒
     """
     return get_skill(account).full_report(price_timeout=price_timeout)
-
-
-def _report_value_breakdown(report: Dict[str, Any]) -> Dict[str, float]:
-    overview = report.get("overview") or {}
-    total_value = _as_float(overview.get("total_value"), 0.0)
-
-    cash_ratio = _as_float(overview.get("cash_ratio"), 0.0)
-    stock_ratio = _as_float(overview.get("stock_ratio"), 0.0)
-    fund_ratio = _as_float(overview.get("fund_ratio"), 0.0)
-
-    nav = report.get("nav") or {}
-    if cash_ratio == 0 and stock_ratio == 0 and fund_ratio == 0 and total_value:
-        cash_value = _as_float(nav.get("cash_value"), 0.0)
-        stock_value = _as_float(nav.get("stock_value"), 0.0)
-        fund_value = _as_float(nav.get("fund_value"), 0.0)
-    else:
-        cash_value = total_value * cash_ratio
-        stock_value = total_value * stock_ratio
-        fund_value = total_value * fund_ratio
-
-    return {
-        "total_value": _round_money(total_value),
-        "cash_value": _round_money(cash_value),
-        "stock_value": _round_money(stock_value),
-        "fund_value": _round_money(fund_value),
-        "non_cash_value": _round_money(stock_value + fund_value),
-    }
 
 
 def multi_account_overview(accounts: Any = None, price_timeout: int = 30,
@@ -1489,91 +1232,23 @@ def multi_account_overview(accounts: Any = None, price_timeout: int = 30,
         include_details: 是否在每个账户条目中附带完整 full_report。
     """
     try:
-        target_accounts = _normalize_accounts(accounts)
-        discovery = None
+        target_accounts = normalize_accounts(accounts)
+        storage = None
+        default_account = DEFAULT_ACCOUNT
         if target_accounts is None:
-            discovery = list_accounts(include_default=True)
-            if not discovery.get("success"):
-                return discovery
-            target_accounts = discovery.get("accounts") or []
+            base_skill = get_skill()
+            storage = base_skill.storage
+            default_account = base_skill.account
 
-        items = []
-        errors = []
-        summary_values = {
-            "total_value": 0.0,
-            "cash_value": 0.0,
-            "stock_value": 0.0,
-            "fund_value": 0.0,
-            "non_cash_value": 0.0,
-        }
-
-        for account in target_accounts:
-            report = get_skill(account).full_report(price_timeout=price_timeout)
-            if not report.get("success"):
-                error = {
-                    "account": account,
-                    "error": report.get("error") or report.get("message") or "unknown error",
-                }
-                errors.append(error)
-                items.append({"account": account, "success": False, **error})
-                continue
-
-            values = _report_value_breakdown(report)
-            for key in summary_values:
-                summary_values[key] += values[key]
-
-            item = {
-                "account": account,
-                "success": True,
-                **values,
-                "overview": report.get("overview") or {},
-                "nav": report.get("nav"),
-                "returns": report.get("returns") or {},
-            }
-            if include_details:
-                item["report"] = report
-            items.append(item)
-
-        successful_count = sum(1 for item in items if item.get("success"))
-        failed_count = len(errors)
-        total_value = summary_values["total_value"]
-        summary = {key: _round_money(value) for key, value in summary_values.items()}
-        summary.update({
-            "cash_ratio": summary["cash_value"] / total_value if total_value > 0 else 0,
-            "stock_ratio": summary["stock_value"] / total_value if total_value > 0 else 0,
-            "fund_ratio": summary["fund_value"] / total_value if total_value > 0 else 0,
-        })
-
-        if not target_accounts:
-            status = "empty"
-            success = True
-        elif successful_count == 0:
-            status = "failed"
-            success = False
-        elif failed_count:
-            status = "partial"
-            success = True
-        else:
-            status = "ok"
-            success = True
-
-        result = {
-            "success": success,
-            "status": status,
-            "generated_at": bj_now_naive().isoformat(),
-            "default_account": DEFAULT_ACCOUNT,
-            "accounts": target_accounts,
-            "account_count": len(target_accounts),
-            "successful_count": successful_count,
-            "failed_count": failed_count,
-            "summary": summary,
-            "items": items,
-        }
-        if discovery is not None:
-            result["discovery"] = discovery
-        if errors:
-            result["errors"] = errors
-        return result
+        return AccountService(
+            storage=storage,
+            default_account=default_account,
+            full_report_func=lambda account, price_timeout=30: get_skill(account).full_report(price_timeout=price_timeout),
+        ).multi_account_overview(
+            accounts=target_accounts,
+            price_timeout=price_timeout,
+            include_details=include_details,
+        )
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -1640,211 +1315,3 @@ def close_nav(date_str: str = None,
 def get_price(code: str, account: str = None) -> Dict:
     """查询价格"""
     return get_skill(account).get_price(code)
-
-
-# 数据清理
-def clean_data(table: str = None, account: str = None, dry_run: bool = True,
-               code: str = None, date_before: str = None,
-               empty_only: bool = False, confirm: bool = False) -> Dict:
-    """
-    清理测试数据
-
-    Args:
-        table: 要清理的表 ('holdings', 'transactions', 'cash_flow', 'nav_history', 'all')
-        account: 按账户过滤，默认当前账户
-        dry_run: 是否只预览不删除（默认 True，设为 False 才实际删除）
-        code: 按资产代码过滤（如 'TEST'）
-        date_before: 删除指定日期之前的数据 (YYYY-MM-DD)
-        empty_only: 只清理空记录（asset_id 为空 或 quantity/price 为 0）
-
-    Returns:
-        {"success": bool, "deleted": {...}, "preview": [...]}
-
-    Example:
-        # 预览要删除的数据
-        clean_data(table='transactions', code='TEST')
-
-        # 实际删除
-        clean_data(table='transactions', code='TEST', dry_run=False, confirm=True)
-
-        # 清理空记录
-        clean_data(table='all', empty_only=True, dry_run=False, confirm=True)
-    """
-    try:
-        skill = get_skill(account)
-        target_account = account or skill.account
-        storage = skill.storage
-
-        # 将 date_before 转换为时间戳（毫秒）用于与飞书字段比较
-        # 业务语义：北京时间 00:00
-        date_before_ts = None
-        if date_before:
-            from datetime import datetime as dt, timezone, timedelta
-            bj = timezone(timedelta(hours=8))
-            d = dt.strptime(date_before, "%Y-%m-%d").replace(tzinfo=bj)
-            date_before_ts = int(d.timestamp() * 1000)
-
-        results = {
-            'holdings': 0,
-            'transactions': 0,
-            'cash_flow': 0,
-            'nav_history': 0
-        }
-        preview = []
-
-        tables_to_clean = ['holdings', 'transactions', 'cash_flow', 'nav_history'] if table == 'all' else [table]
-
-        if (not dry_run) and (not confirm):
-            return {
-                'success': False,
-                'error': 'Refuse to delete data without confirm=True (safety guard).',
-                'dry_run': dry_run,
-                'confirm': confirm,
-            }
-
-        for tbl in tables_to_clean:
-            if tbl == 'holdings':
-                # 获取所有记录（包括 quantity=0 的）
-                # Always filter by account in destructive actions
-                records = storage.client.list_records('holdings', filter_str=f'CurrentValue.[account] = "{target_account}"')
-                for record in records:
-                    fields = record.get('fields', {})
-                    r_id = record.get('record_id')
-                    asset_id = fields.get('asset_id', '')
-                    quantity = fields.get('quantity', 0)
-
-                    should_delete = False
-                    if empty_only:
-                        # 空记录：asset_id 为空 或 quantity 为 0 或空
-                        if not asset_id or asset_id.strip() == '' or not quantity or quantity == 0 or quantity == '0':
-                            should_delete = True
-                    else:
-                        if code and asset_id == code.upper():
-                            should_delete = True
-
-                    if should_delete:
-                        preview.append({
-                            'table': tbl,
-                            'record_id': r_id,
-                            'asset_id': asset_id,
-                            'quantity': quantity,
-                            'reason': 'empty_record' if empty_only else 'code_match'
-                        })
-                        if not dry_run and r_id:
-                            if storage.delete_holding_by_record_id(r_id):
-                                results[tbl] += 1
-
-            elif tbl == 'transactions':
-                records = storage.client.list_records('transactions', filter_str=f'CurrentValue.[account] = "{target_account}"')
-                for record in records:
-                    fields = record.get('fields', {})
-                    r_id = record.get('record_id')
-                    asset_id = fields.get('asset_id', '')
-                    tx_date = fields.get('tx_date', '')
-                    quantity = fields.get('quantity', 0)
-                    price = fields.get('price', 0)
-
-                    should_delete = False
-                    if empty_only:
-                        # 空记录：asset_id 为空 或 quantity/price 为 0
-                        if (not asset_id or asset_id.strip() == '' or
-                            not quantity or quantity == 0 or quantity == '0' or
-                            not price or price == 0 or price == '0'):
-                            should_delete = True
-                    else:
-                        if code and asset_id == code.upper():
-                            should_delete = True
-                        if date_before_ts and tx_date:
-                            ts = tx_date if isinstance(tx_date, (int, float)) else 0
-                            if ts and ts <= date_before_ts:
-                                should_delete = True
-
-                    if should_delete:
-                        preview.append({
-                            'table': tbl,
-                            'record_id': r_id,
-                            'date': tx_date,
-                            'asset_id': asset_id,
-                            'reason': 'empty_record' if empty_only else 'matched'
-                        })
-                        if not dry_run and r_id:
-                            if storage.delete_transaction_by_record_id(r_id):
-                                results[tbl] += 1
-
-            elif tbl == 'cash_flow':
-                records = storage.client.list_records('cash_flow', filter_str=f'CurrentValue.[account] = "{target_account}"')
-                for record in records:
-                    fields = record.get('fields', {})
-                    r_id = record.get('record_id')
-                    flow_date = fields.get('flow_date', '')
-                    amount = fields.get('amount', 0)
-
-                    should_delete = False
-                    if empty_only:
-                        # 空记录：amount 为 0 或空
-                        if not amount or amount == 0 or amount == '0' or amount == '':
-                            should_delete = True
-                    else:
-                        if date_before_ts and flow_date:
-                            ts = flow_date if isinstance(flow_date, (int, float)) else 0
-                            if ts and ts <= date_before_ts:
-                                should_delete = True
-
-                    if should_delete:
-                        preview.append({
-                            'table': tbl,
-                            'record_id': r_id,
-                            'date': flow_date,
-                            'amount': amount,
-                            'reason': 'empty_record' if empty_only else 'matched'
-                        })
-                        if not dry_run and r_id:
-                            if storage.delete_cash_flow_by_record_id(r_id):
-                                results[tbl] += 1
-
-            elif tbl == 'nav_history':
-                records = storage.client.list_records('nav_history', filter_str=f'CurrentValue.[account] = "{target_account}"')
-                for record in records:
-                    fields = record.get('fields', {})
-                    r_id = record.get('record_id')
-                    nav_date = fields.get('date', '')
-                    total_value = fields.get('total_value', 0)
-                    nav = fields.get('nav', 0)
-
-                    should_delete = False
-                    if empty_only:
-                        # 空记录：total_value 或 nav 为 0
-                        if (not total_value or total_value == 0 or total_value == '0' or
-                            not nav or nav == 0 or nav == '0'):
-                            should_delete = True
-                    else:
-                        if date_before_ts and nav_date:
-                            ts = nav_date if isinstance(nav_date, (int, float)) else 0
-                            if ts and ts <= date_before_ts:
-                                should_delete = True
-
-                    if should_delete:
-                        preview.append({
-                            'table': tbl,
-                            'record_id': r_id,
-                            'date': nav_date,
-                            'nav': nav,
-                            'reason': 'empty_record' if empty_only else 'matched'
-                        })
-                        if not dry_run and r_id:
-                            if storage.delete_nav_by_record_id(r_id):
-                                results[tbl] += 1
-
-        return {
-            'success': True,
-            'dry_run': dry_run,
-            'empty_only': empty_only,
-            'account': target_account,
-            'filters': {'code': code, 'date_before': date_before},
-            'deleted_count': results if not dry_run else {k: 0 for k in results},
-            'preview': preview[:50],  # 最多显示50条
-            'total_preview': len(preview),
-            'message': f'{"【预览模式】" if dry_run else "【已删除】"} {"空记录" if empty_only else "匹配记录"}: {len(preview)} 条'
-        }
-    except Exception as e:
-        return {'success': False, 'error': str(e)}

@@ -58,7 +58,6 @@ def get(key: str, default=None):
     # 环境变量映射（环境变量优先）
     env_map = {
         "account": "PORTFOLIO_ACCOUNT",
-        "storage.backend": "PORTFOLIO_STORAGE_BACKEND",
         "service.host": "PORTFOLIO_SERVICE_HOST",
         "service.port": "PORTFOLIO_SERVICE_PORT",
         "service.url": "PORTFOLIO_SERVICE_URL",
@@ -66,7 +65,6 @@ def get(key: str, default=None):
         "report.account_label": "PM_REPORT_ACCOUNT_LABEL",
         "report.reports_dir": "PM_REPORTS_DIR",
         "report.publish_root": "PM_PUBLISH_ROOT",
-        "report.publish_base_url": "OPENCLAW_PUBLISH_BASE_URL",
         "report.sync_futu_cash_mmf": "PM_SYNC_FUTU_CASH_MMF",
         "report.sync_futu_dry_run": "PM_SYNC_FUTU_DRY_RUN",
         "report.disable_nav_runtime_validation": "PM_DISABLE_NAV_RUNTIME_VALIDATION",
@@ -167,11 +165,6 @@ def get_data_dir() -> Path:
     data_dir = _PROJECT_ROOT / ".data"
     data_dir.mkdir(parents=True, exist_ok=True)
     return data_dir
-
-
-def get_storage_backend() -> str:
-    """获取存储后端：auto | feishu（兼容历史配置；sqlite 已移除）"""
-    return str(get("storage.backend", "auto")).lower()
 
 
 def get_service_host() -> str:

@@ -1,4 +1,4 @@
-"""Optimized batch quote planner used by the PriceFetcher compatibility facade."""
+"""Optimized batch quote planner used by the PriceFetcher facade."""
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -13,7 +13,7 @@ from .providers.us_batch import fetch_us_batch
 
 
 class BatchPricePlanner:
-    """Keep batch orchestration out of the legacy fetcher facade."""
+    """Keep batch orchestration out of the fetcher facade."""
 
     def __init__(self, fetcher: Any):
         self.fetcher = fetcher

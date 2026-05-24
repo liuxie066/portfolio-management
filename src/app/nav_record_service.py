@@ -13,17 +13,12 @@ from src.time_utils import bj_today
 class NavRecordService:
     """Coordinate NAV calculation, snapshot persistence, validation, and storage.
 
-    ``manager`` remains the compatibility facade for helper methods that are
-    still patched directly by existing tests and callers.
+    ``manager`` owns shared NAV helper methods and runtime services.
     """
 
     def __init__(self, manager: Any, storage: Any):
         self.manager = manager
         self.storage = storage
-
-    @staticmethod
-    def _is_mock(obj: Any) -> bool:
-        return obj.__class__.__module__ == "unittest.mock"
 
     def _load_navs(self, account: str) -> list:
         preload = getattr(self.storage, "preload_nav_index", None)
@@ -63,6 +58,22 @@ class NavRecordService:
         })
         nav_record.details = details
 
+    @staticmethod
+    def _blocking_valuation_warnings(valuation: PortfolioValuation) -> list[str]:
+        warning_texts = [str(warning) for warning in (getattr(valuation, "warnings", None) or [])]
+        blocking_markers = ("无法获取汇率", "价格缺失，无法可靠估值")
+        return [
+            warning
+            for warning in warning_texts
+            if any(marker in warning for marker in blocking_markers)
+        ]
+
+    def _assert_valuation_reliable_for_write(self, valuation: PortfolioValuation) -> None:
+        blocking_warnings = self._blocking_valuation_warnings(valuation)
+        if not blocking_warnings:
+            return
+        raise ValueError("NAV 写入拒绝：估值存在阻断性告警: " + " | ".join(blocking_warnings))
+
     def record_nav(
         self,
         account: str,
@@ -76,6 +87,8 @@ class NavRecordService:
     ) -> NAVHistory:
         if valuation is None:
             valuation = self.manager.calculate_valuation(account)
+        if persist and not dry_run:
+            self._assert_valuation_reliable_for_write(valuation)
 
         today = nav_date or bj_today()
         current_year = today.strftime("%Y")
@@ -173,27 +186,15 @@ class NavRecordService:
 
         if persist:
             if use_bulk_persist and (not dry_run) and overwrite_existing:
-                prefer_legacy_mock = self._is_mock(self.storage)
-                upsert_bulk = getattr(self.storage, "upsert_nav_bulk", None)
                 write_records = getattr(self.storage, "write_nav_records", None)
-                if prefer_legacy_mock and callable(upsert_bulk):
-                    upsert_bulk([nav_record], mode="replace", allow_partial=False)
-                elif callable(write_records):
+                if callable(write_records):
                     write_records([nav_record], mode="replace", allow_partial=False, dry_run=False)
-                elif callable(upsert_bulk):
-                    upsert_bulk([nav_record], mode="replace", allow_partial=False)
                 else:
                     raise AttributeError("storage does not support bulk NAV writes")
             else:
-                prefer_legacy_mock = self._is_mock(self.storage)
-                save_nav = getattr(self.storage, "save_nav", None)
                 write_record = getattr(self.storage, "write_nav_record", None)
-                if prefer_legacy_mock and callable(save_nav):
-                    save_nav(nav_record, overwrite_existing=overwrite_existing, dry_run=dry_run)
-                elif callable(write_record):
+                if callable(write_record):
                     write_record(nav_record, overwrite_existing=overwrite_existing, dry_run=dry_run)
-                elif callable(save_nav):
-                    save_nav(nav_record, overwrite_existing=overwrite_existing, dry_run=dry_run)
                 else:
                     raise AttributeError("storage does not support NAV writes")
 

@@ -13,6 +13,7 @@ flowchart LR
         Publisher["scripts/publish_daily_report.py<br/>daily NAV + HTML publisher"]
         MCP["mcp_server.py<br/>MCP adapter"]
         ServiceRunner["scripts/service.py<br/>local service daemon"]
+        NavRepairCLI["scripts/nav_history_repair.py<br/>NAV repair CLI"]
     end
 
     subgraph Service["Local Service Boundary"]
@@ -21,12 +22,12 @@ flowchart LR
         AppFacade["src/service/application.py<br/>PortfolioService facade"]
     end
 
-    subgraph Compatibility["Compatibility Facade"]
+    subgraph Facades["Facades / Adapters"]
         SkillAPI["skill_api.py<br/>PortfolioSkill facade"]
     end
 
     subgraph Application["Application Layer"]
-        PMgr["src/portfolio.py<br/>PortfolioManager compatibility facade"]
+        PMgr["src/portfolio.py<br/>PortfolioManager facade"]
         AppServices["src/app/*<br/>trade / cash / valuation / NAV / snapshot / reporting"]
     end
 
@@ -38,7 +39,7 @@ flowchart LR
     end
 
     subgraph Pricing["Pricing Layer"]
-        PriceFetcher["src/price_fetcher.py<br/>legacy pricing facade"]
+        PriceFetcher["src/price_fetcher.py<br/>pricing facade"]
         PriceService["src/pricing/service.py<br/>structured quote entry"]
         BatchPlanner["src/pricing/batch.py<br/>optimized batch planner"]
         PriceResults["src/pricing/result.py<br/>quote / failure / batch result"]
@@ -57,6 +58,10 @@ flowchart LR
         Migrations["src/migrations/*"]
     end
 
+    subgraph Maintenance["Maintenance"]
+        NavRepair["src/maintenance/nav_history_repair/*<br/>backfill / patch implementation"]
+    end
+
     subgraph Config["Config"]
         ConfigModule["src/config.py<br/>env + config.json"]
     end
@@ -71,6 +76,7 @@ flowchart LR
     Human --> CLI
     Scheduler --> Publisher
     Agent --> MCP
+    Human --> NavRepairCLI
     PM --> CLI
 
     CLI --> ServiceClient
@@ -86,6 +92,10 @@ flowchart LR
     HTTP --> AppFacade
     AppFacade --> StorageFactory
     AppFacade --> PMgr
+    NavRepairCLI --> NavRepair
+    NavRepair --> SkillAPI
+    NavRepair --> PMgr
+    NavRepair --> FeishuStorage
     AppFacade --> AppServices
     AppFacade --> ConfigModule
 

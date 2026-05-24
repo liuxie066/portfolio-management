@@ -79,17 +79,16 @@ def test_deposit_creates_quantized_cashflow_and_cash_holding():
 def test_foreign_cash_flow_requires_cny_amount_or_exchange_rate():
     manager = PortfolioManager(storage=Mock(), price_fetcher=Mock())
 
-    with patch.object(PortfolioManager, '_update_cash_holding'):
-        try:
-            manager.deposit(
-                flow_date=date(2025, 3, 14),
-                account='测试账户',
-                amount=1000,
-                currency='USD',
-            )
-            assert False, 'expected ValueError'
-        except ValueError as e:
-            assert '外币现金流必须显式提供 cny_amount 或 exchange_rate' in str(e)
+    try:
+        manager.deposit(
+            flow_date=date(2025, 3, 14),
+            account='测试账户',
+            amount=1000,
+            currency='USD',
+        )
+        assert False, 'expected ValueError'
+    except ValueError as e:
+        assert '外币现金流必须显式提供 cny_amount 或 exchange_rate' in str(e)
 
 
 def test_sell_creates_quantized_transaction_boundary():
@@ -105,7 +104,7 @@ def test_sell_creates_quantized_transaction_boundary():
         currency='CNY',
     )
     storage.add_transaction.side_effect = lambda tx: tx
-    manager._add_cash = Mock()
+    manager.cash_service.add_cash = Mock()
 
     manager.sell(
         tx_date=date(2025, 3, 14),

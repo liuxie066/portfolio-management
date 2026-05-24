@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""portfolio-management CLI (thin wrapper around skill_api).
+"""portfolio-management CLI for service-first workflows.
 
 Design goals:
 - Provide a few common read-only commands.
@@ -19,6 +19,8 @@ Usage examples:
   python scripts/pm.py holdings --include-price --timeout 25
   python scripts/pm.py nav
   python scripts/pm.py nav record --write --confirm
+  python scripts/pm.py cash-flow reconcile --account alice
+  python scripts/pm.py cash-flow reconcile --account alice --apply --confirm
   python scripts/pm.py positions distribution --json
   python scripts/pm.py report daily --preview
   python scripts/pm.py report daily --preview --timeout 25 --json
@@ -132,6 +134,35 @@ def _print_daily(payload):
         _print_distribution(distribution)
 
 
+def _print_cash_flow_reconcile(payload):
+    if not isinstance(payload, dict):
+        print(payload)
+        return
+    if payload.get("success") is False:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+        return
+
+    account = payload.get("account") or "all"
+    mode = "dry-run" if payload.get("dry_run") else "apply"
+    print(f"Cash flow reconcile [{account}]")
+    print(f"  mode: {mode}")
+    print(f"  scanned: {payload.get('scanned', 0)}")
+    print(f"  changes: {payload.get('change_count', 0)}")
+    print(f"  updated: {payload.get('updated_count', 0)}")
+    if payload.get("error_count"):
+        print(f"  errors: {payload.get('error_count')}")
+
+    for row in payload.get("rows") or []:
+        if row.get("status") not in {"pending", "error"}:
+            continue
+        label = row.get("record_id") or "(no record id)"
+        if row.get("status") == "error":
+            print(f"  - {label}: error: {row.get('error')}")
+            continue
+        fields = ", ".join(sorted((row.get("updates") or {}).keys()))
+        print(f"  - {label}: fill {fields}")
+
+
 def _emit_distribution(payload, as_json: bool):
     if as_json:
         _dump(payload, True)
@@ -144,6 +175,13 @@ def _emit_daily(payload, as_json: bool):
         _dump(payload, True)
     else:
         _print_daily(payload)
+
+
+def _emit_cash_flow_reconcile(payload, as_json: bool):
+    if as_json:
+        _dump(payload, True)
+    else:
+        _print_cash_flow_reconcile(payload)
 
 
 def _service_or_fallback(args, service_call, fallback_call):
@@ -169,6 +207,37 @@ def _default_account(account):
     from src import config
 
     return config.get_account()
+
+
+def _daily_parts_from_bundle(bundle):
+    if not isinstance(bundle, dict):
+        nav = {"success": False, "error": "invalid daily bundle response"}
+        distribution = {"success": False, "error": "daily bundle did not return a distribution"}
+        return nav, distribution
+
+    if bundle.get("success") is False:
+        distribution = {"success": False, "error": "skipped because daily bundle failed"}
+        return bundle, distribution
+
+    nav = bundle.get("nav_result") or bundle.get("nav")
+    if not isinstance(nav, dict):
+        nav = {"success": False, "error": "daily bundle missing nav_result"}
+
+    distribution = bundle.get("distribution")
+    if not isinstance(distribution, dict):
+        report_distribution = (bundle.get("report") or {}).get("distribution")
+        if isinstance(report_distribution, dict):
+            distribution = report_distribution
+        elif isinstance(report_distribution, list):
+            distribution = {
+                "success": True,
+                "total_value": nav.get("total_value"),
+                "by_type": report_distribution,
+            }
+        else:
+            distribution = {"success": False, "error": "daily bundle missing distribution"}
+
+    return nav, distribution
 
 
 def cmd_holdings(args):
@@ -199,6 +268,24 @@ def cmd_cash(args):
 
     res = _service_or_fallback(args, via_service, direct)
     _dump(res, args.json)
+    return res
+
+
+def cmd_cash_flow_reconcile(args):
+    if bool(args.apply) and not bool(args.confirm):
+        raise SystemExit("cash-flow reconcile --apply requires --confirm. Re-run without --apply for dry-run.")
+
+    def direct():
+        from src.feishu_storage import FeishuStorage
+
+        storage = FeishuStorage()
+        return storage.reconcile_cash_flows(
+            account=getattr(args, "account", None),
+            dry_run=not bool(args.apply),
+        )
+
+    res = _call_backend(args, direct)
+    _emit_cash_flow_reconcile(res, args.json)
     return res
 
 
@@ -312,7 +399,7 @@ def cmd_daily(args):
     account = args.account or config.get_account()
 
     def via_service(client):
-        nav_kwargs = {
+        bundle_kwargs = {
             "account": account,
             "price_timeout": args.timeout,
             "dry_run": bool(args.dry_run),
@@ -321,26 +408,29 @@ def cmd_daily(args):
             "use_bulk_persist": bool(args.use_bulk_persist),
         }
         if getattr(args, "run_id", None):
-            nav_kwargs["run_id"] = args.run_id
-        nav = client.record_nav(**nav_kwargs)
-        distribution = client.get_distribution(account=account)
-        return nav, distribution
+            bundle_kwargs["run_id"] = args.run_id
+        return _daily_parts_from_bundle(client.daily_report_bundle(**bundle_kwargs))
 
     def direct():
-        from skill_api import get_distribution, record_nav
+        from skill_api import get_skill
 
-        nav_kwargs = {
-            "price_timeout": args.timeout,
-            "dry_run": bool(args.dry_run),
-            "confirm": bool(args.confirm),
-            "overwrite_existing": not bool(args.no_overwrite),
-            "use_bulk_persist": bool(args.use_bulk_persist),
-            "account": args.account,
-        }
+        skill = get_skill(args.account)
+        snapshot = skill.build_snapshot(price_timeout_seconds=args.timeout)
         if getattr(args, "run_id", None):
-            nav_kwargs["run_id"] = args.run_id
-        nav = record_nav(**nav_kwargs)
-        distribution = get_distribution(account=args.account)
+            snapshot["run_id"] = args.run_id
+        nav = skill.record_nav(
+            price_timeout=args.timeout,
+            dry_run=bool(args.dry_run),
+            confirm=bool(args.confirm),
+            overwrite_existing=not bool(args.no_overwrite),
+            use_bulk_persist=bool(args.use_bulk_persist),
+            snapshot=snapshot,
+            run_id=getattr(args, "run_id", None),
+        )
+        if not nav.get("success"):
+            distribution = {"success": False, "error": "skipped because NAV failed"}
+            return nav, distribution
+        distribution = skill.get_distribution(holdings_data=snapshot)
         return nav, distribution
 
     nav_result, distribution_result = _service_or_fallback(args, via_service, direct)
@@ -464,6 +554,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_cash.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
     add_service_args(p_cash)
     p_cash.set_defaults(func=cmd_cash)
+
+    p_cash_flow = sp.add_parser("cash-flow", help="cash-flow ledger maintenance")
+    cash_flow_sub = p_cash_flow.add_subparsers(dest="cash_flow_cmd", required=True)
+    p_cash_flow_reconcile = cash_flow_sub.add_parser(
+        "reconcile",
+        help="fill generated fields for manually entered cash_flow rows",
+    )
+    p_cash_flow_reconcile.add_argument("--account", default=argparse.SUPPRESS, help="account to operate on; defaults to all accounts")
+    p_cash_flow_reconcile.add_argument("--apply", action="store_true", help="write derived fields back to Feishu")
+    p_cash_flow_reconcile.add_argument("--confirm", action="store_true", help="required with --apply")
+    p_cash_flow_reconcile.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
+    p_cash_flow_reconcile.set_defaults(func=cmd_cash_flow_reconcile)
 
     p_accounts = sp.add_parser("accounts", help="list discovered accounts")
     p_accounts.add_argument("--exclude-default", action="store_true", help="do not include the configured default account when it has no data")

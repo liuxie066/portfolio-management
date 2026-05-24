@@ -28,7 +28,6 @@ class PublishConfig:
     reports_dir: Path
     publish_root: Path
     account_label: str
-    publish_base_url: Optional[str] = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -49,15 +48,14 @@ def parse_args() -> argparse.Namespace:
         default=str(app_config.get("report.publish_root", str(WORKSPACE / "prototypes"))),
         help="Root directory for published static pages.",
     )
-    # SECURITY: do not embed real publish URLs in repo history. Use config/env secrets only.
     parser.add_argument(
         "--publish-base-url",
-        default=app_config.get("report.publish_base_url"),
-        help="Base publish URL (config report.publish_base_url or env OPENCLAW_PUBLISH_BASE_URL).",
+        default=None,
+        help="Deprecated and ignored. External daily-report publish domains are disabled.",
     )
     parser.add_argument("--price-timeout", type=int, default=30, help="Price fetch timeout in seconds.")
     parser.add_argument("--dry-run", action="store_true", help="Do not persist NAV writes.")
-    parser.add_argument("--use-bulk-nav-upsert", action="store_true", help="Persist NAV through storage.upsert_nav_bulk (single-row use is optional).")
+    parser.add_argument("--use-bulk-nav-upsert", action="store_true", help="Persist NAV through FeishuStorage.write_nav_records (single-row bulk mode).")
     parser.add_argument("--no-html", action="store_true", help="Do not render HTML; only record NAV + generate JSON bundle.")
     parser.add_argument("--no-publish", action="store_true", help="Do not write HTML files into reports/publish dirs.")
     parser.add_argument("--quiet", action="store_true", help="No stdout on success (scheduled mode).")
@@ -98,16 +96,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def resolve_publish_base_url(explicit: Optional[str]) -> Optional[str]:
-    # SECURITY: Never derive or hardcode publish URLs in the repo.
-    # If you want public URLs, set report.publish_base_url via config/env secrets.
-    if explicit:
-        return explicit.rstrip("/")
-    return None
-
-
-
-
 @contextlib.contextmanager
 def _suppress_internal_stdout(enabled: bool) -> Iterator[None]:
     """Context manager to suppress noisy internal stdout prints."""
@@ -125,47 +113,7 @@ def build_config(args: argparse.Namespace) -> PublishConfig:
         reports_dir=Path(args.reports_dir),
         publish_root=Path(args.publish_root),
         account_label=args.account_label,
-        publish_base_url=resolve_publish_base_url(args.publish_base_url),
     )
-
-
-def fmt_money(v: float) -> str:
-    return f"¥{v:,.2f}"
-
-
-def fmt_pct(v: float) -> str:
-    return f"{v * 100:.2f}%"
-
-
-def fmt_opt_pct(v: Any) -> str:
-    if v is None:
-        return "--"
-    return f"{float(v) * 100:.2f}%"
-
-
-def fmt_opt_money(v: Any) -> str:
-    if v is None:
-        return "--"
-    return fmt_money(float(v))
-
-
-def fmt_opt_nav_delta(v: Any) -> str:
-    """Format NAV delta as a plain number (not money)."""
-    if v is None:
-        return "--"
-    return f"{float(v):+.6f}"
-
-
-def type_label(v: str) -> str:
-    return {
-        "a_stock": "A股",
-        "hk_stock": "港股",
-        "us_stock": "美股",
-        "fund": "基金",
-        "cash": "现金",
-        "mmf": "货基",
-        "bond": "债券",
-    }.get(v, v or "--")
 
 
 def build_report_data(
@@ -282,7 +230,7 @@ def _build_report_data_direct(
             raise RuntimeError(json.dumps(futu_sync_result, ensure_ascii=False))
 
     t_snapshot = _ms()
-    snapshot = skill.build_snapshot()
+    snapshot = skill.build_snapshot(price_timeout_seconds=price_timeout)
     if run_id:
         snapshot["run_id"] = run_id
 
@@ -329,7 +277,14 @@ def _build_report_data_direct(
 
     t_report = _ms()
     # Generate report using the same snapshot (no extra price fetch).
-    report = skill.generate_report(report_type="daily", record_nav=False, price_timeout=price_timeout, snapshot=snapshot, navs=navs_all)
+    report = skill.generate_report(
+        report_type="daily",
+        record_nav=False,
+        price_timeout=price_timeout,
+        snapshot=snapshot,
+        navs=navs_all,
+        nav_override=nav_result,
+    )
     if run_id:
         report["run_id"] = run_id
     report_ms = _ms() - t_report
@@ -387,20 +342,7 @@ def render_daily_report_html(report_bundle: dict[str, Any], config: PublishConfi
     return dt, html
 
 
-def _ensure_publish_server_running() -> None:
-    """Best-effort: avoid external 502 by ensuring :3000 publish server is up."""
-    try:
-        ensure_script = WORKSPACE / "tools" / "ensure_publish_server.py"
-        if ensure_script.exists():
-            __import__("subprocess").run([sys.executable, str(ensure_script), "--quiet"], check=False)
-    except Exception:
-        # Publishing still writes files; server health is handled separately.
-        pass
-
-
 def publish_report(report_date: str, html: str, config: PublishConfig) -> dict[str, Any]:
-    _ensure_publish_server_running()
-
     slug = f"investment-daily-{report_date}"
     report_path = config.reports_dir / f"{slug}.html"
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -412,14 +354,15 @@ def publish_report(report_date: str, html: str, config: PublishConfig) -> dict[s
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "index.html").write_text(html, encoding="utf-8")
 
-    public_url = f"{config.publish_base_url}/{slug}/" if config.publish_base_url else slug
     return {
         "date": report_date,
         "slug": slug,
         "report_file": str(report_path),
         "latest_file": str(latest_path),
         "publish_dir": str(out_dir),
-        "public_url": public_url,
+        "relative_path": f"{slug}/index.html",
+        "public_url": None,
+        "public_url_status": "disabled",
     }
 
 

@@ -566,7 +566,7 @@ class NavMixin:
         return
 
     def write_nav_record(self, nav: NAVHistory, overwrite_existing: bool = True, dry_run: bool = False):
-        """Public semantic alias for writing one full nav record."""
+        """Public entrypoint for writing one full nav record."""
         return self._write_one_nav_record(nav, overwrite_existing=overwrite_existing, dry_run=dry_run)
 
     def write_nav_records(
@@ -576,7 +576,7 @@ class NavMixin:
         allow_partial: bool = False,
         dry_run: bool = False,
     ) -> Dict[str, any]:
-        """Public semantic alias for writing full nav records in bulk."""
+        """Public entrypoint for writing full nav records in bulk."""
         result = self._write_nav_full_records(
             nav_list,
             mode=mode,

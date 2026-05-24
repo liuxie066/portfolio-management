@@ -20,6 +20,7 @@ flowchart LR
         Publisher["scripts/publish_daily_report.py<br/>daily NAV + HTML publisher"]
         MCP["mcp_server.py<br/>MCP adapter"]
         ServiceRunner["scripts/service.py<br/>local service daemon"]
+        NavRepairCLI["scripts/nav_history_repair.py<br/>NAV repair CLI"]
     end
 
     subgraph Service["Local Service Boundary"]
@@ -28,12 +29,12 @@ flowchart LR
         AppFacade["src/service/application.py<br/>PortfolioService facade"]
     end
 
-    subgraph Compatibility["Compatibility Facade"]
+    subgraph Facades["Facades / Adapters"]
         SkillAPI["skill_api.py<br/>PortfolioSkill facade"]
     end
 
     subgraph Application["Application Layer"]
-        PMgr["src/portfolio.py<br/>PortfolioManager compatibility facade"]
+        PMgr["src/portfolio.py<br/>PortfolioManager facade"]
         AppServices["src/app/*<br/>trade / cash / valuation / NAV / snapshot / reporting"]
     end
 
@@ -45,7 +46,7 @@ flowchart LR
     end
 
     subgraph Pricing["Pricing Layer"]
-        PriceFetcher["src/price_fetcher.py<br/>legacy pricing facade"]
+        PriceFetcher["src/price_fetcher.py<br/>pricing facade"]
         PriceService["src/pricing/service.py<br/>structured quote entry"]
         BatchPlanner["src/pricing/batch.py<br/>optimized batch planner"]
         PriceResults["src/pricing/result.py<br/>quote / failure / batch result"]
@@ -64,6 +65,10 @@ flowchart LR
         Migrations["src/migrations/*"]
     end
 
+    subgraph Maintenance["Maintenance"]
+        NavRepair["src/maintenance/nav_history_repair/*<br/>backfill / patch implementation"]
+    end
+
     subgraph Config["Config"]
         ConfigModule["src/config.py<br/>env + config.json"]
     end
@@ -78,6 +83,7 @@ flowchart LR
     Human --> CLI
     Scheduler --> Publisher
     Agent --> MCP
+    Human --> NavRepairCLI
     PM --> CLI
 
     CLI --> ServiceClient
@@ -93,6 +99,10 @@ flowchart LR
     HTTP --> AppFacade
     AppFacade --> StorageFactory
     AppFacade --> PMgr
+    NavRepairCLI --> NavRepair
+    NavRepair --> SkillAPI
+    NavRepair --> PMgr
+    NavRepair --> FeishuStorage
     AppFacade --> AppServices
     AppFacade --> ConfigModule
 
@@ -162,13 +172,13 @@ flowchart LR
 - `./pm` is the human CLI wrapper; `scripts/pm.py` is the actual command
   implementation.
 - CLI and MCP paths prefer the local service client and keep `skill_api.py` as
-  a fallback/compatibility surface.
+  a local recovery adapter.
 - The daily publisher prefers `PortfolioServiceClient.daily_report_bundle()` and
   keeps direct `skill_api.py` only as an unavailable-service fallback.
 - `src/service/application.py` owns `list_accounts`, `multi_account_overview`,
   `record_nav`, `get_nav`, `get_holdings`, `get_cash`, `get_distribution`,
   `full_report`, `generate_report`, and `daily_report_bundle` through direct
   `src/app` / `PortfolioManager` paths. `skill_api.py` remains a caller-facing
-  compatibility surface and should not own new service behavior.
+  adapter and should not own new service behavior.
 - Business logic should keep moving downward into `src/app`, `src/domain`,
   `src/pricing`, and storage-specific modules rather than growing the facades.

@@ -13,7 +13,7 @@ flowchart TB
     end
 
     subgraph Entry["入口与编排层"]
-        SkillAPI["skill_api.py<br/>PortfolioSkill<br/>兼容 API / 参数适配"]
+        SkillAPI["skill_api.py<br/>PortfolioSkill<br/>调用适配 / 参数适配"]
         CLI["scripts/pm.py<br/>CLI 产品入口"]
         ServiceRunner["scripts/service.py<br/>本地服务进程"]
         ServiceClient["src/service/client.py<br/>本地服务客户端"]
@@ -33,7 +33,7 @@ flowchart TB
     end
 
     subgraph Pricing["行情层"]
-        PF["src/price_fetcher.py<br/>兼容门面"]
+        PF["src/price_fetcher.py<br/>行情门面"]
         PS["src/pricing/service.py<br/>结构化报价入口"]
         PBatch["src/pricing/batch.py<br/>批量编排"]
         PCache["src/pricing/cache.py<br/>TTL / stale fallback"]
@@ -56,7 +56,7 @@ flowchart TB
 
     subgraph Bitable["Feishu Bitable 云端主存储"]
         Holdings["holdings<br/>当前持仓"]
-        Tx["transactions<br/>交易流水"]
+        Tx["transactions<br/>可选交易流水"]
         CashFlow["cash_flow<br/>出入金"]
         NAV["nav_history<br/>净值历史"]
         HoldingsSnapshot["holdings_snapshot<br/>每日持仓快照"]
@@ -168,7 +168,7 @@ flowchart TB
 ### 风险与改进点
 
 1. **强耦合 Feishu，无离线降级**
-   - `storage.backend=auto` 实际只能解析到 Feishu；SQLite 后端已被移除。
+   - 存储工厂只创建 Feishu 后端；SQLite 后端和 `storage.backend` 选择面已移除。
    - 影响：Feishu API、权限、网络或 Schema 异常会直接影响主要读写路径。
    - 建议：保留最小只读快照导出，或提供本地 JSON/SQLite 只读降级，用于查看最近一次持仓、NAV 和日报。
 
@@ -179,15 +179,15 @@ flowchart TB
 
 3. **PriceFetcher 复杂度高**
    - 多源回退（腾讯 / Finnhub / Yahoo Chart / East Money）、并发线程、市场时间感知 TTL、汇率接口等逻辑仍较多。
-   - 已迁出行情分类、缓存策略、固定报价、汇率服务和优化批量路径到 `src/pricing/`，建议继续把剩余兼容适配器迁出 `PriceFetcher`。
+   - 已迁出行情分类、缓存策略、固定报价、汇率服务、Provider 实现和优化批量路径到 `src/pricing/`；`PriceFetcher` 只保留既有 `fetch`/`fetch_batch` 调用面、缓存上下文和汇率上下文。
 
 4. **服务主路径已基本脱离 Skill facade**
    - `PortfolioService.list_accounts()`、`multi_account_overview()`、`record_nav()`、`get_nav()`、`get_holdings()`、`get_cash()`、`get_distribution()`、`full_report()`、`generate_report()` 和 `daily_report_bundle()` 已经直接走 `src/app` / `PortfolioManager`。
-   - 日报发布器优先调用服务端 bundle，在同一次估值快照中完成 NAV 写入、日报 payload 和页面返回字段组装；`skill_api.py` 只保留服务不可用时的兼容 fallback。
-   - 建议：后续新产品能力继续先进 `src/service/application.py` 和 `src/app/*`，`skill_api.py` 只保留兼容入口。
+   - 日报发布器优先调用服务端 bundle，在同一次估值快照中完成 NAV 写入、日报 payload 和页面返回字段组装；`skill_api.py` 只保留服务不可用时的本地恢复 fallback。
+   - 建议：后续新产品能力继续先进 `src/service/application.py` 和 `src/app/*`，`skill_api.py` 只保留调用适配入口。
 
 5. **无自动 Schema 迁移**
-   - Bitable 表结构变更目前通过手工操作和 `doctor.py` / `audit_*.py` 脚本管理，没有版本化的迁移系统。
+   - Bitable 表结构变更目前通过手工操作和 `doctor.py` / `migrate_schema.py check-live` 管理，没有完整自动迁移系统。
    - 建议：引入 `docs/schema.md` 的版本号和迁移脚本目录，至少能检查“当前线上 Schema 是否满足代码版本”。
 
 6. **写入事务不是强原子**
@@ -240,7 +240,7 @@ flowchart TB
 
 ## 总体结论
 
-当前架构**适合继续收敛成 CLI + 本地服务产品**：核心数据安全、审计追踪、时区正确性和多源行情聚合已经比较扎实；`skill_api.py` 应继续降级为兼容入口，而不是承载新的核心产品逻辑。
+当前架构**适合继续收敛成 CLI + 本地服务产品**：核心数据安全、审计追踪、时区正确性和多源行情聚合已经比较扎实；`skill_api.py` 应继续降级为调用适配入口，而不是承载新的核心产品逻辑。
 
 若未来功能持续扩展（支持多账户、策略回测、更多报表类型），优先建议：
 1. 继续将 `skill_api.py` 和 `portfolio.py` 中的报告/NAV 逻辑迁入 `src/service`、`src/app`、`src/domain`；

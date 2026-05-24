@@ -51,7 +51,7 @@ def test_reporting_service_industry_distribution_with_price_and_cny_fallback():
     storage = Mock()
     manager = Mock()
     manager.price_fetcher = Mock()
-    storage.get_holdings.return_value = [
+    holdings = [
         Holding(
             asset_id="000001",
             asset_name="平安银行",
@@ -60,6 +60,7 @@ def test_reporting_service_industry_distribution_with_price_and_cny_fallback():
             quantity=100,
             currency="CNY",
             industry=Industry.FINANCE,
+            market_value_cny=1000.0,
         ),
         Holding(
             asset_id="CNY-CASH",
@@ -69,25 +70,26 @@ def test_reporting_service_industry_distribution_with_price_and_cny_fallback():
             quantity=50,
             currency="CNY",
             industry=None,
+            market_value_cny=50.0,
         ),
     ]
-    manager.price_fetcher.fetch_batch.return_value = {
-        "000001": {"cny_price": 10.0},
-    }
+    manager.calculate_valuation.return_value = PortfolioValuation(account="a", total_value_cny=1050.0, holdings=holdings)
     service = ReportingService(manager=manager, storage=storage)
 
     result = service.get_industry_distribution("a")
 
     assert result["金融"] == 1000.0 / 1050.0
     assert result["其他"] == 50.0 / 1050.0
-    manager.price_fetcher.fetch_batch.assert_called_once()
+    manager.calculate_valuation.assert_called_once_with("a")
+    manager.price_fetcher.fetch_batch.assert_not_called()
+    storage.get_holdings.assert_not_called()
 
 
 def test_reporting_service_industry_distribution_returns_empty_without_value():
     storage = Mock()
     manager = Mock()
     manager.price_fetcher = None
-    storage.get_holdings.return_value = [
+    manager.calculate_valuation.return_value = PortfolioValuation(account="a", total_value_cny=0.0, holdings=[
         Holding(
             asset_id="AAPL",
             asset_name="Apple",
@@ -97,10 +99,11 @@ def test_reporting_service_industry_distribution_returns_empty_without_value():
             currency="USD",
             industry=Industry.TECH,
         )
-    ]
+    ])
     service = ReportingService(manager=manager, storage=storage)
 
     assert service.get_industry_distribution("a") == {}
+    storage.get_holdings.assert_not_called()
 
 
 def test_portfolio_distribution_methods_delegate_to_reporting_service():

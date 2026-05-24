@@ -61,7 +61,6 @@ HTTP 服务默认只允许绑定 `127.0.0.1`/`localhost`/`::1`。该服务当前
 - `FEISHU_TABLE_SCHEMA_VERSION`
 - `PORTFOLIO_SERVICE_URL`（可选，默认 `http://127.0.0.1:8765`）
 - `PM_REPORT_ACCOUNT_LABEL` / `report.account_label`（日报展示账户名）
-- `OPENCLAW_PUBLISH_BASE_URL` / `report.publish_base_url`（发布后的公开 URL 前缀）
 - `FUTU_OPEND_HOST` / `futu.opend.host`、`FUTU_OPEND_PORT` / `futu.opend.port`（可选，富途 OpenD 同步）
 
 配置统一从 `src/config.py` 读取：命令行参数优先，其次环境变量，再其次 `config.json`，最后使用默认值。真实密钥和生产路径仍建议放在仓外 `config.json` 或运行环境变量中。
@@ -106,6 +105,7 @@ withdraw(10000, remark="出金")
 ```
 
 日报数据与 HTML 统一从 `scripts/publish_daily_report.py` 生成；`scripts/generate_daily_report_html.py` 仅负责渲染已准备好的 bundle。
+公网发布域名已失效；日报发布当前只保证写入本地静态产物路径，不再生成或维护对外可访问 URL。
 
 HTTP 服务是新的主产品入口；CLI、MCP 和 `skill_api.py` 保持兼容，作为服务/应用层的适配入口逐步收敛。当前核心路径中，账户发现、多账户概览、NAV 记录/读取、现金、持仓、仓位分布、完整报告和日报/月报/年报 payload 已经由 service application 直接调用 `src/app` / `src/portfolio.py`，不再把 `skill_api.py` 作为主路径。
 `scripts/pm.py` 的常用命令会优先尝试本地服务，服务不可用时自动回退到直连 `skill_api.py`；CLI 可用 `--no-service` 强制直连，或用 `--require-service` 在服务不可用时直接失败。`scripts/publish_daily_report.py` 也优先调用服务端 `daily_report_bundle`，在一次估值快照内完成 NAV 写入、日报 payload 和页面返回字段组装。
@@ -160,9 +160,10 @@ src/
 ├── service/              # HTTP/service 边界：FastAPI app 与服务门面
 ├── domain/               # 纯计算：NAV 公式、历史索引、payload 规范化
 ├── pricing/              # 行情插件化：PriceService + Provider
+├── maintenance/          # 运维修复：nav_history repair/backfill 等维护实现
 ├── migrations/           # Schema 版本化迁移登记
-├── portfolio.py          # 兼容 facade，保留旧方法入口
-├── price_fetcher.py      # 兼容 facade，委托 pricing service
+├── portfolio.py          # PortfolioManager facade，委托 app/domain 服务
+├── price_fetcher.py      # PriceFetcher facade，委托 pricing service
 ├── feishu_storage.py     # 飞书表读写与本地缓存索引
 └── feishu_client.py      # 飞书 API 客户端
 ```
@@ -176,7 +177,7 @@ src/
 - NAV 写入前先写 `holdings_snapshot`，保证可审计和可复算。
 - 交易/现金/持仓跨表失败要记录补偿任务，不静默吞掉。
 - Schema 变更必须登记到 `src/migrations/feishu/registry.py`，并更新 `docs/schema.md`。
-- `PortfolioManager` 和 `PriceFetcher` 是兼容 facade，新逻辑不要继续塞回巨型文件。
+- `PortfolioManager` 和 `PriceFetcher` 是 facade，新逻辑不要继续塞回巨型文件；现金逻辑归 `src/app/cash_service.py`，行情分类/Provider 归 `src/pricing/`。
 
 ## NAV 写入约定
 
@@ -210,6 +211,8 @@ python3 scripts/migrate_schema.py --apply
 # NAV 历史修复统一入口
 python3 scripts/nav_history_repair.py backfill --account lx --from 2025-01-01 --to 2025-01-31 --dry-run
 ```
+
+`check-live` 的退出状态只阻断核心净值表；`transactions`、`compensation_tasks`、`schema_version` 是可选能力表，缺失时会体现在 `all_ok=false`，但不影响 `core_ok`。
 
 ## 文档索引
 

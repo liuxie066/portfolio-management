@@ -88,7 +88,7 @@ def test_http_service_routes_delegate_to_portfolio_service():
         ("record_nav", {"account": "alice/bob", "price_timeout": 8, "dry_run": False, "confirm": True, "overwrite_existing": False, "use_bulk_persist": False, "run_id": "run-nav-1"}),
         ("distribution", {"account": "alice/bob"}),
         ("full_report", {"account": "alice/bob", "price_timeout": 9}),
-        ("daily_report_bundle", {"account": "alice/bob", "price_timeout": 10, "dry_run": False, "confirm": True, "use_bulk_persist": True, "sync_futu_cash_mmf": True, "sync_futu_dry_run": False, "run_id": "run-report-1"}),
+        ("daily_report_bundle", {"account": "alice/bob", "price_timeout": 10, "dry_run": False, "confirm": True, "overwrite_existing": True, "use_bulk_persist": True, "sync_futu_cash_mmf": True, "sync_futu_dry_run": False, "run_id": "run-report-1"}),
         ("generate_report", {"account": "alice/bob", "report_type": "monthly", "price_timeout": 11}),
         ("holdings", {"account": "alice", "include_cash": False, "group_by_market": True, "include_price": True}),
         ("cash", {"account": "alice"}),
@@ -96,7 +96,7 @@ def test_http_service_routes_delegate_to_portfolio_service():
         ("record_nav", {"account": "alice", "price_timeout": 9, "dry_run": True, "confirm": False, "overwrite_existing": True, "use_bulk_persist": True}),
         ("distribution", {"account": "alice"}),
         ("full_report", {"account": "alice", "price_timeout": 9}),
-        ("daily_report_bundle", {"account": "alice", "price_timeout": 10, "dry_run": True, "confirm": False, "use_bulk_persist": False, "sync_futu_cash_mmf": False, "sync_futu_dry_run": True}),
+        ("daily_report_bundle", {"account": "alice", "price_timeout": 10, "dry_run": True, "confirm": False, "overwrite_existing": True, "use_bulk_persist": False, "sync_futu_cash_mmf": False, "sync_futu_dry_run": True}),
         ("generate_report", {"account": "alice", "report_type": "monthly", "price_timeout": 11}),
     ]
 

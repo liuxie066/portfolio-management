@@ -74,7 +74,7 @@ def test_full_report_and_record_nav_share_same_snapshot():
     )
     skill.portfolio.record_nav = Mock(return_value=saved_nav)
 
-    snapshot = skill._build_snapshot()
+    snapshot = skill.build_snapshot()
     full = skill.full_report(snapshot=snapshot)
     rec = skill.record_nav(snapshot=snapshot)
 

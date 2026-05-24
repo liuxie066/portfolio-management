@@ -8,7 +8,7 @@ from src.portfolio import PortfolioManager
 
 def _manager(storage):
     manager = PortfolioManager(storage=storage, price_fetcher=Mock())
-    manager._get_asset_name = Mock(side_effect=lambda asset_id, asset_type, fallback: fallback)
+    manager._get_asset_name = Mock(side_effect=lambda asset_id, fallback: fallback)
     return manager
 
 
@@ -44,8 +44,8 @@ def test_trade_service_buy_records_compensation_when_cash_deduct_fails():
     storage.add_transaction.side_effect = lambda tx: tx
     storage.upsert_holding.side_effect = lambda holding: holding
     manager = _manager(storage)
-    manager._has_sufficient_cash = Mock(return_value=True)
-    manager._deduct_cash = Mock(return_value=False)
+    manager.cash_service.has_sufficient_cash = Mock(return_value=True)
+    manager.cash_service.deduct_cash = Mock(return_value=False)
     manager._record_compensation = Mock()
     service = TradeService(manager=manager, storage=storage)
 
@@ -65,7 +65,7 @@ def test_trade_service_buy_records_compensation_when_cash_deduct_fails():
     assert manager._record_compensation.call_args.kwargs["operation_type"] == "BUY_CASH_DEDUCT_FAILED"
 
 
-def test_trade_service_sell_uses_manager_add_cash_patch_point():
+def test_trade_service_sell_uses_cash_service_add_cash():
     storage = Mock()
     storage.get_holding.return_value = Holding(
         asset_id="000001",
@@ -77,7 +77,7 @@ def test_trade_service_sell_uses_manager_add_cash_patch_point():
     )
     storage.add_transaction.side_effect = lambda tx: tx
     manager = _manager(storage)
-    manager._add_cash = Mock()
+    manager.cash_service.add_cash = Mock()
     service = TradeService(manager=manager, storage=storage)
 
     tx = service.sell(
@@ -92,14 +92,14 @@ def test_trade_service_sell_uses_manager_add_cash_patch_point():
     )
 
     assert tx.quantity == -1.0
-    manager._add_cash.assert_called_once_with("a", 9.0)
+    manager.cash_service.add_cash.assert_called_once_with("a", 9.0)
 
 
-def test_trade_service_deposit_uses_cash_holding_patch_point():
+def test_trade_service_deposit_uses_cash_service_update():
     storage = Mock()
     storage.add_cash_flow.side_effect = lambda cf: cf
     manager = _manager(storage)
-    manager._update_cash_holding = Mock()
+    manager.cash_service.update_cash_holding = Mock()
     service = TradeService(manager=manager, storage=storage)
 
     cf = service.deposit(
@@ -111,4 +111,4 @@ def test_trade_service_deposit_uses_cash_holding_patch_point():
     )
 
     assert cf.amount == 1.01
-    manager._update_cash_holding.assert_called_once_with("a", 1.01, "CNY", 1.01)
+    manager.cash_service.update_cash_holding.assert_called_once_with("a", 1.01, "CNY", 1.01)

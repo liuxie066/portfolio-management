@@ -42,4 +42,22 @@ def get_migrations() -> list[Migration]:
                 "schema_version": ["migration_id", "description", "applied_at", "status"],
             },
         ),
+        Migration(
+            id="0004_manual_editable_fields",
+            description="Document manual-editable fields and require full holdings_snapshot valuation fields.",
+            required_tables={
+                "holdings_snapshot": [
+                    "as_of",
+                    "account",
+                    "asset_id",
+                    "broker",
+                    "quantity",
+                    "currency",
+                    "price",
+                    "cny_price",
+                    "market_value_cny",
+                    "dedup_key",
+                ],
+            },
+        ),
     ]

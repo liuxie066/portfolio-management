@@ -17,9 +17,8 @@ from src.models import (
 class TradeService:
     """Coordinate transaction/cash-flow writes and repair-task recording.
 
-    ``manager`` is intentionally used as a compatibility facade so existing
-    PortfolioManager helper patch points keep working while the orchestration
-    code moves out of ``portfolio.py``.
+    ``manager`` still owns shared normalization/name/compensation helpers, but
+    cash side effects go directly through ``CashService``.
 
     NOTE: buy/sell/deposit/withdraw perform multi-table writes (transaction →
     holding → cash) without database-level transactions.  If a secondary write
@@ -31,6 +30,7 @@ class TradeService:
     def __init__(self, manager: Any, storage: Any):
         self.manager = manager
         self.storage = storage
+        self.cash_service = manager.cash_service
 
     def buy(
         self,
@@ -50,7 +50,7 @@ class TradeService:
         auto_deduct_cash: bool = True,
         request_id: str = None,
     ) -> Transaction:
-        full_asset_name = self.manager._get_asset_name(asset_id, asset_type, asset_name)
+        full_asset_name = self.manager._get_asset_name(asset_id, asset_name)
         if full_asset_name != asset_name:
             print(f"[名称自动补全] {asset_name} -> {full_asset_name}")
 
@@ -62,7 +62,7 @@ class TradeService:
         )
 
         if auto_deduct_cash and currency == "CNY":
-            if not self.manager._has_sufficient_cash(account, total_cost):
+            if not self.cash_service.has_sufficient_cash(account, total_cost):
                 raise ValueError(f"账户 {account} 现金不足，需要 ¥{total_cost:,.2f}")
 
         tx = Transaction(
@@ -118,7 +118,7 @@ class TradeService:
 
         if auto_deduct_cash and currency == "CNY":
             try:
-                cash_deducted = self.manager._deduct_cash(account, total_cost)
+                cash_deducted = self.cash_service.deduct_cash(account, total_cost)
                 if not cash_deducted:
                     print(f"[警告] 买入交易已记录，但现金扣减失败。请手动调整账户 {account} 的现金余额 ¥{total_cost:,.2f}")
                     self.manager._record_compensation(
@@ -168,7 +168,7 @@ class TradeService:
             asset_type = holding.asset_type
         else:
             asset_type = None
-            asset_name = self.manager._get_asset_name(asset_id, asset_type, asset_id)
+            asset_name = self.manager._get_asset_name(asset_id, asset_id)
             print(f"[警告] 未找到持仓记录，尝试查询名称: {asset_id} -> {asset_name}")
 
         tx_payload = self.manager._normalize_transaction_payload(quantity=-quantity, price=price, fee=fee)
@@ -239,7 +239,7 @@ class TradeService:
                 )
             )
             try:
-                self.manager._add_cash(account, total_proceeds)
+                self.cash_service.add_cash(account, total_proceeds)
             except Exception as exc:
                 print(f"[警告] 现金增加异常: {exc}")
                 self.manager._record_compensation(
@@ -287,7 +287,7 @@ class TradeService:
         cf = self.storage.add_cash_flow(cf)
 
         try:
-            self.manager._update_cash_holding(account, cf_payload["amount"], currency, cf_payload["cny_amount"])
+            self.cash_service.update_cash_holding(account, cf_payload["amount"], currency, cf_payload["cny_amount"])
         except Exception as exc:
             self.manager._record_compensation(
                 operation_type="DEPOSIT_CASH_HOLDING_UPDATE_FAILED",
@@ -334,7 +334,7 @@ class TradeService:
         cf = self.storage.add_cash_flow(cf)
 
         try:
-            self.manager._update_cash_holding(account, -cf_payload["amount"], currency, -cf_payload["cny_amount"])
+            self.cash_service.update_cash_holding(account, -cf_payload["amount"], currency, -cf_payload["cny_amount"])
         except Exception as exc:
             self.manager._record_compensation(
                 operation_type="WITHDRAW_CASH_HOLDING_UPDATE_FAILED",

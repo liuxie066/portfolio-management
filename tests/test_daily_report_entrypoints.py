@@ -95,16 +95,22 @@ def test_publish_daily_report_build_report_data_passes_account():
             self.account = account
             self.storage = FakeStorage()
 
-        def build_snapshot(self):
-            calls.append(("build_snapshot", self.account))
+        def build_snapshot(self, **kwargs):
+            calls.append(("build_snapshot", self.account, kwargs))
             return {"valuation": None}
 
         def record_nav(self, **kwargs):
             calls.append(("record_nav", self.account, kwargs["dry_run"], kwargs.get("run_id")))
-            return {"success": True}
+            return {
+                "success": True,
+                "date": "2026-04-20",
+                "nav": 1.23,
+                "total_value": 123.0,
+                "pnl": 4.5,
+            }
 
         def generate_report(self, **kwargs):
-            calls.append(("generate_report", self.account, kwargs["report_type"]))
+            calls.append(("generate_report", self.account, kwargs["report_type"], kwargs.get("nav_override", {}).get("nav")))
             return {"success": True, "date": "2026-04-20"}
 
         def get_nav(self, **kwargs):
@@ -127,9 +133,9 @@ def test_publish_daily_report_build_report_data_passes_account():
     assert bundle["run_id"] == "run-report-1"
     assert bundle["snapshot"]["run_id"] == "run-report-1"
     assert bundle["report"]["run_id"] == "run-report-1"
-    assert ("build_snapshot", "alice") in calls
+    assert ("build_snapshot", "alice", {"price_timeout_seconds": 5}) in calls
     assert ("record_nav", "alice", True, "run-report-1") in calls
-    assert ("generate_report", "alice", "daily") in calls
+    assert ("generate_report", "alice", "daily", 1.23) in calls
     assert ("get_nav", "alice", 2) in calls
 
 
@@ -149,7 +155,7 @@ def test_publish_daily_report_futu_sync_defaults_to_dry_run():
             calls.append(("sync_futu_cash_mmf", dry_run))
             return {"success": True, "dry_run": dry_run}
 
-        def build_snapshot(self):
+        def build_snapshot(self, **_kwargs):
             return {"valuation": None}
 
         def record_nav(self, **kwargs):
@@ -320,7 +326,6 @@ def test_publish_daily_report_parse_args_uses_config_defaults_and_cli_overrides(
                     "account_label": "family",
                     "reports_dir": "out/reports",
                     "publish_root": "out/publish",
-                    "publish_base_url": "https://example.test/base/",
                     "sync_futu_cash_mmf": True,
                     "sync_futu_dry_run": False,
                 },
@@ -335,7 +340,6 @@ def test_publish_daily_report_parse_args_uses_config_defaults_and_cli_overrides(
                 "PM_REPORT_ACCOUNT_LABEL",
                 "PM_REPORTS_DIR",
                 "PM_PUBLISH_ROOT",
-                "OPENCLAW_PUBLISH_BASE_URL",
                 "PM_SYNC_FUTU_CASH_MMF",
                 "PM_SYNC_FUTU_DRY_RUN",
             ):
@@ -347,7 +351,7 @@ def test_publish_daily_report_parse_args_uses_config_defaults_and_cli_overrides(
             assert args.account_label == "family"
             assert args.reports_dir == "out/reports"
             assert args.publish_root == "out/publish"
-            assert args.publish_base_url == "https://example.test/base/"
+            assert args.publish_base_url is None
             assert args.sync_futu_cash_mmf is True
             assert args.sync_futu_dry_run is False
 
@@ -365,3 +369,23 @@ def test_publish_daily_report_parse_args_uses_config_defaults_and_cli_overrides(
         finally:
             patch.undo()
             publish_daily_report.app_config.reload_config()
+
+
+def test_publish_report_returns_local_artifact_without_public_url():
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = publish_daily_report.PublishConfig(
+            repo_root=root,
+            workspace=root,
+            reports_dir=root / "reports",
+            publish_root=root / "published",
+            account_label="family",
+        )
+
+        result = publish_daily_report.publish_report("2026-05-24", "<html></html>", config)
+
+        assert result["slug"] == "investment-daily-2026-05-24"
+        assert result["relative_path"] == "investment-daily-2026-05-24/index.html"
+        assert result["public_url"] is None
+        assert result["public_url_status"] == "disabled"
+        assert (root / "published" / "investment-daily-2026-05-24" / "index.html").exists()

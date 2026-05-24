@@ -8,6 +8,7 @@ from src import config as _config
 
 from ..payload import normalize_price_payload
 from ..types import PriceRequest, ProviderResult
+from .yahoo_chart import fetch_yahoo_chart_quote
 
 
 class USStockProvider:
@@ -92,69 +93,4 @@ class USStockProvider:
         )
 
     def fetch_yahoo_chart(self, code: str) -> Optional[dict]:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{code}?interval=1d&range=2d"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json",
-        }
-        response = self.fetcher.session.get(url, headers=headers, timeout=15)
-        if response.status_code == 429:
-            raise Exception("Rate limited")
-        response.raise_for_status()
-        data = response.json()
-
-        chart = data.get("chart", {})
-        if chart.get("error"):
-            raise Exception(chart["error"].get("description", "Unknown error"))
-
-        result = chart.get("result", [{}])[0]
-        meta = result.get("meta", {})
-        timestamps = result.get("timestamp", [])
-        quotes = result.get("indicators", {}).get("quote", [{}])[0]
-        if not timestamps or not quotes.get("close"):
-            return None
-
-        closes = quotes["close"]
-        opens = quotes.get("open", [])
-        highs = quotes.get("high", [])
-        lows = quotes.get("low", [])
-        volumes = quotes.get("volume", [])
-        valid_closes = [c for c in closes if c is not None]
-        if not valid_closes:
-            return None
-
-        current = valid_closes[-1]
-        prev_close = meta.get("previousClose") or meta.get("chartPreviousClose")
-        if prev_close is None and len(valid_closes) >= 2:
-            prev_close = valid_closes[-2]
-        elif prev_close is None and opens:
-            prev_close = opens[0]
-        elif prev_close is None:
-            prev_close = current
-
-        change = current - prev_close
-        change_pct = (change / prev_close * 100) if prev_close else 0
-        valid_highs = [h for h in highs if h is not None]
-        valid_lows = [l for l in lows if l is not None]
-        valid_volumes = [v for v in volumes if v is not None]
-
-        usd_cny = self.fetcher._fetch_exchange_rates()["USDCNY"]
-        return normalize_price_payload(
-            {
-                "code": code,
-                "name": meta.get("shortName") or meta.get("longName") or meta.get("symbol"),
-                "price": current,
-                "prev_close": prev_close,
-                "open": opens[-1] if opens and opens[-1] else current,
-                "high": valid_highs[-1] if valid_highs else current,
-                "low": valid_lows[-1] if valid_lows else current,
-                "change": change,
-                "change_pct": change_pct,
-                "volume": int(valid_volumes[-1]) if valid_volumes else 0,
-                "currency": meta.get("currency", "USD"),
-                "cny_price": current * usd_cny,
-                "exchange_rate": usd_cny,
-                "market_type": "us",
-                "source": "yahoo_chart",
-            }
-        )
+        return fetch_yahoo_chart_quote(self.fetcher, code, timeout=15)

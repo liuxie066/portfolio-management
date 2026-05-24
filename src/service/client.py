@@ -30,6 +30,37 @@ def _query_value(value: Any) -> Any:
     return value
 
 
+def _error_from_collection(value: Any) -> Optional[str]:
+    if not isinstance(value, list):
+        return None
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        message = item.get("error") or item.get("message") or item.get("detail")
+        if not message:
+            continue
+        account = item.get("account")
+        if account:
+            return f"{account}: {message}"
+        return str(message)
+    return None
+
+
+def _failure_message(payload: Dict[str, Any]) -> str:
+    for key in ("error", "message", "detail"):
+        value = payload.get(key)
+        if value:
+            return str(value)
+    for key in ("errors", "items"):
+        message = _error_from_collection(payload.get(key))
+        if message:
+            return message
+    status = payload.get("status")
+    if status:
+        return f"status={status}"
+    return "unknown service error"
+
+
 class PortfolioServiceClient:
     def __init__(self, base_url: Optional[str] = None, timeout: float = 0.5):
         self.base_url = (base_url or config.get_service_url()).rstrip("/")
@@ -77,7 +108,7 @@ class PortfolioServiceClient:
         if not isinstance(decoded, dict):
             raise PortfolioServiceResponseError("service returned non-object JSON")
         if decoded.get("success") is False:
-            message = decoded.get("error") or decoded.get("message") or decoded.get("detail") or "unknown service error"
+            message = _failure_message(decoded)
             raise PortfolioServiceResponseError(f"service returned success=false: {message}")
         return decoded
 
@@ -182,6 +213,7 @@ class PortfolioServiceClient:
         price_timeout: int = 30,
         dry_run: bool = True,
         confirm: bool = False,
+        overwrite_existing: bool = True,
         use_bulk_persist: bool = False,
         sync_futu_cash_mmf: bool = False,
         sync_futu_dry_run: bool = True,
@@ -192,6 +224,7 @@ class PortfolioServiceClient:
             "price_timeout": price_timeout,
             "dry_run": dry_run,
             "confirm": confirm,
+            "overwrite_existing": overwrite_existing,
             "use_bulk_persist": use_bulk_persist,
             "sync_futu_cash_mmf": sync_futu_cash_mmf,
             "sync_futu_dry_run": sync_futu_dry_run,

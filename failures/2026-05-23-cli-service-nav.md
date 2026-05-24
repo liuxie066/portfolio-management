@@ -13,3 +13,5 @@
 - Chaining `/nav/record`, `/report/daily`, and `/nav` from the publisher would rebuild priced snapshots, making the stored NAV and rendered report potentially inconsistent while adding avoidable pricing latency.
 - If only the HTTP/service layer generates a run id, direct fallback and scheduled publisher output can lose traceability; resolve or accept the id at the publisher boundary and pass it into either path.
 - Suppressing internal stdout around the entire daily publisher swallowed the final JSON result and made `--quiet` meaningless; suppress only noisy build stages, then print the operator-facing result outside that context.
+- A long-running local service can be healthy but stale after code changes; restart it before validating new routes like `/report/daily-bundle`.
+- `daily_report_bundle` initially let storage/config exceptions escape as HTTP 500, and multi-account overview returned failure details only in `errors`; both made real configuration issues look like service bugs instead of actionable operator errors.

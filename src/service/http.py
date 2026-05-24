@@ -27,6 +27,7 @@ class DailyReportBundleRequest(BaseModel):
     price_timeout: int = 30
     dry_run: bool = True
     confirm: bool = False
+    overwrite_existing: bool = True
     use_bulk_persist: bool = False
     sync_futu_cash_mmf: bool = False
     sync_futu_dry_run: bool = True
@@ -40,7 +41,7 @@ def _service(request: Request) -> PortfolioService:
 def create_app(service: Optional[PortfolioService] = None) -> FastAPI:
     app = FastAPI(
         title="Portfolio Management Service",
-        version="0.1.0",
+        version="0.1.1",
         description="Service-first API for portfolio accounts, holdings, NAV, and reports.",
     )
     app.state.portfolio_service = service or PortfolioService()
@@ -182,6 +183,7 @@ def create_app(service: Optional[PortfolioService] = None) -> FastAPI:
             price_timeout=payload.price_timeout,
             dry_run=payload.dry_run,
             confirm=payload.confirm,
+            overwrite_existing=payload.overwrite_existing,
             use_bulk_persist=payload.use_bulk_persist,
             sync_futu_cash_mmf=payload.sync_futu_cash_mmf,
             sync_futu_dry_run=payload.sync_futu_dry_run,
@@ -197,6 +199,7 @@ def create_app(service: Optional[PortfolioService] = None) -> FastAPI:
             price_timeout=payload.price_timeout,
             dry_run=payload.dry_run,
             confirm=payload.confirm,
+            overwrite_existing=payload.overwrite_existing,
             use_bulk_persist=payload.use_bulk_persist,
             sync_futu_cash_mmf=payload.sync_futu_cash_mmf,
             sync_futu_dry_run=payload.sync_futu_dry_run,

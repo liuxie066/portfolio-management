@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Any, Iterable, Optional, Protocol
+from typing import Any, Optional, Protocol
 
 from src import config
 from src.models import (
@@ -63,7 +63,6 @@ class FutuOpenApiBalanceProvider:
         acc_id: Optional[int] = None,
         trd_market: Optional[str] = None,
         cash_currency: Optional[str] = None,
-        mmf_codes: Optional[Iterable[str]] = None,
     ):
         self.host = host or config.get("futu.opend.host", "127.0.0.1")
         self.port = int(port if port is not None else (config.get_int("futu.opend.port", 11111) or 11111))
@@ -71,9 +70,6 @@ class FutuOpenApiBalanceProvider:
         self.acc_id = int(acc_id) if acc_id is not None else config.get_int("futu.acc_id")
         self.trd_market = trd_market or config.get("futu.trd_market", "HK")
         self.cash_currency = cash_currency or config.get("futu.cash_currency", "CNH")
-        # Kept for constructor compatibility. MMF balance is authoritative from
-        # accinfo.fund_assets, not position code matching.
-        self._legacy_mmf_codes = tuple(mmf_codes or ())
 
     def fetch_balances(self) -> FutuBalanceSnapshot:
         try:

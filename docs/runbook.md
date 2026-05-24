@@ -69,10 +69,11 @@ python scripts/pm.py positions distribution
 - 默认 `dry_run=True`；任何真正写入都必须 `confirm=True`。
 - 清仓点不会触发价格拉取/估值计算；它是一个“人工定义的状态点”。
 
-## 1) Daily report link returns 502
+## 1) Daily report public link is unavailable
 
-- Confirm an HTTP server is listening on `0.0.0.0:3000` inside the container.
-- Confirm publish root points to the directory containing `investment-daily-YYYY-MM-DD/index.html`.
+- The old public daily-report domain is no longer valid.
+- Treat `scripts/publish_daily_report.py` output as local static artifacts only.
+- Confirm `publish.publish_dir` points to the directory containing `investment-daily-YYYY-MM-DD/index.html`.
 
 ## 2) "Report didn't refresh prices"
 
