@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional
 
 from src import config
 from src.app.account_nav_recorder_service import _now_ms, _set_run_id
-from src.app.nav_payload import format_nav_payload
+from src.app.nav_payload import format_nav_history_item, format_nav_payload
 from src.domain.nav.performance import NavPerformanceCalculator, sort_navs
 from src.domain.report.holdings_projection import merge_top_holdings
 
@@ -35,8 +35,6 @@ class DailyReportPayloadService:
         price_timeout: int = 30,
         run_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        from src.app import NavReadService
-
         resolved_run_id = run_id or nav_result.get("run_id") or snapshot.get("run_id")
 
         t_navs = _now_ms()
@@ -59,10 +57,8 @@ class DailyReportPayloadService:
         report["run_id"] = resolved_run_id
 
         t_get_nav = _now_ms()
-        nav_snapshot = NavReadService(storage=self.storage).get_nav(account=self.account, days=2)
+        nav_snapshot = self._build_nav_snapshot(navs_all, nav_record)
         get_nav_ms = _now_ms() - t_get_nav
-        if not nav_snapshot.get("success"):
-            return _set_run_id(nav_snapshot, resolved_run_id)
 
         return {
             "success": True,
@@ -140,6 +136,20 @@ class DailyReportPayloadService:
                 "yearly": performance.year_return(current_year, navs=navs_for_returns),
                 "since_inception": since_inception,
             },
+        }
+
+    @classmethod
+    def _build_nav_snapshot(cls, navs: list, nav_record: Any) -> Dict[str, Any]:
+        navs_for_snapshot = cls._replace_nav_for_date(navs, nav_record)
+        recent_navs = sort_navs(navs_for_snapshot)[-2:]
+        if not recent_navs:
+            return {"success": False, "message": "无净值记录"}
+
+        latest = recent_navs[-1]
+        return {
+            "success": True,
+            "latest": format_nav_payload(latest),
+            "history": [format_nav_history_item(nav) for nav in recent_navs],
         }
 
     @staticmethod

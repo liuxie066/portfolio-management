@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.4 - 2026-05-25
+
+- Fixed daily report payload assembly so scheduled Monday jobs can record the
+  previous Friday's NAV without failing on a short natural-day NAV read window.
+- Built recent NAV snapshots from the current NAV record plus loaded history,
+  keeping dry-run and write-mode daily jobs on the same path.
+- Documented the Linux production deployment split: `lx` runs with Futu
+  cash/MMF sync, while `hb` and `sy` run normal daily NAV recording.
+- Added deployment runbook notes for dry-run parity, explicit Asia/Shanghai
+  timer scheduling, and Futu sync account scoping.
+
 ## 0.1.3 - 2026-05-25
 
 - Added `scripts/install.sh` as a Hermes-style Linux bootstrap installer for

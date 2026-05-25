@@ -257,34 +257,18 @@ def test_daily_report_payload_service_uses_existing_snapshot_and_nav_record():
             calls.append(("get_distribution", kwargs.get("holdings_data") is snapshot))
             return {"success": True, "total_value": 123.45}
 
-    class FakeNavReadService:
-        def __init__(self, **_kwargs):
-            pass
-
-        def get_nav(self, **kwargs):
-            calls.append(("get_nav", kwargs))
-            return {"success": True, "latest": {"date": "2026-05-22"}}
-
-    import src.app as app_module
-
-    patch = MonkeyPatch()
-    try:
-        patch.setattr(app_module, "NavReadService", FakeNavReadService)
-
-        result = DailyReportPayloadService(
-            account="alice",
-            storage=FakeStorage(),
-            portfolio=SimpleNamespace(),
-            read_service=FakeReadService(),
-        ).build(
-            snapshot=snapshot,
-            nav_record=nav_record,
-            nav_result=nav_result,
-            price_timeout=7,
-            run_id="run-payload-1",
-        )
-    finally:
-        patch.undo()
+    result = DailyReportPayloadService(
+        account="alice",
+        storage=FakeStorage(),
+        portfolio=SimpleNamespace(),
+        read_service=FakeReadService(),
+    ).build(
+        snapshot=snapshot,
+        nav_record=nav_record,
+        nav_result=nav_result,
+        price_timeout=7,
+        run_id="run-payload-1",
+    )
 
     assert result["success"] is True
     assert result["distribution"]["total_value"] == 123.45
@@ -295,6 +279,36 @@ def test_daily_report_payload_service_uses_existing_snapshot_and_nav_record():
     assert result["report"]["report_type"] == "日报"
     assert result["report"]["date"] == "2026-05-22"
     assert result["stage_timings"].keys() == {"navs_all_ms", "generate_report_ms", "get_nav_ms"}
+
+
+def test_daily_report_payload_service_uses_dry_run_nav_record_for_recent_snapshot():
+    old_nav = _nav_record(nav_date=date(2026, 5, 18))
+    nav_record = _nav_record(nav_date=date(2026, 5, 22))
+    snapshot = {"valuation": SimpleNamespace(), "snapshot_time": "2026-05-22T18:00:00"}
+
+    class FakeStorage:
+        def get_nav_history(self, account, days):
+            return [old_nav]
+
+    class FakeReadService:
+        def get_distribution(self, **_kwargs):
+            return {"success": True, "total_value": 123.45}
+
+    result = DailyReportPayloadService(
+        account="alice",
+        storage=FakeStorage(),
+        portfolio=SimpleNamespace(),
+        read_service=FakeReadService(),
+    ).build(
+        snapshot=snapshot,
+        nav_record=nav_record,
+        nav_result={"success": True, "date": "2026-05-22", "run_id": "run-payload-dry"},
+        run_id="run-payload-dry",
+    )
+
+    assert result["success"] is True
+    assert result["nav_snapshot"]["latest"]["date"] == "2026-05-22"
+    assert [row["date"] for row in result["nav_snapshot"]["history"]] == ["2026-05-18", "2026-05-22"]
 
 
 def test_daily_account_nav_service_returns_failure_when_payload_stage_raises():
