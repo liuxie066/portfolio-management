@@ -7,7 +7,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
@@ -54,6 +54,7 @@ def parse_args() -> argparse.Namespace:
         help="Deprecated and ignored. External daily-report publish domains are disabled.",
     )
     parser.add_argument("--price-timeout", type=int, default=30, help="Price fetch timeout in seconds.")
+    parser.add_argument("--nav-date", default=None, help="NAV date to record (YYYY-MM-DD). Defaults to Beijing today.")
     parser.add_argument("--dry-run", action="store_true", help="Do not persist NAV writes.")
     parser.add_argument("--use-bulk-nav-upsert", action="store_true", help="Persist NAV through FeishuStorage.write_nav_records (single-row bulk mode).")
     parser.add_argument("--no-html", action="store_true", help="Do not render HTML; only record NAV + generate JSON bundle.")
@@ -62,7 +63,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--debug-internal", action="store_true", help="Do not suppress internal stdout prints (debug only).")
     parser.add_argument("--service-url", default=None, help="Local service URL; defaults to config/PORTFOLIO_SERVICE_URL.")
     parser.add_argument("--service-timeout", type=float, default=0.5, help="Local service timeout seconds before fallback.")
-    parser.add_argument("--no-service", action="store_true", help="Bypass local service and call skill_api directly.")
+    parser.add_argument("--no-service", action="store_true", help="Bypass local service and call the local application service directly.")
     parser.add_argument("--require-service", action="store_true", help="Fail instead of falling back when local service is unavailable.")
     parser.add_argument("--run-id", default=None, help="Operator-supplied run id for tracing NAV/report artifacts.")
     parser.add_argument(
@@ -128,6 +129,7 @@ def build_report_data(
     no_service: bool = False,
     require_service: bool = False,
     run_id: Optional[str] = None,
+    nav_date: Optional[str] = None,
 ) -> dict[str, Any]:
     """Build a consistent bundle for publishing.
 
@@ -151,6 +153,7 @@ def build_report_data(
                 service_url=service_url,
                 service_timeout=service_timeout,
                 run_id=resolved_run_id,
+                nav_date=nav_date,
             )
             bundle.setdefault("run_id", resolved_run_id)
             return bundle
@@ -173,6 +176,7 @@ def build_report_data(
         sync_futu_dry_run=sync_futu_dry_run,
         account=account,
         run_id=resolved_run_id,
+        nav_date=nav_date,
     )
 
 
@@ -187,20 +191,24 @@ def _build_report_data_via_service(
     service_url: Optional[str],
     service_timeout: float,
     run_id: str,
+    nav_date: Optional[str],
 ) -> dict[str, Any]:
     from src.service.client import PortfolioServiceClient
 
     client = PortfolioServiceClient(base_url=service_url, timeout=service_timeout)
-    return client.daily_report_bundle(
-        account=account,
-        price_timeout=price_timeout,
-        dry_run=dry_run,
-        confirm=not dry_run,
-        use_bulk_persist=use_bulk_nav_upsert,
-        sync_futu_cash_mmf=sync_futu_cash_mmf,
-        sync_futu_dry_run=sync_futu_dry_run,
-        run_id=run_id,
-    )
+    kwargs = {
+        "account": account,
+        "price_timeout": price_timeout,
+        "dry_run": dry_run,
+        "confirm": not dry_run,
+        "use_bulk_persist": use_bulk_nav_upsert,
+        "sync_futu_cash_mmf": sync_futu_cash_mmf,
+        "sync_futu_dry_run": sync_futu_dry_run,
+        "run_id": run_id,
+    }
+    if nav_date is not None:
+        kwargs["nav_date"] = nav_date
+    return client.daily_report_bundle(**kwargs)
 
 
 def _build_report_data_direct(
@@ -212,109 +220,26 @@ def _build_report_data_direct(
     sync_futu_dry_run: bool = True,
     account: Optional[str] = None,
     run_id: Optional[str] = None,
+    nav_date: Optional[str] = None,
 ) -> dict[str, Any]:
-    # Build a single snapshot first (heavy operation: holdings + price fetch).
-    # Import lazily to keep script startup fast.
-    from skill_api import get_skill
+    from src.service.application import PortfolioService
 
-    import time
-    def _ms():
-        return int(time.time()*1000)
-
-    skill = get_skill(account)
-
-    futu_sync_result = None
-    if sync_futu_cash_mmf:
-        futu_sync_result = skill.sync_futu_cash_mmf(dry_run=sync_futu_dry_run)
-        if not futu_sync_result.get("success"):
-            raise RuntimeError(json.dumps(futu_sync_result, ensure_ascii=False))
-
-    t_snapshot = _ms()
-    snapshot = skill.build_snapshot(price_timeout_seconds=price_timeout)
-    if run_id:
-        snapshot["run_id"] = run_id
-
-    # Debug: show price meta if present
-    try:
-        valuation = snapshot.get('valuation')
-        pm = getattr(valuation, 'price_meta', None)
-        if pm is not None:
-            print('[price_meta]', pm)
-    except Exception:
-        pass
-    snapshot_ms = _ms() - t_snapshot
-
-    t_navs = _ms()
-    navs_all = skill.storage.get_nav_history(skill.account, days=9999)
-    navs_ms = _ms() - t_navs
-
-    t_record_nav = _ms()
-    # NOTE: skill_api.record_nav() 默认 dry_run=True（安全约束）。
-    # 作为定时任务，我们在非 dry_run 模式下显式写入：dry_run=False 且 confirm=True。
-    if dry_run:
-        nav_result = skill.record_nav(
-            price_timeout=price_timeout,
-            dry_run=True,
-            confirm=False,
-            snapshot=snapshot,
-            use_bulk_persist=use_bulk_nav_upsert,
-            run_id=run_id,
-        )
-    else:
-        nav_result = skill.record_nav(
-            price_timeout=price_timeout,
-            dry_run=False,
-            confirm=True,
-            snapshot=snapshot,
-            use_bulk_persist=use_bulk_nav_upsert,
-            run_id=run_id,
-        )
-
-    record_nav_ms = _ms() - t_record_nav
-
-    if not nav_result.get("success"):
-        raise RuntimeError(json.dumps(nav_result, ensure_ascii=False))
-
-    t_report = _ms()
-    # Generate report using the same snapshot (no extra price fetch).
-    report = skill.generate_report(
-        report_type="daily",
-        record_nav=False,
-        price_timeout=price_timeout,
-        snapshot=snapshot,
-        navs=navs_all,
-        nav_override=nav_result,
-    )
-    if run_id:
-        report["run_id"] = run_id
-    report_ms = _ms() - t_report
-
-    if not report.get("success"):
-        raise RuntimeError(json.dumps(report, ensure_ascii=False))
-
-    t_get_nav = _ms()
-    # For daily report, we only need recent 2 days of NAV history.
-    nav_snapshot = skill.get_nav(days=2)
-    get_nav_ms = _ms() - t_get_nav
-    if not nav_snapshot.get("success"):
-        raise RuntimeError(json.dumps(nav_snapshot, ensure_ascii=False))
-
-    return {
-        "account": skill.account,
+    kwargs = {
+        "account": account,
+        "price_timeout": price_timeout,
+        "dry_run": dry_run,
+        "confirm": not dry_run,
+        "use_bulk_persist": use_bulk_nav_upsert,
+        "sync_futu_cash_mmf": sync_futu_cash_mmf,
+        "sync_futu_dry_run": sync_futu_dry_run,
         "run_id": run_id,
-        "snapshot": snapshot,
-        "nav_result": nav_result,
-        "report": report,
-        "nav_snapshot": nav_snapshot,
-        "stage_timings": {
-            "snapshot_ms": snapshot_ms,
-            "navs_all_ms": navs_ms,
-            "record_nav_ms": record_nav_ms,
-            "generate_report_ms": report_ms,
-            "get_nav_ms": get_nav_ms,
-        },
-        "futu_sync_result": futu_sync_result,
     }
+    if nav_date is not None:
+        kwargs["nav_date"] = nav_date
+    bundle = PortfolioService().daily_report_bundle(**kwargs)
+    if not bundle.get("success"):
+        raise RuntimeError(json.dumps(bundle, ensure_ascii=False))
+    return bundle
 
 
 def render_daily_report_html(report_bundle: dict[str, Any], config: PublishConfig) -> tuple[str, str]:
@@ -397,6 +322,7 @@ def main() -> None:
             no_service=bool(args.no_service),
             require_service=bool(args.require_service),
             run_id=args.run_id,
+            nav_date=args.nav_date,
         )
     timings['build_report_data_ms'] = _now_ms() - t1
 

@@ -1,16 +1,19 @@
 """
 统一配置管理
 
-优先级：环境变量 > config.json > 默认值
+优先级：环境变量 > config.yaml > 默认值
 """
 import json
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Iterable, Optional
 
-# 项目根目录（config.json 所在目录）
+import yaml
+
+# 项目根目录（config.yaml 所在目录）
 _PROJECT_ROOT = Path(__file__).parent.parent
-_CONFIG_FILE = _PROJECT_ROOT / "config.json"
+_CONFIG_FILE = _PROJECT_ROOT / "config.yaml"
+CONFIG_FILE_ENV = "PORTFOLIO_CONFIG_FILE"
 
 # 模块级缓存，避免重复读文件
 _cached_config: Optional[dict] = None
@@ -18,19 +21,140 @@ _cached_config: Optional[dict] = None
 _TRUE_VALUES = {"1", "true", "yes", "y", "on"}
 _FALSE_VALUES = {"0", "false", "no", "n", "off"}
 
+ENV_MAP = {
+    "account": "PORTFOLIO_ACCOUNT",
+    "data.dir": "PM_DATA_DIR",
+    "service.host": "PORTFOLIO_SERVICE_HOST",
+    "service.port": "PORTFOLIO_SERVICE_PORT",
+    "service.url": "PORTFOLIO_SERVICE_URL",
+    "nav.disable_runtime_validation": "PORTFOLIO_NAV_DISABLE_RUNTIME_VALIDATION",
+    "report.account_label": "PM_REPORT_ACCOUNT_LABEL",
+    "report.reports_dir": "PM_REPORTS_DIR",
+    "report.publish_root": "PM_PUBLISH_ROOT",
+    "report.sync_futu_cash_mmf": "PM_SYNC_FUTU_CASH_MMF",
+    "report.sync_futu_dry_run": "PM_SYNC_FUTU_DRY_RUN",
+    "report.disable_nav_runtime_validation": "PM_DISABLE_NAV_RUNTIME_VALIDATION",
+    "calendar.holidays": "PM_BUSINESS_HOLIDAYS",
+    "futu.opend.host": "FUTU_OPEND_HOST",
+    "futu.opend.port": "FUTU_OPEND_PORT",
+    "futu.trd_env": "FUTU_TRD_ENV",
+    "futu.acc_id": "FUTU_ACC_ID",
+    "futu.trd_market": "FUTU_TRD_MARKET",
+    "futu.cash_currency": "FUTU_CASH_CURRENCY",
+    "feishu.app_token": "FEISHU_APP_TOKEN",
+    "feishu.app_id": "FEISHU_APP_ID",
+    "feishu.app_secret": "FEISHU_APP_SECRET",
+    "feishu.user_token": "FEISHU_USER_TOKEN",
+    "feishu.tables.holdings": "FEISHU_TABLE_HOLDINGS",
+    "feishu.tables.transactions": "FEISHU_TABLE_TRANSACTIONS",
+    "feishu.tables.price_cache": "FEISHU_TABLE_PRICE_CACHE",
+    "feishu.tables.nav_history": "FEISHU_TABLE_NAV_HISTORY",
+    "feishu.tables.cash_flow": "FEISHU_TABLE_CASH_FLOW",
+    "feishu.tables.holdings_snapshot": "FEISHU_TABLE_HOLDINGS_SNAPSHOT",
+    "feishu.tables.compensation_tasks": "FEISHU_TABLE_COMPENSATION_TASKS",
+    "feishu.tables.schema_version": "FEISHU_TABLE_SCHEMA_VERSION",
+    "finnhub_api_key": "FINNHUB_API_KEY",
+}
+
+OPERATOR_CONFIG_KEYS = (
+    "account",
+    "data.dir",
+    "service.host",
+    "service.port",
+    "service.url",
+    "calendar.holidays",
+    "report.reports_dir",
+    "report.publish_root",
+    "report.sync_futu_cash_mmf",
+    "futu.opend.host",
+    "futu.opend.port",
+    "futu.trd_env",
+    "futu.acc_id",
+    "futu.trd_market",
+    "futu.cash_currency",
+    "feishu.app_id",
+    "feishu.app_secret",
+    "feishu.app_token",
+    "feishu.tables.holdings",
+    "feishu.tables.nav_history",
+    "feishu.tables.cash_flow",
+    "feishu.tables.holdings_snapshot",
+    "feishu.tables.transactions",
+    "finnhub_api_key",
+)
+
+REQUIRED_DAILY_JOB_KEYS = (
+    "feishu.app_id",
+    "feishu.app_secret",
+    "feishu.tables.holdings",
+    "feishu.tables.nav_history",
+    "feishu.tables.cash_flow",
+    "feishu.tables.holdings_snapshot",
+)
+
+SECRET_KEYS = {
+    "feishu.app_id",
+    "feishu.app_secret",
+    "feishu.user_token",
+    "finnhub_api_key",
+}
+
+OPERATOR_DEFAULTS: Dict[str, Any] = {
+    "account": "default",
+    "data.dir": str(_PROJECT_ROOT / ".data"),
+    "service.host": "127.0.0.1",
+    "service.port": 8765,
+    "service.url": "",
+    "calendar.holidays": [],
+    "report.reports_dir": "reports",
+    "report.publish_root": "../prototypes",
+    "report.sync_futu_cash_mmf": False,
+    "futu.opend.host": "127.0.0.1",
+    "futu.opend.port": 11111,
+    "futu.trd_env": "REAL",
+    "futu.trd_market": "HK",
+    "futu.cash_currency": "CNH",
+}
+
+
+def get_config_file() -> Path:
+    """Return the active config file path.
+
+    Linux deployments should set ``PORTFOLIO_CONFIG_FILE`` to keep secrets out
+    of the checkout. Tests may still monkeypatch ``_CONFIG_FILE`` directly.
+    """
+    configured = os.environ.get(CONFIG_FILE_ENV)
+    if configured:
+        return Path(configured).expanduser()
+    return _CONFIG_FILE
+
+
+def _load_structured_config(config_file: Path) -> dict:
+    suffix = config_file.suffix.lower()
+    with open(config_file, "r", encoding="utf-8") as f:
+        if suffix == ".json":
+            loaded = json.load(f)
+        else:
+            loaded = yaml.safe_load(f)
+    if loaded is None:
+        return {}
+    if not isinstance(loaded, dict):
+        raise ValueError("top-level config must be a mapping")
+    return loaded
+
 
 def _load_config_file() -> dict:
-    """从 config.json 加载配置"""
+    """从 config.yaml 加载配置"""
     global _cached_config
     if _cached_config is not None:
         return _cached_config
 
-    if _CONFIG_FILE.exists():
+    config_file = get_config_file()
+    if config_file.exists():
         try:
-            with open(_CONFIG_FILE, "r", encoding="utf-8") as f:
-                _cached_config = json.load(f)
-        except (json.JSONDecodeError, IOError) as e:
-            print(f"[配置] 加载 config.json 失败: {e}")
+            _cached_config = _load_structured_config(config_file)
+        except (json.JSONDecodeError, yaml.YAMLError, ValueError, IOError) as e:
+            print(f"[配置] 加载 {config_file} 失败: {e}")
             _cached_config = {}
     else:
         _cached_config = {}
@@ -45,6 +169,31 @@ def reload_config():
     return _load_config_file()
 
 
+def _get_from_file(key: str, default=None) -> tuple[Any, bool]:
+    cfg = _load_config_file()
+    parts = key.split(".")
+    node: Any = cfg
+    for part in parts:
+        if isinstance(node, dict) and part in node:
+            node = node[part]
+        else:
+            return default, False
+    return (default, True) if node == "" else (node, True)
+
+
+def get_with_source(key: str, default=None) -> tuple[Any, str]:
+    env_key = ENV_MAP.get(key)
+    if env_key:
+        env_val = os.environ.get(env_key)
+        if env_val not in (None, ""):
+            return env_val, f"env:{env_key}"
+
+    file_value, found = _get_from_file(key, default)
+    if found:
+        return file_value, f"file:{get_config_file()}"
+    return default, "default"
+
+
 def get(key: str, default=None):
     """获取配置值（支持点号分隔的嵌套 key）
 
@@ -55,57 +204,90 @@ def get(key: str, default=None):
     Returns:
         配置值
     """
-    # 环境变量映射（环境变量优先）
-    env_map = {
-        "account": "PORTFOLIO_ACCOUNT",
-        "service.host": "PORTFOLIO_SERVICE_HOST",
-        "service.port": "PORTFOLIO_SERVICE_PORT",
-        "service.url": "PORTFOLIO_SERVICE_URL",
-        "nav.disable_runtime_validation": "PORTFOLIO_NAV_DISABLE_RUNTIME_VALIDATION",
-        "report.account_label": "PM_REPORT_ACCOUNT_LABEL",
-        "report.reports_dir": "PM_REPORTS_DIR",
-        "report.publish_root": "PM_PUBLISH_ROOT",
-        "report.sync_futu_cash_mmf": "PM_SYNC_FUTU_CASH_MMF",
-        "report.sync_futu_dry_run": "PM_SYNC_FUTU_DRY_RUN",
-        "report.disable_nav_runtime_validation": "PM_DISABLE_NAV_RUNTIME_VALIDATION",
-        "futu.opend.host": "FUTU_OPEND_HOST",
-        "futu.opend.port": "FUTU_OPEND_PORT",
-        "futu.trd_env": "FUTU_TRD_ENV",
-        "futu.acc_id": "FUTU_ACC_ID",
-        "futu.trd_market": "FUTU_TRD_MARKET",
-        "futu.cash_currency": "FUTU_CASH_CURRENCY",
-        "feishu.app_token": "FEISHU_APP_TOKEN",
-        "feishu.app_id": "FEISHU_APP_ID",
-        "feishu.app_secret": "FEISHU_APP_SECRET",
-        "feishu.user_token": "FEISHU_USER_TOKEN",
-        "feishu.tables.holdings": "FEISHU_TABLE_HOLDINGS",
-        "feishu.tables.transactions": "FEISHU_TABLE_TRANSACTIONS",
-        "feishu.tables.price_cache": "FEISHU_TABLE_PRICE_CACHE",
-        "feishu.tables.nav_history": "FEISHU_TABLE_NAV_HISTORY",
-        "feishu.tables.cash_flow": "FEISHU_TABLE_CASH_FLOW",
-        "feishu.tables.holdings_snapshot": "FEISHU_TABLE_HOLDINGS_SNAPSHOT",
-        "feishu.tables.compensation_tasks": "FEISHU_TABLE_COMPENSATION_TASKS",
-        "feishu.tables.schema_version": "FEISHU_TABLE_SCHEMA_VERSION",
-        "finnhub_api_key": "FINNHUB_API_KEY",
+    value, _source = get_with_source(key, default)
+    return value
+
+
+def _redact_value(key: str, value: Any) -> Any:
+    if value in (None, ""):
+        return value
+    if key in SECRET_KEYS:
+        text = str(value)
+        if len(text) <= 6:
+            return "***"
+        return f"{text[:3]}...{text[-3:]}"
+    return value
+
+
+def inspect_config(*, keys: Optional[Iterable[str]] = None, redact: bool = True) -> Dict[str, Any]:
+    """Return operator-facing effective configuration with source metadata."""
+    selected_keys = tuple(keys or OPERATOR_CONFIG_KEYS)
+    values: Dict[str, Dict[str, Any]] = {}
+    for key in selected_keys:
+        value, source = get_with_source(key, OPERATOR_DEFAULTS.get(key))
+        values[key] = {
+            "value": _redact_value(key, value) if redact else value,
+            "source": source,
+            "env": ENV_MAP.get(key),
+            "set": source != "default" and value not in (None, ""),
+        }
+    return {
+        "success": True,
+        "config_file": str(get_config_file()),
+        "config_format": get_config_file().suffix.lower().lstrip(".") or "yaml",
+        "config_file_exists": get_config_file().exists(),
+        "config_file_env": CONFIG_FILE_ENV,
+        "values": values,
     }
 
-    # 1. 先查环境变量
-    env_key = env_map.get(key)
-    if env_key:
-        env_val = os.environ.get(env_key)
-        if env_val:
-            return env_val
 
-    # 2. 再查 config.json（按点号拆分嵌套查找）
-    cfg = _load_config_file()
-    parts = key.split(".")
-    node = cfg
-    for part in parts:
-        if isinstance(node, dict) and part in node:
-            node = node[part]
-        else:
-            return default
-    return node if node != "" else default
+def validate_deploy_config(*, require_futu: bool = False) -> Dict[str, Any]:
+    """Validate configuration needed by scheduled daily NAV jobs."""
+    issues = []
+    warnings = []
+
+    for key in REQUIRED_DAILY_JOB_KEYS:
+        value = get(key)
+        if value in (None, ""):
+            issues.append({"key": key, "error": "missing required value", "env": ENV_MAP.get(key)})
+
+    app_token = get("feishu.app_token")
+    for key in (
+        "feishu.tables.holdings",
+        "feishu.tables.nav_history",
+        "feishu.tables.cash_flow",
+        "feishu.tables.holdings_snapshot",
+    ):
+        value = get(key)
+        if value and "/" not in str(value) and not app_token:
+            issues.append({
+                "key": key,
+                "error": "table id requires feishu.app_token unless value is app_token/table_id",
+                "env": ENV_MAP.get(key),
+            })
+
+    if require_futu:
+        if not get("futu.opend.host"):
+            issues.append({"key": "futu.opend.host", "error": "missing Futu OpenD host", "env": ENV_MAP.get("futu.opend.host")})
+        if get_int("futu.opend.port") is None:
+            issues.append({"key": "futu.opend.port", "error": "missing or invalid Futu OpenD port", "env": ENV_MAP.get("futu.opend.port")})
+        try:
+            __import__("futu")
+        except Exception:
+            try:
+                __import__("moomoo")
+            except Exception:
+                warnings.append({"key": "futu.sdk", "warning": "futu/moomoo SDK is not importable; Futu sync will fail unless installed"})
+
+    return {
+        "success": not issues,
+        "config_file": str(get_config_file()),
+        "config_format": get_config_file().suffix.lower().lstrip(".") or "yaml",
+        "config_file_exists": get_config_file().exists(),
+        "issues": issues,
+        "warnings": warnings,
+        "required_keys": list(REQUIRED_DAILY_JOB_KEYS),
+    }
 
 
 def get_bool(key: str, default: bool = False) -> bool:
@@ -162,7 +344,10 @@ def get_project_root() -> Path:
 
 def get_data_dir() -> Path:
     """获取数据目录（.data/）"""
-    data_dir = _PROJECT_ROOT / ".data"
+    configured = get("data.dir")
+    data_dir = Path(configured).expanduser() if configured else (_PROJECT_ROOT / ".data")
+    if not data_dir.is_absolute():
+        data_dir = _PROJECT_ROOT / data_dir
     data_dir.mkdir(parents=True, exist_ok=True)
     return data_dir
 

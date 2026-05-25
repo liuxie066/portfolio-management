@@ -2,7 +2,7 @@ from datetime import date, datetime
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from src.app.full_report_service import FullReportService
+from src.app.report_query_service import ReportQueryService
 from src.domain.nav_calculator import NavCalculator
 from src.models import NAVHistory
 
@@ -72,11 +72,11 @@ def test_full_report_prefers_recorded_today_nav_over_synthetic():
         _calc_nav_metrics=forbidden,
         _build_nav_record=forbidden,
     )
-    service = FullReportService(account="a", storage=SimpleNamespace(), portfolio=portfolio, read_service=_read_service())
+    service = ReportQueryService(account="a", storage=SimpleNamespace(), portfolio=portfolio, read_service=_read_service())
 
     with (
-        patch("src.app.full_report_service.bj_today", return_value=today),
-        patch("src.app.full_report_service.bj_now_naive", return_value=datetime(2026, 3, 20, 15, 0, 0)),
+        patch("src.app.report_query_service.bj_today", return_value=today),
+        patch("src.app.report_query_service.bj_now_naive", return_value=datetime(2026, 3, 20, 15, 0, 0)),
     ):
         report = service.full_report(snapshot=_snapshot(), navs=[previous, recorded_today])
 
@@ -120,12 +120,12 @@ def test_full_report_synthetic_nav_reuses_core_nav_calculation():
         _calc_nav_metrics=calc_mock,
         _build_nav_record=build_mock,
     )
-    service = FullReportService(account="a", storage=SimpleNamespace(), portfolio=portfolio, read_service=_read_service())
+    service = ReportQueryService(account="a", storage=SimpleNamespace(), portfolio=portfolio, read_service=_read_service())
 
     with (
-        patch("src.app.full_report_service.bj_today", return_value=today),
-        patch("src.app.full_report_service.bj_now_naive", return_value=datetime(2026, 3, 20, 15, 0, 0)),
-        patch("src.app.full_report_service.config.get_start_year", return_value=2026),
+        patch("src.app.report_query_service.bj_today", return_value=today),
+        patch("src.app.report_query_service.bj_now_naive", return_value=datetime(2026, 3, 20, 15, 0, 0)),
+        patch("src.app.report_query_service.config.get_start_year", return_value=2026),
     ):
         report = service.full_report(snapshot=_snapshot(total_value=1100.0, cash_value=200.0, stock_value=900.0), navs=[previous])
 

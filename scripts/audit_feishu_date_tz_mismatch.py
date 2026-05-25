@@ -23,7 +23,7 @@ import sys
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from skill_api import PortfolioSkill
+from src.storage import create_storage
 
 
 def main():
@@ -33,8 +33,8 @@ def main():
     ap.add_argument('--limit', type=int, default=500)
     args = ap.parse_args()
 
-    ps = PortfolioSkill(); ps.account = args.account
-    client = ps.storage.client
+    storage = create_storage(healthcheck=False)
+    client = storage.client
 
     records = client.list_records(args.table, filter_str=f'CurrentValue.[account] = "{args.account}"')
 

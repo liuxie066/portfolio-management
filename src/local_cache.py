@@ -13,10 +13,16 @@ from .time_utils import bj_now_naive
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from . import config
 from .models import AssetType, PriceCache, DATETIME_FORMAT
 
+
+def _cache_file(name: str) -> Path:
+    return config.get_data_dir() / name
+
+
 # 默认缓存文件路径
-PRICE_CACHE_FILE = Path(__file__).parent.parent / '.data' / 'price_cache.json'
+PRICE_CACHE_FILE = _cache_file('price_cache.json')
 
 # 延迟写入配置
 FLUSH_INTERVAL_SECONDS = 5  # 5秒自动刷盘
@@ -34,8 +40,8 @@ class LocalPriceCache:
     5. 延迟写入 - 批量写入减少 I/O
     """
 
-    def __init__(self, cache_file: Path = PRICE_CACHE_FILE):
-        self.cache_file = cache_file
+    def __init__(self, cache_file: Optional[Path] = None):
+        self.cache_file = cache_file or _cache_file('price_cache.json')
         self._cache: Dict[str, Dict] = {}
         self._lock = threading.Lock()
         self._dirty_count = 0  # 未保存的变更计数
@@ -282,7 +288,7 @@ class LocalPriceCache:
 
 
 # 默认持仓索引缓存文件路径
-HOLDINGS_INDEX_FILE = Path(__file__).parent.parent / '.data' / 'holdings_index.json'
+HOLDINGS_INDEX_FILE = _cache_file('holdings_index.json')
 
 
 class LocalHoldingsIndexCache:
@@ -307,8 +313,8 @@ class LocalHoldingsIndexCache:
 
     VERSION = 1
 
-    def __init__(self, cache_file: Path = HOLDINGS_INDEX_FILE):
-        self.cache_file = cache_file
+    def __init__(self, cache_file: Optional[Path] = None):
+        self.cache_file = cache_file or _cache_file('holdings_index.json')
         self._cache: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
         self._dirty_count = 0
@@ -412,7 +418,7 @@ class LocalHoldingsIndexCache:
 
 
 # 默认净值索引缓存文件路径
-NAV_INDEX_FILE = Path(__file__).parent.parent / '.data' / 'nav_index_cache.json'
+NAV_INDEX_FILE = _cache_file('nav_index_cache.json')
 
 
 class LocalNavIndexCache:
@@ -430,8 +436,8 @@ class LocalNavIndexCache:
 
     VERSION = 1
 
-    def __init__(self, cache_file: Path = NAV_INDEX_FILE):
-        self.cache_file = cache_file
+    def __init__(self, cache_file: Optional[Path] = None):
+        self.cache_file = cache_file or _cache_file('nav_index_cache.json')
         self._cache: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
         self._dirty_count = 0
@@ -634,7 +640,7 @@ class LocalNavIndexCache:
 
 
 # 默认现金流聚合缓存文件路径
-CASH_FLOW_AGG_FILE = Path(__file__).parent.parent / '.data' / 'cash_flow_agg_cache.json'
+CASH_FLOW_AGG_FILE = _cache_file('cash_flow_agg_cache.json')
 
 
 class LocalCashFlowAggCache:
@@ -648,8 +654,8 @@ class LocalCashFlowAggCache:
 
     VERSION = 1
 
-    def __init__(self, cache_file: Path = CASH_FLOW_AGG_FILE):
-        self.cache_file = cache_file
+    def __init__(self, cache_file: Optional[Path] = None):
+        self.cache_file = cache_file or _cache_file('cash_flow_agg_cache.json')
         self._cache: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
         self._dirty_count = 0

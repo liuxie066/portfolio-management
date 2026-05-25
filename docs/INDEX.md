@@ -1,75 +1,101 @@
-# Portfolio Management — Project Map
+# Documentation Index
 
-This repo is designed to be operated as an HTTP service, with Skill/MCP/CLI
-adapters kept for automation and compatibility.
-Keep docs short, executable, and reality-checked.
+`portfolio-management` is operated as a local CLI/service product. The
+historical Skill/Python API remains available only as a compatibility adapter.
 
-## Core entrypoints
+## Start Here
 
-- HTTP service (primary surface): `src/service/http.py`
-- Service manager: `scripts/service.py`
-- Service runner: `scripts/serve.py`
-- Service API notes: `docs/service.md`
+- Quick start and product overview: `README.md`
+- Daily operations: `docs/runbook.md`
+- Linux install and systemd timer: `docs/deploy-linux.md`
+- Service API: `docs/service.md`
+- Architecture map: `docs/architecture.md`
 - Dependency graph: `docs/dependency-graph.md`
-- Skill API (compatibility adapter): `skill_api.py`
-- Storage backend (Feishu only): `src/feishu_storage.py` + `src/feishu_client.py`
-- Portfolio logic: `src/portfolio.py`
-- Pricing + caching: `src/price_fetcher.py` + `src/pricing/*` + `src/market_time.py`
-- Timezone helpers (Beijing time semantics): `src/time_utils.py`
-
-## Daily report
-
-- Publisher: `scripts/publish_daily_report.py`
-- Notes: `scripts/README_daily_report.md`
-
-## Diagnostics / runbooks
-
-- Environment doctor: `scripts/doctor.py`
-- Schema doctor (Feishu fields vs docs/schema.md): `scripts/migrate_schema.py check-live`
-- Pricing diagnosis: `scripts/diagnose_pricing.py`
-- NAV history repair/backfill: `scripts/nav_history_repair.py`
-
-## Schema truth source
-
-- Feishu Bitable schema reference (fields/names/types): `docs/schema.md`
+- Feishu schema: `docs/schema.md`
 - Schema migration notes: `docs/migrations.md`
 
-## Non-negotiable invariants
+## Product Entrypoints
 
-- Beijing time semantics for all business dates (tx_date, flow_date, nav date, snapshot as_of)
-- Pricing cache policy:
-  - cache valid → MUST NOT call realtime sources (unless `force_refresh`)
-  - cache expired → try realtime; if fails, may fallback to stale cache but MUST mark `is_stale=true`
-- Valuation identity (within tolerance): `total ≈ cash + stock + fund`
-- NAV write surfaces:
-  - full write → `FeishuStorage.write_nav_record()` / `write_nav_records()`
-  - derived-field patch → `FeishuStorage.patch_nav_derived_fields()`
-  - legacy `save_nav()` / `upsert_nav_bulk()` / `update_nav_fields()` are removed
+- CLI: `./pm`
+- CLI implementation: `scripts/pm.py`
+- Local service manager: `scripts/service.py`
+- HTTP routes: `src/service/http.py`
+- Service facade: `src/service/application.py`
+- Daily report publisher: `scripts/publish_daily_report.py`
+- NAV repair CLI: `scripts/nav_history_repair.py`
+- Compatibility Python API: `skill_api.py`
+- MCP compatibility adapter: `mcp_server.py`
 
-## Common commands
+## Main Workflows
 
-- Environment doctor (deps + network + Feishu sanity):
-  - `python scripts/doctor.py`
+### Daily NAV Job
 
-- Run HTTP service:
-  - `python scripts/service.py start`
-  - `python scripts/service.py status`
-  - Non-loopback binds require `--allow-remote`; the service is otherwise local-only and unauthenticated.
+Use `./pm daily-job`.
 
-- Schema checks:
-  - `python scripts/migrate_schema.py check-live`
-  - `python scripts/migrate_schema.py expectations`
+It resolves the NAV date, audits duplicate `nav_history` rows, checks pending
+manual `cash_flow` rows, optionally syncs Futu cash/MMF holdings, values each
+account, writes NAV, and records holdings snapshots.
 
-- Diagnose pricing behavior (cache vs realtime vs fallback):
-  - `python scripts/diagnose_pricing.py --account lx`
-  - `python scripts/diagnose_pricing.py --account lx --json`
+### Daily Report
 
-- Publish daily report:
-  - `python scripts/publish_daily_report.py`
-  - `python scripts/publish_daily_report.py --run-id manual-20260523`
-  - Prefer local service `POST /report/daily-bundle`; use `--no-service` only for direct recovery.
+Use `scripts/publish_daily_report.py`.
 
-## Natural language adapter (stub)
+The publisher uses one priced snapshot for NAV recording, report payload
+generation, and HTML rendering. The external daily-report domain is no longer
+valid; only local static artifacts are produced.
 
-- `scripts/nl.py "..."` converts natural language into a structured intent JSON.
-- It has **no side effects**; execution must be done by calling `scripts/pm.py`, the local service, or the compatibility API explicitly.
+### Configuration
+
+Use `config.yaml`; production deployments should point
+`PORTFOLIO_CONFIG_FILE` at `/etc/portfolio-management/config.yaml`.
+
+Check readiness with:
+
+```bash
+./pm config inspect --json
+./pm config doctor --json
+```
+
+## Core Boundaries
+
+- `src/service/*`: service and HTTP boundary
+- `src/app/*`: application orchestration
+- `src/domain/*`: pure NAV/report calculations
+- `src/pricing/*`: quote providers, cache policy, FX
+- `src/feishu/repositories/*`: Feishu table-level storage
+- `src/maintenance/*`: repair/backfill operations
+
+Do not add new product behavior to `skill_api.py`. It should remain a caller
+adapter that delegates inward.
+
+## Invariants
+
+- Business dates use Beijing date semantics.
+- Writes default to dry-run and require explicit confirmation.
+- `nav_history` writes must go through `FeishuStorage.write_nav_record()` or
+  `FeishuStorage.write_nav_records()`.
+- `holdings_snapshot` is written only after NAV write success.
+- `daily-job` skips weekends and `calendar.holidays` unless explicitly forced.
+- `daily-job` must block duplicate `nav_history` account/date rows before
+  writing.
+- `cash_flow` rows may be manually entered, but generated fields must be
+  reconciled before daily NAV writes.
+
+## Diagnostics
+
+```bash
+./pm config doctor --json
+./pm nav duplicates --json
+python scripts/migrate_schema.py check-live
+python scripts/diagnose_pricing.py --account lx --json
+python scripts/nav_history_repair.py backfill --account lx --from 2025-01-01 --to 2025-01-31 --dry-run
+```
+
+## Validation
+
+```bash
+python3 -m pytest tests -q
+python3 tests/run_tests.py
+git diff --check
+python3 -X pycache_prefix=/tmp/pm_pycache -m compileall src skill_api.py scripts/pm.py scripts/publish_daily_report.py
+```

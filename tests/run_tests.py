@@ -94,7 +94,7 @@ def main() -> None:
     from tests.test_daily_top_holdings_merge_minimal import (
         test_full_report_top_holdings_merge_duplicates_and_cash_mmf_bucket,
     )
-    from tests.test_full_report_service import (
+    from tests.test_report_query_service import (
         test_full_report_prefers_recorded_today_nav_over_synthetic,
         test_full_report_synthetic_nav_reuses_core_nav_calculation,
     )
@@ -148,16 +148,17 @@ def main() -> None:
         test_multi_account_overview_aggregates_successful_accounts,
     )
     from tests.test_service_application import (
-        test_portfolio_service_generate_report_uses_direct_app_service_not_backend,
-        test_portfolio_service_get_cash_uses_direct_cash_service_not_backend,
-        test_portfolio_service_get_distribution_uses_direct_read_service_not_backend,
-        test_portfolio_service_full_report_uses_direct_app_service_not_backend,
-        test_portfolio_service_get_holdings_uses_direct_read_service_not_backend,
-        test_portfolio_service_get_nav_uses_direct_storage_path_not_backend,
-        test_portfolio_service_list_accounts_uses_direct_account_service_not_backend,
-        test_portfolio_service_multi_account_overview_uses_direct_account_service_not_backend_overview,
+        test_portfolio_service_generate_report_uses_direct_app_service,
+        test_portfolio_service_get_cash_uses_direct_cash_service,
+        test_portfolio_service_get_distribution_uses_direct_read_service,
+        test_portfolio_service_full_report_uses_direct_app_service,
+        test_portfolio_service_get_holdings_uses_direct_read_service,
+        test_portfolio_service_get_nav_uses_direct_storage_path,
+        test_portfolio_service_init_nav_history_uses_direct_app_service,
+        test_portfolio_service_list_accounts_uses_direct_account_service,
+        test_portfolio_service_multi_account_overview_uses_direct_account_service,
         test_portfolio_service_daily_report_bundle_reuses_one_snapshot,
-        test_portfolio_service_record_nav_uses_direct_portfolio_path_not_backend,
+        test_portfolio_service_record_nav_uses_direct_portfolio_path,
     )
     from tests.test_portfolio_read_service import (
         test_build_snapshot_passes_price_timeout_to_valuation,
@@ -174,7 +175,7 @@ def main() -> None:
     )
     from tests.test_daily_report_entrypoints import (
         test_generate_daily_report_html_is_renderer_only,
-        test_publish_daily_report_returns_renderer_bundle_shape,
+        test_publish_daily_report_direct_path_uses_application_bundle_service,
         test_publish_daily_report_build_report_data_passes_account,
         test_publish_daily_report_futu_sync_defaults_to_dry_run,
         test_publish_daily_report_main_prints_result_while_suppressing_internal_stdout,
@@ -187,7 +188,7 @@ def main() -> None:
         test_futu_openapi_provider_reads_defaults_from_config_file,
     )
     from tests.test_config import (
-        test_config_typed_getters_use_file_then_env_overrides,
+        test_config_typed_getters_use_yaml_file_then_env_overrides,
     )
 
     tests = [
@@ -266,16 +267,17 @@ def main() -> None:
         test_pm_daily_prefers_service_for_nav_and_distribution,
         test_list_accounts_discovers_accounts_across_read_models,
         test_multi_account_overview_aggregates_successful_accounts,
-        test_portfolio_service_generate_report_uses_direct_app_service_not_backend,
-        test_portfolio_service_get_cash_uses_direct_cash_service_not_backend,
-        test_portfolio_service_get_distribution_uses_direct_read_service_not_backend,
-        test_portfolio_service_full_report_uses_direct_app_service_not_backend,
-        test_portfolio_service_get_holdings_uses_direct_read_service_not_backend,
-        test_portfolio_service_get_nav_uses_direct_storage_path_not_backend,
-        test_portfolio_service_list_accounts_uses_direct_account_service_not_backend,
-        test_portfolio_service_multi_account_overview_uses_direct_account_service_not_backend_overview,
+        test_portfolio_service_generate_report_uses_direct_app_service,
+        test_portfolio_service_get_cash_uses_direct_cash_service,
+        test_portfolio_service_get_distribution_uses_direct_read_service,
+        test_portfolio_service_full_report_uses_direct_app_service,
+        test_portfolio_service_get_holdings_uses_direct_read_service,
+        test_portfolio_service_get_nav_uses_direct_storage_path,
+        test_portfolio_service_init_nav_history_uses_direct_app_service,
+        test_portfolio_service_list_accounts_uses_direct_account_service,
+        test_portfolio_service_multi_account_overview_uses_direct_account_service,
         test_portfolio_service_daily_report_bundle_reuses_one_snapshot,
-        test_portfolio_service_record_nav_uses_direct_portfolio_path_not_backend,
+        test_portfolio_service_record_nav_uses_direct_portfolio_path,
         test_build_snapshot_passes_price_timeout_to_valuation,
         test_service_client_builds_local_request_urls,
         test_service_client_posts_daily_report_bundle_payload,
@@ -284,7 +286,7 @@ def main() -> None:
         test_http_service_routes_delegate_to_portfolio_service,
         test_http_service_rejects_unknown_report_type,
         test_generate_daily_report_html_is_renderer_only,
-        test_publish_daily_report_returns_renderer_bundle_shape,
+        test_publish_daily_report_direct_path_uses_application_bundle_service,
         test_publish_daily_report_build_report_data_passes_account,
         test_publish_daily_report_futu_sync_defaults_to_dry_run,
         test_publish_daily_report_main_prints_result_while_suppressing_internal_stdout,
@@ -293,7 +295,7 @@ def main() -> None:
         test_publish_daily_report_parse_args_uses_config_defaults_and_cli_overrides,
         test_publish_report_returns_local_artifact_without_public_url,
         test_futu_openapi_provider_reads_defaults_from_config_file,
-        test_config_typed_getters_use_file_then_env_overrides,
+        test_config_typed_getters_use_yaml_file_then_env_overrides,
     ]
     for t in tests:
         t()

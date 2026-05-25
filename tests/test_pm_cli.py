@@ -2,31 +2,30 @@ from __future__ import annotations
 
 import json
 import io
-import sys
-import types
 from contextlib import redirect_stdout
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from pytest import MonkeyPatch
 
 from scripts import pm
 
 
-class _SysModulesPatch:
-    def __init__(self, name, value):
-        self.name = name
-        self.value = value
+class _PortfolioServicePatch:
+    def __init__(self, service_cls):
+        self.service_cls = service_cls
         self.old = None
-        self.had_old = False
 
     def __enter__(self):
-        self.had_old = self.name in sys.modules
-        self.old = sys.modules.get(self.name)
-        sys.modules[self.name] = self.value
+        import src.service.application as app_module
+
+        self.app_module = app_module
+        self.old = app_module.PortfolioService
+        app_module.PortfolioService = self.service_cls
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        if self.had_old:
-            sys.modules[self.name] = self.old
-        else:
-            sys.modules.pop(self.name, None)
+        self.app_module.PortfolioService = self.old
 
 
 def test_pm_report_requires_preview_flag():
@@ -39,15 +38,16 @@ def test_pm_report_requires_preview_flag():
 
 
 def test_pm_report_preview_marks_noncanonical_output():
-    fake_skill_api = types.SimpleNamespace(
-        generate_report=lambda **kwargs: {
-            "success": True,
-            "report_type": kwargs["report_type"],
-            "account": kwargs["account"],
-        }
-    )
+    class FakePortfolioService:
+        def generate_report(self, **kwargs):
+            return {
+                "success": True,
+                "report_type": kwargs["report_type"],
+                "account": kwargs["account"],
+            }
+
     stdout = io.StringIO()
-    with _SysModulesPatch("skill_api", fake_skill_api), redirect_stdout(stdout):
+    with _PortfolioServicePatch(FakePortfolioService), redirect_stdout(stdout):
         assert pm.main(["report", "daily", "--preview", "--account", "alice", "--no-service", "--json"]) == 0
 
     out = json.loads(stdout.getvalue())
@@ -59,14 +59,15 @@ def test_pm_report_preview_marks_noncanonical_output():
 
 
 def test_pm_cash_passes_account():
-    fake_skill_api = types.SimpleNamespace(
-        get_cash=lambda **kwargs: {
-            "success": True,
-            "account": kwargs["account"],
-        }
-    )
+    class FakePortfolioService:
+        def get_cash(self, **kwargs):
+            return {
+                "success": True,
+                "account": kwargs["account"],
+            }
+
     stdout = io.StringIO()
-    with _SysModulesPatch("skill_api", fake_skill_api), redirect_stdout(stdout):
+    with _PortfolioServicePatch(FakePortfolioService), redirect_stdout(stdout):
         assert pm.main(["cash", "--account", "bob", "--no-service", "--json"]) == 0
 
     out = json.loads(stdout.getvalue())
@@ -75,13 +76,13 @@ def test_pm_cash_passes_account():
 
 
 def test_pm_json_suppresses_internal_stdout_by_default():
-    def noisy_get_cash(**kwargs):
-        print("internal log")
-        return {"success": True, "account": kwargs["account"]}
+    class FakePortfolioService:
+        def get_cash(self, **kwargs):
+            print("internal log")
+            return {"success": True, "account": kwargs["account"]}
 
-    fake_skill_api = types.SimpleNamespace(get_cash=noisy_get_cash)
     stdout = io.StringIO()
-    with _SysModulesPatch("skill_api", fake_skill_api), redirect_stdout(stdout):
+    with _PortfolioServicePatch(FakePortfolioService), redirect_stdout(stdout):
         assert pm.main(["cash", "--account", "bob", "--no-service", "--json"]) == 0
 
     out = json.loads(stdout.getvalue())
@@ -91,14 +92,15 @@ def test_pm_json_suppresses_internal_stdout_by_default():
 
 
 def test_pm_failure_payload_returns_nonzero_exit_code():
-    fake_skill_api = types.SimpleNamespace(
-        get_distribution=lambda **_kwargs: {
-            "success": False,
-            "error": "missing holdings table",
-        }
-    )
+    class FakePortfolioService:
+        def get_distribution(self, **_kwargs):
+            return {
+                "success": False,
+                "error": "missing holdings table",
+            }
+
     stdout = io.StringIO()
-    with _SysModulesPatch("skill_api", fake_skill_api), redirect_stdout(stdout):
+    with _PortfolioServicePatch(FakePortfolioService), redirect_stdout(stdout):
         assert pm.main(["positions", "distribution", "--account", "bob", "--no-service", "--json"]) == 1
 
     out = json.loads(stdout.getvalue())
@@ -107,15 +109,16 @@ def test_pm_failure_payload_returns_nonzero_exit_code():
 
 
 def test_pm_accounts_lists_discovered_accounts():
-    fake_skill_api = types.SimpleNamespace(
-        list_accounts=lambda **kwargs: {
-            "success": True,
-            "include_default": kwargs["include_default"],
-            "accounts": ["alice"],
-        }
-    )
+    class FakePortfolioService:
+        def list_accounts(self, **kwargs):
+            return {
+                "success": True,
+                "include_default": kwargs["include_default"],
+                "accounts": ["alice"],
+            }
+
     stdout = io.StringIO()
-    with _SysModulesPatch("skill_api", fake_skill_api), redirect_stdout(stdout):
+    with _PortfolioServicePatch(FakePortfolioService), redirect_stdout(stdout):
         assert pm.main(["accounts", "--exclude-default", "--no-service", "--json"]) == 0
 
     out = json.loads(stdout.getvalue())
@@ -125,16 +128,17 @@ def test_pm_accounts_lists_discovered_accounts():
 
 
 def test_pm_overview_passes_accounts_and_timeout():
-    fake_skill_api = types.SimpleNamespace(
-        multi_account_overview=lambda **kwargs: {
-            "success": True,
-            "accounts": kwargs["accounts"],
-            "price_timeout": kwargs["price_timeout"],
-            "include_details": kwargs["include_details"],
-        }
-    )
+    class FakePortfolioService:
+        def multi_account_overview(self, **kwargs):
+            return {
+                "success": True,
+                "accounts": kwargs["accounts"],
+                "price_timeout": kwargs["price_timeout"],
+                "include_details": kwargs["include_details"],
+            }
+
     stdout = io.StringIO()
-    with _SysModulesPatch("skill_api", fake_skill_api), redirect_stdout(stdout):
+    with _PortfolioServicePatch(FakePortfolioService), redirect_stdout(stdout):
         assert pm.main(["overview", "--accounts", "alice,bob", "--timeout", "7", "--details", "--no-service", "--json"]) == 0
 
     out = json.loads(stdout.getvalue())
@@ -186,16 +190,12 @@ def test_pm_service_response_error_does_not_fallback():
             calls.append(("get_cash", account))
             raise PortfolioServiceResponseError("bad service payload")
 
-    fake_skill_api = types.SimpleNamespace(
-        get_cash=lambda **_kwargs: calls.append(("fallback", None))
-    )
     old_client = client_module.PortfolioServiceClient
     try:
         client_module.PortfolioServiceClient = FakeClient
-        with _SysModulesPatch("skill_api", fake_skill_api):
-            stdout = io.StringIO()
-            with redirect_stdout(stdout):
-                assert pm.main(["cash", "--account", "bob", "--service-url", "http://local", "--json"]) == 1
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            assert pm.main(["cash", "--account", "bob", "--service-url", "http://local", "--json"]) == 1
     finally:
         client_module.PortfolioServiceClient = old_client
 
@@ -219,19 +219,15 @@ def test_pm_require_service_fails_instead_of_fallback():
             calls.append(("get_cash", account))
             raise PortfolioServiceUnavailable("down")
 
-    fake_skill_api = types.SimpleNamespace(
-        get_cash=lambda **_kwargs: calls.append(("fallback", None))
-    )
     old_client = client_module.PortfolioServiceClient
     try:
         client_module.PortfolioServiceClient = FakeClient
-        with _SysModulesPatch("skill_api", fake_skill_api):
-            try:
-                pm.main(["cash", "--account", "bob", "--service-url", "http://local", "--require-service", "--json"])
-            except SystemExit as exc:
-                assert "--require-service" in str(exc)
-            else:
-                raise AssertionError("expected SystemExit")
+        try:
+            pm.main(["cash", "--account", "bob", "--service-url", "http://local", "--require-service", "--json"])
+        except SystemExit as exc:
+            assert "--require-service" in str(exc)
+        else:
+            raise AssertionError("expected SystemExit")
     finally:
         client_module.PortfolioServiceClient = old_client
 
@@ -239,17 +235,18 @@ def test_pm_require_service_fails_instead_of_fallback():
 
 
 def test_pm_init_nav_passes_account_and_write_flags():
-    fake_skill_api = types.SimpleNamespace(
-        init_nav_history=lambda **kwargs: {
-            "success": True,
-            "account": kwargs["account"],
-            "date": kwargs["date_str"],
-            "dry_run": kwargs["dry_run"],
-            "confirm": kwargs["confirm"],
-        }
-    )
+    class FakePortfolioService:
+        def init_nav_history(self, **kwargs):
+            return {
+                "success": True,
+                "account": kwargs["account"],
+                "date": kwargs["date_str"],
+                "dry_run": kwargs["dry_run"],
+                "confirm": kwargs["confirm"],
+            }
+
     stdout = io.StringIO()
-    with _SysModulesPatch("skill_api", fake_skill_api), redirect_stdout(stdout):
+    with _PortfolioServicePatch(FakePortfolioService), redirect_stdout(stdout):
         assert pm.main([
             "init-nav",
             "--account", "sy",
@@ -277,19 +274,20 @@ def test_pm_init_nav_write_requires_confirm():
 
 
 def test_pm_nav_record_passes_account_and_write_flags():
-    fake_skill_api = types.SimpleNamespace(
-        record_nav=lambda **kwargs: {
-            "success": True,
-            "account": kwargs["account"],
-            "dry_run": kwargs["dry_run"],
-            "confirm": kwargs["confirm"],
-            "overwrite_existing": kwargs["overwrite_existing"],
-            "use_bulk_persist": kwargs["use_bulk_persist"],
-            "price_timeout": kwargs["price_timeout"],
-        }
-    )
+    class FakePortfolioService:
+        def record_nav(self, **kwargs):
+            return {
+                "success": True,
+                "account": kwargs["account"],
+                "dry_run": kwargs["dry_run"],
+                "confirm": kwargs["confirm"],
+                "overwrite_existing": kwargs["overwrite_existing"],
+                "use_bulk_persist": kwargs["use_bulk_persist"],
+                "price_timeout": kwargs["price_timeout"],
+            }
+
     stdout = io.StringIO()
-    with _SysModulesPatch("skill_api", fake_skill_api), redirect_stdout(stdout):
+    with _PortfolioServicePatch(FakePortfolioService), redirect_stdout(stdout):
         assert pm.main([
             "nav",
             "record",
@@ -323,30 +321,38 @@ def test_pm_nav_record_write_requires_confirm():
 
 
 def test_pm_daily_runs_nav_record_and_distribution():
+    import src.service.application as app_module
+
     calls = []
-    snapshot = {"valuation": object(), "holdings_data": {"total_value": 123.45}}
-    fake_skill = types.SimpleNamespace(
-        build_snapshot=lambda **kwargs: calls.append(("build_snapshot", kwargs)) or snapshot,
-        record_nav=lambda **kwargs: calls.append(("record_nav", kwargs)) or {
-            "success": True,
-            "date": "2026-05-23",
-            "nav": 1.2345,
-            "shares": 100,
-            "total_value": 123.45,
-            "dry_run": kwargs["dry_run"],
-        },
-        get_distribution=lambda **kwargs: calls.append(("get_distribution", kwargs)) or {
-            "success": True,
-            "total_value": 123.45,
-            "by_type": [{"type": "stock", "value": 100, "ratio": 0.81}],
-        },
-    )
-    fake_skill_api = types.SimpleNamespace(
-        get_skill=lambda account=None: calls.append(("get_skill", account)) or fake_skill,
-    )
+
+    class FakePortfolioService:
+        def daily_report_bundle(self, **kwargs):
+            calls.append(("daily_report_bundle", kwargs))
+            return {
+                "success": True,
+                "nav_result": {
+                    "success": True,
+                    "date": "2026-05-23",
+                    "nav": 1.2345,
+                    "shares": 100,
+                    "total_value": 123.45,
+                    "dry_run": kwargs["dry_run"],
+                },
+                "distribution": {
+                    "success": True,
+                    "total_value": 123.45,
+                    "by_type": [{"type": "stock", "value": 100, "ratio": 0.81}],
+                },
+            }
+
+    old_service = app_module.PortfolioService
     stdout = io.StringIO()
-    with _SysModulesPatch("skill_api", fake_skill_api), redirect_stdout(stdout):
-        assert pm.main(["daily", "--account", "alice", "--timeout", "8", "--no-service", "--json"]) == 0
+    try:
+        app_module.PortfolioService = FakePortfolioService
+        with redirect_stdout(stdout):
+            assert pm.main(["daily", "--account", "alice", "--timeout", "8", "--no-service", "--json"]) == 0
+    finally:
+        app_module.PortfolioService = old_service
 
     out = json.loads(stdout.getvalue())
     assert out["success"] is True
@@ -356,18 +362,14 @@ def test_pm_daily_runs_nav_record_and_distribution():
     assert out["nav"]["nav"] == 1.2345
     assert out["distribution"]["by_type"][0]["type"] == "stock"
     assert calls == [
-        ("get_skill", "alice"),
-        ("build_snapshot", {"price_timeout_seconds": 8}),
-        ("record_nav", {
+        ("daily_report_bundle", {
+            "account": "alice",
             "price_timeout": 8,
             "dry_run": True,
             "confirm": False,
             "overwrite_existing": True,
             "use_bulk_persist": False,
-            "snapshot": snapshot,
-            "run_id": None,
         }),
-        ("get_distribution", {"holdings_data": snapshot}),
     ]
 
 
@@ -381,17 +383,20 @@ def test_pm_daily_write_requires_confirm():
 
 
 def test_pm_daily_failure_payload_returns_nonzero_exit_code():
-    snapshot = {"valuation": object(), "holdings_data": {}}
-    fake_skill_api = types.SimpleNamespace(
-        get_skill=lambda account=None: types.SimpleNamespace(
-            build_snapshot=lambda **_kwargs: snapshot,
-            record_nav=lambda **_kwargs: {"success": False, "error": "nav failed"},
-            get_distribution=lambda **_kwargs: (_ for _ in ()).throw(AssertionError("distribution should not run")),
-        ),
-    )
+    import src.service.application as app_module
+
+    class FakePortfolioService:
+        def daily_report_bundle(self, **_kwargs):
+            return {"success": False, "error": "nav failed"}
+
+    old_service = app_module.PortfolioService
     stdout = io.StringIO()
-    with _SysModulesPatch("skill_api", fake_skill_api), redirect_stdout(stdout):
-        assert pm.main(["daily", "--account", "alice", "--no-service", "--json"]) == 1
+    try:
+        app_module.PortfolioService = FakePortfolioService
+        with redirect_stdout(stdout):
+            assert pm.main(["daily", "--account", "alice", "--no-service", "--json"]) == 1
+    finally:
+        app_module.PortfolioService = old_service
 
     out = json.loads(stdout.getvalue())
     assert out["success"] is False
@@ -520,3 +525,123 @@ def test_pm_daily_prefers_service_for_nav_and_distribution():
             "run_id": "run-daily-1",
         }),
     ]
+
+
+def test_pm_daily_job_prefers_service_client():
+    import src.service.client as client_module
+
+    calls = []
+
+    class FakeClient:
+        def __init__(self, base_url=None, timeout=0.5):
+            calls.append(("init", base_url, timeout))
+
+        def daily_nav_job(self, **kwargs):
+            calls.append(("daily_nav_job", kwargs))
+            return {"success": True, "status": "completed", "summary": {"dry_run": 2}, "items": [], **kwargs}
+
+    old_client = client_module.PortfolioServiceClient
+    try:
+        client_module.PortfolioServiceClient = FakeClient
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            assert pm.main([
+                "daily-job",
+                "--accounts", "alice,bob",
+                "--nav-date", "2026-05-22",
+                "--timeout", "9",
+                "--overwrite",
+                "--force-non-business-day",
+                "--run-id", "run-job-1",
+                "--service-url", "http://local",
+                "--json",
+            ]) == 0
+    finally:
+        client_module.PortfolioServiceClient = old_client
+
+    out = json.loads(stdout.getvalue())
+    assert out["status"] == "completed"
+    assert calls == [
+        ("init", "http://local", 0.5),
+        ("daily_nav_job", {
+            "accounts": "alice,bob",
+            "nav_date": "2026-05-22",
+            "price_timeout": 9,
+            "dry_run": True,
+            "confirm": False,
+            "overwrite_existing": True,
+            "use_bulk_persist": False,
+            "sync_futu_cash_mmf": False,
+            "force_non_business_day": True,
+            "run_id": "run-job-1",
+        }),
+    ]
+
+
+def test_pm_config_inspect_outputs_yaml_sources_and_redacts_secrets():
+    from src import config
+
+    with TemporaryDirectory() as tmp:
+        config_file = Path(tmp) / "config.yaml"
+        config_file.write_text(
+            """
+account: lx
+feishu:
+  app_secret: secret123456
+""",
+            encoding="utf-8",
+        )
+
+        patch = MonkeyPatch()
+        stdout = io.StringIO()
+        try:
+            patch.setenv(config.CONFIG_FILE_ENV, str(config_file))
+            patch.delenv("PORTFOLIO_ACCOUNT", raising=False)
+            patch.delenv("FEISHU_APP_SECRET", raising=False)
+            config.reload_config()
+
+            with redirect_stdout(stdout):
+                assert pm.main([
+                    "config",
+                    "inspect",
+                    "--keys", "account,feishu.app_secret",
+                    "--json",
+                ]) == 0
+        finally:
+            patch.undo()
+            config.reload_config()
+
+    out = json.loads(stdout.getvalue())
+    assert out["success"] is True
+    assert out["config_format"] == "yaml"
+    assert out["values"]["account"]["value"] == "lx"
+    assert out["values"]["feishu.app_secret"]["value"] == "sec...456"
+    assert out["values"]["feishu.app_secret"]["source"] == f"file:{config_file}"
+
+
+def test_pm_config_doctor_returns_nonzero_for_missing_deploy_config():
+    from src import config
+
+    with TemporaryDirectory() as tmp:
+        config_file = Path(tmp) / "config.yaml"
+        config_file.write_text("account: lx\n", encoding="utf-8")
+
+        patch = MonkeyPatch()
+        stdout = io.StringIO()
+        try:
+            patch.setenv(config.CONFIG_FILE_ENV, str(config_file))
+            for key in config.REQUIRED_DAILY_JOB_KEYS:
+                env_key = config.ENV_MAP.get(key)
+                if env_key:
+                    patch.delenv(env_key, raising=False)
+            config.reload_config()
+
+            with redirect_stdout(stdout):
+                assert pm.main(["config", "doctor", "--json"]) == 1
+        finally:
+            patch.undo()
+            config.reload_config()
+
+    out = json.loads(stdout.getvalue())
+    assert out["success"] is False
+    assert {issue["key"] for issue in out["issues"]} >= set(config.REQUIRED_DAILY_JOB_KEYS)

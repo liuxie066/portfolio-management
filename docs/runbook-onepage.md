@@ -1,113 +1,128 @@
-# portfolio-management 1 页 Runbook（prod 运行/排障）
+# portfolio-management 1 页 Runbook
 
-> 目标：让“今天日报/净值为什么不对/静态产物在哪里”能在 5 分钟内定位。
+目标：5 分钟内判断日净值任务、日报产物或核心数据为什么不对。
 
-## 0) Repo / 入口
-- repo：`/home/node/.openclaw/workspace/portfolio-management`
-- 定时任务入口：`scripts/publish_daily_report.py`
-- CLI 产品入口：`scripts/pm.py`；`pm report` 仅作 preview
+## 0) 入口
 
----
+- 产品入口：`./pm`
+- 定时任务入口：`./pm daily-job`
+- 本地服务：`python scripts/service.py start`
+- 日报发布：`python scripts/publish_daily_report.py --account lx`
+- Linux 推荐路径：`/opt/portfolio-management/current`
+- 生产配置：`/etc/portfolio-management/config.yaml`
 
-## 1) 业务主流程（按 IO 顺序）
-1) `POST /report/daily-bundle`：优先通过本地服务生成统一快照（持仓 + 价格/汇率 + 估值）
-2) `record_nav()`：用同一快照写入 `nav_history`（cron 模式会写；默认安全约束是 dry_run）
-3) `generate_report(daily)`：用同一快照生成日报结构化数据
-4) `render_html()`：渲染 GitHub 风格 HTML
-5) publish：把 HTML 写入本地静态产物目录，不再返回对外可访问链接
+`skill_api.py` / MCP 只保留兼容 adapter，不作为新运维入口。
 
-服务不可用时，发布器才回退到直连 `skill_api` 兼容路径；不要把 `/nav/record`、`/report/daily`、`/nav` 串成三个独立调用，否则会重复构建估值快照。每次运行都会生成或接收一个 `run_id`，用于串联 NAV `details`、report bundle、HTML 和发布输出。
+## 1) 日净值主流程
 
----
+`daily-job` 是单账户和多账户统一工作流：
 
-## 2) 真相来源（数据/中间表）
-### Feishu Bitable（事实表/中间表）
-字段名以 `docs/schema.md` 为准：
+1. 解析 NAV 日期；未指定时取运行日前最近业务日。
+2. 跳过周六、周日和 `calendar.holidays`。
+3. 解析账户列表；未指定时从当前 holdings 发现账户。
+4. 审计 `nav_history` 同账户同日期重复记录。
+5. 检查人工 `cash_flow` 行是否还有待补齐系统字段。
+6. 可选同步 Futu 现金/MMF 到 holdings。
+7. 为每个账户构建一次带价格的估值快照。
+8. 写入 `nav_history`，成功后写入 `holdings_snapshot`。
+
+常用命令：
+
+```bash
+./pm daily-job --json
+./pm daily-job --accounts lx,alice --write --confirm --json
+./pm daily-job --account lx --sync-futu-cash-mmf --write --confirm --json
+```
+
+## 2) 数据真相来源
+
+字段名以 `docs/schema.md` 为准。
+
+核心表：
+
 - `holdings`
 - `cash_flow`
 - `nav_history`
-- `holdings_snapshot`（审计/回放）
+- `holdings_snapshot`
 
-可选能力表：
-- `transactions`（交易流水；当前不作为日净值核心数据源）
+可选表：
+
+- `transactions`
 - `compensation_tasks`
 - `schema_version`
 
-### 本地缓存/回放（中间文件）
-- `.data/holdings_snapshot/<account>/<YYYY-MM-DD>.json`
-- `.data/nav_index_cache.json`
-- `.data/cash_flow_agg_cache.json`
-- `.data/holdings_index.json`
-- `audit/*`
+本地缓存默认在 `.data/`，生产可用 `data.dir` / `PM_DATA_DIR` 指到仓库外。
 
----
+## 3) 日报和静态产物
 
-## 3) 报告/发布 IO（最常出问题的部分）
-### 生成/归档
+日报发布器用于单账户 HTML 产物：
+
+```bash
+python scripts/publish_daily_report.py --account lx
+python scripts/publish_daily_report.py --account lx --dry-run
+```
+
+产物：
+
 - `reports/investment-daily-YYYY-MM-DD.html`
+- `reports/latest.html`
+- `<publish_root>/investment-daily-YYYY-MM-DD/index.html`
 
-### 本地静态产物目录
-- 当前 publish 根：`/home/node/.openclaw/workspace/prototypes`
-- 日报路径：`prototypes/investment-daily-YYYY-MM-DD/index.html`
+旧公网日报域名已经失效。不要把 `publish.public_url` 当成可访问链接；当前输出中 `public_url=null`、`public_url_status=disabled`。
 
-### 对外域名
-- 已失效。不要把 `publish.public_url` 当成可访问链接；当前输出中 `public_url` 为 `null`，`public_url_status=disabled`。
+## 4) 最小预检
 
----
-
-## 4) 最小验收（每次改动都跑）
-### 4.1 编译检查
 ```bash
-cd /home/node/.openclaw/workspace/portfolio-management
-./.venv/bin/python -m py_compile \
-  scripts/publish_daily_report.py \
-  scripts/generate_daily_report_html.py \
-  src/feishu_storage.py
+./pm config inspect --json
+./pm config doctor --json
+./pm nav duplicates --json
+python scripts/migrate_schema.py check-live
 ```
 
-### 4.2 生成日报（不写 nav_history）
+启用 Futu 现金/MMF 同步前再跑：
+
 ```bash
-./.venv/bin/python scripts/publish_daily_report.py \
-  --dry-run --price-timeout 10 \
-  --publish-root /home/node/.openclaw/workspace/prototypes
+./pm config doctor --require-futu --json
 ```
 
-如果要确认正式任务一定走服务：
+## 5) 常见故障
+
+### NAV 日期不对
+
+`daily-job` 的自动日期是“运行日前最近业务日”，不是日历昨天。周一默认记录上一个周五。
+
+### 写入被阻断
+
+先看：
+
 ```bash
-./.venv/bin/python scripts/publish_daily_report.py --dry-run --require-service
+./pm nav duplicates --json
+./pm cash-flow reconcile --json
 ```
 
-需要人工指定追踪 ID 时：
+重复 NAV 需要先修复；人工 cash_flow 行需要先执行：
+
 ```bash
-./.venv/bin/python scripts/publish_daily_report.py --dry-run --run-id manual-YYYYMMDD
+./pm cash-flow reconcile --apply --confirm --json
 ```
 
-### 4.3 本地文件验证
+### 价格缺失
+
 ```bash
-test -f /home/node/.openclaw/workspace/prototypes/investment-daily-YYYY-MM-DD/index.html
+python scripts/diagnose_pricing.py --account lx --json
 ```
 
----
+重点看 realtime/cache/stale/missing 数量和 provider error。
 
-## 5) 常见故障（直接定位）
-### 5.1 看不到日报产物
-原因：HTML 未写入本地 publish 根，或 `--no-publish` 被启用。
-检查 `scripts/publish_daily_report.py` 输出中的 `publish.publish_dir` 和 `publish.relative_path`。
+### 看不到日报产物
 
-### 5.2 价格汇总 realtime/cache/stale/missing 怎么看
-- realtime：本次从实时源拉到的数量
-- cache：本次直接命中缓存数量
-- stale_fallback：实时失败后用过期缓存兜底数量
-- missing：最终缺价格数量（应为 0；否则拒绝写 nav_history 或在 warnings 强提示）
+检查 `scripts/publish_daily_report.py` 输出中的 `publish.report_path`、`publish.publish_dir` 和 `publish.relative_path`。如果加了 `--no-publish`，只会生成 bundle/报告，不会写静态发布目录。
 
-### 5.3 现金“数量 vs 金额”不一致
-通常是把不同币种的现金数量相加导致；金额是折算到 CNY 后的市值。
-建议：合并行不要展示 quantity（或拆币种分行）。
+## 6) 改动后验证
 
----
-
-## 6) 写入保护（避免污染 nav_history）
-- `record_nav()` 默认 `dry_run=True`，只有 `dry_run=False && confirm=True` 才真正写。
-- 完整 `nav_history` 写入统一走 `FeishuStorage.write_nav_record()` / `write_nav_records()`。
-- 派生字段修复统一走 `FeishuStorage.patch_nav_derived_fields()`。
-- 旧入口 `save_nav()` / `upsert_nav_bulk()` / `update_nav_fields()` 已删除。
+```bash
+python3 -m pytest tests -q
+python3 tests/run_tests.py
+git diff --check
+python3 -X pycache_prefix=/tmp/pm_pycache -m compileall src skill_api.py scripts/pm.py scripts/publish_daily_report.py
+```

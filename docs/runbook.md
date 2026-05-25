@@ -1,99 +1,184 @@
 # Runbook
 
-## 常用命令速查（pm CLI）
+This runbook is for local or Linux-instance operations. Production writes should
+go through `./pm` or the local service, not ad hoc Python calls.
 
-为了把常用查询从“记函数名”变成“敲命令”，提供一个薄 CLI：`scripts/pm.py`。
+## Preflight
 
-准备：
 ```bash
-cd /home/node/.openclaw/workspace/portfolio-management
-. .venv/bin/activate
+./pm config inspect --json
+./pm config doctor --json
+./pm nav duplicates --json
+python scripts/migrate_schema.py check-live
 ```
 
-常用查询（只读，默认不写入任何表）：
+If Futu cash/MMF sync is enabled:
+
 ```bash
-# 查持仓（默认不拉实时价格；主要用于结构/数量核对）
-python scripts/pm.py holdings
-
-# 查现金（按 cash 类持仓汇总）
-python scripts/pm.py cash
-python scripts/pm.py cash --json
-
-# 查净值（nav_history 最新一条 + 最近若干条 history）
-python scripts/pm.py nav
-python scripts/pm.py nav --json
-
-# 预览日报数据（只读，不是正式日报入口；如需更快/更稳可调 timeout）
-python scripts/pm.py report daily --preview
-python scripts/pm.py report daily --preview --timeout 25 --json
+./pm config doctor --require-futu --json
 ```
 
-核心日净值命令（默认 dry-run，真实写入必须显式确认）：
+## Read-Only Checks
+
 ```bash
-# 计算今日 NAV 并输出仓位分布，不写入
-python scripts/pm.py daily
-
-# 真实记录今日 nav_history，并输出仓位分布
-python scripts/pm.py daily --write --confirm
-
-# 只记录今日 NAV
-python scripts/pm.py nav record --write --confirm
-
-# 统计仓位分布
-python scripts/pm.py positions distribution
+./pm accounts --json
+./pm holdings --account lx --json
+./pm cash --account lx --json
+./pm nav --account lx --json
+./pm positions distribution --account lx --json
+./pm report daily --preview --account lx --json
 ```
 
-说明：
-- `--json` 适合做自动化/二次处理；默认输出对人更友好。
-- CLI 常用命令优先走本地服务；可用 `--no-service` 强制直连，或用 `--require-service` 禁止 fallback。
-- 涉及写入的动作（如 `nav record`）默认 dry-run，真实写入必须走显式 `--write --confirm` 语义。
-- 正式日报数据/HTML/发布入口只有 `scripts/publish_daily_report.py`；`pm report` 仅作 preview。
+`pm report` is preview-only. Formal daily report generation uses
+`scripts/publish_daily_report.py`.
 
-## 清仓 / 关闭账户：写入 shares=0 的净值点（close_nav）
+## Daily NAV Job
 
-背景：
-- `shares=0` 是合法业务语义（清仓/关闭），但必须**显式触发**，不能靠“缺失字段默认 0”混入。
-- 为了让下游收益率/回撤等逻辑稳定，我们约定清仓点：`nav=1.0`，并在 `details` 写入 `{"status":"CLOSED"}`。
+Dry-run:
 
-使用方式：
-- 先演练（不会写入）：
-  - `close_nav(date_str="YYYY-MM-DD", total_value=..., dry_run=True)`
-- 真写入（必须显式确认）：
-  - `close_nav(date_str="YYYY-MM-DD", total_value=..., dry_run=False, confirm=True)`
+```bash
+./pm daily-job --json
+./pm daily-job --accounts lx,alice --json
+```
 
-口径说明：
-- 允许 `total_value > 0`（例如残余现金/零碎资产）。
-- 建议同时提供 `cash_value` / `stock_value`，让拆分字段自洽（否则会默认把 `total_value` 全部计入 `cash_value`，`stock_value=0`）。
+Write:
 
-安全约束：
-- 默认 `dry_run=True`；任何真正写入都必须 `confirm=True`。
-- 清仓点不会触发价格拉取/估值计算；它是一个“人工定义的状态点”。
+```bash
+./pm daily-job --accounts lx,alice --write --confirm --json
+./pm daily-job --account lx --sync-futu-cash-mmf --write --confirm --json
+```
 
-## 1) Daily report public link is unavailable
+Manual date:
 
-- The old public daily-report domain is no longer valid.
-- Treat `scripts/publish_daily_report.py` output as local static artifacts only.
-- Confirm `publish.publish_dir` points to the directory containing `investment-daily-YYYY-MM-DD/index.html`.
+```bash
+./pm daily-job --accounts lx,alice --nav-date 2026-05-22 --write --confirm --json
+```
 
-## 2) "Report didn't refresh prices"
+Rules:
 
-- Run `python scripts/diagnose_pricing.py --account lx`.
-- Check:
-  - `summary.realtime/cache/stale_fallback/missing`
-  - `tencent_batch` meta (requests/elapsed/coverage)
-  - per-asset `state` and `source`
+- If `--nav-date` is omitted, the job records the most recent business day
+  before the run date.
+- Weekends and `calendar.holidays` are skipped by default.
+- Duplicate `nav_history` account/date records block writes.
+- Pending generated fields in manual `cash_flow` rows block writes.
+- Existing same-day NAV is skipped unless `--overwrite` is explicit.
+- Real writes require `--write --confirm`.
 
-## 3) Missing price for US tickers
+## Daily Report
 
-- Ensure `finnhub_api_key` is set.
-- If Finnhub fails, Yahoo Chart may be rate-limited.
+```bash
+python scripts/publish_daily_report.py --account lx
+python scripts/publish_daily_report.py --account lx --run-id manual-YYYYMMDD
+```
 
-## 4) Date off by one day
+Service controls:
 
-- Business dates are Beijing time.
-- Check code uses `src/time_utils.py` helpers.
+```bash
+python scripts/publish_daily_report.py --require-service
+python scripts/publish_daily_report.py --no-service
+```
 
-## 5) Feishu field not found
+The old public daily-report domain is invalid. Validate local artifacts instead:
 
-- Compare actual Bitable fields with `docs/schema.md`.
-- Use `python scripts/migrate_schema.py check-live`.
+```bash
+ls reports/investment-daily-*.html
+ls ../prototypes/investment-daily-*/index.html
+```
+
+Expected publish output has `public_url=null` and
+`public_url_status=disabled`.
+
+## Local Service
+
+```bash
+python scripts/service.py start
+python scripts/service.py status
+curl http://127.0.0.1:8765/health
+```
+
+Use `--require-service` on CLI commands when you want service outage to fail
+instead of falling back:
+
+```bash
+./pm daily-job --require-service --json
+```
+
+## Cash Flow Reconcile
+
+Manual `cash_flow` rows may omit generated fields, but daily NAV writes will
+block until generated fields are reconciled.
+
+```bash
+./pm cash-flow reconcile --account lx --json
+./pm cash-flow reconcile --account lx --apply --confirm --json
+```
+
+## Close Account NAV Point
+
+Use only for explicit close/clear-account states:
+
+```python
+close_nav(date_str="YYYY-MM-DD", total_value=0, dry_run=True)
+close_nav(date_str="YYYY-MM-DD", total_value=0, dry_run=False, confirm=True)
+```
+
+Rules:
+
+- `shares=0` is intentional only through this explicit action.
+- `nav=1.0`.
+- `details.status="CLOSED"`.
+- It does not fetch prices or build valuation.
+
+## Common Failures
+
+### Config Doctor Fails
+
+Check `PORTFOLIO_CONFIG_FILE`, then inspect the resolved values:
+
+```bash
+echo "$PORTFOLIO_CONFIG_FILE"
+./pm config inspect --json
+```
+
+Required scheduled-job tables are holdings, nav_history, cash_flow, and
+holdings_snapshot.
+
+### Date Looks Wrong
+
+Business dates use Beijing date semantics. `daily-job` auto-date means previous
+business day before the run date, not calendar yesterday.
+
+### Prices Missing
+
+```bash
+python scripts/diagnose_pricing.py --account lx --json
+```
+
+Check realtime/cache/stale/missing counts and provider errors. US quotes use
+Finnhub/Yahoo Chart paths; A/H quotes use Tencent paths.
+
+### Feishu Field Missing
+
+```bash
+python scripts/migrate_schema.py check-live
+```
+
+Compare with `docs/schema.md`. Schema changes must also update migration
+registry files.
+
+### Duplicate NAV Rows
+
+```bash
+./pm nav duplicates --json
+```
+
+Repair duplicates before running the daily job.
+
+## Validation After Code Changes
+
+```bash
+python3 -m pytest tests -q
+python3 tests/run_tests.py
+git diff --check
+python3 -X pycache_prefix=/tmp/pm_pycache -m compileall src skill_api.py scripts/pm.py scripts/publish_daily_report.py
+```

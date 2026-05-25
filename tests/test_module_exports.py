@@ -4,23 +4,30 @@ import src.domain as domain
 
 def test_app_exports_public_services():
     expected = {
+        "AccountNavRecorderService",
         "AuditService",
         "AccountService",
         "AssetNameService",
+        "BusinessCalendarService",
         "CashFlowSummaryService",
         "CashService",
         "CompensationService",
+        "DailyAccountNavService",
+        "DailyNavJobService",
+        "DailyReportPayloadService",
         "FutuBalanceProvider",
         "FutuBalanceSnapshot",
         "FutuBalanceSyncService",
         "FutuOpenApiBalanceProvider",
-        "FullReportService",
         "NavBaselineService",
+        "NavInitializationService",
+        "NavPreviewService",
         "NavReadService",
         "NavRecordService",
         "NavSummaryPrinter",
         "PortfolioReadService",
         "ReportGenerationService",
+        "ReportQueryService",
         "ReportingService",
         "ShareService",
         "SnapshotService",
@@ -38,7 +45,9 @@ def test_domain_exports_public_helpers():
     expected = {
         "NavCalculator",
         "NavHistoryIndex",
+        "NavPerformanceCalculator",
         "PayloadNormalizer",
+        "merge_top_holdings",
     }
 
     assert set(domain.__all__) == expected

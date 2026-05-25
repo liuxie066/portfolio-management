@@ -43,6 +43,19 @@ class FakeStorage:
         return holding
 
 
+class FakeReplaceStorage(FakeStorage):
+    def __init__(self):
+        super().__init__()
+        self.replacements = []
+
+    def replace_holding(self, holding):
+        self.replacements.append(holding)
+        existing = self.holdings.get((holding.asset_id, holding.account, holding.broker))
+        holding.record_id = getattr(existing, "record_id", None)
+        self.holdings[(holding.asset_id, holding.account, holding.broker)] = holding
+        return holding
+
+
 def test_sync_cash_and_mmf_updates_existing_holdings_by_delta():
     storage = FakeStorage()
     storage.holdings[("CNY-CASH", "lx", "富途")] = Holding(
@@ -75,6 +88,39 @@ def test_sync_cash_and_mmf_updates_existing_holdings_by_delta():
     ]
     assert storage.holdings[("CNY-CASH", "lx", "富途")].quantity == 100.13
     assert storage.holdings[("CNY-MMF", "lx", "富途")].quantity == 200.33
+
+
+def test_sync_cash_and_mmf_replaces_existing_holding_fields_when_supported():
+    storage = FakeReplaceStorage()
+    storage.holdings[("CNY-CASH", "lx", "富途")] = Holding(
+        record_id="rec_cash",
+        asset_id="CNY-CASH",
+        asset_name="旧现金名",
+        asset_type=AssetType.OTHER,
+        account="lx",
+        broker="富途",
+        quantity=20,
+        currency="USD",
+    )
+
+    result = FutuBalanceSyncService(storage, FakeProvider(cash=100.126, mmf=None)).sync_cash_and_mmf(account="lx")
+
+    assert result["updated"] == 1
+    assert result["items"][0]["fields_changed"] is True
+    assert result["items"][0]["field_updates"] == {
+        "asset_name": "人民币现金",
+        "asset_type": "cash",
+        "currency": "CNY",
+        "asset_class": "现金",
+        "industry": "现金",
+    }
+    assert storage.updates == []
+    assert [h.asset_id for h in storage.replacements] == ["CNY-CASH"]
+    holding = storage.holdings[("CNY-CASH", "lx", "富途")]
+    assert holding.quantity == 100.13
+    assert holding.asset_name == "人民币现金"
+    assert holding.asset_type == AssetType.CASH
+    assert holding.currency == "CNY"
 
 
 def test_sync_cash_and_mmf_creates_missing_holdings():
@@ -123,6 +169,8 @@ def test_sync_cash_and_mmf_accepts_manual_balances_without_provider():
             "delta": 1.24,
             "created": True,
             "updated": True,
+            "fields_changed": False,
+            "field_updates": {},
         }
     ]
     assert storage.holdings[("CNY-CASH", "lx", "富途")].quantity == 1.24

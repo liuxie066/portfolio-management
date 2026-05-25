@@ -44,11 +44,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import sys
-REPO_ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(REPO_ROOT))
-
-from skill_api import PortfolioSkill
+from src.maintenance.nav_history_repair.context import NavRepairContext, create_nav_repair_context
 from src.models import NAVHistory
 
 
@@ -166,7 +162,7 @@ def merge_existing(existing: NAVHistory, patch: PatchRow, patch_none: bool = Fal
 
 def validate_math(
     *,
-    pm: PortfolioSkill,
+    context: NavRepairContext,
     navs_sorted: List[NAVHistory],
     idx: int,
     candidate: NAVHistory,
@@ -250,7 +246,7 @@ def validate_math(
         # MTD/YTD are "full" checks; legacy stored values may follow older conventions.
         if validate_level == "full":
             all_navs = navs_sorted
-            p = pm.portfolio
+            p = context.portfolio
             nav_index = p._build_nav_lookup(all_navs)
 
             pm_base = p._find_prev_month_end_nav(all_navs, candidate.date.year, candidate.date.month, nav_index=nav_index)
@@ -326,11 +322,11 @@ def run(args: argparse.Namespace) -> None:
     if args.dry_run and args.apply:
         raise SystemExit("choose only one of --dry-run / --apply")
 
-    ps = PortfolioSkill(account=args.account) if args.account else PortfolioSkill()
+    context = create_nav_repair_context(account=args.account)
 
     patches = load_patch_rows(args.patch_file, args.mode)
 
-    navs = ps.storage.get_nav_history(ps.account, days=9999)
+    navs = context.storage.get_nav_history(context.account, days=9999)
     navs = sorted(navs, key=lambda n: n.date)
     nav_by_date = {n.date: n for n in navs}
 
@@ -403,15 +399,15 @@ def run(args: argparse.Namespace) -> None:
                 continue
             if args.validate_scope == "patched" and n.date not in dates_in_patch:
                 continue
-            errs = validate_math(pm=ps, navs_sorted=series, idx=i, candidate=n, mode=args.mode, validate_level=args.validate_level)
+            errs = validate_math(context=context, navs_sorted=series, idx=i, candidate=n, mode=args.mode, validate_level=args.validate_level)
             if errs:
                 violations.append({"date": n.date.isoformat(), "record_id": n.record_id, "errors": errs})
 
     out_dir = Path("audit")
     out_dir.mkdir(exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    diff_path = out_dir / f"nav_history_repair_patch_diff_{ps.account}_{stamp}.json"
-    diff_path.write_text(json.dumps({"account": ps.account, "mode": args.mode, "diffs": diffs, "violations": violations}, ensure_ascii=False, indent=2), encoding="utf-8")
+    diff_path = out_dir / f"nav_history_repair_patch_diff_{context.account}_{stamp}.json"
+    diff_path.write_text(json.dumps({"account": context.account, "mode": args.mode, "diffs": diffs, "violations": violations}, ensure_ascii=False, indent=2), encoding="utf-8")
     print("wrote", diff_path)
 
     if violations:
@@ -428,13 +424,13 @@ def run(args: argparse.Namespace) -> None:
         return
 
     # apply
-    backup_file = args.backup_file or str(out_dir / f"nav_history_repair_patch_backup_{ps.account}_{stamp}.json")
+    backup_file = args.backup_file or str(out_dir / f"nav_history_repair_patch_backup_{context.account}_{stamp}.json")
     backup = []
     for p in patches:
         existing = nav_by_date.get(p.d)
         if not existing:
             continue
-        backup.append(ps.storage.write_nav_record(existing, overwrite_existing=True, dry_run=True))
+        backup.append(context.storage.write_nav_record(existing, overwrite_existing=True, dry_run=True))
     Path(backup_file).write_text(json.dumps(backup, ensure_ascii=False, indent=2), encoding="utf-8")
     print("backup wrote", backup_file)
 
@@ -449,7 +445,7 @@ def run(args: argparse.Namespace) -> None:
         for f in ["cash_value", "stock_value", "fund_value", "cn_stock_value", "us_stock_value", "hk_stock_value", "total_value"]:
             if getattr(existing, f) != getattr(cand, f):
                 raise SystemExit(f"safety abort: non-target field changed: {p.d} {f}")
-        ps.storage.write_nav_record(cand, overwrite_existing=True, dry_run=False)
+        context.storage.write_nav_record(cand, overwrite_existing=True, dry_run=False)
         updated += 1
 
     print("applied patches; updated", updated, "records")

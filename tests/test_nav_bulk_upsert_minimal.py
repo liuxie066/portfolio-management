@@ -355,6 +355,100 @@ def test_write_nav_record_respects_overwrite_existing_false_before_write():
     assert len(client.create_record_calls) == 0
 
 
+def test_audit_nav_history_duplicates_groups_by_account_date():
+    client = StubNavSingleWriteClient(
+        initial_records=[
+            {
+                'record_id': 'rec_nav_1',
+                'fields': {
+                    'date': '2026-03-01',
+                    'account': 'lx',
+                    'total_value': 1000,
+                    'shares': 1000,
+                    'nav': 1.0,
+                },
+            },
+            {
+                'record_id': 'rec_nav_2',
+                'fields': {
+                    'date': '2026-03-01',
+                    'account': 'lx',
+                    'total_value': 1100,
+                    'shares': 1000,
+                    'nav': 1.1,
+                },
+            },
+            {
+                'record_id': 'rec_nav_3',
+                'fields': {
+                    'date': '2026-03-02',
+                    'account': 'lx',
+                    'total_value': 1200,
+                    'shares': 1000,
+                    'nav': 1.2,
+                },
+            },
+        ]
+    )
+    storage = FeishuStorage(client=client, local_nav_index_cache=StubLocalNavIndexCache())
+
+    result = storage.audit_nav_history_duplicates(account='lx')
+
+    assert result['success'] is True
+    assert result['record_count'] == 3
+    assert result['duplicate_group_count'] == 1
+    assert result['duplicate_record_count'] == 2
+    assert result['duplicates'][0]['account'] == 'lx'
+    assert result['duplicates'][0]['date'] == '2026-03-01'
+    assert result['duplicates'][0]['record_ids'] == ['rec_nav_1', 'rec_nav_2']
+
+
+def test_write_nav_record_refuses_existing_duplicate_date_records():
+    client = StubNavSingleWriteClient(
+        initial_records=[
+            {
+                'record_id': 'rec_nav_1',
+                'fields': {
+                    'date': '2026-03-01',
+                    'account': 'lx',
+                    'total_value': 1000,
+                    'shares': 1000,
+                    'nav': 1.0,
+                },
+            },
+            {
+                'record_id': 'rec_nav_2',
+                'fields': {
+                    'date': '2026-03-01',
+                    'account': 'lx',
+                    'total_value': 1100,
+                    'shares': 1000,
+                    'nav': 1.1,
+                },
+            },
+        ]
+    )
+    storage = FeishuStorage(client=client, local_nav_index_cache=StubLocalNavIndexCache())
+    nav = NAVHistory(
+        date=date(2026, 3, 2),
+        account='lx',
+        total_value=1200.0,
+        shares=1000.0,
+        nav=1.2,
+    )
+
+    try:
+        storage.write_nav_record(nav, dry_run=False)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "duplicate account/date" in str(exc)
+        assert "rec_nav_1" in str(exc)
+        assert "rec_nav_2" in str(exc)
+
+    assert len(client.update_record_calls) == 0
+    assert len(client.create_record_calls) == 0
+
+
 def test_write_nav_record_matches_single_full_write_behavior():
     client = StubNavSingleWriteClient()
     storage = FeishuStorage(client=client, local_nav_index_cache=StubLocalNavIndexCache())

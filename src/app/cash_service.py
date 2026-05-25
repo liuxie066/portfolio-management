@@ -86,23 +86,48 @@ class CashService:
         current_qty = float(self.quantize_money(existing.quantity if existing else 0))
         delta = float(self.quantize_money(target_qty - current_qty))
         created = existing is None
-        updated = bool(created or delta != 0)
+        replacement = Holding(
+            asset_id=asset_id,
+            asset_name=asset_name,
+            asset_type=asset_type,
+            account=account,
+            broker=broker,
+            quantity=target_qty,
+            currency="CNY",
+            asset_class=AssetClass.CASH,
+            industry="现金",
+        )
+
+        field_updates = {}
+        if existing:
+            comparable_fields = {
+                "asset_name": asset_name,
+                "asset_type": asset_type,
+                "currency": "CNY",
+                "asset_class": AssetClass.CASH,
+                "industry": "现金",
+            }
+            for field, target_value in comparable_fields.items():
+                current_value = getattr(existing, field, None)
+                if hasattr(current_value, "value"):
+                    current_value = current_value.value
+                if hasattr(target_value, "value"):
+                    target_value = target_value.value
+                if current_value != target_value:
+                    field_updates[field] = target_value
+
+        fields_changed = bool(field_updates)
+        updated = bool(created or delta != 0 or fields_changed)
 
         if not dry_run and updated:
             if existing:
-                self.storage.update_holding_quantity(asset_id, account, delta, broker)
+                replace_holding = getattr(self.storage, "replace_holding", None)
+                if callable(replace_holding) and hasattr(type(self.storage), "replace_holding"):
+                    replace_holding(replacement)
+                else:
+                    self.storage.update_holding_quantity(asset_id, account, delta, broker)
             else:
-                self.storage.upsert_holding(Holding(
-                    asset_id=asset_id,
-                    asset_name=asset_name,
-                    asset_type=asset_type,
-                    account=account,
-                    broker=broker,
-                    quantity=target_qty,
-                    currency="CNY",
-                    asset_class=AssetClass.CASH,
-                    industry="现金",
-                ))
+                self.storage.upsert_holding(replacement)
 
         return {
             "asset_id": asset_id,
@@ -112,6 +137,8 @@ class CashService:
             "delta": delta,
             "created": created,
             "updated": updated,
+            "fields_changed": fields_changed,
+            "field_updates": field_updates,
         }
 
     def get_cash_like_holdings(self, account: str):

@@ -160,6 +160,50 @@ class AccountService:
             result["warnings"] = warnings
         return result
 
+    def list_nav_accounts(self, *, include_default: bool = False) -> Dict[str, Any]:
+        """List accounts that should participate in daily NAV jobs.
+
+        This is intentionally narrower than ``list_accounts``: trade history and
+        old NAV rows should not cause a dormant account to be processed.  The NAV
+        job follows current holdings because holdings are the source of today's
+        valuation.
+        """
+        accounts = set()
+        warnings = []
+
+        try:
+            get_holdings_fn = getattr(self.storage, "get_holdings")
+            try:
+                holdings = get_holdings_fn(account=None, include_empty=True)
+            except TypeError:
+                holdings = get_holdings_fn(account=None)
+            for holding in holdings or []:
+                account = getattr(holding, "account", None)
+                if not account:
+                    continue
+                try:
+                    quantity = float(getattr(holding, "quantity", 0) or 0)
+                except (TypeError, ValueError):
+                    quantity = 0.0
+                if abs(quantity) > 1e-12:
+                    accounts.add(account)
+        except Exception as e:
+            warnings.append({"source": "holdings", "error": str(e)})
+
+        if include_default and self.default_account:
+            accounts.add(self.default_account)
+
+        result = {
+            "success": True,
+            "default_account": self.default_account,
+            "accounts": sorted(accounts),
+            "count": len(accounts),
+            "source": "holdings",
+        }
+        if warnings:
+            result["warnings"] = warnings
+        return result
+
     def multi_account_overview(
         self,
         *,

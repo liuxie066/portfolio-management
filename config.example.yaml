@@ -1,0 +1,54 @@
+# portfolio-management canonical config.
+# Production deployments should copy this to /etc/portfolio-management/config.yaml
+# and set PORTFOLIO_CONFIG_FILE=/etc/portfolio-management/config.yaml.
+
+account: lx
+initial_value: 0
+start_year: 2024
+
+data:
+  dir: .data
+
+nav:
+  disable_runtime_validation: false
+
+service:
+  host: 127.0.0.1
+  port: 8765
+  url: ""
+
+calendar:
+  # Beijing-date non-trading days. Weekends are skipped automatically.
+  holidays: []
+
+report:
+  account_label: lx
+  reports_dir: reports
+  publish_root: ../prototypes
+  sync_futu_cash_mmf: false
+  sync_futu_dry_run: true
+  disable_nav_runtime_validation: false
+
+futu:
+  opend:
+    host: 127.0.0.1
+    port: 11111
+  trd_env: REAL
+  acc_id:
+  trd_market: HK
+  cash_currency: CNH
+
+finnhub_api_key: ""
+
+feishu:
+  app_id: ""
+  app_secret: ""
+  app_token: ""
+  tables:
+    holdings: ""
+    transactions: ""
+    nav_history: ""
+    cash_flow: ""
+    holdings_snapshot: ""
+    compensation_tasks: ""
+    schema_version: ""

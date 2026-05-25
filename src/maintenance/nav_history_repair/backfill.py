@@ -21,17 +21,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-from skill_api import PortfolioSkill
+from src.maintenance.nav_history_repair.context import NavRepairContext, create_nav_repair_context
 from src.models import NAVHistory, PortfolioValuation
 
 
@@ -109,8 +104,8 @@ def _rows_to_points(rows: List[Dict[str, Any]]) -> List[BaseNavPoint]:
     return [m[d] for d in sorted(m.keys())]
 
 
-def _existing_points_from_range(skill: PortfolioSkill, d_from: date, d_to: date) -> List[BaseNavPoint]:
-    navs = skill.storage.get_nav_history(skill.account, days=9999)
+def _existing_points_from_range(context: NavRepairContext, d_from: date, d_to: date) -> List[BaseNavPoint]:
+    navs = context.storage.get_nav_history(context.account, days=9999)
     points: List[BaseNavPoint] = []
     for n in navs:
         if n.date < d_from or n.date > d_to:
@@ -187,7 +182,7 @@ def run(args: argparse.Namespace) -> None:
     if args.apply and args.dry_run:
         raise ValueError("--apply and --dry-run are mutually exclusive")
 
-    skill = PortfolioSkill(account=args.account)
+    context = create_nav_repair_context(account=args.account)
 
     # Build base points
     if args.input:
@@ -198,7 +193,7 @@ def run(args: argparse.Namespace) -> None:
             raise ValueError("either --input or (--from and --to) is required")
         d_from = _to_date(args.d_from)
         d_to = _to_date(args.d_to)
-        points = _existing_points_from_range(skill, d_from, d_to)
+        points = _existing_points_from_range(context, d_from, d_to)
 
     if args.limit and args.limit > 0:
         points = points[: args.limit]
@@ -208,8 +203,8 @@ def run(args: argparse.Namespace) -> None:
         return
 
     # Preload once; then mutate in-memory nav index incrementally so later dates depend on recomputed earlier dates.
-    skill.storage.preload_nav_index(skill.account)
-    idx = skill.storage.get_nav_index(skill.account)
+    context.storage.preload_nav_index(context.account)
+    idx = context.storage.get_nav_index(context.account)
     working_navs: List[NAVHistory] = sorted(list(idx.get("_nav_objects") or []), key=lambda n: n.date)
 
     def _upsert_working(nav: NAVHistory):
@@ -226,12 +221,12 @@ def run(args: argparse.Namespace) -> None:
     recomputed: List[NAVHistory] = []
     for p in points:
         # inject working nav history into in-memory index for this iteration
-        if isinstance(skill.storage._nav_index_mem_cache.get(skill.account), dict):
-            skill.storage._nav_index_mem_cache[skill.account]["_nav_objects"] = list(working_navs)
+        if isinstance(context.storage._nav_index_mem_cache.get(context.account), dict):
+            context.storage._nav_index_mem_cache[context.account]["_nav_objects"] = list(working_navs)
 
-        valuation = _build_valuation(skill.account, p)
-        nav = skill.portfolio.record_nav(
-            skill.account,
+        valuation = _build_valuation(context.account, p)
+        nav = context.portfolio.record_nav(
+            context.account,
             valuation=valuation,
             nav_date=p.d,
             persist=False,
@@ -259,7 +254,7 @@ def run(args: argparse.Namespace) -> None:
 
     payload = {
         "success": True,
-        "account": skill.account,
+        "account": context.account,
         "count": len(recomputed),
         "date_from": recomputed[0].date.isoformat(),
         "date_to": recomputed[-1].date.isoformat(),
@@ -282,7 +277,7 @@ def run(args: argparse.Namespace) -> None:
     }
 
     if args.apply:
-        write_result = skill.storage.write_nav_records(
+        write_result = context.storage.write_nav_records(
             recomputed,
             mode=args.mode,
             allow_partial=bool(args.allow_partial),

@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from src import config
 from src.snapshot_models import HoldingSnapshot
 
 
@@ -34,7 +35,7 @@ class SnapshotService:
 
     def __init__(self, storage: Any, data_dir: Optional[Path] = None):
         self.storage = storage
-        self.data_dir = data_dir or (Path(__file__).resolve().parents[2] / ".data")
+        self.data_dir = data_dir or config.get_data_dir()
 
     def build_holdings_snapshots(self, *, account: str, as_of: str, valuation: Any) -> list[HoldingSnapshot]:
         snapshots = []

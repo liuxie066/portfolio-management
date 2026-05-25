@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date, datetime
 from typing import Any, Dict, Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
@@ -27,6 +28,14 @@ def _query_value(value: Any) -> Any:
         return ",".join(str(item) for item in sorted(value, key=str))
     if isinstance(value, (list, tuple)):
         return ",".join(str(item) for item in value)
+    return value
+
+
+def _body_value(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
     return value
 
 
@@ -131,6 +140,9 @@ class PortfolioServiceClient:
     def list_accounts(self, *, include_default: bool = True) -> Dict[str, Any]:
         return self._get("/accounts", {"include_default": include_default})
 
+    def list_nav_accounts(self, *, include_default: bool = False) -> Dict[str, Any]:
+        return self._get("/accounts/nav", {"include_default": include_default})
+
     def multi_account_overview(
         self,
         *,
@@ -175,6 +187,7 @@ class PortfolioServiceClient:
         self,
         *,
         account: str,
+        nav_date: Optional[Any] = None,
         price_timeout: int = 30,
         dry_run: bool = True,
         confirm: bool = False,
@@ -190,9 +203,14 @@ class PortfolioServiceClient:
             "overwrite_existing": overwrite_existing,
             "use_bulk_persist": use_bulk_persist,
         }
+        if nav_date is not None:
+            body["nav_date"] = _body_value(nav_date)
         if run_id is not None:
             body["run_id"] = run_id
         return self._post("/nav/record", body)
+
+    def audit_nav_history_duplicates(self, *, account: Optional[str] = None) -> Dict[str, Any]:
+        return self._get("/nav/duplicates", {"account": account})
 
     def get_distribution(self, *, account: str) -> Dict[str, Any]:
         return self._get("/distribution", {"account": account})
@@ -210,13 +228,14 @@ class PortfolioServiceClient:
         self,
         *,
         account: Optional[str],
+        nav_date: Optional[Any] = None,
         price_timeout: int = 30,
         dry_run: bool = True,
         confirm: bool = False,
         overwrite_existing: bool = True,
         use_bulk_persist: bool = False,
         sync_futu_cash_mmf: bool = False,
-        sync_futu_dry_run: bool = True,
+        sync_futu_dry_run: Optional[bool] = None,
         run_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         body = {
@@ -227,8 +246,49 @@ class PortfolioServiceClient:
             "overwrite_existing": overwrite_existing,
             "use_bulk_persist": use_bulk_persist,
             "sync_futu_cash_mmf": sync_futu_cash_mmf,
-            "sync_futu_dry_run": sync_futu_dry_run,
         }
+        if sync_futu_dry_run is not None:
+            body["sync_futu_dry_run"] = sync_futu_dry_run
+        if nav_date is not None:
+            body["nav_date"] = _body_value(nav_date)
         if run_id is not None:
             body["run_id"] = run_id
         return self._post("/report/daily-bundle", body)
+
+    def daily_nav_job(
+        self,
+        *,
+        account: Optional[str] = None,
+        accounts: Any = None,
+        nav_date: Optional[Any] = None,
+        run_date: Optional[Any] = None,
+        price_timeout: int = 30,
+        dry_run: bool = True,
+        confirm: bool = False,
+        overwrite_existing: bool = False,
+        use_bulk_persist: bool = False,
+        sync_futu_cash_mmf: bool = False,
+        sync_futu_dry_run: Optional[bool] = None,
+        force_non_business_day: bool = False,
+        run_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        body = {
+            "price_timeout": price_timeout,
+            "dry_run": dry_run,
+            "confirm": confirm,
+            "overwrite_existing": overwrite_existing,
+            "use_bulk_persist": use_bulk_persist,
+            "sync_futu_cash_mmf": sync_futu_cash_mmf,
+            "force_non_business_day": force_non_business_day,
+        }
+        if sync_futu_dry_run is not None:
+            body["sync_futu_dry_run"] = sync_futu_dry_run
+        optional = {
+            "account": account,
+            "accounts": accounts,
+            "nav_date": _body_value(nav_date),
+            "run_date": _body_value(run_date),
+            "run_id": run_id,
+        }
+        body.update({key: value for key, value in optional.items() if value is not None})
+        return self._post("/daily-nav-job", body)

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Any, Optional, Protocol
+from typing import Any, Dict, Optional, Protocol
 
 from src import config
 from src.models import (
@@ -42,6 +42,8 @@ class FutuBalanceSyncItem:
     delta: float
     created: bool
     updated: bool
+    fields_changed: bool
+    field_updates: Dict[str, Any]
 
 
 class FutuOpenApiBalanceProvider:
@@ -236,6 +238,8 @@ class FutuBalanceSyncService:
             delta=synced["delta"],
             created=synced["created"],
             updated=synced["updated"],
+            fields_changed=bool(synced.get("fields_changed")),
+            field_updates=dict(synced.get("field_updates") or {}),
         )]
 
 

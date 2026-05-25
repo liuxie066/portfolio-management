@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-Portfolio Management Skill API
-投资组合管理 Skill 统一入口
+Compatibility Python API adapter for portfolio-management.
 
-基于飞书多维表作为数据存储，支持多端同步
+The product entrypoints are the CLI and local service. This module preserves
+the historical Skill/Python function surface by delegating to service/app/domain
+boundaries; new business behavior should not be implemented here.
 """
 import sys
-import json
 from pathlib import Path
-from datetime import date, datetime, timedelta
 
-from src.time_utils import bj_today
 from typing import Dict, Any, Optional
 
 # 确保能 import 到 src 模块
@@ -21,7 +19,6 @@ from src.feishu_storage import FeishuStorage, FeishuClient
 from src.portfolio import PortfolioManager
 from src.price_fetcher import PriceFetcher
 from src.storage import create_storage
-from src.reporting_utils import normalize_asset_type, normalization_warning
 from src.models import AssetType, AssetClass, Industry, Holding, NAVHistory
 from src.asset_utils import (
     validate_code as validate_asset_code,
@@ -29,10 +26,17 @@ from src.asset_utils import (
     parse_date,
 )
 from src.broker_message_parser import parse_futu_fill_message
-from src.app import FutuBalanceSyncService, FullReportService, PortfolioReadService, ReportGenerationService
+from src.app import AccountNavRecorderService, FutuBalanceSyncService, PortfolioReadService, ReportGenerationService, ReportQueryService
 from src.app.account_service import AccountService, normalize_accounts
 from src.app.audit_service import AuditService
-from src.app.nav_payload import format_nav_payload
+from src.domain.nav.performance import (
+    calc_month_return,
+    calc_risk_metrics,
+    calc_since_inception_return,
+    calc_year_return,
+)
+from src.domain.report.holdings_projection import merge_top_holdings
+from src.service.application import PortfolioService
 from src.write_guard import validate_and_normalize_trade_input, validate_and_normalize_nav_input
 from src import config
 
@@ -42,24 +46,13 @@ from src import config
 DEFAULT_ACCOUNT = config.get_account()
 
 
-def _snapshot_failure(nav_record: NAVHistory) -> Optional[Dict[str, Any]]:
-    details = getattr(nav_record, "details", None) or {}
-    snapshot_error = details.get("snapshot_error")
-    if not snapshot_error:
-        return None
-    return {
-        "snapshot_status": details.get("snapshot_status") or "failed",
-        "snapshot_persisted": bool(details.get("snapshot_persisted")),
-        "snapshot_error": snapshot_error,
-    }
-
-
-# ========== 核心 API 类 ==========
+# ========== 兼容 API adapter ==========
 
 class PortfolioSkill:
-    """投资组合管理 Skill 核心类
+    """Backward-compatible adapter for historical Skill callers.
 
-    额外能力：支持从券商成交提醒消息（如富途成交提醒）解析并写入 transactions 表。
+    Keep this class thin. Product workflows belong in `src/service`,
+    `src/app`, `src/domain`, `src/pricing`, or storage repositories.
     """
 
     def build_snapshot(self, price_timeout_seconds: Optional[int] = None) -> Dict[str, Any]:
@@ -419,6 +412,20 @@ class PortfolioSkill:
             default_account=self.account,
         ).list_accounts(include_default=include_default)
 
+    def list_nav_accounts(self, include_default: bool = False) -> Dict[str, Any]:
+        """列出应参与每日净值任务的当前持仓账户。"""
+        return AccountService(
+            storage=self.storage,
+            default_account=self.account,
+        ).list_nav_accounts(include_default=include_default)
+
+    def audit_nav_history_duplicates(self, account: Optional[str] = None) -> Dict[str, Any]:
+        """审计 nav_history 是否存在同账户同日期重复记录。"""
+        audit = getattr(self.storage, "audit_nav_history_duplicates", None)
+        if not callable(audit):
+            return {"success": False, "error": "storage does not support nav_history duplicate audit"}
+        return audit(account=account or self.account)
+
     def _read_service(self) -> PortfolioReadService:
         return PortfolioReadService(
             account=self.account,
@@ -537,27 +544,17 @@ class PortfolioSkill:
     def _calc_month_return(self, month: str, _navs: list = None) -> Dict:
         """计算月收益率（环比：较上月末的变化）"""
         navs = _navs if _navs is not None else self.storage.get_nav_history(self.account, days=365)
-        return FullReportService(account=self.account, storage=self.storage, portfolio=self.portfolio)._calc_month_return(
-            month,
-            navs=navs,
-        )
+        return calc_month_return(month, navs=navs)
 
     def _calc_year_return(self, year: str, _navs: list = None) -> Dict:
         """计算年收益率（环比：较上年末的变化）"""
         navs = _navs if _navs is not None else self.storage.get_nav_history(self.account, days=730)
-        return FullReportService(account=self.account, storage=self.storage, portfolio=self.portfolio)._calc_year_return(
-            year,
-            navs=navs,
-        )
+        return calc_year_return(year, navs=navs)
 
     def _calc_since_inception_return(self, _navs: list = None) -> Dict:
         """计算自 start_year 以来收益（以上年末净值为基准，标准化为1）"""
         navs = _navs if _navs is not None else self.storage.get_nav_history(self.account, days=9999)
-        return FullReportService(
-            account=self.account,
-            storage=self.storage,
-            portfolio=self.portfolio,
-        )._calc_since_inception_return(navs=navs)
+        return calc_since_inception_return(navs=navs, start_year=config.get_start_year())
 
     # ---------- 现金管理 ----------
 
@@ -659,32 +656,105 @@ class PortfolioSkill:
     # ---------- 完整报告 ----------
 
     def generate_report(self, report_type: str = "daily",
-                        record_nav: bool = False, price_timeout: int = 30,
+                        price_timeout: int = 30,
                         snapshot: Optional[Dict[str, Any]] = None,
                         navs: Optional[list] = None,
-                        nav_override: Optional[Any] = None,
-                        overwrite_existing: bool = True,
-                        dry_run: bool = False) -> Dict[str, Any]:
+                        nav_override: Optional[Any] = None) -> Dict[str, Any]:
         """生成日报/月报/年报
 
         Args:
             report_type: "daily" | "monthly" | "yearly"
-            record_nav: 是否自动记录今日净值
             price_timeout: 价格获取超时时间（秒）
         """
+        if snapshot is None and navs is None and nav_override is None:
+            return self._service().generate_report(
+                account=self.account,
+                report_type=report_type,
+                price_timeout=price_timeout,
+            )
+
         return ReportGenerationService(
             build_snapshot_func=self.build_snapshot,
             full_report_func=self.full_report,
-            record_nav_func=self.record_nav,
         ).generate_report(
             report_type=report_type,
-            record_nav=record_nav,
             price_timeout=price_timeout,
             snapshot=snapshot,
             navs=navs,
             nav_override=nav_override,
-            overwrite_existing=overwrite_existing,
+        )
+
+    def daily_report_bundle(
+        self,
+        *,
+        nav_date: Optional[Any] = None,
+        price_timeout: int = 30,
+        dry_run: bool = True,
+        confirm: bool = False,
+        overwrite_existing: bool = True,
+        use_bulk_persist: bool = False,
+        sync_futu_cash_mmf: bool = False,
+        sync_futu_dry_run: Optional[bool] = None,
+        run_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """单账户日报包薄入口：业务流程由 DailyAccountNavService 执行。"""
+        from src.app import DailyAccountNavService
+
+        return DailyAccountNavService(
+            account=self.account,
+            storage=self.storage,
+            portfolio=self.portfolio,
+            read_service=self._read_service(),
+        ).run(
+            nav_date=nav_date,
+            price_timeout=price_timeout,
             dry_run=dry_run,
+            confirm=confirm,
+            overwrite_existing=overwrite_existing,
+            use_bulk_persist=use_bulk_persist,
+            sync_futu_cash_mmf=sync_futu_cash_mmf,
+            sync_futu_dry_run=sync_futu_dry_run,
+            run_id=run_id,
+        )
+
+    def daily_nav_job(
+        self,
+        *,
+        nav_date: Optional[Any] = None,
+        run_date: Optional[Any] = None,
+        accounts: Any = None,
+        account: Optional[str] = None,
+        price_timeout: int = 30,
+        dry_run: bool = True,
+        confirm: bool = False,
+        overwrite_existing: bool = False,
+        use_bulk_persist: bool = False,
+        sync_futu_cash_mmf: bool = False,
+        sync_futu_dry_run: Optional[bool] = None,
+        force_non_business_day: bool = False,
+        run_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """每日净值任务薄入口：单/多账户统一由 DailyNavJobService 执行。"""
+        from src.app import DailyNavJobService
+
+        return DailyNavJobService(
+            storage=self.storage,
+            portfolio=self.portfolio,
+            default_account=self.account,
+        ).run(
+            nav_date=nav_date,
+            run_date=run_date,
+            accounts=accounts,
+            account=account,
+            price_timeout=price_timeout,
+            dry_run=dry_run,
+            confirm=confirm,
+            overwrite_existing=overwrite_existing,
+            use_bulk_persist=use_bulk_persist,
+            sync_futu_cash_mmf=sync_futu_cash_mmf,
+            sync_futu_dry_run=sync_futu_dry_run,
+            force_non_business_day=force_non_business_day,
+            run_id=run_id,
         )
 
     def _merge_daily_top_holdings(self, holdings: list, total_value: float, top_n: int = 10) -> list:
@@ -693,7 +763,7 @@ class PortfolioSkill:
         2) 现金/货基（asset_type= cash/mmf 或代码后缀 -CASH/-MMF）合并为一行
         3) 权重按 total_value 重新计算
         """
-        return FullReportService.merge_daily_top_holdings(
+        return merge_top_holdings(
             holdings=holdings,
             total_value=total_value,
             top_n=top_n,
@@ -708,7 +778,10 @@ class PortfolioSkill:
         Args:
             price_timeout: 价格获取超时时间（秒），默认30秒
         """
-        return FullReportService(
+        if snapshot is None and navs is None:
+            return self._service().full_report(account=self.account, price_timeout=price_timeout)
+
+        return ReportQueryService(
             account=self.account,
             storage=self.storage,
             portfolio=self.portfolio,
@@ -814,8 +887,8 @@ class PortfolioSkill:
     def record_nav(self, price_timeout: int = 30, snapshot: Optional[Dict[str, Any]] = None,
                    overwrite_existing: bool = True, dry_run: bool = True,
                    confirm: bool = False, use_bulk_persist: bool = False,
-                   run_id: Optional[str] = None) -> Dict[str, Any]:
-        """记录今日净值（独立方法，与报告生成解耦）
+                   run_id: Optional[str] = None, nav_date: Optional[Any] = None) -> Dict[str, Any]:
+        """记录今日净值（兼容入口，委托 AccountNavRecorderService）
 
         ⚠️ 安全约束：默认 dry_run=True，避免被日报/调试调用误写入历史。
         只有在 confirm=True 且 dry_run=False 时才会真正写入。
@@ -827,64 +900,29 @@ class PortfolioSkill:
             dry_run: 仅演练，不实际写入（默认 True）
             confirm: 明确确认写入（默认 False）
         """
-        try:
-            snapshot = snapshot or self.build_snapshot(price_timeout_seconds=price_timeout)
-            if run_id:
-                snapshot["run_id"] = run_id
-            valuation = snapshot["valuation"]
-            today = bj_today()
+        class _SnapshotReadService:
+            def build_snapshot(_self, **kwargs):
+                return self.build_snapshot(**kwargs)
 
-            if (not dry_run) and (not confirm):
-                return {
-                    "success": False,
-                    "error": "Refuse to write nav_history without confirm=True (safety guard).",
-                    "date": today.isoformat(),
-                    "run_id": run_id,
-                    "dry_run": dry_run,
-                    "confirm": confirm,
-                }
-
-            nav_record = self.portfolio.record_nav(
-                self.account,
-                valuation=valuation,
-                nav_date=today,
-                persist=True,
-                overwrite_existing=overwrite_existing,
-                dry_run=dry_run,
-                use_bulk_persist=use_bulk_persist,
-                run_id=run_id,
-            )
-            storage_result = None
-            nav_payload = format_nav_payload(nav_record)
-            result = {
-                "success": True,
-                **nav_payload,
-                "date": today.isoformat(),
-                "run_id": run_id,
-                "message": (f"已演练 {today} 净值写入: {nav_record.nav:.4f}" if dry_run else f"已记录 {today} 净值: {nav_record.nav:.4f}")
-            }
-            result["snapshot_time"] = snapshot.get("snapshot_time")
-            result["dry_run"] = dry_run
-            if result.get("run_id") is None:
-                result.pop("run_id", None)
-            if storage_result is not None:
-                result["storage"] = storage_result
-            if valuation.warnings:
-                result["warnings"] = valuation.warnings
-            failure = _snapshot_failure(nav_record)
-            if failure:
-                result.update(failure)
-                result["success"] = False
-                result["status"] = "failed" if dry_run else "partial"
-                result["error"] = failure["snapshot_error"]
-                result["message"] = (
-                    f"净值已演练，但 holdings_snapshot 写入校验失败: {failure['snapshot_error']}"
-                    if dry_run
-                    else f"净值已写入，但 holdings_snapshot 写入失败: {failure['snapshot_error']}"
-                )
-            return result
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        result = AccountNavRecorderService(
+            account=self.account,
+            storage=getattr(self, "storage", None),
+            portfolio=self.portfolio,
+            read_service=_SnapshotReadService(),
+        ).record(
+            nav_date=nav_date,
+            price_timeout=price_timeout,
+            snapshot=snapshot,
+            dry_run=dry_run,
+            confirm=confirm,
+            overwrite_existing=overwrite_existing,
+            use_bulk_persist=use_bulk_persist,
+            run_id=run_id,
+        )
+        nav_result = result.get("nav_result")
+        if isinstance(nav_result, dict):
+            return nav_result
+        return result
 
     def init_nav_history(
         self,
@@ -894,100 +932,27 @@ class PortfolioSkill:
         confirm: bool = False,
         use_bulk_persist: bool = False,
     ) -> Dict[str, Any]:
-        """为新账户初始化第一条 nav_history。
-
-        该入口只服务“已有 holdings、尚无 nav_history”的账户：
-        - 若账户已有任意 nav_history，直接拒绝，避免污染历史。
-        - 第一条记录会自然得到 nav=1.0、shares=total_value。
-        - 默认 dry_run=True；真实写入必须 dry_run=False 且 confirm=True。
-        """
-        try:
-            nav_date = parse_date(date_str) if date_str else bj_today()
-
-            if (not dry_run) and (not confirm):
-                return {
-                    "success": False,
-                    "error": "Refuse to initialize nav_history without confirm=True (safety guard).",
-                    "account": self.account,
-                    "date": nav_date.isoformat(),
-                    "dry_run": dry_run,
-                    "confirm": confirm,
-                }
-
-            existing_navs = self.storage.get_nav_history(self.account, days=9999)
-            if existing_navs:
-                latest = max(existing_navs, key=lambda n: n.date)
-                earliest = min(existing_navs, key=lambda n: n.date)
-                return {
-                    "success": False,
-                    "error": "nav_history already exists; initialization is only for empty accounts.",
-                    "account": self.account,
-                    "existing_count": len(existing_navs),
-                    "earliest_date": earliest.date.isoformat(),
-                    "latest_date": latest.date.isoformat(),
-                    "dry_run": dry_run,
-                }
-
-            snapshot = self.build_snapshot()
-            valuation = snapshot["valuation"]
-            if valuation.total_value_cny <= 0:
-                return {
-                    "success": False,
-                    "error": "Cannot initialize nav_history with non-positive total_value.",
-                    "account": self.account,
-                    "date": nav_date.isoformat(),
-                    "total_value": valuation.total_value_cny,
-                    "warnings": valuation.warnings,
-                }
-
-            nav_record = self.portfolio.record_nav(
-                self.account,
-                valuation=valuation,
-                nav_date=nav_date,
-                persist=True,
-                overwrite_existing=False,
-                dry_run=dry_run,
-                use_bulk_persist=use_bulk_persist,
-            )
-
-            result = {
-                "success": True,
-                "account": self.account,
-                "date": nav_date.isoformat(),
-                "dry_run": dry_run,
-                "nav": nav_record.nav,
-                "shares": nav_record.shares,
-                "total_value": nav_record.total_value,
-                "cash_value": nav_record.cash_value,
-                "stock_value": nav_record.stock_value,
-                "fund_value": nav_record.fund_value,
-                "snapshot_time": snapshot.get("snapshot_time"),
-                "message": (
-                    f"已演练初始化 {self.account} 的 nav_history: {nav_record.nav:.4f}"
-                    if dry_run
-                    else f"已初始化 {self.account} 的 nav_history: {nav_record.nav:.4f}"
-                ),
-            }
-            if valuation.warnings:
-                result["warnings"] = valuation.warnings
-            failure = _snapshot_failure(nav_record)
-            if failure:
-                result.update(failure)
-                result["success"] = False
-                result["status"] = "failed" if dry_run else "partial"
-                result["error"] = failure["snapshot_error"]
-                result["message"] = (
-                    f"初始化已演练，但 holdings_snapshot 写入校验失败: {failure['snapshot_error']}"
-                    if dry_run
-                    else f"nav_history 已初始化，但 holdings_snapshot 写入失败: {failure['snapshot_error']}"
-                )
-            return result
-        except Exception as e:
-            return {"success": False, "error": str(e), "account": self.account}
+        """为新账户初始化第一条 nav_history 的兼容入口。"""
+        return self._service().init_nav_history(
+            account=self.account,
+            date_str=date_str,
+            price_timeout=price_timeout,
+            dry_run=dry_run,
+            confirm=confirm,
+            use_bulk_persist=use_bulk_persist,
+        )
 
     def _calc_risk_metrics(self, navs) -> tuple:
         """计算风险指标：波动率和最大回撤"""
-        return FullReportService.calc_risk_metrics(navs)
+        return calc_risk_metrics(navs)
+
+    def _service(self) -> PortfolioService:
+        return PortfolioService(
+            storage=self.storage,
+            portfolio=self.portfolio,
+            price_fetcher=self.price_fetcher,
+            default_account=self.account,
+        )
 
     # ---------- 价格查询 ----------
 
@@ -1171,6 +1136,14 @@ def list_accounts(include_default: bool = True) -> Dict:
     """列出当前数据集中出现过的账户。"""
     return get_skill().list_accounts(include_default=include_default)
 
+def list_nav_accounts(include_default: bool = False) -> Dict:
+    """列出应参与每日净值任务的当前持仓账户。"""
+    return get_skill().list_nav_accounts(include_default=include_default)
+
+def audit_nav_history_duplicates(account: str = None) -> Dict:
+    """审计 nav_history 同账户同日期重复记录。"""
+    return get_skill(account).audit_nav_history_duplicates(account=account)
+
 # 净值收益
 def get_nav(days: int = 30, account: str = None) -> Dict:
     """账户净值
@@ -1202,12 +1175,11 @@ def sync_futu_cash_mmf(account: str = None, **kwargs) -> Dict:
     return get_skill(account).sync_futu_cash_mmf(**kwargs)
 
 # 报告
-def generate_report(report_type: str = "daily", record_nav: bool = False, price_timeout: int = 30,
+def generate_report(report_type: str = "daily", price_timeout: int = 30,
                     navs=None, nav_override: Optional[Any] = None, account: str = None) -> Dict:
     """生成日报/月报/年报"""
     return get_skill(account).generate_report(
         report_type=report_type,
-        record_nav=record_nav,
         price_timeout=price_timeout,
         navs=navs,
         nav_override=nav_override,
@@ -1254,7 +1226,8 @@ def multi_account_overview(accounts: Any = None, price_timeout: int = 30,
 
 def record_nav(price_timeout: int = 30, dry_run: bool = True, confirm: bool = False,
                overwrite_existing: bool = True, use_bulk_persist: bool = False,
-               account: str = None, run_id: Optional[str] = None) -> Dict:
+               account: str = None, run_id: Optional[str] = None,
+               nav_date: Optional[Any] = None) -> Dict:
     """记录今日净值
 
     ⚠️ 默认 dry_run=True，避免误写入。
@@ -1266,6 +1239,66 @@ def record_nav(price_timeout: int = 30, dry_run: bool = True, confirm: bool = Fa
         confirm=confirm,
         overwrite_existing=overwrite_existing,
         use_bulk_persist=use_bulk_persist,
+        run_id=run_id,
+        nav_date=nav_date,
+    )
+
+
+def daily_report_bundle(
+    account: str = None,
+    nav_date: Optional[Any] = None,
+    price_timeout: int = 30,
+    dry_run: bool = True,
+    confirm: bool = False,
+    overwrite_existing: bool = True,
+    use_bulk_persist: bool = False,
+    sync_futu_cash_mmf: bool = False,
+    sync_futu_dry_run: Optional[bool] = None,
+    run_id: Optional[str] = None,
+) -> Dict:
+    """生成单账户每日净值/分布/日报包。"""
+    return get_skill(account).daily_report_bundle(
+        nav_date=nav_date,
+        price_timeout=price_timeout,
+        dry_run=dry_run,
+        confirm=confirm,
+        overwrite_existing=overwrite_existing,
+        use_bulk_persist=use_bulk_persist,
+        sync_futu_cash_mmf=sync_futu_cash_mmf,
+        sync_futu_dry_run=sync_futu_dry_run,
+        run_id=run_id,
+    )
+
+
+def daily_nav_job(
+    account: str = None,
+    accounts: Any = None,
+    nav_date: Optional[Any] = None,
+    run_date: Optional[Any] = None,
+    price_timeout: int = 30,
+    dry_run: bool = True,
+    confirm: bool = False,
+    overwrite_existing: bool = False,
+    use_bulk_persist: bool = False,
+    sync_futu_cash_mmf: bool = False,
+    sync_futu_dry_run: Optional[bool] = None,
+    force_non_business_day: bool = False,
+    run_id: Optional[str] = None,
+) -> Dict:
+    """运行每日净值任务；单/多账户统一入口。"""
+    return get_skill(account).daily_nav_job(
+        account=account,
+        accounts=accounts,
+        nav_date=nav_date,
+        run_date=run_date,
+        price_timeout=price_timeout,
+        dry_run=dry_run,
+        confirm=confirm,
+        overwrite_existing=overwrite_existing,
+        use_bulk_persist=use_bulk_persist,
+        sync_futu_cash_mmf=sync_futu_cash_mmf,
+        sync_futu_dry_run=sync_futu_dry_run,
+        force_non_business_day=force_non_business_day,
         run_id=run_id,
     )
 

@@ -1,5 +1,6 @@
 # 数据验证
 pydantic>=2.0.0
+PyYAML>=6.0.0
 
 # HTTP Service（src/service/http.py 中使用）
 fastapi>=0.115.0

@@ -5,7 +5,6 @@ import io
 import json
 from pathlib import Path
 import sys
-import types
 from contextlib import redirect_stdout
 from tempfile import TemporaryDirectory
 
@@ -19,26 +18,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 def _module_ast(path: str) -> ast.Module:
     return ast.parse((REPO_ROOT / path).read_text(encoding="utf-8"))
-
-
-class _SysModulesPatch:
-    def __init__(self, name, value):
-        self.name = name
-        self.value = value
-        self.old = None
-        self.had_old = False
-
-    def __enter__(self):
-        self.had_old = self.name in sys.modules
-        self.old = sys.modules.get(self.name)
-        sys.modules[self.name] = self.value
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        if self.had_old:
-            sys.modules[self.name] = self.old
-        else:
-            sys.modules.pop(self.name, None)
 
 
 def test_generate_daily_report_html_is_renderer_only():
@@ -65,62 +44,55 @@ def test_generate_daily_report_html_is_renderer_only():
     assert "get_nav_history" not in forbidden_calls
 
 
-def test_publish_daily_report_returns_renderer_bundle_shape():
+def test_publish_daily_report_direct_path_uses_application_bundle_service():
     tree = _module_ast("scripts/publish_daily_report.py")
     build_report = next(
         node for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name == "_build_report_data_direct"
     )
-    return_dicts = [node.value for node in ast.walk(build_report) if isinstance(node, ast.Return) and isinstance(node.value, ast.Dict)]
-    keys = {
-        key.value
-        for ret in return_dicts
-        for key in ret.keys
-        if isinstance(key, ast.Constant)
-    }
+    called_names = set()
+    imported_names = set()
+    for node in ast.walk(build_report):
+        if isinstance(node, ast.ImportFrom):
+            imported_names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name):
+                called_names.add(func.id)
+            elif isinstance(func, ast.Attribute):
+                called_names.add(func.attr)
 
-    assert {"snapshot", "report", "nav_result", "nav_snapshot"}.issubset(keys)
+    assert "PortfolioService" in imported_names
+    assert "daily_report_bundle" in called_names
+    assert "get_skill" not in called_names
+    assert "build_snapshot" not in called_names
+    assert "record_nav" not in called_names
+    assert "generate_report" not in called_names
 
 
 def test_publish_daily_report_build_report_data_passes_account():
+    import src.service.application as app_module
+
     calls = []
 
-    class FakeStorage:
-        def get_nav_history(self, account, days):
-            calls.append(("get_nav_history", account, days))
-            return [{"date": "2026-04-20", "nav": 1.0}]
-
-    class FakeSkill:
-        def __init__(self, account):
-            self.account = account
-            self.storage = FakeStorage()
-
-        def build_snapshot(self, **kwargs):
-            calls.append(("build_snapshot", self.account, kwargs))
-            return {"valuation": None}
-
-        def record_nav(self, **kwargs):
-            calls.append(("record_nav", self.account, kwargs["dry_run"], kwargs.get("run_id")))
+    class FakePortfolioService:
+        def daily_report_bundle(self, **kwargs):
+            calls.append(("daily_report_bundle", kwargs))
             return {
                 "success": True,
-                "date": "2026-04-20",
-                "nav": 1.23,
-                "total_value": 123.0,
-                "pnl": 4.5,
+                "account": kwargs["account"],
+                "run_id": kwargs["run_id"],
+                "snapshot": {"run_id": kwargs["run_id"]},
+                "report": {"success": True, "date": "2026-04-20", "run_id": kwargs["run_id"]},
+                "nav_result": {"success": True, "nav": 1.23},
+                "nav_snapshot": {"success": True},
+                "stage_timings": {},
+                "futu_sync_result": None,
             }
 
-        def generate_report(self, **kwargs):
-            calls.append(("generate_report", self.account, kwargs["report_type"], kwargs.get("nav_override", {}).get("nav")))
-            return {"success": True, "date": "2026-04-20"}
-
-        def get_nav(self, **kwargs):
-            calls.append(("get_nav", self.account, kwargs["days"]))
-            return {"success": True}
-
-    fake_skill_api = types.SimpleNamespace(
-        get_skill=lambda account=None: FakeSkill(account or "default")
-    )
-    with _SysModulesPatch("skill_api", fake_skill_api):
+    old_service = app_module.PortfolioService
+    try:
+        app_module.PortfolioService = FakePortfolioService
         bundle = publish_daily_report.build_report_data(
             price_timeout=5,
             dry_run=True,
@@ -128,49 +100,45 @@ def test_publish_daily_report_build_report_data_passes_account():
             no_service=True,
             run_id="run-report-1",
         )
+    finally:
+        app_module.PortfolioService = old_service
 
     assert bundle["account"] == "alice"
     assert bundle["run_id"] == "run-report-1"
     assert bundle["snapshot"]["run_id"] == "run-report-1"
     assert bundle["report"]["run_id"] == "run-report-1"
-    assert ("build_snapshot", "alice", {"price_timeout_seconds": 5}) in calls
-    assert ("record_nav", "alice", True, "run-report-1") in calls
-    assert ("generate_report", "alice", "daily", 1.23) in calls
-    assert ("get_nav", "alice", 2) in calls
+    assert calls == [
+        ("daily_report_bundle", {
+            "account": "alice",
+            "price_timeout": 5,
+            "dry_run": True,
+            "confirm": False,
+            "use_bulk_persist": False,
+            "sync_futu_cash_mmf": False,
+            "sync_futu_dry_run": True,
+            "run_id": "run-report-1",
+        }),
+    ]
 
 
 def test_publish_daily_report_futu_sync_defaults_to_dry_run():
+    import src.service.application as app_module
+
     calls = []
 
-    class FakeStorage:
-        def get_nav_history(self, account, days):
-            return []
+    class FakePortfolioService:
+        def daily_report_bundle(self, **kwargs):
+            calls.append(("daily_report_bundle", kwargs))
+            return {
+                "success": True,
+                "account": kwargs["account"],
+                "run_id": kwargs["run_id"],
+                "futu_sync_result": {"success": True, "dry_run": kwargs["sync_futu_dry_run"]},
+            }
 
-    class FakeSkill:
-        def __init__(self, account):
-            self.account = account
-            self.storage = FakeStorage()
-
-        def sync_futu_cash_mmf(self, dry_run):
-            calls.append(("sync_futu_cash_mmf", dry_run))
-            return {"success": True, "dry_run": dry_run}
-
-        def build_snapshot(self, **_kwargs):
-            return {"valuation": None}
-
-        def record_nav(self, **kwargs):
-            return {"success": True}
-
-        def generate_report(self, **kwargs):
-            return {"success": True, "date": "2026-04-20"}
-
-        def get_nav(self, **kwargs):
-            return {"success": True}
-
-    fake_skill_api = types.SimpleNamespace(
-        get_skill=lambda account=None: FakeSkill(account or "default")
-    )
-    with _SysModulesPatch("skill_api", fake_skill_api):
+    old_service = app_module.PortfolioService
+    try:
+        app_module.PortfolioService = FakePortfolioService
         bundle = publish_daily_report.build_report_data(
             price_timeout=5,
             dry_run=True,
@@ -178,9 +146,20 @@ def test_publish_daily_report_futu_sync_defaults_to_dry_run():
             account="alice",
             no_service=True,
         )
+    finally:
+        app_module.PortfolioService = old_service
 
     assert bundle["futu_sync_result"] == {"success": True, "dry_run": True}
-    assert calls == [("sync_futu_cash_mmf", True)]
+    assert calls == [("daily_report_bundle", {
+        "account": "alice",
+        "price_timeout": 5,
+        "dry_run": True,
+        "confirm": False,
+        "use_bulk_persist": False,
+        "sync_futu_cash_mmf": True,
+        "sync_futu_dry_run": True,
+        "run_id": bundle["run_id"],
+    })]
 
 
 def test_publish_daily_report_prefers_service_bundle():

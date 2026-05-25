@@ -8,11 +8,7 @@ from src.models import AssetType
 from src.service import PortfolioService
 
 
-def test_portfolio_service_generate_report_uses_direct_app_service_not_backend():
-    backend = SimpleNamespace(
-        full_report=Mock(side_effect=AssertionError("backend should not be called")),
-        generate_report=Mock(side_effect=AssertionError("backend should not be called")),
-    )
+def test_portfolio_service_generate_report_uses_direct_app_service():
     storage = SimpleNamespace(get_nav_history=Mock(return_value=[]))
     portfolio = SimpleNamespace(reporting_service=object())
     snapshot = _snapshot(total_value=150, cash_ratio=0.2, stock_ratio=0.7, fund_ratio=0.1)
@@ -22,7 +18,6 @@ def test_portfolio_service_generate_report_uses_direct_app_service_not_backend()
     )
 
     service = PortfolioService(
-        backend=backend,
         storage=storage,
         portfolio=portfolio,
         read_service_factory=lambda **_kwargs: read_service,
@@ -35,13 +30,11 @@ def test_portfolio_service_generate_report_uses_direct_app_service_not_backend()
     assert result["report_type"] == "月报"
     assert result["snapshot_time"] == "2026-05-23T12:00:00"
     assert result["monthly_return"]["success"] is False
-    backend.full_report.assert_not_called()
-    backend.generate_report.assert_not_called()
     read_service.build_snapshot.assert_called_once_with(price_timeout_seconds=11)
     read_service.get_distribution.assert_called_once_with(holdings_data=snapshot["holdings_data"])
 
 
-def test_portfolio_service_list_accounts_uses_direct_account_service_not_backend():
+def test_portfolio_service_list_accounts_uses_direct_account_service():
     class FakeClient:
         def list_records(self, table, **_kwargs):
             records = {
@@ -60,13 +53,12 @@ def test_portfolio_service_list_accounts_uses_direct_account_service_not_backend
             SimpleNamespace(account=""),
         ]
 
-    backend = SimpleNamespace(list_accounts=Mock(side_effect=AssertionError("backend should not be called")))
     storage = SimpleNamespace(
         client=FakeClient(),
         get_holdings=Mock(side_effect=get_holdings),
         _from_feishu_fields=lambda fields, _table: dict(fields),
     )
-    service = PortfolioService(backend=backend, storage=storage, default_account="default")
+    service = PortfolioService(storage=storage, default_account="default")
 
     result = service.list_accounts()
 
@@ -75,14 +67,9 @@ def test_portfolio_service_list_accounts_uses_direct_account_service_not_backend
     assert result["accounts"] == ["alice", "bob", "carol", "dave", "default"]
     assert result["sources"]["holdings"] == ["alice", "bob"]
     assert result["sources"]["cash_flow"] == ["carol"]
-    backend.list_accounts.assert_not_called()
 
 
-def test_portfolio_service_multi_account_overview_uses_direct_account_service_not_backend_overview():
-    backend = SimpleNamespace(
-        multi_account_overview=Mock(side_effect=AssertionError("backend should not be called")),
-        full_report=Mock(side_effect=AssertionError("backend should not be called")),
-    )
+def test_portfolio_service_multi_account_overview_uses_direct_account_service():
     snapshots = {
         "alice": _snapshot(total_value=100, cash_ratio=0.2, stock_ratio=0.7, fund_ratio=0.1),
         "bob": _snapshot(total_value=200, cash_ratio=0.5, stock_ratio=0.25, fund_ratio=0.25),
@@ -98,7 +85,6 @@ def test_portfolio_service_multi_account_overview_uses_direct_account_service_no
         )
 
     service = PortfolioService(
-        backend=backend,
         storage=storage,
         portfolio=portfolio,
         read_service_factory=read_service_factory,
@@ -121,20 +107,12 @@ def test_portfolio_service_multi_account_overview_uses_direct_account_service_no
     assert result["summary"]["stock_value"] == 120
     assert result["summary"]["fund_value"] == 60
     assert "report" in result["items"][0]
-    backend.multi_account_overview.assert_not_called()
-    backend.full_report.assert_not_called()
     assert storage.get_nav_history.call_args_list[0].args == ("alice",)
     assert storage.get_nav_history.call_args_list[1].args == ("bob",)
 
 
 def test_portfolio_service_multi_account_overview_exposes_error_when_all_accounts_fail():
-    backend = SimpleNamespace(
-        multi_account_overview=Mock(side_effect=AssertionError("backend should not be called")),
-        full_report=Mock(side_effect=AssertionError("backend should not be called")),
-    )
-
     service = PortfolioService(
-        backend=backend,
         storage=SimpleNamespace(),
         portfolio=SimpleNamespace(reporting_service=object()),
         read_service_factory=lambda **_kwargs: SimpleNamespace(
@@ -149,12 +127,9 @@ def test_portfolio_service_multi_account_overview_exposes_error_when_all_account
     assert result["status"] == "failed"
     assert result["error"] == "default: missing holdings table"
     assert result["errors"] == [{"account": "default", "error": "missing holdings table"}]
-    backend.multi_account_overview.assert_not_called()
-    backend.full_report.assert_not_called()
 
 
-def test_portfolio_service_get_nav_uses_direct_storage_path_not_backend():
-    backend = SimpleNamespace(get_nav=Mock(side_effect=AssertionError("backend should not be called")))
+def test_portfolio_service_get_nav_uses_direct_storage_path():
     navs = [
         SimpleNamespace(
             date=date(2026, 5, 22),
@@ -199,7 +174,7 @@ def test_portfolio_service_get_nav_uses_direct_storage_path_not_backend():
     ]
     storage = SimpleNamespace(get_nav_history=Mock(return_value=navs))
 
-    service = PortfolioService(backend=backend, storage=storage)
+    service = PortfolioService(storage=storage)
 
     result = service.get_nav(account="alice", days=7)
 
@@ -213,19 +188,16 @@ def test_portfolio_service_get_nav_uses_direct_storage_path_not_backend():
         {"date": "2026-05-22", "nav": 1.1, "share_change": 0.0},
         {"date": "2026-05-23", "nav": 1.2, "share_change": 8.0},
     ]
-    backend.get_nav.assert_not_called()
     storage.get_nav_history.assert_called_once_with("alice", days=7)
 
 
-def test_portfolio_service_get_holdings_uses_direct_read_service_not_backend():
-    backend = SimpleNamespace(get_holdings=Mock(side_effect=AssertionError("backend should not be called")))
+def test_portfolio_service_get_holdings_uses_direct_read_service():
     portfolio = SimpleNamespace(reporting_service=object())
     read_service = SimpleNamespace(
         get_holdings=Mock(return_value={"success": True, "holdings": [{"code": "AAPL"}]})
     )
 
     service = PortfolioService(
-        backend=backend,
         storage=object(),
         portfolio=portfolio,
         read_service_factory=lambda **kwargs: read_service,
@@ -239,7 +211,6 @@ def test_portfolio_service_get_holdings_uses_direct_read_service_not_backend():
     )
 
     assert result == {"success": True, "holdings": [{"code": "AAPL"}]}
-    backend.get_holdings.assert_not_called()
     read_service.get_holdings.assert_called_once_with(
         include_cash=False,
         group_by_market=True,
@@ -247,8 +218,7 @@ def test_portfolio_service_get_holdings_uses_direct_read_service_not_backend():
     )
 
 
-def test_portfolio_service_get_cash_uses_direct_cash_service_not_backend():
-    backend = SimpleNamespace(get_cash=Mock(side_effect=AssertionError("backend should not be called")))
+def test_portfolio_service_get_cash_uses_direct_cash_service():
     storage = SimpleNamespace(get_holdings=Mock(return_value=[
         SimpleNamespace(
             asset_id="CNY-CASH",
@@ -259,7 +229,7 @@ def test_portfolio_service_get_cash_uses_direct_cash_service_not_backend():
         )
     ]))
 
-    service = PortfolioService(backend=backend, storage=storage)
+    service = PortfolioService(storage=storage)
 
     result = service.get_cash(account="alice")
 
@@ -269,12 +239,10 @@ def test_portfolio_service_get_cash_uses_direct_cash_service_not_backend():
         "items": [{"code": "CNY-CASH", "name": "人民币现金", "amount": 100.0, "currency": "CNY", "type": "cash"}],
         "count": 1,
     }
-    backend.get_cash.assert_not_called()
     storage.get_holdings.assert_called_once_with(account="alice")
 
 
-def test_portfolio_service_record_nav_uses_direct_portfolio_path_not_backend():
-    backend = SimpleNamespace(record_nav=Mock(side_effect=AssertionError("backend should not be called")))
+def test_portfolio_service_record_nav_uses_direct_portfolio_path():
     valuation = SimpleNamespace(warnings=["price warning"])
     snapshot = {"valuation": valuation, "snapshot_time": "2026-05-23T12:00:00"}
     nav_record = SimpleNamespace(nav=1.2345, total_value=1234.5, shares=1000.0, details={})
@@ -285,7 +253,6 @@ def test_portfolio_service_record_nav_uses_direct_portfolio_path_not_backend():
     read_service = SimpleNamespace(build_snapshot=Mock(return_value=snapshot))
 
     service = PortfolioService(
-        backend=backend,
         storage=object(),
         portfolio=portfolio,
         read_service_factory=lambda **_kwargs: read_service,
@@ -307,7 +274,6 @@ def test_portfolio_service_record_nav_uses_direct_portfolio_path_not_backend():
     assert result["nav"] == 1.2345
     assert result["snapshot_time"] == "2026-05-23T12:00:00"
     assert result["warnings"] == ["price warning"]
-    backend.record_nav.assert_not_called()
     read_service.build_snapshot.assert_called_once_with(price_timeout_seconds=8)
     portfolio.record_nav.assert_called_once()
     assert portfolio.record_nav.call_args.args[0] == "alice"
@@ -319,8 +285,54 @@ def test_portfolio_service_record_nav_uses_direct_portfolio_path_not_backend():
     assert portfolio.record_nav.call_args.kwargs["run_id"] == "run-nav-1"
 
 
+def test_portfolio_service_init_nav_history_uses_direct_app_service():
+    valuation = SimpleNamespace(total_value_cny=1000.0, warnings=[])
+    snapshot = {"valuation": valuation, "snapshot_time": "2026-05-22T12:00:00"}
+    nav_record = SimpleNamespace(
+        nav=1.0,
+        shares=1000.0,
+        total_value=1000.0,
+        cash_value=200.0,
+        stock_value=800.0,
+        fund_value=0.0,
+        details={},
+    )
+    storage = SimpleNamespace(get_nav_history=Mock(return_value=[]))
+    portfolio = SimpleNamespace(
+        reporting_service=object(),
+        record_nav=Mock(return_value=nav_record),
+    )
+    read_service = SimpleNamespace(build_snapshot=Mock(return_value=snapshot))
+
+    service = PortfolioService(
+        storage=storage,
+        portfolio=portfolio,
+        read_service_factory=lambda **_kwargs: read_service,
+    )
+
+    result = service.init_nav_history(
+        account="alice",
+        date_str="2026-05-22",
+        price_timeout=8,
+        dry_run=False,
+        confirm=True,
+        use_bulk_persist=True,
+    )
+
+    assert result["success"] is True
+    assert result["account"] == "alice"
+    assert result["date"] == "2026-05-22"
+    storage.get_nav_history.assert_called_once_with("alice", days=9999)
+    read_service.build_snapshot.assert_called_once_with(price_timeout_seconds=8)
+    portfolio.record_nav.assert_called_once()
+    assert portfolio.record_nav.call_args.args[0] == "alice"
+    assert portfolio.record_nav.call_args.kwargs["valuation"] is valuation
+    assert portfolio.record_nav.call_args.kwargs["dry_run"] is False
+    assert portfolio.record_nav.call_args.kwargs["overwrite_existing"] is False
+    assert portfolio.record_nav.call_args.kwargs["use_bulk_persist"] is True
+
+
 def test_portfolio_service_daily_report_bundle_reuses_one_snapshot():
-    backend = SimpleNamespace(daily_report_bundle=Mock(side_effect=AssertionError("backend should not be called")))
     valuation = SimpleNamespace(
         total_value_cny=150.0,
         cash_value_cny=30.0,
@@ -379,7 +391,6 @@ def test_portfolio_service_daily_report_bundle_reuses_one_snapshot():
     )
 
     service = PortfolioService(
-        backend=backend,
         storage=storage,
         portfolio=portfolio,
         read_service_factory=lambda **_kwargs: read_service,
@@ -412,7 +423,6 @@ def test_portfolio_service_daily_report_bundle_reuses_one_snapshot():
     assert result["report"]["mtd_nav_change"] == 0.05
     assert result["report"]["cagr_pct"] == 8.8
     assert result["nav_snapshot"]["latest"]["nav"] == 1.5
-    backend.daily_report_bundle.assert_not_called()
     read_service.build_snapshot.assert_called_once_with(price_timeout_seconds=8)
     portfolio.record_nav.assert_called_once()
     assert portfolio.record_nav.call_args.args[0] == "alice"
@@ -425,13 +435,11 @@ def test_portfolio_service_daily_report_bundle_reuses_one_snapshot():
 
 
 def test_portfolio_service_daily_report_bundle_returns_failure_payload_on_snapshot_error():
-    backend = SimpleNamespace(daily_report_bundle=Mock(side_effect=AssertionError("backend should not be called")))
     read_service = SimpleNamespace(
         build_snapshot=Mock(side_effect=ValueError("missing holdings table"))
     )
 
     service = PortfolioService(
-        backend=backend,
         storage=SimpleNamespace(),
         portfolio=SimpleNamespace(record_nav=Mock(), reporting_service=object()),
         read_service_factory=lambda **_kwargs: read_service,
@@ -450,16 +458,13 @@ def test_portfolio_service_daily_report_bundle_returns_failure_payload_on_snapsh
     assert result["run_id"] == "run-report-failure"
     assert result["dry_run"] is True
     assert result["confirm"] is False
-    backend.daily_report_bundle.assert_not_called()
 
 
-def test_portfolio_service_get_distribution_uses_direct_read_service_not_backend():
-    backend = SimpleNamespace(get_distribution=Mock(side_effect=AssertionError("backend should not be called")))
+def test_portfolio_service_get_distribution_uses_direct_read_service():
     portfolio = SimpleNamespace(reporting_service=object())
     read_service = SimpleNamespace(get_distribution=Mock(return_value={"success": True, "total_value": 10}))
 
     service = PortfolioService(
-        backend=backend,
         storage=object(),
         portfolio=portfolio,
         read_service_factory=lambda **kwargs: read_service,
@@ -468,12 +473,10 @@ def test_portfolio_service_get_distribution_uses_direct_read_service_not_backend
     result = service.get_distribution(account="alice")
 
     assert result == {"success": True, "total_value": 10}
-    backend.get_distribution.assert_not_called()
     read_service.get_distribution.assert_called_once_with()
 
 
-def test_portfolio_service_full_report_uses_direct_app_service_not_backend():
-    backend = SimpleNamespace(full_report=Mock(side_effect=AssertionError("backend should not be called")))
+def test_portfolio_service_full_report_uses_direct_app_service():
     storage = SimpleNamespace(get_nav_history=Mock(return_value=[]))
     portfolio = SimpleNamespace(reporting_service=object())
     snapshot = _snapshot(total_value=150, cash_ratio=0.2, stock_ratio=0.7, fund_ratio=0.1)
@@ -505,7 +508,6 @@ def test_portfolio_service_full_report_uses_direct_app_service_not_backend():
     )
 
     service = PortfolioService(
-        backend=backend,
         storage=storage,
         portfolio=portfolio,
         read_service_factory=lambda **_kwargs: read_service,
@@ -517,7 +519,6 @@ def test_portfolio_service_full_report_uses_direct_app_service_not_backend():
     assert result["overview"] == {"total_value": 150, "cash_ratio": 0.2, "stock_ratio": 0.7, "fund_ratio": 0.1}
     assert result["distribution"] == [{"type": "stock", "value": 100.0, "ratio": 2 / 3}]
     assert [row["code"] for row in result["top_holdings"]] == ["AAPL", "CASH+MMF"]
-    backend.full_report.assert_not_called()
     read_service.build_snapshot.assert_called_once_with(price_timeout_seconds=12)
     read_service.get_distribution.assert_called_once_with(holdings_data=snapshot["holdings_data"])
     storage.get_nav_history.assert_called_once_with("alice", days=9999)

@@ -40,11 +40,19 @@ def test_service_client_builds_local_request_urls():
         client_module.urlopen = fake_urlopen
         client = PortfolioServiceClient(base_url="http://127.0.0.1:8765/", timeout=1.25)
         result = client.list_accounts(include_default=False)
+        nav_accounts = client.list_nav_accounts(include_default=True)
+        duplicates = client.audit_nav_history_duplicates(account="alice")
     finally:
         client_module.urlopen = old_urlopen
 
     assert result["accounts"] == ["alice"]
-    assert calls == [("http://127.0.0.1:8765/accounts?include_default=False", 1.25)]
+    assert nav_accounts["accounts"] == ["alice"]
+    assert duplicates["accounts"] == ["alice"]
+    assert calls == [
+        ("http://127.0.0.1:8765/accounts?include_default=False", 1.25),
+        ("http://127.0.0.1:8765/accounts/nav?include_default=True", 1.25),
+        ("http://127.0.0.1:8765/nav/duplicates?account=alice", 1.25),
+    ]
 
 
 def test_service_client_uses_query_routes_for_account_values():
@@ -166,6 +174,61 @@ def test_service_client_posts_daily_report_bundle_payload():
             "sync_futu_cash_mmf": True,
             "sync_futu_dry_run": False,
             "run_id": "run-report-1",
+        },
+        2.0,
+    )]
+
+
+def test_service_client_posts_daily_nav_job_payload():
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        calls.append((
+            request.full_url,
+            request.get_method(),
+            json.loads(request.data.decode("utf-8")),
+            timeout,
+        ))
+        return FakeResponse({"success": True, "status": "completed"})
+
+    old_urlopen = client_module.urlopen
+    try:
+        client_module.urlopen = fake_urlopen
+        client = PortfolioServiceClient(base_url="http://127.0.0.1:8765", timeout=2.0)
+        result = client.daily_nav_job(
+            accounts=["alice", "bob"],
+            nav_date="2026-05-22",
+            run_date="2026-05-23",
+            price_timeout=9,
+            dry_run=False,
+            confirm=True,
+            overwrite_existing=True,
+            use_bulk_persist=True,
+            sync_futu_cash_mmf=True,
+            sync_futu_dry_run=False,
+            force_non_business_day=True,
+            run_id="run-job-1",
+        )
+    finally:
+        client_module.urlopen = old_urlopen
+
+    assert result["status"] == "completed"
+    assert calls == [(
+        "http://127.0.0.1:8765/daily-nav-job",
+        "POST",
+        {
+            "price_timeout": 9,
+            "dry_run": False,
+            "confirm": True,
+            "overwrite_existing": True,
+            "use_bulk_persist": True,
+            "sync_futu_cash_mmf": True,
+            "sync_futu_dry_run": False,
+            "force_non_business_day": True,
+            "accounts": ["alice", "bob"],
+            "nav_date": "2026-05-22",
+            "run_date": "2026-05-23",
+            "run_id": "run-job-1",
         },
         2.0,
     )]

@@ -20,7 +20,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from skill_api import PortfolioSkill
+from src import config
+from src.storage import create_storage
 
 
 def main() -> int:
@@ -35,9 +36,8 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    ps = PortfolioSkill()
-    account = args.account or ps.account
-    storage = ps.storage
+    account = args.account or config.get_account()
+    storage = create_storage(healthcheck=False)
 
     navs = storage.get_nav_history(account, days=9999)
 

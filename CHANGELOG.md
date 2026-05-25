@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.1.2 - 2026-05-25
+
+- Added the unified `daily-job` workflow for single-account and multi-account
+  NAV recording, including previous-business-day date resolution.
+- Added duplicate `nav_history` auditing and write blocking to prevent repeated
+  account/date rows.
+- Added account NAV recording, daily NAV job, report payload, NAV preview, and
+  NAV initialization application services.
+- Moved Feishu table read/write behavior behind table-level repositories and
+  kept mixins as thin storage facades.
+- Removed the obsolete full-report alias layer and kept `skill_api.py` /
+  `PortfolioSkill` as compatibility adapters only.
+- Added YAML-based Linux installation and systemd timer support for scheduled
+  daily NAV runs.
+- Rewrote README, runbooks, service, architecture, dependency graph, schema,
+  deployment, and Skill docs around the CLI + local service product boundary.
+- Kept stale daily-report public URL publishing disabled; reports now document
+  local artifacts with `public_url=null` and `public_url_status=disabled`.
+- Expanded test coverage for config, CLI fallback behavior, service HTTP/client
+  endpoints, daily NAV services, Feishu NAV repositories, Linux install, and
+  report query boundaries.
+
 ## 0.1.1 - 2026-05-24
 
 - Upgraded the portfolio CLI/service workflow around daily NAV calculation.

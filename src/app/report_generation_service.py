@@ -14,41 +14,23 @@ class ReportGenerationService:
         *,
         build_snapshot_func: Callable[..., Dict[str, Any]],
         full_report_func: Callable[..., Dict[str, Any]],
-        record_nav_func: Optional[Callable[..., Dict[str, Any]]] = None,
     ):
         self.build_snapshot_func = build_snapshot_func
         self.full_report_func = full_report_func
-        self.record_nav_func = record_nav_func
 
     def generate_report(
         self,
         *,
         report_type: str = "daily",
-        record_nav: bool = False,
         price_timeout: int = 30,
         snapshot: Optional[Dict[str, Any]] = None,
         navs: Optional[list] = None,
         nav_override: Optional[Any] = None,
-        overwrite_existing: bool = True,
-        dry_run: bool = False,
     ) -> Dict[str, Any]:
         snapshot = snapshot or self._build_snapshot(price_timeout)
         full = self.full_report_func(price_timeout=price_timeout, snapshot=snapshot, navs=navs)
         if not full.get("success"):
             return full
-
-        if record_nav:
-            if self.record_nav_func is None:
-                return {"success": False, "error": "record_nav_func is required when record_nav=True"}
-            record_nav_result = self.record_nav_func(
-                price_timeout=price_timeout,
-                snapshot=snapshot,
-                overwrite_existing=overwrite_existing,
-                dry_run=dry_run,
-            )
-            if isinstance(record_nav_result, dict) and not record_nav_result.get("success", True):
-                return record_nav_result
-            nav_override = nav_override or record_nav_result
 
         nav = self._normalize_nav_override(nav_override) or full.get("nav") or {}
         nav_details = nav.get("details") or {}

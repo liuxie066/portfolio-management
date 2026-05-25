@@ -23,6 +23,6 @@ To mark migrations as applied in local state after the Feishu tables/fields have
 python scripts/migrate_schema.py --apply
 ```
 
-State is stored in `.data/schema_migrations.json`.
+State is stored in `config.get_data_dir() / "schema_migrations.json"` (default `.data/schema_migrations.json`; production can override with `data.dir` / `PM_DATA_DIR`).
 
 Current policy: migrations are check/documentation-first. Actual Feishu field creation remains manual until write-safe migration operations are implemented.

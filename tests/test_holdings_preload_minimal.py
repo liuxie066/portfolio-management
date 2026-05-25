@@ -164,3 +164,42 @@ def test_upsert_create_after_preload_missing_key_without_refetch():
     assert created.record_id == "rec_new_1"
     assert len(client.list_records_calls) == 1  # preload only
     assert len(client.create_record_calls) == 1
+
+
+def test_replace_holding_updates_absolute_quantity_and_descriptor_fields():
+    client = StubHoldingsClient(
+        initial_records=[
+            {
+                "record_id": "rec_cash",
+                "fields": {
+                    "asset_id": "CNY-CASH",
+                    "asset_name": "旧现金名",
+                    "asset_type": "other",
+                    "account": "lx",
+                    "broker": "富途",
+                    "quantity": 20,
+                    "currency": "USD",
+                },
+            }
+        ]
+    )
+    storage = FeishuStorage(client=client)
+    storage.preload_holdings_index(account="lx")
+
+    replaced = storage.replace_holding(Holding(
+        asset_id="CNY-CASH",
+        asset_name="人民币现金",
+        asset_type=AssetType.CASH,
+        account="lx",
+        broker="富途",
+        quantity=100.13,
+        currency="CNY",
+    ))
+
+    assert replaced.record_id == "rec_cash"
+    assert len(client.update_record_calls) == 1
+    fields = client.update_record_calls[0]["fields"]
+    assert fields["quantity"] == 100.13
+    assert fields["asset_name"] == "人民币现金"
+    assert fields["asset_type"] == "cash"
+    assert fields["currency"] == "CNY"

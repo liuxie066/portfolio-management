@@ -3,7 +3,7 @@
 
 Design goals:
 - Provide a few common read-only commands.
-- Prefer the local HTTP service, with direct skill_api fallback.
+- Prefer the local HTTP service, with direct application fallback.
 - Fast defaults (no writes; avoid slow realtime price fetch unless asked).
 - Human-readable by default; `--json` for automation.
 
@@ -40,7 +40,7 @@ import json
 import sys
 from pathlib import Path
 
-# Ensure repo root is on sys.path so `import skill_api` works.
+# Ensure repo root is on sys.path for direct local imports.
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -184,6 +184,29 @@ def _emit_cash_flow_reconcile(payload, as_json: bool):
         _print_cash_flow_reconcile(payload)
 
 
+def _print_daily_job(payload):
+    if not isinstance(payload, dict):
+        print(payload)
+        return
+    if payload.get("success") is False:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+        return
+
+    print(f"Daily NAV job [{payload.get('date')}]")
+    print(f"  status: {payload.get('status')}")
+    print(f"  mode: {'dry-run' if payload.get('dry_run') else 'write'}")
+    summary = payload.get("summary") or {}
+    if summary:
+        print(f"  summary: {json.dumps(summary, ensure_ascii=False, default=str)}")
+    for item in payload.get("items") or []:
+        account = item.get("account") or "default"
+        status = item.get("status") or ("ok" if item.get("success") else "failed")
+        nav_result = item.get("nav_result") if isinstance(item.get("nav_result"), dict) else item
+        nav = nav_result.get("nav") if isinstance(nav_result, dict) else None
+        suffix = f", nav={nav}" if nav is not None else ""
+        print(f"  - {account}: {status}{suffix}")
+
+
 def _service_or_fallback(args, service_call, fallback_call):
     if not bool(getattr(args, "no_service", False)):
         from src.service.client import PortfolioServiceClient, PortfolioServiceUnavailable
@@ -248,9 +271,9 @@ def cmd_holdings(args):
         )
 
     def direct():
-        from skill_api import get_holdings
+        from src.service.application import PortfolioService
 
-        return get_holdings(include_price=bool(args.include_price), account=args.account)
+        return PortfolioService().get_holdings(include_price=bool(args.include_price), account=args.account)
 
     res = _service_or_fallback(args, via_service, direct)
     _dump(res, args.json)
@@ -262,9 +285,9 @@ def cmd_cash(args):
         return client.get_cash(account=_default_account(args.account))
 
     def direct():
-        from skill_api import get_cash
+        from src.service.application import PortfolioService
 
-        return get_cash(account=args.account)
+        return PortfolioService().get_cash(account=args.account)
 
     res = _service_or_fallback(args, via_service, direct)
     _dump(res, args.json)
@@ -294,9 +317,9 @@ def cmd_accounts(args):
         return client.list_accounts(include_default=not bool(args.exclude_default))
 
     def direct():
-        from skill_api import list_accounts
+        from src.service.application import PortfolioService
 
-        return list_accounts(include_default=not bool(args.exclude_default))
+        return PortfolioService().list_accounts(include_default=not bool(args.exclude_default))
 
     res = _service_or_fallback(args, via_service, direct)
     _dump(res, args.json)
@@ -312,9 +335,9 @@ def cmd_overview(args):
         )
 
     def direct():
-        from skill_api import multi_account_overview
+        from src.service.application import PortfolioService
 
-        return multi_account_overview(
+        return PortfolioService().multi_account_overview(
             accounts=args.accounts,
             price_timeout=args.timeout,
             include_details=bool(args.details),
@@ -330,9 +353,9 @@ def cmd_nav(args):
         return client.get_nav(account=_default_account(args.account), days=int(getattr(args, "days", 30)))
 
     def direct():
-        from skill_api import get_nav
+        from src.service.application import PortfolioService
 
-        return get_nav(account=args.account, days=int(getattr(args, "days", 30)))
+        return PortfolioService().get_nav(account=args.account, days=int(getattr(args, "days", 30)))
 
     res = _service_or_fallback(args, via_service, direct)
     _dump(res, args.json)
@@ -352,24 +375,28 @@ def cmd_nav_record(args):
             "overwrite_existing": not bool(args.no_overwrite),
             "use_bulk_persist": bool(args.use_bulk_persist),
         }
+        if getattr(args, "nav_date", None):
+            kwargs["nav_date"] = args.nav_date
         if getattr(args, "run_id", None):
             kwargs["run_id"] = args.run_id
         return client.record_nav(**kwargs)
 
     def direct():
-        from skill_api import record_nav
+        from src.service.application import PortfolioService
 
         kwargs = {
+            "account": args.account,
             "price_timeout": args.timeout,
             "dry_run": bool(args.dry_run),
             "confirm": bool(args.confirm),
             "overwrite_existing": not bool(args.no_overwrite),
             "use_bulk_persist": bool(args.use_bulk_persist),
-            "account": args.account,
         }
+        if getattr(args, "nav_date", None):
+            kwargs["nav_date"] = args.nav_date
         if getattr(args, "run_id", None):
             kwargs["run_id"] = args.run_id
-        return record_nav(**kwargs)
+        return PortfolioService().record_nav(**kwargs)
 
     res = _service_or_fallback(args, via_service, direct)
     _dump(res, args.json)
@@ -381,9 +408,9 @@ def cmd_positions_distribution(args):
         return client.get_distribution(account=_default_account(args.account))
 
     def direct():
-        from skill_api import get_distribution
+        from src.service.application import PortfolioService
 
-        return get_distribution(account=args.account)
+        return PortfolioService().get_distribution(account=args.account)
 
     res = _service_or_fallback(args, via_service, direct)
     _emit_distribution(res, args.json)
@@ -407,31 +434,28 @@ def cmd_daily(args):
             "overwrite_existing": not bool(args.no_overwrite),
             "use_bulk_persist": bool(args.use_bulk_persist),
         }
+        if getattr(args, "nav_date", None):
+            bundle_kwargs["nav_date"] = args.nav_date
         if getattr(args, "run_id", None):
             bundle_kwargs["run_id"] = args.run_id
         return _daily_parts_from_bundle(client.daily_report_bundle(**bundle_kwargs))
 
     def direct():
-        from skill_api import get_skill
+        from src.service.application import PortfolioService
 
-        skill = get_skill(args.account)
-        snapshot = skill.build_snapshot(price_timeout_seconds=args.timeout)
+        bundle_kwargs = {
+            "account": account,
+            "price_timeout": args.timeout,
+            "dry_run": bool(args.dry_run),
+            "confirm": bool(args.confirm),
+            "overwrite_existing": not bool(args.no_overwrite),
+            "use_bulk_persist": bool(args.use_bulk_persist),
+        }
+        if getattr(args, "nav_date", None):
+            bundle_kwargs["nav_date"] = args.nav_date
         if getattr(args, "run_id", None):
-            snapshot["run_id"] = args.run_id
-        nav = skill.record_nav(
-            price_timeout=args.timeout,
-            dry_run=bool(args.dry_run),
-            confirm=bool(args.confirm),
-            overwrite_existing=not bool(args.no_overwrite),
-            use_bulk_persist=bool(args.use_bulk_persist),
-            snapshot=snapshot,
-            run_id=getattr(args, "run_id", None),
-        )
-        if not nav.get("success"):
-            distribution = {"success": False, "error": "skipped because NAV failed"}
-            return nav, distribution
-        distribution = skill.get_distribution(holdings_data=snapshot)
-        return nav, distribution
+            bundle_kwargs["run_id"] = args.run_id
+        return _daily_parts_from_bundle(PortfolioService().daily_report_bundle(**bundle_kwargs))
 
     nav_result, distribution_result = _service_or_fallback(args, via_service, direct)
     success = bool(nav_result.get("success")) and bool(distribution_result.get("success"))
@@ -452,6 +476,78 @@ def cmd_daily(args):
     return payload
 
 
+def cmd_daily_job(args):
+    if not bool(args.dry_run) and not bool(args.confirm):
+        raise SystemExit("daily-job write requires --confirm. Re-run without --write for dry-run.")
+
+    def job_kwargs():
+        kwargs = {
+            "account": getattr(args, "account", None),
+            "accounts": getattr(args, "accounts", None),
+            "nav_date": getattr(args, "nav_date", None),
+            "run_date": getattr(args, "run_date", None),
+            "price_timeout": args.timeout,
+            "dry_run": bool(args.dry_run),
+            "confirm": bool(args.confirm),
+            "overwrite_existing": bool(args.overwrite),
+            "use_bulk_persist": bool(args.use_bulk_persist),
+            "sync_futu_cash_mmf": bool(args.sync_futu_cash_mmf),
+            "force_non_business_day": bool(args.force_non_business_day),
+            "run_id": getattr(args, "run_id", None),
+        }
+        if getattr(args, "sync_futu_dry_run", None) is not None:
+            kwargs["sync_futu_dry_run"] = bool(args.sync_futu_dry_run)
+        return {key: value for key, value in kwargs.items() if value is not None}
+
+    def via_service(client):
+        return client.daily_nav_job(**job_kwargs())
+
+    def direct():
+        from src.service.application import PortfolioService
+
+        return PortfolioService().daily_nav_job(**job_kwargs())
+
+    res = _service_or_fallback(args, via_service, direct)
+    if args.json:
+        _dump(res, True)
+    else:
+        _print_daily_job(res)
+    return res
+
+
+def cmd_nav_duplicates(args):
+    def via_service(client):
+        return client.audit_nav_history_duplicates(account=getattr(args, "account", None))
+
+    def direct():
+        from src.service.application import PortfolioService
+
+        return PortfolioService().audit_nav_history_duplicates(account=getattr(args, "account", None))
+
+    res = _service_or_fallback(args, via_service, direct)
+    _dump(res, args.json)
+    return res
+
+
+def cmd_config_inspect(args):
+    from src import config
+
+    keys = None
+    if getattr(args, "keys", None):
+        keys = [item.strip() for item in args.keys.split(",") if item.strip()]
+    res = config.inspect_config(keys=keys, redact=not bool(args.show_secrets))
+    _dump(res, args.json)
+    return res
+
+
+def cmd_config_doctor(args):
+    from src import config
+
+    res = config.validate_deploy_config(require_futu=bool(args.require_futu))
+    _dump(res, args.json)
+    return res
+
+
 def cmd_report(args):
     if not bool(args.preview):
         raise SystemExit(
@@ -467,13 +563,12 @@ def cmd_report(args):
         )
 
     def direct():
-        from skill_api import generate_report
+        from src.service.application import PortfolioService
 
-        return generate_report(
-            report_type=args.type,
-            record_nav=False,
-            price_timeout=args.timeout,
+        return PortfolioService().generate_report(
             account=args.account,
+            report_type=args.type,
+            price_timeout=args.timeout,
         )
 
     res = _service_or_fallback(args, via_service, direct)
@@ -489,9 +584,9 @@ def cmd_init_nav(args):
         raise SystemExit("init-nav write requires --confirm. Re-run with --dry-run or add --confirm.")
 
     def direct():
-        from skill_api import init_nav_history
+        from src.service.application import PortfolioService
 
-        return init_nav_history(
+        return PortfolioService().init_nav_history(
             date_str=args.date,
             price_timeout=args.timeout,
             dry_run=bool(args.dry_run),
@@ -511,7 +606,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--account", default=None, help="account to operate on; defaults to config/PORTFOLIO_ACCOUNT")
     p.add_argument("--service-url", default=None, help="local service URL; defaults to config/PORTFOLIO_SERVICE_URL")
     p.add_argument("--service-timeout", type=float, default=0.5, help="local service timeout seconds before fallback")
-    p.add_argument("--no-service", action="store_true", help="bypass local service and call skill_api directly")
+    p.add_argument("--no-service", action="store_true", help="bypass local service and call the direct local fallback")
     p.add_argument("--require-service", action="store_true", help="fail instead of falling back when local service is unavailable")
     p.add_argument("--debug-internal", action="store_true", help="Do not suppress internal stdout prints (debug only).")
 
@@ -523,11 +618,12 @@ def build_parser() -> argparse.ArgumentParser:
     def add_service_args(subparser):
         subparser.add_argument("--service-url", default=argparse.SUPPRESS, help="local service URL")
         subparser.add_argument("--service-timeout", type=float, default=argparse.SUPPRESS, help="local service timeout seconds before fallback")
-        subparser.add_argument("--no-service", action="store_true", default=argparse.SUPPRESS, help="bypass local service and call skill_api directly")
+        subparser.add_argument("--no-service", action="store_true", default=argparse.SUPPRESS, help="bypass local service and call the direct local fallback")
         subparser.add_argument("--require-service", action="store_true", default=argparse.SUPPRESS, help="fail instead of falling back when local service is unavailable")
 
     def add_nav_write_args(subparser):
         subparser.add_argument("--timeout", type=int, default=30, help="price timeout seconds (default 30)")
+        subparser.add_argument("--nav-date", default=None, help="NAV date (YYYY-MM-DD); defaults to Beijing today")
         subparser.add_argument("--dry-run", action="store_true", default=True, help="preview only (default)")
         subparser.add_argument("--write", dest="dry_run", action="store_false", help="actually write nav_history")
         subparser.add_argument("--confirm", action="store_true", help="required with --write")
@@ -537,10 +633,45 @@ def build_parser() -> argparse.ArgumentParser:
         subparser.add_argument("--account", default=argparse.SUPPRESS, help="account to operate on; defaults to config/PORTFOLIO_ACCOUNT")
         subparser.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
 
+    def add_daily_job_args(subparser):
+        subparser.add_argument("--timeout", type=int, default=30, help="price timeout seconds (default 30)")
+        subparser.add_argument("--nav-date", default=None, help="NAV date (YYYY-MM-DD), or auto for previous business day before run date")
+        subparser.add_argument("--run-date", default=None, help="Job run date used when --nav-date is omitted/auto")
+        subparser.add_argument("--accounts", default=None, help="comma-separated accounts; defaults to current non-zero holdings accounts")
+        subparser.add_argument("--account", default=argparse.SUPPRESS, help="single account to operate on")
+        subparser.add_argument("--dry-run", action="store_true", default=True, help="preview only (default)")
+        subparser.add_argument("--write", dest="dry_run", action="store_false", help="actually write nav_history")
+        subparser.add_argument("--confirm", action="store_true", help="required with --write")
+        subparser.add_argument("--overwrite", action="store_true", help="overwrite an existing NAV row for the same date")
+        subparser.add_argument("--use-bulk-persist", action="store_true", help="use nav_history bulk upsert path")
+        subparser.add_argument("--sync-futu-cash-mmf", action="store_true", help="sync Futu cash/MMF holdings before each account snapshot")
+        subparser.add_argument("--sync-futu-dry-run", dest="sync_futu_dry_run", action="store_true", default=None, help="preview Futu cash/MMF sync without writing holdings")
+        subparser.add_argument("--sync-futu-write", dest="sync_futu_dry_run", action="store_false", help="write Futu cash/MMF sync results when the job is also writing NAV")
+        subparser.add_argument("--force-non-business-day", action="store_true", help="run even when calendar marks the NAV date non-business")
+        subparser.add_argument("--run-id", default=None, help="operator-supplied run id for tracing")
+        subparser.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
+
     p_daily = sp.add_parser("daily", help="calculate daily NAV and position distribution; dry-run by default")
     add_nav_write_args(p_daily)
     add_service_args(p_daily)
     p_daily.set_defaults(func=cmd_daily)
+
+    p_daily_job = sp.add_parser("daily-job", help="run the unified single/multi-account daily NAV job")
+    add_daily_job_args(p_daily_job)
+    add_service_args(p_daily_job)
+    p_daily_job.set_defaults(func=cmd_daily_job)
+
+    p_config = sp.add_parser("config", help="inspect and validate deployment config")
+    config_sub = p_config.add_subparsers(dest="config_cmd", required=True)
+    p_config_inspect = config_sub.add_parser("inspect", help="show effective config values and sources")
+    p_config_inspect.add_argument("--keys", default=None, help="comma-separated config keys to inspect")
+    p_config_inspect.add_argument("--show-secrets", action="store_true", help="show unredacted secret values")
+    p_config_inspect.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
+    p_config_inspect.set_defaults(func=cmd_config_inspect)
+    p_config_doctor = config_sub.add_parser("doctor", help="validate config needed by scheduled daily NAV jobs")
+    p_config_doctor.add_argument("--require-futu", action="store_true", help="require Futu OpenD settings and SDK importability")
+    p_config_doctor.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
+    p_config_doctor.set_defaults(func=cmd_config_doctor)
 
     p_hold = sp.add_parser("holdings", help="list holdings")
     p_hold.add_argument("--include-price", action="store_true", help="include price fields (may be slow)")
@@ -592,6 +723,11 @@ def build_parser() -> argparse.ArgumentParser:
     add_nav_write_args(p_nav_record)
     add_service_args(p_nav_record)
     p_nav_record.set_defaults(func=cmd_nav_record)
+    p_nav_duplicates = nav_sub.add_parser("duplicates", help="audit duplicate nav_history account/date rows")
+    p_nav_duplicates.add_argument("--account", default=argparse.SUPPRESS, help="account to audit; defaults to all accounts")
+    p_nav_duplicates.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
+    add_service_args(p_nav_duplicates)
+    p_nav_duplicates.set_defaults(func=cmd_nav_duplicates)
 
     p_positions = sp.add_parser("positions", help="position analytics")
     positions_sub = p_positions.add_subparsers(dest="positions_cmd", required=True)

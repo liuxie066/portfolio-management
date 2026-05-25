@@ -21,6 +21,11 @@ Purpose: current positions. This is the main manual-maintained table.
 
 Business key: `(asset_id, account, broker)`
 
+Manual edit policy:
+- Normal stock/fund/other holding rows are maintained manually in the manual view.
+- Broker-synced cash-like rows are system-updated rows. For the current Futu workflow this means `account=lx`, `broker=富途`, `asset_id in (CNY-CASH, CNY-MMF)`.
+- Futu sync treats the fetched broker balance as an absolute target and refreshes descriptor fields (`asset_name`, `asset_type`, `quantity`, `currency`, `asset_class`, `industry`, `updated_at`) before the NAV snapshot is built.
+
 Manual view fields:
 - `asset_id`, `asset_name`, `asset_type`, `account`, `broker`, `quantity`, `currency`
 - Optional manual metadata: `avg_cost`, `asset_class`, `industry`, `tag`
@@ -135,8 +140,10 @@ Role: core
 Purpose: daily NAV facts. Do not use this as a normal manual-entry table.
 
 Manual edit policy:
-- Normal writes must go through `pm daily --write` or `scripts/nav_history_repair.py`.
+- Normal writes must go through `pm daily-job --write --confirm` or an explicit
+  nav repair command.
 - Manual editing is only for explicit repair and should be followed by an audit/reconcile pass.
+- Duplicate `(account, date)` rows are considered data corruption. Run `pm nav duplicates --json`; normal NAV writes block until duplicates are repaired.
 
 System-only fields:
 - all fields below are generated or repaired by the system.

@@ -106,7 +106,7 @@ class FeishuClient:
                 return self._tenant_token
 
             if not self.app_id or not self.app_secret:
-                raise ValueError("需要提供 app_id 和 app_secret，请在 config.json 或环境变量中配置")
+                raise ValueError("需要提供 app_id 和 app_secret，请在 config.yaml 或环境变量中配置")
 
             url = f"{self.BASE_URL}/auth/v3/tenant_access_token/internal"
             response = requests.post(url, json={

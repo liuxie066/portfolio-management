@@ -8,18 +8,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
 
+from src import config
 from src.time_utils import bj_now_naive
 
 
-RATE_CACHE_FILE = Path(__file__).parent.parent.parent / ".data" / "rate_cache.json"
+RATE_CACHE_FILE = config.get_data_dir() / "rate_cache.json"
 
 
 class FxRateService:
     """Fetch USD/HKD to CNY rates with a 24-hour cache and stale fallback."""
 
-    def __init__(self, session, cache_file: Path = RATE_CACHE_FILE):
+    def __init__(self, session, cache_file: Optional[Path] = None):
         self.session = session
-        self.cache_file = cache_file
+        self.cache_file = cache_file or (config.get_data_dir() / "rate_cache.json")
         self._rate_cache: Dict[str, float] = {}
         self._rate_cache_time: Optional[datetime] = None
 

@@ -1,16 +1,10 @@
 # Service API
 
-`src/service/http.py` is the service-first HTTP boundary. It uses FastAPI and
-delegates to `src/service/application.py`.
+The local HTTP service is the primary programmatic boundary. It delegates all
+product behavior to `src/service/application.py`.
 
-Core product paths should live behind this service boundary first. Account
-discovery, multi-account overview, NAV recording, NAV history reads, holdings
-reads, cash reads, position distribution, full report reads, and daily/monthly/
-yearly report payloads now execute directly through `src/service/application.py`
-plus `src/app/*`/`src/portfolio.py`. The daily report publisher also uses a
-service bundle endpoint so NAV recording, report payload assembly, and page
-return fields share the same priced snapshot. `skill_api.py` remains a
-compatibility adapter, not a service implementation dependency.
+`skill_api.py` is not a service dependency; it is a compatibility adapter for
+older Python/Skill callers.
 
 ## Run
 
@@ -18,20 +12,20 @@ compatibility adapter, not a service implementation dependency.
 python scripts/service.py start
 python scripts/service.py status
 python scripts/service.py stop
+curl http://127.0.0.1:8765/health
 ```
 
 Default URL: `http://127.0.0.1:8765`.
 
 The service is unauthenticated and binds to loopback hosts only by default.
-Binding to `0.0.0.0` or any other non-loopback address requires the explicit
-`--allow-remote` flag and should only be used behind an authenticated network
-boundary.
+Binding to `0.0.0.0` or any other non-loopback address requires
+`--allow-remote` and an authenticated outer network boundary.
 
-Overrides:
+Config keys:
 
-- `PORTFOLIO_SERVICE_HOST`
-- `PORTFOLIO_SERVICE_PORT`
-- `PORTFOLIO_SERVICE_URL`
+- `service.host` / `PORTFOLIO_SERVICE_HOST`
+- `service.port` / `PORTFOLIO_SERVICE_PORT`
+- `service.url` / `PORTFOLIO_SERVICE_URL`
 
 ## Read Endpoints
 
@@ -45,9 +39,8 @@ Overrides:
 - `GET /report/full?account=alice&price_timeout=30`
 - `GET /report/{daily|monthly|yearly}?account=alice&price_timeout=30`
 
-Legacy `/accounts/{account}/...` routes remain available for compatibility, but
-new clients should pass account as a query parameter so account names do not
-need to be embedded in the URL path.
+Legacy `/accounts/{account}/...` routes remain available for compatibility.
+New clients should pass account as a query parameter.
 
 ## Write Endpoints
 
@@ -55,12 +48,20 @@ need to be embedded in the URL path.
 - `POST /accounts/{account}/nav/record`
 - `POST /report/daily-bundle`
 - `POST /accounts/{account}/report/daily-bundle`
+- `POST /daily-nav-job`
+- `POST /accounts/{account}/daily-nav-job`
 
-NAV record body:
+Writes are dry-run by default. A real write requires `dry_run=false` and
+`confirm=true`.
+
+## NAV Record
+
+Request:
 
 ```json
 {
   "account": "alice",
+  "nav_date": "2026-05-22",
   "price_timeout": 30,
   "dry_run": true,
   "confirm": false,
@@ -70,55 +71,106 @@ NAV record body:
 }
 ```
 
-NAV writes are dry-run by default. A real write still requires
-`dry_run=false` and `confirm=true`; the CLI exposes this as
-`./pm nav record --write --confirm` and `./pm daily --write --confirm`.
+Use this for a single account NAV write. For scheduled production work prefer
+`daily-nav-job`.
 
-Daily report bundle body:
+## Daily NAV Job
+
+Request:
+
+```json
+{
+  "accounts": ["alice", "bob"],
+  "nav_date": "auto",
+  "run_date": "2026-05-25",
+  "price_timeout": 30,
+  "dry_run": true,
+  "confirm": false,
+  "overwrite_existing": false,
+  "sync_futu_cash_mmf": false,
+  "sync_futu_dry_run": null,
+  "force_non_business_day": false,
+  "run_id": "optional-operator-run-id"
+}
+```
+
+Behavior:
+
+1. Resolve `nav_date`. `auto` means the most recent business day before
+   `run_date`.
+2. Skip weekends and configured `calendar.holidays` unless
+   `force_non_business_day=true`.
+3. Resolve accounts from the request or current holdings.
+4. Block duplicate `nav_history` account/date records.
+5. Block pending generated-field reconciliation in manual `cash_flow` rows.
+6. Optionally sync Futu cash/MMF holdings before valuation.
+7. Build one priced snapshot per account and write NAV.
+
+Top-level response includes:
+
+- `success`
+- `status`
+- `date`
+- `run_id`
+- `calendar`
+- `accounts`
+- `items`
+- `summary`
+
+## Daily Report Bundle
+
+Request:
 
 ```json
 {
   "account": "alice",
+  "nav_date": "2026-05-22",
   "price_timeout": 30,
   "dry_run": true,
   "confirm": false,
+  "overwrite_existing": true,
   "sync_futu_cash_mmf": false,
+  "sync_futu_dry_run": null,
   "use_bulk_persist": false,
   "run_id": "optional-operator-run-id"
 }
 ```
 
-`daily_report_bundle` is dry-run by default and requires `dry_run=false` plus
-`confirm=true` for real NAV writes. It exists as one service call instead of a
-client-side chain of `/nav/record`, `/report/daily`, and `/nav`, because the
-publisher must reuse one priced valuation snapshot for consistency and runtime.
-If `run_id` is omitted, the service generates one and returns it in the top-level
-response, `nav_result`, report payload, snapshot, and persisted NAV `details`.
+The bundle is one service call instead of a client-side chain of
+`/nav/record`, `/report/daily`, and `/nav`. It must reuse one priced snapshot
+for NAV recording, report payload, and recent NAV output.
 
-## Migration Rule
+Internal boundaries:
 
-New product behavior should enter through `src/service/application.py` and the
-HTTP route layer first. `skill_api.py`, `mcp_server.py`, and `scripts/pm.py`
-remain compatibility adapters while heavy business logic is moved out of the
-Skill facade over time.
+- `AccountNavRecorderService`: optional Futu sync, priced snapshot, NAV write.
+- `DailyReportPayloadService`: report/distribution/recent-NAV payload from the
+  existing snapshot and NAV fact.
+- `DailyAccountNavService`: response-shape orchestrator for the two services.
 
-Current direct service paths:
+`daily_report_bundle` is also dry-run by default and requires `dry_run=false`
+plus `confirm=true` for real NAV writes.
+
+## Service Facade Map
 
 - `PortfolioService.list_accounts()` -> `AccountService.list_accounts()`
 - `PortfolioService.multi_account_overview()` -> `AccountService.multi_account_overview()`
-- `PortfolioService.record_nav()` -> `PortfolioReadService.build_snapshot()` -> `PortfolioManager.record_nav()`
+- `PortfolioService.record_nav()` -> `AccountNavRecorderService.record()`
+- `PortfolioService.init_nav_history()` -> `NavInitializationService.init_nav_history()`
 - `PortfolioService.get_nav()` -> `NavReadService.get_nav()`
 - `PortfolioService.get_holdings()` -> `PortfolioReadService.get_holdings()`
 - `PortfolioService.get_cash()` -> `CashService.get_cash()`
 - `PortfolioService.get_distribution()` -> `PortfolioReadService.get_distribution()`
-- `PortfolioService.full_report()` -> `FullReportService.full_report()`
+- `PortfolioService.full_report()` -> `ReportQueryService.full_report()`
 - `PortfolioService.generate_report()` -> `ReportGenerationService.generate_report()`
-- `PortfolioService.daily_report_bundle()` -> one snapshot reused by NAV write, report payload, and recent NAV read
+- `PortfolioService.daily_report_bundle()` -> `DailyAccountNavService.run()`
+- `PortfolioService.daily_nav_job()` -> `DailyNavJobService.run()`
 
-`scripts/pm.py` common commands prefer the local HTTP service and silently fall
-back to `skill_api.py` when the service is unavailable. Use `--no-service` in
-the CLI for explicit direct mode, or `--require-service` to fail instead of
-falling back when the service cannot be reached.
-`scripts/publish_daily_report.py` follows the same service-first rule through
-`PortfolioServiceClient.daily_report_bundle()`; direct mode remains available
-for local recovery and compatibility.
+## Client Rules
+
+- `scripts/pm.py` should prefer the local service and fall back to
+  `PortfolioService` directly.
+- `scripts/publish_daily_report.py` should prefer
+  `PortfolioServiceClient.daily_report_bundle()` and fall back to the
+  application service only for local recovery.
+- New product behavior should enter `PortfolioService` and then be exposed by
+  HTTP/CLI. Do not add service behavior to `skill_api.py`.

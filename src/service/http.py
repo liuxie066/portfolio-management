@@ -1,7 +1,7 @@
 """FastAPI HTTP service for portfolio-management."""
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -14,6 +14,7 @@ REPORT_TYPES = {"daily", "monthly", "yearly"}
 
 class NavRecordRequest(BaseModel):
     account: Optional[str] = None
+    nav_date: Optional[str] = None
     price_timeout: int = 30
     dry_run: bool = True
     confirm: bool = False
@@ -24,18 +25,42 @@ class NavRecordRequest(BaseModel):
 
 class DailyReportBundleRequest(BaseModel):
     account: Optional[str] = None
+    nav_date: Optional[str] = None
     price_timeout: int = 30
     dry_run: bool = True
     confirm: bool = False
     overwrite_existing: bool = True
     use_bulk_persist: bool = False
     sync_futu_cash_mmf: bool = False
-    sync_futu_dry_run: bool = True
+    sync_futu_dry_run: Optional[bool] = None
+    run_id: Optional[str] = None
+
+
+class DailyNavJobRequest(BaseModel):
+    account: Optional[str] = None
+    accounts: Optional[Any] = None
+    nav_date: Optional[str] = None
+    run_date: Optional[str] = None
+    price_timeout: int = 30
+    dry_run: bool = True
+    confirm: bool = False
+    overwrite_existing: bool = False
+    use_bulk_persist: bool = False
+    sync_futu_cash_mmf: bool = False
+    sync_futu_dry_run: Optional[bool] = None
+    force_non_business_day: bool = False
     run_id: Optional[str] = None
 
 
 def _service(request: Request) -> PortfolioService:
     return request.app.state.portfolio_service
+
+
+def _payload_dict(payload: BaseModel) -> dict:
+    model_dump = getattr(payload, "model_dump", None)
+    if callable(model_dump):
+        return model_dump(exclude_none=True)
+    return payload.dict(exclude_none=True)
 
 
 def create_app(service: Optional[PortfolioService] = None) -> FastAPI:
@@ -56,6 +81,13 @@ def create_app(service: Optional[PortfolioService] = None) -> FastAPI:
         include_default: bool = Query(True, description="Include configured default account even if empty."),
     ):
         return _service(request).list_accounts(include_default=include_default)
+
+    @app.get("/accounts/nav", tags=["accounts"])
+    def list_nav_accounts(
+        request: Request,
+        include_default: bool = Query(False, description="Include configured default account even if empty."),
+    ):
+        return _service(request).list_nav_accounts(include_default=include_default)
 
     @app.get("/accounts/overview", tags=["accounts"])
     def multi_account_overview(
@@ -126,31 +158,18 @@ def create_app(service: Optional[PortfolioService] = None) -> FastAPI:
 
     @app.post("/nav/record", tags=["nav"])
     def record_nav_query(request: Request, payload: NavRecordRequest):
-        kwargs = dict(
-            account=payload.account,
-            price_timeout=payload.price_timeout,
-            dry_run=payload.dry_run,
-            confirm=payload.confirm,
-            overwrite_existing=payload.overwrite_existing,
-            use_bulk_persist=payload.use_bulk_persist,
-        )
-        if payload.run_id is not None:
-            kwargs["run_id"] = payload.run_id
+        kwargs = _payload_dict(payload)
         return _service(request).record_nav(**kwargs)
 
     @app.post("/accounts/{account}/nav/record", tags=["nav"])
     def record_nav(request: Request, account: str, payload: NavRecordRequest):
-        kwargs = dict(
-            account=account,
-            price_timeout=payload.price_timeout,
-            dry_run=payload.dry_run,
-            confirm=payload.confirm,
-            overwrite_existing=payload.overwrite_existing,
-            use_bulk_persist=payload.use_bulk_persist,
-        )
-        if payload.run_id is not None:
-            kwargs["run_id"] = payload.run_id
+        kwargs = _payload_dict(payload)
+        kwargs["account"] = account
         return _service(request).record_nav(**kwargs)
+
+    @app.get("/nav/duplicates", tags=["nav"])
+    def audit_nav_history_duplicates(request: Request, account: Optional[str] = Query(None)):
+        return _service(request).audit_nav_history_duplicates(account=account)
 
     @app.get("/distribution", tags=["positions"])
     def get_distribution_query(request: Request, account: str = Query(...)):
@@ -178,35 +197,25 @@ def create_app(service: Optional[PortfolioService] = None) -> FastAPI:
 
     @app.post("/report/daily-bundle", tags=["reports"])
     def daily_report_bundle_query(request: Request, payload: DailyReportBundleRequest):
-        kwargs = dict(
-            account=payload.account,
-            price_timeout=payload.price_timeout,
-            dry_run=payload.dry_run,
-            confirm=payload.confirm,
-            overwrite_existing=payload.overwrite_existing,
-            use_bulk_persist=payload.use_bulk_persist,
-            sync_futu_cash_mmf=payload.sync_futu_cash_mmf,
-            sync_futu_dry_run=payload.sync_futu_dry_run,
-        )
-        if payload.run_id is not None:
-            kwargs["run_id"] = payload.run_id
+        kwargs = _payload_dict(payload)
         return _service(request).daily_report_bundle(**kwargs)
 
     @app.post("/accounts/{account}/report/daily-bundle", tags=["reports"])
     def daily_report_bundle(request: Request, account: str, payload: DailyReportBundleRequest):
-        kwargs = dict(
-            account=account,
-            price_timeout=payload.price_timeout,
-            dry_run=payload.dry_run,
-            confirm=payload.confirm,
-            overwrite_existing=payload.overwrite_existing,
-            use_bulk_persist=payload.use_bulk_persist,
-            sync_futu_cash_mmf=payload.sync_futu_cash_mmf,
-            sync_futu_dry_run=payload.sync_futu_dry_run,
-        )
-        if payload.run_id is not None:
-            kwargs["run_id"] = payload.run_id
+        kwargs = _payload_dict(payload)
+        kwargs["account"] = account
         return _service(request).daily_report_bundle(**kwargs)
+
+    @app.post("/daily-nav-job", tags=["nav"])
+    def daily_nav_job_query(request: Request, payload: DailyNavJobRequest):
+        kwargs = _payload_dict(payload)
+        return _service(request).daily_nav_job(**kwargs)
+
+    @app.post("/accounts/{account}/daily-nav-job", tags=["nav"])
+    def daily_nav_job(request: Request, account: str, payload: DailyNavJobRequest):
+        kwargs = _payload_dict(payload)
+        kwargs["account"] = account
+        return _service(request).daily_nav_job(**kwargs)
 
     @app.get("/report/{report_type}", tags=["reports"])
     def generate_report_query(

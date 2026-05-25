@@ -1,122 +1,110 @@
 flowchart TB
-    subgraph Operators["使用入口"]
-        Agent["Agent / Skill 调用方"]
-        Human["Human / CLI"]
-        Scheduler["定时发布任务"]
+    subgraph Operators["Operators / Automation"]
+        Human["Human"]
+        Scheduler["systemd / cron"]
+        Agent["MCP / legacy Skill caller"]
     end
 
-    subgraph Entry["入口与编排层"]
-        SkillAPI["skill_api.py<br/>PortfolioSkill<br/>调用适配 / 参数适配"]
-        CLI["scripts/pm.py<br/>CLI 产品入口"]
-        ServiceRunner["scripts/service.py<br/>本地服务进程"]
-        ServiceClient["src/service/client.py<br/>本地服务客户端"]
-        ServiceHTTP["src/service/http.py<br/>HTTP 路由"]
-        ServiceApp["src/service/application.py<br/>服务应用边界"]
-        Publish["scripts/publish_daily_report.py<br/>记录 NAV + 生成 HTML + 发布"]
-        Doctor["scripts/doctor.py / migrate_schema.py check-live<br/>环境与 Schema 诊断"]
+    subgraph Entry["Entrypoints"]
+        CLI["./pm / scripts/pm.py<br/>CLI product surface"]
+        ServiceRunner["scripts/service.py<br/>local service process"]
+        Publisher["scripts/publish_daily_report.py<br/>daily report publisher"]
+        MCP["mcp_server.py<br/>compatibility adapter"]
+        SkillAPI["skill_api.py<br/>compatibility Python API"]
     end
 
-    subgraph Domain["领域层"]
-        PM["src/portfolio.py<br/>PortfolioManager<br/>交易 / 现金 / 估值 / NAV / 收益"]
-        AppRead["src/app/account_service.py + portfolio_read_service.py + nav_read_service.py + cash_service.py + full_report_service.py + report_generation_service.py<br/>账户发现 / 多账户概览 / 估值快照 / NAV / 持仓 / 现金 / 仓位分布 / 报告"]
-        Guard["src/write_guard.py<br/>写入前校验"]
-        Models["src/models.py<br/>Pydantic 领域模型"]
-        Snapshot["src/snapshot_models.py<br/>每日持仓快照模型"]
-        Time["src/time_utils.py<br/>北京时间业务日期"]
+    subgraph Service["Service Boundary"]
+        ServiceClient["src/service/client.py"]
+        HTTP["src/service/http.py"]
+        AppFacade["src/service/application.py<br/>PortfolioService"]
     end
 
-    subgraph Pricing["行情层"]
-        PF["src/price_fetcher.py<br/>行情门面"]
-        PS["src/pricing/service.py<br/>结构化报价入口"]
-        PBatch["src/pricing/batch.py<br/>批量编排"]
-        PCache["src/pricing/cache.py<br/>TTL / stale fallback"]
-        PFixed["src/pricing/fixed.py<br/>现金 / MMF 固定报价"]
-        PFX["src/pricing/fx.py<br/>汇率服务"]
-        PProviders["src/pricing/providers/*<br/>单笔 / 批量数据源"]
-        MarketTime["src/market_time.py<br/>交易时段判断"]
-        Tencent["Tencent Finance<br/>A/H 股批量报价"]
-        USQuote["Finnhub / Yahoo Chart<br/>美股报价"]
-        FundQuote["Tencent Fund / East Money<br/>基金报价"]
-        FX["Exchange Rate API<br/>汇率"]
+    subgraph App["Application Layer"]
+        Account["account_service.py"]
+        Read["portfolio_read_service.py"]
+        DailyJob["daily_nav_job_service.py"]
+        AccountNav["account_nav_recorder_service.py"]
+        InitNav["nav_initialization_service.py"]
+        ReportPayload["daily_report_payload_service.py"]
+        ReportQuery["report_query_service.py"]
+        FutuSync["futu_balance_sync_service.py"]
     end
 
-    subgraph Storage["存储与缓存层"]
-        Factory["src/storage.py<br/>存储工厂<br/>仅 Feishu / auto"]
-        FS["src/feishu_storage.py<br/>FeishuStorage<br/>Bitable 映射 / 缓存索引 / 批量写入"]
-        FC["src/feishu_client.py<br/>FeishuClient<br/>Token / 限流 / 分页 / 重试"]
-        LocalCache["src/local_cache.py + .data/*.json<br/>价格 / 持仓索引 / NAV 索引 / 现金流聚合缓存"]
+    subgraph Domain["Domain Layer"]
+        NavCalc["nav_calculator.py"]
+        Performance["domain/nav/performance.py"]
+        HoldingsProjection["domain/report/holdings_projection.py"]
+        Payload["payload_normalizer.py"]
+        Models["models.py / snapshot_models.py"]
     end
 
-    subgraph Bitable["Feishu Bitable 云端主存储"]
-        Holdings["holdings<br/>当前持仓"]
-        Tx["transactions<br/>可选交易流水"]
-        CashFlow["cash_flow<br/>出入金"]
-        NAV["nav_history<br/>净值历史"]
-        HoldingsSnapshot["holdings_snapshot<br/>每日持仓快照"]
-        PriceCache["price_cache<br/>历史兼容字段<br/>当前主要由本地价格缓存替代"]
+    subgraph Pricing["Pricing"]
+        PriceFetcher["price_fetcher.py<br/>compat facade"]
+        PriceService["pricing/service.py"]
+        Providers["pricing/providers/*"]
+        Fx["pricing/fx.py"]
+        CachePolicy["pricing/cache.py"]
     end
 
-    subgraph Report["报表与发布"]
-        DailyHTML["scripts/generate_daily_report_html.py<br/>HTML 渲染"]
-        Static["reports/ + publish root<br/>静态文件"]
-        PublicSite["OpenClaw Publish Domain<br/>公开访问"]
+    subgraph Storage["Storage"]
+        StorageFactory["storage.py"]
+        FeishuStorage["feishu_storage.py"]
+        Repos["feishu/repositories/*"]
+        FeishuClient["feishu_client.py"]
+        LocalCache["local_cache.py / .data"]
     end
 
-    Agent --> SkillAPI
+    subgraph External["External"]
+        Feishu["Feishu Bitable"]
+        Quotes["Tencent / Finnhub / Yahoo Chart / East Money / FX"]
+        Reports["reports/ + publish_root<br/>local artifacts only"]
+    end
+
     Human --> CLI
-    Human --> Doctor
-    Scheduler --> Publish
+    Scheduler --> CLI
+    Scheduler --> Publisher
+    Agent --> MCP
+    Agent --> SkillAPI
 
     CLI --> ServiceClient
-    CLI -.fallback.-> SkillAPI
-    ServiceRunner --> ServiceHTTP
-    ServiceClient --> ServiceHTTP
-    ServiceHTTP --> ServiceApp
-    ServiceApp --> Factory
-    ServiceApp --> PM
-    ServiceApp --> AppRead
-    Publish --> ServiceClient
-    Publish -.fallback.-> SkillAPI
-    SkillAPI --> Factory
-    Factory --> FS
-    SkillAPI --> PM
-    SkillAPI --> PF
-    AppRead --> PM
-    AppRead --> PF
-    PM --> Guard
-    PM --> Models
-    PM --> Snapshot
-    PM --> Time
-    PM --> FS
-    PM --> PF
+    CLI -.direct fallback.-> AppFacade
+    Publisher --> ServiceClient
+    Publisher -.direct fallback.-> AppFacade
+    ServiceRunner --> HTTP
+    ServiceClient --> HTTP
+    HTTP --> AppFacade
+    MCP --> SkillAPI
+    SkillAPI --> AppFacade
 
-    PF --> PS
-    PF --> PBatch
-    PBatch --> PCache
-    PBatch --> PFixed
-    PBatch --> PProviders
-    PS --> PBatch
-    PS --> PProviders
-    PS --> PCache
-    PS --> PFixed
-    PCache --> MarketTime
-    PF --> PFX
-    PProviders --> Tencent
-    PProviders --> USQuote
-    PProviders --> FundQuote
-    PFX --> LocalCache
-    PFX --> FX
+    AppFacade --> Account
+    AppFacade --> Read
+    AppFacade --> DailyJob
+    AppFacade --> AccountNav
+    AppFacade --> InitNav
+    AppFacade --> ReportPayload
+    AppFacade --> ReportQuery
+    AppFacade --> StorageFactory
 
-    FS --> LocalCache
-    FS --> FC
-    FC --> Holdings
-    FC --> Tx
-    FC --> CashFlow
-    FC --> NAV
-    FC --> HoldingsSnapshot
-    FC -.兼容.-> PriceCache
+    DailyJob --> AccountNav
+    DailyJob --> FutuSync
+    AccountNav --> Read
+    AccountNav --> FeishuStorage
+    ReportPayload --> ReportQuery
+    ReportQuery --> Performance
+    ReportQuery --> HoldingsProjection
+    App --> Domain
 
-    SkillAPI --> DailyHTML
-    Publish --> DailyHTML
-    DailyHTML --> Static
-    Static --> PublicSite
+    Read --> PriceFetcher
+    PriceFetcher --> PriceService
+    PriceService --> Providers
+    PriceService --> CachePolicy
+    PriceService --> Fx
+    Providers --> Quotes
+    Fx --> Quotes
+
+    StorageFactory --> FeishuStorage
+    FeishuStorage --> Repos
+    Repos --> FeishuClient
+    Repos --> LocalCache
+    FeishuClient --> Feishu
+    Publisher --> Reports
