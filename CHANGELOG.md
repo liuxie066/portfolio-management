@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.3 - 2026-05-25
+
+- Added `scripts/install.sh` as a Hermes-style Linux bootstrap installer for
+  clone/update, virtualenv creation, dependency installation, and deployment
+  asset setup.
+- Added a generated `pm` launcher for installed systems, defaulting to
+  `/usr/local/bin/pm` for root Linux installs and `~/.local/bin/pm` for user
+  installs.
+- Updated systemd daily NAV jobs to invoke the same `pm` launcher used by
+  operators, keeping manual and scheduled startup paths aligned.
+- Hardened launch/install environment handling by clearing inherited Python
+  environment variables that could shadow the installed checkout.
+- Updated Linux deployment docs and runbooks around the new bootstrap install
+  path while keeping timer activation explicit.
+- Expanded installer coverage for launcher rendering, systemd unit behavior,
+  and shell installer help output.
+
 ## 0.1.2 - 2026-05-25
 
 - Added the unified `daily-job` workflow for single-account and multi-account

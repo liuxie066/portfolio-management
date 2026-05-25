@@ -16,6 +16,35 @@
 
 ## 安装
 
+推荐入口：
+
+```bash
+# 在目标 checkout 内运行；脚本会使用当前 checkout 作为 app 目录
+sudo scripts/install.sh --apply --sync-futu-cash-mmf
+```
+
+这个 bootstrap installer 会：
+
+- 清理继承的 `PYTHONPATH` / `PYTHONHOME`，避免装错 checkout。
+- 安装或更新代码目录。
+- 创建 `.venv` 并安装 `requirements.txt`。
+- 生成稳定启动命令 `/usr/local/bin/pm`。
+- 调用 `scripts/install_linux.py` 写入 config/env/systemd 文件。
+
+如果希望安装脚本自己从 GitHub 拉取指定版本：
+
+```bash
+sudo bash -c 'curl -fsSL https://raw.githubusercontent.com/liuxie066/portfolio-management/main/scripts/install.sh | bash -s -- --apply --ref main --sync-futu-cash-mmf'
+```
+
+如果网络环境对 PyPI 慢或不稳定，可以指定镜像：
+
+```bash
+sudo scripts/install.sh --apply --pip-index-url https://mirrors.aliyun.com/pypi/simple/ --sync-futu-cash-mmf
+```
+
+底层 Python 安装器仍然可直接使用：
+
 ```bash
 cd /opt/portfolio-management/current
 python3 -m venv .venv
@@ -33,6 +62,7 @@ sudo python3 scripts/install_linux.py --apply --sync-futu-cash-mmf
 
 - `/etc/portfolio-management/config.yaml`
 - `/etc/portfolio-management/portfolio-management.env`
+- `/usr/local/bin/pm`
 - `/etc/systemd/system/portfolio-nav-daily.service`
 - `/etc/systemd/system/portfolio-nav-daily.timer`
 
@@ -61,16 +91,16 @@ sudo chmod 600 /etc/portfolio-management/config.yaml
 ## 预检
 
 ```bash
-PORTFOLIO_CONFIG_FILE=/etc/portfolio-management/config.yaml ./pm config inspect --json
-PORTFOLIO_CONFIG_FILE=/etc/portfolio-management/config.yaml ./pm config doctor --json
-PORTFOLIO_CONFIG_FILE=/etc/portfolio-management/config.yaml ./pm nav duplicates --json
-PORTFOLIO_CONFIG_FILE=/etc/portfolio-management/config.yaml ./pm daily-job --json --no-service
+pm config inspect --json
+pm config doctor --json
+pm nav duplicates --json
+pm daily-job --json --no-service
 ```
 
 如果需要富途现金/MMF 同步，再检查：
 
 ```bash
-PORTFOLIO_CONFIG_FILE=/etc/portfolio-management/config.yaml ./pm config doctor --require-futu --json
+pm config doctor --require-futu --json
 ```
 
 ## 启用定时任务
@@ -93,7 +123,7 @@ sudo journalctl -u portfolio-nav-daily.service -n 200 --no-pager
 定时任务执行：
 
 ```bash
-./pm daily-job --write --confirm --sync-futu-cash-mmf --json
+pm daily-job --write --confirm --sync-futu-cash-mmf --json
 ```
 
 核心保护：

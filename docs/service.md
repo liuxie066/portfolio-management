@@ -9,6 +9,7 @@ older Python/Skill callers.
 ## Run
 
 ```bash
+pm config doctor --json
 python scripts/service.py start
 python scripts/service.py status
 python scripts/service.py stop

@@ -17,7 +17,9 @@ historical Skill/Python API remains available only as a compatibility adapter.
 ## Product Entrypoints
 
 - CLI: `./pm`
+- Installed CLI launcher: `pm`
 - CLI implementation: `scripts/pm.py`
+- Linux bootstrap installer: `scripts/install.sh`
 - Local service manager: `scripts/service.py`
 - HTTP routes: `src/service/http.py`
 - Service facade: `src/service/application.py`

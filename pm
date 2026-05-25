@@ -3,7 +3,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VPY="$ROOT/.venv/bin/python"
-export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
+unset PYTHONHOME
+export PYTHONPATH="$ROOT"
 
 if [[ -x "$VPY" ]]; then
   exec "$VPY" "$ROOT/scripts/pm.py" "$@"

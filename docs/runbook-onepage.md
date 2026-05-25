@@ -5,6 +5,7 @@
 ## 0) 入口
 
 - 产品入口：`./pm`
+- 安装后启动入口：`pm`
 - 定时任务入口：`./pm daily-job`
 - 本地服务：`python scripts/service.py start`
 - 日报发布：`python scripts/publish_daily_report.py --account lx`
@@ -32,6 +33,13 @@
 ./pm daily-job --json
 ./pm daily-job --accounts lx,alice --write --confirm --json
 ./pm daily-job --account lx --sync-futu-cash-mmf --write --confirm --json
+```
+
+Linux 安装后可直接用 `/usr/local/bin/pm`：
+
+```bash
+pm daily-job --json
+pm daily-job --write --confirm --sync-futu-cash-mmf --json
 ```
 
 ## 2) 数据真相来源

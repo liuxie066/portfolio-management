@@ -35,6 +35,7 @@ class InstallPaths:
     reports_dir: Path
     systemd_dir: Path
     python_bin: Path
+    launcher_path: Path
 
 
 def _default_user() -> str:
@@ -54,6 +55,7 @@ def build_paths(args) -> InstallPaths:
     config_file = _as_path(args.config_file) if args.config_file else config_dir / "config.yaml"
     env_file = _as_path(args.env_file) if args.env_file else config_dir / "portfolio-management.env"
     python_bin = _as_path(args.python) if args.python else app_dir / ".venv" / "bin" / "python"
+    launcher_path = _as_path(args.launcher)
     return InstallPaths(
         app_dir=app_dir,
         config_dir=config_dir,
@@ -63,6 +65,7 @@ def build_paths(args) -> InstallPaths:
         reports_dir=reports_dir,
         systemd_dir=systemd_dir,
         python_bin=python_bin,
+        launcher_path=launcher_path,
     )
 
 
@@ -119,9 +122,21 @@ def render_env_file(paths: InstallPaths) -> str:
         f"PORTFOLIO_CONFIG_FILE={paths.config_file}",
         f"PM_DATA_DIR={paths.data_dir}",
         f"PM_REPORTS_DIR={paths.reports_dir}",
+        f"PORTFOLIO_PM_BIN={paths.launcher_path}",
         "PYTHONUNBUFFERED=1",
         "",
     ])
+
+
+def render_launcher(paths: InstallPaths) -> str:
+    return f"""#!/usr/bin/env bash
+set -euo pipefail
+
+unset PYTHONHOME
+export PYTHONPATH="{paths.app_dir}"
+export PORTFOLIO_CONFIG_FILE="${{PORTFOLIO_CONFIG_FILE:-{paths.config_file}}}"
+exec "{paths.python_bin}" "{paths.app_dir / "scripts" / "pm.py"}" "$@"
+"""
 
 
 def _daily_job_args(*, sync_futu_cash_mmf: bool) -> list[str]:
@@ -145,8 +160,9 @@ WorkingDirectory={paths.app_dir}
 Environment=TZ=Asia/Shanghai
 Environment=APP_DIR={paths.app_dir}
 Environment=PYTHON_BIN={paths.python_bin}
+Environment=PORTFOLIO_PM_BIN={paths.launcher_path}
 EnvironmentFile={paths.env_file}
-ExecStart=/bin/sh -lc 'exec /usr/bin/flock -n /var/lock/portfolio-nav-daily.lock "$PYTHON_BIN" "$APP_DIR/scripts/pm.py" {job_args}'
+ExecStart=/bin/sh -lc 'exec /usr/bin/flock -n /var/lock/portfolio-nav-daily.lock "$PORTFOLIO_PM_BIN" {job_args}'
 """
 
 
@@ -181,11 +197,19 @@ def build_plan(args) -> dict:
             "systemd_service": str(service_file),
             "systemd_timer": str(timer_file),
             "python_bin": str(paths.python_bin),
+            "launcher": str(paths.launcher_path),
         },
-        "directories": [str(paths.config_dir), str(paths.data_dir), str(paths.reports_dir), str(paths.systemd_dir)],
+        "directories": [
+            str(paths.config_dir),
+            str(paths.data_dir),
+            str(paths.reports_dir),
+            str(paths.systemd_dir),
+            str(paths.launcher_path.parent),
+        ],
         "files": [
             {"path": str(paths.config_file), "mode": "0600", "overwrite": bool(args.overwrite_config)},
             {"path": str(paths.env_file), "mode": "0600", "overwrite": True},
+            {"path": str(paths.launcher_path), "mode": "0755", "overwrite": True},
             {"path": str(service_file), "mode": "0644", "overwrite": True},
             {"path": str(timer_file), "mode": "0644", "overwrite": True},
         ],
@@ -220,7 +244,7 @@ def apply_install(args) -> dict:
     paths = build_paths(args)
     service_file = paths.systemd_dir / SERVICE_NAME
     timer_file = paths.systemd_dir / TIMER_NAME
-    _mkdirs([paths.config_dir, paths.data_dir, paths.reports_dir, paths.systemd_dir])
+    _mkdirs([paths.config_dir, paths.data_dir, paths.reports_dir, paths.systemd_dir, paths.launcher_path.parent])
 
     writes = {
         str(paths.config_file): _write_text(
@@ -230,6 +254,7 @@ def apply_install(args) -> dict:
             overwrite=bool(args.overwrite_config),
         ),
         str(paths.env_file): _write_text(paths.env_file, render_env_file(paths), mode=0o600, overwrite=True),
+        str(paths.launcher_path): _write_text(paths.launcher_path, render_launcher(paths), mode=0o755, overwrite=True),
         str(service_file): _write_text(
             service_file,
             render_service_unit(paths, run_user=args.run_user, sync_futu_cash_mmf=bool(args.sync_futu_cash_mmf)),
@@ -250,7 +275,7 @@ def apply_install(args) -> dict:
     result["writes"] = writes
     result["next_steps"] = [
         f"edit {paths.config_file} and fill Feishu/Futu credentials",
-        f"{paths.python_bin} {paths.app_dir / 'scripts' / 'pm.py'} config doctor --json",
+        f"{paths.launcher_path} config doctor --json",
         f"systemctl status {TIMER_NAME}",
     ]
     return result
@@ -284,6 +309,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reports-dir", default="/var/lib/portfolio-management/reports", help="report output directory")
     parser.add_argument("--systemd-dir", default="/etc/systemd/system", help="systemd unit directory")
     parser.add_argument("--python", default=None, help="Python interpreter for systemd job")
+    parser.add_argument("--launcher", default="/usr/local/bin/pm", help="pm launcher path")
     parser.add_argument("--run-user", default=_default_user(), help="systemd User for the oneshot service")
     parser.add_argument("--on-calendar", default="*-*-* 08:10:00", help="systemd OnCalendar value")
     parser.add_argument("--sync-futu-cash-mmf", action="store_true", help="include Futu cash/MMF sync in daily job")

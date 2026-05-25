@@ -138,12 +138,19 @@ python scripts/publish_daily_report.py --account lx
 /var/lib/portfolio-management/reports
 ```
 
-安装脚本默认 dry-run：
+推荐使用 bootstrap installer。它会参考 Hermes Agent 的部署模式：安装/更新
+代码、创建 `.venv`、安装依赖、生成稳定 `pm` launcher，并把 systemd/config
+写入交给保守的 Python 安装器。
 
 ```bash
-python3 scripts/install_linux.py --json
-sudo python3 scripts/install_linux.py --apply --sync-futu-cash-mmf
+sudo scripts/install.sh --apply --sync-futu-cash-mmf
 sudo systemctl status portfolio-nav-daily.timer
+```
+
+首次运行不会自动启用 timer；确认配置后再显式启用：
+
+```bash
+sudo scripts/install.sh --apply --enable-timer --sync-futu-cash-mmf
 ```
 
 完整步骤见 `docs/deploy-linux.md`。
