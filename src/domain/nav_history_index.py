@@ -11,6 +11,7 @@ class NavHistoryIndex:
         year_end_map = {}
         year_first_map = {}
         month_end_map = {}
+        month_first_map = {}
         sorted_navs = sorted(navs, key=lambda nav: nav.date)
 
         for nav in sorted_navs:
@@ -19,6 +20,7 @@ class NavHistoryIndex:
             year_end_map[year] = nav
             year_first_map.setdefault(year, nav)
             month_end_map[month_key] = nav
+            month_first_map.setdefault(month_key, nav)
 
         return {
             "sorted_navs": sorted_navs,
@@ -26,6 +28,7 @@ class NavHistoryIndex:
             "year_end_map": year_end_map,
             "year_first_map": year_first_map,
             "month_end_map": month_end_map,
+            "month_first_map": month_first_map,
         }
 
     @staticmethod
@@ -60,3 +63,42 @@ class NavHistoryIndex:
 
         prev_month_navs = [nav for nav in navs if nav.date.year == prev_year and nav.date.month == prev_month]
         return max(prev_month_navs, key=lambda nav: nav.date) if prev_month_navs else None
+
+    @staticmethod
+    def find_first_in_month_before(navs: list, year: int, month: int, before_date: date, nav_index: dict = None):
+        if nav_index:
+            candidate = nav_index.get("month_first_map", {}).get((year, month))
+            if candidate and candidate.date < before_date:
+                return candidate
+            return None
+
+        candidates = [
+            nav for nav in navs
+            if nav.date < before_date and nav.date.year == year and nav.date.month == month
+        ]
+        return min(candidates, key=lambda nav: nav.date) if candidates else None
+
+    @staticmethod
+    def find_first_in_year_before(navs: list, year: int, before_date: date, nav_index: dict = None):
+        if nav_index:
+            candidate = nav_index.get("year_first_map", {}).get(year)
+            if candidate and candidate.date < before_date:
+                return candidate
+            return None
+
+        candidates = [nav for nav in navs if nav.date < before_date and nav.date.year == year]
+        return min(candidates, key=lambda nav: nav.date) if candidates else None
+
+    @classmethod
+    def find_mtd_return_base(cls, navs: list, as_of_date: date, nav_index: dict = None):
+        prev_month_end = cls.find_prev_month_end(navs, as_of_date.year, as_of_date.month, nav_index=nav_index)
+        if prev_month_end:
+            return prev_month_end
+        return cls.find_first_in_month_before(navs, as_of_date.year, as_of_date.month, as_of_date, nav_index=nav_index)
+
+    @classmethod
+    def find_ytd_return_base(cls, navs: list, as_of_date: date, nav_index: dict = None):
+        prev_year_end = cls.find_year_end(navs, str(as_of_date.year - 1), nav_index=nav_index)
+        if prev_year_end:
+            return prev_year_end
+        return cls.find_first_in_year_before(navs, as_of_date.year, as_of_date, nav_index=nav_index)

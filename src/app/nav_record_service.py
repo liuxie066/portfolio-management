@@ -106,6 +106,8 @@ class NavRecordService:
         yesterday_nav = self.manager._find_latest_nav_before(all_navs, today, nav_index=nav_index)
         prev_year_end_nav = self.manager._find_year_end_nav(all_navs, str(today.year - 1), nav_index=nav_index)
         prev_month_end_nav = self.manager._find_prev_month_end_nav(all_navs, today.year, today.month, nav_index=nav_index)
+        mtd_return_base_nav = self.manager._find_mtd_return_base_nav(all_navs, today, nav_index=nav_index)
+        ytd_return_base_nav = self.manager._find_ytd_return_base_nav(all_navs, today, nav_index=nav_index)
         last_nav = yesterday_nav
 
         yearly_data = {}
@@ -137,6 +139,8 @@ class NavRecordService:
             yesterday_nav=yesterday_nav,
             prev_year_end_nav=prev_year_end_nav,
             prev_month_end_nav=prev_month_end_nav,
+            mtd_return_base_nav=mtd_return_base_nav,
+            ytd_return_base_nav=ytd_return_base_nav,
             last_nav=last_nav,
             yearly_data=yearly_data,
             daily_cash_flow=daily_cash_flow,
@@ -176,6 +180,8 @@ class NavRecordService:
                 last_nav=last_nav,
                 prev_month_end_nav=prev_month_end_nav,
                 prev_year_end_nav=prev_year_end_nav,
+                mtd_return_base_nav=mtd_return_base_nav,
+                ytd_return_base_nav=ytd_return_base_nav,
                 daily_cash_flow=daily_cash_flow,
                 monthly_cash_flow=monthly_cash_flow,
                 yearly_cash_flow=yearly_cash_flow,

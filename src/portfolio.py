@@ -278,7 +278,7 @@ class PortfolioManager:
         prev_month_end_nav, last_nav, yearly_data, daily_cash_flow,
         monthly_cash_flow, yearly_cash_flow,
         cumulative_cash_flow, start_year, gap_cash_flow=None,
-        all_navs=None,
+        all_navs=None, mtd_return_base_nav=None, ytd_return_base_nav=None,
     ) -> dict:
         """计算份额、净值涨幅、资产升值等指标，返回中间结果 dict"""
         initial_value = self._get_initial_value(account, all_navs=all_navs)
@@ -296,6 +296,8 @@ class PortfolioManager:
             cumulative_cash_flow=cumulative_cash_flow,
             start_year=start_year,
             initial_value=initial_value,
+            mtd_return_base_nav=mtd_return_base_nav,
+            ytd_return_base_nav=ytd_return_base_nav,
             gap_cash_flow=gap_cash_flow,
         )
 
@@ -324,6 +326,7 @@ class PortfolioManager:
     def _validate_nav_record(
         self, *, nav_record: NAVHistory, last_nav=None,
         prev_month_end_nav=None, prev_year_end_nav=None,
+        mtd_return_base_nav=None, ytd_return_base_nav=None,
         daily_cash_flow: float = 0.0, monthly_cash_flow: float = 0.0,
         yearly_cash_flow: float = 0.0, gap_cash_flow: Optional[float] = None,
         initial_value: Optional[float] = None, cumulative_cash_flow: float = 0.0,
@@ -334,6 +337,8 @@ class PortfolioManager:
             last_nav=last_nav,
             prev_month_end_nav=prev_month_end_nav,
             prev_year_end_nav=prev_year_end_nav,
+            mtd_return_base_nav=mtd_return_base_nav,
+            ytd_return_base_nav=ytd_return_base_nav,
             daily_cash_flow=daily_cash_flow,
             monthly_cash_flow=monthly_cash_flow,
             yearly_cash_flow=yearly_cash_flow,
@@ -489,6 +494,16 @@ class PortfolioManager:
     def _find_prev_month_end_nav(navs: list, year: int, month: int, nav_index: dict = None):
         """从内存 NAV 列表中找上月末记录"""
         return NavHistoryIndex.find_prev_month_end(navs, year, month, nav_index=nav_index)
+
+    @staticmethod
+    def _find_mtd_return_base_nav(navs: list, as_of_date: date, nav_index: dict = None):
+        """Find MTD return base: previous month end, or first earlier NAV in the same month."""
+        return NavHistoryIndex.find_mtd_return_base(navs, as_of_date, nav_index=nav_index)
+
+    @staticmethod
+    def _find_ytd_return_base_nav(navs: list, as_of_date: date, nav_index: dict = None):
+        """Find YTD return base: previous year end, or first earlier NAV in the same year."""
+        return NavHistoryIndex.find_ytd_return_base(navs, as_of_date, nav_index=nav_index)
 
     def _get_cumulative_cash_flow_from_year(self, account: str, from_year: str, to_date: date) -> float:
         """获取从某年开始到指定日期的累计资金变动（基于聚合缓存）。"""

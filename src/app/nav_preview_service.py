@@ -35,8 +35,22 @@ class NavPreviewService:
             return None
 
         current_year = str(today.year)
+        build_lookup = getattr(self.portfolio, "_build_nav_lookup", None)
+        nav_index = build_lookup(history_navs) if callable(build_lookup) else None
         prev_year_end_nav = self.portfolio._find_year_end_nav(history_navs, str(today.year - 1))
         prev_month_end_nav = self.portfolio._find_prev_month_end_nav(history_navs, today.year, today.month)
+        find_mtd_base = getattr(self.portfolio, "_find_mtd_return_base_nav", None)
+        find_ytd_base = getattr(self.portfolio, "_find_ytd_return_base_nav", None)
+        mtd_return_base_nav = (
+            find_mtd_base(history_navs, today, nav_index=nav_index)
+            if callable(find_mtd_base)
+            else prev_month_end_nav
+        )
+        ytd_return_base_nav = (
+            find_ytd_base(history_navs, today, nav_index=nav_index)
+            if callable(find_ytd_base)
+            else prev_year_end_nav
+        )
 
         yearly_data = {}
         for yr in range(self.start_year, today.year + 1):
@@ -62,6 +76,8 @@ class NavPreviewService:
             yesterday_nav=last_nav,
             prev_year_end_nav=prev_year_end_nav,
             prev_month_end_nav=prev_month_end_nav,
+            mtd_return_base_nav=mtd_return_base_nav,
+            ytd_return_base_nav=ytd_return_base_nav,
             last_nav=last_nav,
             yearly_data=yearly_data,
             daily_cash_flow=daily_cash_flow,

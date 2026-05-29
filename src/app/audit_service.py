@@ -44,11 +44,21 @@ class AuditService:
     def _recompute_period_metrics(self, *, account: str, nav, all_navs: list, nav_index: dict) -> Dict[str, Any]:
         pm = self.portfolio._find_prev_month_end_nav(all_navs, nav.date.year, nav.date.month, nav_index=nav_index)
         py = self.portfolio._find_year_end_nav(all_navs, str(nav.date.year - 1), nav_index=nav_index)
+        mtd_return_base = self.portfolio._find_mtd_return_base_nav(all_navs, nav.date, nav_index=nav_index)
+        ytd_return_base = self.portfolio._find_ytd_return_base_nav(all_navs, nav.date, nav_index=nav_index)
         monthly_cf = self.portfolio._get_monthly_cash_flow(account, nav.date.year, nav.date.month) if pm else None
         yearly_cf = self.portfolio._get_yearly_cash_flow(account, str(nav.date.year)) if py else None
 
-        raw_mtd_nav_change = self.portfolio._calc_mtd_nav_change(nav.nav, pm) if (nav.nav is not None and pm) else None
-        raw_ytd_nav_change = self.portfolio._calc_ytd_nav_change(nav.nav, py) if (nav.nav is not None and py) else None
+        raw_mtd_nav_change = (
+            self.portfolio._calc_mtd_nav_change(nav.nav, mtd_return_base)
+            if (nav.nav is not None and mtd_return_base)
+            else None
+        )
+        raw_ytd_nav_change = (
+            self.portfolio._calc_ytd_nav_change(nav.nav, ytd_return_base)
+            if (nav.nav is not None and ytd_return_base)
+            else None
+        )
         raw_mtd_pnl = (
             self.portfolio._calc_mtd_pnl(nav.total_value, pm, monthly_cf)
             if (nav.total_value is not None and pm is not None and monthly_cf is not None)
@@ -63,6 +73,8 @@ class AuditService:
         return {
             "pm": pm,
             "py": py,
+            "mtd_return_base": mtd_return_base,
+            "ytd_return_base": ytd_return_base,
             "monthly_cf": monthly_cf,
             "yearly_cf": yearly_cf,
             "mtd_nav_change": round(raw_mtd_nav_change, 6) if raw_mtd_nav_change is not None else None,
@@ -96,12 +108,14 @@ class AuditService:
             )
             pm = recomputed["pm"]
             py = recomputed["py"]
+            mtd_return_base = recomputed["mtd_return_base"]
+            ytd_return_base = recomputed["ytd_return_base"]
             recomputed_mtd_nav_change = recomputed["mtd_nav_change"]
             recomputed_ytd_nav_change = recomputed["ytd_nav_change"]
             recomputed_mtd_pnl = recomputed["mtd_pnl"]
             recomputed_ytd_pnl = recomputed["ytd_pnl"]
 
-            is_initial_without_month_base = (pm is None)
+            is_initial_without_month_base = (mtd_return_base is None)
             is_january_same_period_return = (
                 n.date.month == 1
                 and recomputed_mtd_nav_change is not None
@@ -113,6 +127,8 @@ class AuditService:
                 "date": n.date.isoformat(),
                 "pm_base_date": pm.date.isoformat() if pm else None,
                 "py_base_date": py.date.isoformat() if py else None,
+                "mtd_return_base_date": mtd_return_base.date.isoformat() if mtd_return_base else None,
+                "ytd_return_base_date": ytd_return_base.date.isoformat() if ytd_return_base else None,
                 "stored_mtd_nav_change": n.mtd_nav_change,
                 "recomputed_mtd_nav_change": recomputed_mtd_nav_change,
                 "stored_ytd_nav_change": n.ytd_nav_change,
@@ -122,6 +138,7 @@ class AuditService:
                 "stored_ytd_pnl": n.ytd_pnl,
                 "recomputed_ytd_pnl": recomputed_ytd_pnl,
                 "base_missing": {"month": pm is None, "year": py is None},
+                "return_base_missing": {"month": mtd_return_base is None, "year": ytd_return_base is None},
                 "audit_exemptions": {
                     "initial_without_month_base": is_initial_without_month_base,
                     "january_mtd_equals_ytd": is_january_same_period_return,
@@ -129,9 +146,14 @@ class AuditService:
             })
 
         def _neq_mtd_nav(r):
-            if r.get("audit_exemptions", {}).get("initial_without_month_base"):
+            if r.get("return_base_missing", {}).get("month"):
                 return False
             return self._neq(r["stored_mtd_nav_change"], r["recomputed_mtd_nav_change"], 'nav', self.portfolio)
+
+        def _neq_ytd_nav(r):
+            if r.get("return_base_missing", {}).get("year"):
+                return False
+            return self._neq(r["stored_ytd_nav_change"], r["recomputed_ytd_nav_change"], 'nav', self.portfolio)
 
         sign_flip_mtd = [r["date"] for r in rows if r["stored_mtd_pnl"] is not None and r["recomputed_mtd_pnl"] is not None and r["stored_mtd_pnl"] * r["recomputed_mtd_pnl"] < 0]
         sign_flip_ytd = [r["date"] for r in rows if r["stored_ytd_pnl"] is not None and r["recomputed_ytd_pnl"] is not None and r["stored_ytd_pnl"] * r["recomputed_ytd_pnl"] < 0]
@@ -143,11 +165,13 @@ class AuditService:
         ]
         summary = {
             "mtd_nav_change_mismatch": sum(1 for r in rows if _neq_mtd_nav(r)),
-            "ytd_nav_change_mismatch": sum(1 for r in rows if self._neq(r["stored_ytd_nav_change"], r["recomputed_ytd_nav_change"], 'nav', self.portfolio)),
+            "ytd_nav_change_mismatch": sum(1 for r in rows if _neq_ytd_nav(r)),
             "mtd_pnl_mismatch": sum(1 for r in rows if self._neq(r["stored_mtd_pnl"], r["recomputed_mtd_pnl"], 'money', self.portfolio)),
             "ytd_pnl_mismatch": sum(1 for r in rows if self._neq(r["stored_ytd_pnl"], r["recomputed_ytd_pnl"], 'money', self.portfolio)),
             "base_missing_month": sum(1 for r in rows if r.get("base_missing", {}).get("month")),
             "base_missing_year": sum(1 for r in rows if r.get("base_missing", {}).get("year")),
+            "return_base_missing_month": sum(1 for r in rows if r.get("return_base_missing", {}).get("month")),
+            "return_base_missing_year": sum(1 for r in rows if r.get("return_base_missing", {}).get("year")),
             "sign_flip_mtd_pnl": len(sign_flip_mtd),
             "sign_flip_ytd_pnl": len(sign_flip_ytd),
             "swapped_nav_change_like": len(swapped_dates),
@@ -187,6 +211,8 @@ class AuditService:
             )
             pm = recomputed["pm"]
             py = recomputed["py"]
+            mtd_return_base = recomputed["mtd_return_base"]
+            ytd_return_base = recomputed["ytd_return_base"]
             monthly_cf = recomputed["monthly_cf"]
             yearly_cf = recomputed["yearly_cf"]
 
@@ -216,16 +242,20 @@ class AuditService:
             recomputed_mtd_pnl = recomputed["mtd_pnl"]
             recomputed_ytd_pnl = recomputed["ytd_pnl"]
 
-            if pm is None:
+            if mtd_return_base is None:
                 exemptions.append('missing_month_base')
-            if py is None:
+            elif pm is None:
+                exemptions.append('fallback_month_base')
+            if ytd_return_base is None:
                 exemptions.append('missing_year_base')
+            elif py is None:
+                exemptions.append('fallback_year_base')
             if n.date.month == 1 and recomputed_mtd is not None and recomputed_ytd is not None and recomputed_mtd == recomputed_ytd:
                 exemptions.append('january_mtd_equals_ytd')
 
-            if not self.portfolio._nav_equal(n.mtd_nav_change, recomputed_mtd) and 'missing_month_base' not in exemptions:
+            if not self.portfolio._nav_equal(n.mtd_nav_change, recomputed_mtd) and recomputed_mtd is not None:
                 anomalies.append(f"mtd_nav_change mismatch ({n.mtd_nav_change} != {recomputed_mtd})")
-            if not self.portfolio._nav_equal(n.ytd_nav_change, recomputed_ytd) and 'missing_year_base' not in exemptions:
+            if not self.portfolio._nav_equal(n.ytd_nav_change, recomputed_ytd) and recomputed_ytd is not None:
                 anomalies.append(f"ytd_nav_change mismatch ({n.ytd_nav_change} != {recomputed_ytd})")
             if not self.portfolio._money_equal(n.mtd_pnl, recomputed_mtd_pnl) and 'missing_month_base' not in exemptions:
                 anomalies.append(f"mtd_pnl mismatch ({n.mtd_pnl} != {recomputed_mtd_pnl})")
@@ -265,6 +295,10 @@ class AuditService:
                     'prev_year_end_date': py.date.isoformat() if py else None,
                     'prev_year_end_nav': py.nav if py else None,
                     'prev_year_end_total_value': py.total_value if py else None,
+                    'mtd_return_base_date': mtd_return_base.date.isoformat() if mtd_return_base else None,
+                    'mtd_return_base_nav': mtd_return_base.nav if mtd_return_base else None,
+                    'ytd_return_base_date': ytd_return_base.date.isoformat() if ytd_return_base else None,
+                    'ytd_return_base_nav': ytd_return_base.nav if ytd_return_base else None,
                 },
                 'cash_flow_basis': {
                     'daily_cash_flow': daily_cf,
@@ -423,19 +457,21 @@ class AuditService:
             if 'non_consecutive_daily_pnl' not in (item.get('exemptions') or []):
                 fields['pnl'] = expected_daily_pnl
 
-            if row.get('base_missing', {}).get('month'):
+            return_base_missing = row.get('return_base_missing') or row.get('base_missing') or {}
+
+            if return_base_missing.get('month'):
                 fields['mtd_nav_change'] = None
                 fields['mtd_pnl'] = None
             else:
                 fields['mtd_nav_change'] = row.get('recomputed_mtd_nav_change')
-                fields['mtd_pnl'] = row.get('recomputed_mtd_pnl')
+                fields['mtd_pnl'] = row.get('recomputed_mtd_pnl') if not row.get('base_missing', {}).get('month') else None
 
-            if row.get('base_missing', {}).get('year'):
+            if return_base_missing.get('year'):
                 fields['ytd_nav_change'] = None
                 fields['ytd_pnl'] = None
             else:
                 fields['ytd_nav_change'] = row.get('recomputed_ytd_nav_change')
-                fields['ytd_pnl'] = row.get('recomputed_ytd_pnl')
+                fields['ytd_pnl'] = row.get('recomputed_ytd_pnl') if not row.get('base_missing', {}).get('year') else None
 
             updates.append({
                 'record_id': row.get('record_id'),

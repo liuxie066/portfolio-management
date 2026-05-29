@@ -81,6 +81,37 @@ def test_nav_record_service_persists_run_id_in_details():
     storage.write_nav_record.assert_called_once_with(result, overwrite_existing=True, dry_run=True)
 
 
+def test_nav_record_service_falls_back_to_current_period_start_for_nav_change():
+    storage = _storage()
+    base = NAVHistory(
+        date=date(2026, 5, 1),
+        account="a",
+        total_value=1000.0,
+        cash_value=100.0,
+        stock_value=900.0,
+        stock_weight=0.9,
+        cash_weight=0.1,
+        shares=1000.0,
+        nav=1.0,
+    )
+    storage.get_nav_index.return_value = {"_nav_objects": [base]}
+    manager = _manager(storage)
+    service = NavRecordService(manager=manager, storage=storage)
+
+    result = service.record_nav(
+        account="a",
+        valuation=_valuation(),
+        nav_date=date(2026, 5, 28),
+        persist=True,
+        dry_run=True,
+    )
+
+    assert result.mtd_nav_change == 0.2
+    assert result.ytd_nav_change == 0.2
+    assert result.mtd_pnl is None
+    assert result.ytd_pnl is None
+
+
 def test_nav_record_service_uses_bulk_persist_when_requested():
     storage = _storage()
     manager = _manager(storage)

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.5 - 2026-05-29
+
+- Fixed MTD/YTD NAV change recording for new accounts that do not yet have a
+  previous month-end or previous year-end NAV anchor.
+- Kept MTD/YTD PnL on strict previous-period anchors while allowing NAV change
+  to fall back to the first earlier NAV in the current month/year.
+- Updated NAV audit and repair logic to distinguish strict period anchors from
+  NAV-return fallback anchors.
+- Added tests covering current-period fallback bases for NAV recording, audit,
+  reconciliation, and NAV history indexing.
+
 ## 0.1.4 - 2026-05-25
 
 - Fixed daily report payload assembly so scheduled Monday jobs can record the

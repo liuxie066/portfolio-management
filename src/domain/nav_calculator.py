@@ -93,6 +93,8 @@ class NavCalculator:
         cumulative_cash_flow,
         start_year,
         initial_value: Optional[float],
+        ytd_return_base_nav=None,
+        mtd_return_base_nav=None,
         gap_cash_flow=None,
     ) -> dict:
         """Calculate shares, NAV deltas, PnL, and CAGR.
@@ -126,8 +128,10 @@ class NavCalculator:
         shares = float(shares_dec)
         nav = float(nav_dec)
 
-        month_nav_change = cls.calc_mtd_nav_change(nav, prev_month_end_nav)
-        year_nav_change = cls.calc_ytd_nav_change(nav, prev_year_end_nav)
+        month_base_nav = mtd_return_base_nav if mtd_return_base_nav is not None else prev_month_end_nav
+        year_base_nav = ytd_return_base_nav if ytd_return_base_nav is not None else prev_year_end_nav
+        month_nav_change = cls.calc_mtd_nav_change(nav, month_base_nav)
+        year_nav_change = cls.calc_ytd_nav_change(nav, year_base_nav)
 
         for yd in yearly_data.values():
             base, e = yd["prev_end"], yd["end"]
@@ -225,6 +229,8 @@ class NavCalculator:
         last_nav=None,
         prev_month_end_nav=None,
         prev_year_end_nav=None,
+        mtd_return_base_nav=None,
+        ytd_return_base_nav=None,
         daily_cash_flow: float = 0.0,
         monthly_cash_flow: float = 0.0,
         yearly_cash_flow: float = 0.0,
@@ -259,11 +265,14 @@ class NavCalculator:
             if not cls.money_equal(nav_record.share_change, 0.0):
                 errors.append(f"无资金流时 share_change 不应变化: {nav_record.share_change}")
 
-        expected_mtd = cls.calc_mtd_nav_change(nav_record.nav, prev_month_end_nav) if nav_record.nav is not None else None
+        month_base_nav = mtd_return_base_nav if mtd_return_base_nav is not None else prev_month_end_nav
+        year_base_nav = ytd_return_base_nav if ytd_return_base_nav is not None else prev_year_end_nav
+
+        expected_mtd = cls.calc_mtd_nav_change(nav_record.nav, month_base_nav) if nav_record.nav is not None else None
         if not cls.approx_equal_quantized(nav_record.mtd_nav_change, expected_mtd, cls.quantize_nav):
             errors.append(f"mtd_nav_change 不一致: {nav_record.mtd_nav_change} != {expected_mtd}")
 
-        expected_ytd = cls.calc_ytd_nav_change(nav_record.nav, prev_year_end_nav) if nav_record.nav is not None else None
+        expected_ytd = cls.calc_ytd_nav_change(nav_record.nav, year_base_nav) if nav_record.nav is not None else None
         if not cls.approx_equal_quantized(nav_record.ytd_nav_change, expected_ytd, cls.quantize_nav):
             errors.append(f"ytd_nav_change 不一致: {nav_record.ytd_nav_change} != {expected_ytd}")
 

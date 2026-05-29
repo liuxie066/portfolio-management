@@ -5,7 +5,7 @@ from skill_api import PortfolioSkill
 from src.models import NAVHistory
 
 
-def _nav(d, mtd, ytd):
+def _nav(d, mtd, ytd, nav_value=1.0):
     return NAVHistory(
         record_id=f"nav-{d.isoformat()}",
         date=d,
@@ -20,7 +20,7 @@ def _nav(d, mtd, ytd):
         stock_weight=1.0,
         cash_weight=0.0,
         shares=100.0,
-        nav=1.0,
+        nav=nav_value,
         cash_flow=0.0,
         share_change=0.0,
         mtd_nav_change=mtd,
@@ -48,7 +48,27 @@ def test_audit_ignores_initial_record_without_month_base():
 
     assert result['summary']['mtd_nav_change_mismatch'] == 0
     assert result['summary']['base_missing_month'] == 1
+    assert result['summary']['return_base_missing_month'] == 1
     assert result['rows'][0]['audit_exemptions']['initial_without_month_base'] is True
+
+
+def test_audit_flags_missing_nav_change_when_current_period_base_exists():
+    skill = PortfolioSkill(account='lx')
+    base = _nav(date(2026, 5, 1), mtd=None, ytd=None, nav_value=1.0)
+    curr = _nav(date(2026, 5, 28), mtd=None, ytd=None, nav_value=1.2)
+    skill.storage.get_nav_history = Mock(return_value=[base, curr])
+    skill.portfolio._get_monthly_cash_flow = Mock(return_value=0.0)
+    skill.portfolio._get_yearly_cash_flow = Mock(return_value=0.0)
+
+    result = skill.audit_nav_history_metrics(write_report=False)
+    row = [r for r in result['rows'] if r['date'] == '2026-05-28'][0]
+
+    assert row['mtd_return_base_date'] == '2026-05-01'
+    assert row['ytd_return_base_date'] == '2026-05-01'
+    assert row['recomputed_mtd_nav_change'] == 0.2
+    assert row['recomputed_ytd_nav_change'] == 0.2
+    assert result['summary']['mtd_nav_change_mismatch'] == 1
+    assert result['summary']['ytd_nav_change_mismatch'] == 1
 
 
 def test_audit_ignores_swapped_false_positive_when_january_mtd_equals_ytd():

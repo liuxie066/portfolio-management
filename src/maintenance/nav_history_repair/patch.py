@@ -251,10 +251,12 @@ def validate_math(
 
             pm_base = p._find_prev_month_end_nav(all_navs, candidate.date.year, candidate.date.month, nav_index=nav_index)
             py_base = p._find_year_end_nav(all_navs, str(candidate.date.year - 1), nav_index=nav_index)
+            mtd_return_base = p._find_mtd_return_base_nav(all_navs, candidate.date, nav_index=nav_index)
+            ytd_return_base = p._find_ytd_return_base_nav(all_navs, candidate.date, nav_index=nav_index)
 
             if candidate.nav is not None:
-                exp_mtd = p._calc_mtd_nav_change(candidate.nav, pm_base) if pm_base else None
-                exp_ytd = p._calc_ytd_nav_change(candidate.nav, py_base) if py_base else None
+                exp_mtd = p._calc_mtd_nav_change(candidate.nav, mtd_return_base) if mtd_return_base else None
+                exp_ytd = p._calc_ytd_nav_change(candidate.nav, ytd_return_base) if ytd_return_base else None
                 exp_mtd_r = round(exp_mtd, 6) if exp_mtd is not None else None
                 exp_ytd_r = round(exp_ytd, 6) if exp_ytd is not None else None
                 if candidate.mtd_nav_change is not None:

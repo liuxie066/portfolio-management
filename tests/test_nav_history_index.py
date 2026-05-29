@@ -35,3 +35,16 @@ def test_nav_history_index_fallback_queries_without_index():
     assert NavHistoryIndex.find_year_end(navs, "2025").date == date(2025, 3, 13)
     assert NavHistoryIndex.find_prev_month_end(navs, 2025, 3).date == date(2025, 2, 28)
     assert NavHistoryIndex.find_latest_before(navs, date(2025, 1, 1)) is None
+
+
+def test_nav_history_index_resolves_return_base_from_current_period_start():
+    navs = [
+        _nav(date(2026, 5, 1), 100.0, 1.0),
+        _nav(date(2026, 5, 25), 101.0, 1.01),
+    ]
+    index = NavHistoryIndex.build(navs)
+
+    assert NavHistoryIndex.find_mtd_return_base(navs, date(2026, 5, 25), nav_index=index).date == date(2026, 5, 1)
+    assert NavHistoryIndex.find_ytd_return_base(navs, date(2026, 5, 25), nav_index=index).date == date(2026, 5, 1)
+    assert NavHistoryIndex.find_mtd_return_base(navs, date(2026, 5, 1), nav_index=index) is None
+    assert NavHistoryIndex.find_ytd_return_base(navs, date(2026, 5, 1), nav_index=index) is None

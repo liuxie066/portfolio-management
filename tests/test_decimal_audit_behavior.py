@@ -41,7 +41,7 @@ def test_metrics_audit_does_not_flag_nav_values_equal_after_quantize():
     skill.portfolio._find_year_end_nav = Mock(return_value=None)
     skill.portfolio._get_monthly_cash_flow = Mock(return_value=0.0)
     skill.portfolio._get_yearly_cash_flow = Mock(return_value=None)
-    skill.portfolio._calc_mtd_nav_change = Mock(side_effect=[0.0, 0.1234569999])
+    skill.portfolio._calc_mtd_nav_change = Mock(return_value=0.1234569999)
     skill.portfolio._calc_ytd_nav_change = Mock(side_effect=[None, None])
     skill.portfolio._calc_mtd_pnl = Mock(side_effect=[None, 12.3400001])
     skill.portfolio._calc_ytd_pnl = Mock(side_effect=[None, None])

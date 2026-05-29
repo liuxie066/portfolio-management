@@ -74,7 +74,7 @@ def test_reconcile_marks_ok_for_consistent_consecutive_record():
         shares=1000.0,
         nav=1.01,
         mtd=0.01,
-        ytd=None,
+        ytd=0.01,
         pnl=10.0,
         mtd_pnl=10.0,
         ytd_pnl=None,
@@ -89,8 +89,9 @@ def test_reconcile_marks_ok_for_consistent_consecutive_record():
     row = [r for r in result['rows'] if r['date'] == '2025-03-01'][0]
     assert row['status'] == 'exempt'
     assert row['anomalies'] == []
-    assert 'missing_year_base' in row['exemptions']
+    assert 'fallback_year_base' in row['exemptions']
     assert row['basis']['prev_nav_date'] == '2025-02-28'
     assert row['basis']['prev_month_end_date'] == '2025-02-28'
+    assert row['basis']['ytd_return_base_date'] == '2025-02-28'
     assert row['cash_flow_basis']['daily_cash_flow'] == 0
     assert row['recomputed']['expected_daily_pnl'] == 10.0
