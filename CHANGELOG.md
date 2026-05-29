@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.6 - 2026-05-29
+
+- Suppressed swapped MTD/YTD NAV-change audit false positives when both values
+  legitimately share the same current-period fallback base.
+
 ## 0.1.5 - 2026-05-29
 
 - Fixed MTD/YTD NAV change recording for new accounts that do not yet have a

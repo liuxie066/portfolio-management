@@ -162,6 +162,7 @@ class AuditService:
             if r["stored_mtd_nav_change"] == r["recomputed_ytd_nav_change"]
             and r["stored_ytd_nav_change"] == r["recomputed_mtd_nav_change"]
             and not r.get("audit_exemptions", {}).get("january_mtd_equals_ytd")
+            and r.get("mtd_return_base_date") != r.get("ytd_return_base_date")
         ]
         summary = {
             "mtd_nav_change_mismatch": sum(1 for r in rows if _neq_mtd_nav(r)),

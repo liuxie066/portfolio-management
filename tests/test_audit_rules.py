@@ -69,6 +69,7 @@ def test_audit_flags_missing_nav_change_when_current_period_base_exists():
     assert row['recomputed_ytd_nav_change'] == 0.2
     assert result['summary']['mtd_nav_change_mismatch'] == 1
     assert result['summary']['ytd_nav_change_mismatch'] == 1
+    assert result['summary']['swapped_nav_change_like'] == 0
 
 
 def test_audit_ignores_swapped_false_positive_when_january_mtd_equals_ytd():
