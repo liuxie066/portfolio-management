@@ -113,6 +113,8 @@ sudo systemctl enable --now portfolio-nav-daily.timer
 systemctl list-timers portfolio-nav-daily.timer
 ```
 
+这个 timer 是按自然日运行，不是按交易日运行。`daily-job` 会把运行日解析为前一个业务日：周六运行用于记录周五；周日运行通常会因周五已存在而跳过重复写入。不要把 timer 改成只跑周一到周五；如果必须减少运行日，至少覆盖周二到周六。
+
 手动触发一次：
 
 ```bash
@@ -128,7 +130,7 @@ pm daily-job --write --confirm --sync-futu-cash-mmf --json
 
 核心保护：
 
-- 排除周六、周日和 `calendar.holidays` 中配置的法定节假日。
+- 排除周六、周日和 `calendar.holidays` 中配置的 NAV 日期。
 - 未显式传 `--nav-date` 时，默认记录运行日前最近业务日。
 - 写入前阻断 `nav_history` 同账户同日期重复。
 - 写入前阻断待补齐的 `cash_flow` 人工录入行。

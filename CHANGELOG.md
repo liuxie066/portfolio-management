@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.7 - 2026-06-02
+
+- Made the Linux installer default systemd timer run daily at
+  `08:10 Asia/Shanghai`, matching the next-day NAV recording workflow.
+- Documented that weekend/holiday skipping applies to NAV dates, not timer run
+  dates; Saturday runs are needed to record Friday NAV on the next day.
+- Added calendar coverage for Saturday/Sunday timer runs resolving to the prior
+  Friday business date.
+
 ## 0.1.6 - 2026-05-29
 
 - Suppressed swapped MTD/YTD NAV-change audit false positives when both values

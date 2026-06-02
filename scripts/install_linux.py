@@ -23,6 +23,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SERVICE_NAME = "portfolio-nav-daily.service"
 TIMER_NAME = "portfolio-nav-daily.timer"
+DEFAULT_ON_CALENDAR = "*-*-* 08:10:00 Asia/Shanghai"
 
 
 @dataclass(frozen=True)
@@ -311,7 +312,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--python", default=None, help="Python interpreter for systemd job")
     parser.add_argument("--launcher", default="/usr/local/bin/pm", help="pm launcher path")
     parser.add_argument("--run-user", default=_default_user(), help="systemd User for the oneshot service")
-    parser.add_argument("--on-calendar", default="*-*-* 08:10:00", help="systemd OnCalendar value")
+    parser.add_argument("--on-calendar", default=DEFAULT_ON_CALENDAR, help="systemd OnCalendar value")
     parser.add_argument("--sync-futu-cash-mmf", action="store_true", help="include Futu cash/MMF sync in daily job")
     parser.add_argument("--overwrite-config", action="store_true", help="overwrite an existing config.yaml")
     parser.add_argument("--enable-timer", action="store_true", help="run systemctl enable --now after writing units")

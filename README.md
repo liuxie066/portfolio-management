@@ -86,14 +86,16 @@ feishu:
 ./pm daily-job --accounts lx,alice --nav-date 2026-05-22 --write --confirm --json
 ```
 
-`daily-job` 是单账户和多账户的统一入口。未显式传 `--nav-date` 时，它会取运行日前最近业务日；周一任务会记录上一个周五，而不是落到周日后跳过。
+`daily-job` 是单账户和多账户的统一入口。未显式传 `--nav-date` 时，它会取运行日前最近业务日；周六任务会记录周五，周日/周一会在周五已存在时跳过同日重复写入。
+
+定时器应按自然日运行，例如每天 `08:10 Asia/Shanghai`。不要把 systemd timer 配成只跑周一到周五；如果必须减少运行日，至少要覆盖周二到周六，否则周五的次日记录窗口会被漏掉。
 
 写入保护：
 
 - 默认 `dry_run=true`
 - 真实写入必须显式 `--write --confirm`
 - 默认不覆盖同日已有 NAV
-- 非交易日默认跳过，可用 `--force-non-business-day` 明确覆盖
+- NAV 日期为非交易日时默认跳过，可用 `--force-non-business-day` 明确覆盖
 
 ## 本地服务
 

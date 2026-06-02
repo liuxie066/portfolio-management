@@ -58,7 +58,8 @@ Rules:
 
 - If `--nav-date` is omitted, the job records the most recent business day
   before the run date.
-- Weekends and `calendar.holidays` are skipped by default.
+- Weekends and `calendar.holidays` are skipped as NAV dates, not as timer run
+  dates.
 - Duplicate `nav_history` account/date records block writes.
 - Pending generated fields in manual `cash_flow` rows block writes.
 - Existing same-day NAV is skipped unless `--overwrite` is explicit.
@@ -147,6 +148,10 @@ holdings_snapshot.
 
 Business dates use Beijing date semantics. `daily-job` auto-date means previous
 business day before the run date, not calendar yesterday.
+
+The systemd timer should run every calendar day, for example
+`*-*-* 08:10:00 Asia/Shanghai`. A Saturday timer run records Friday NAV; do not
+limit the timer to Monday-Friday.
 
 ### Prices Missing
 

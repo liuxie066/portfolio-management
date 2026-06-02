@@ -54,6 +54,14 @@ def test_business_calendar_skips_weekend_and_configured_holiday():
     assert calendar.is_business_day("2026-05-21") is True
 
 
+def test_business_calendar_weekend_timer_run_records_friday():
+    calendar = BusinessCalendarService()
+
+    assert calendar.default_nav_date(run_date="2026-05-30").isoformat() == "2026-05-29"
+    assert calendar.default_nav_date(run_date="2026-05-31").isoformat() == "2026-05-29"
+    assert calendar.default_nav_date(run_date="2026-06-01").isoformat() == "2026-05-29"
+
+
 def test_daily_account_nav_service_reuses_one_snapshot_and_respects_nav_date():
     calls = []
     valuation = SimpleNamespace(warnings=[])

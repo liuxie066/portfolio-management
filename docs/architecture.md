@@ -136,7 +136,7 @@ flowchart TB
 
 1. Resolve NAV date. If omitted, use the most recent business day before the
    run date.
-2. Skip weekends and configured `calendar.holidays`.
+2. Skip NAV dates that are weekends or configured `calendar.holidays`.
 3. Resolve target accounts from CLI input or current holdings.
 4. Audit duplicate `nav_history` account/date rows and block writes if found.
 5. Reconcile-check manual `cash_flow` rows and block writes if generated fields

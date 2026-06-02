@@ -19,7 +19,7 @@
 `daily-job` 是单账户和多账户统一工作流：
 
 1. 解析 NAV 日期；未指定时取运行日前最近业务日。
-2. 跳过周六、周日和 `calendar.holidays`。
+2. 跳过周六、周日和 `calendar.holidays` 对应的 NAV 日期。
 3. 解析账户列表；未指定时从当前 holdings 发现账户。
 4. 审计 `nav_history` 同账户同日期重复记录。
 5. 检查人工 `cash_flow` 行是否还有待补齐系统字段。
@@ -98,6 +98,8 @@ python scripts/migrate_schema.py check-live
 ### NAV 日期不对
 
 `daily-job` 的自动日期是“运行日前最近业务日”，不是日历昨天。周一默认记录上一个周五。
+
+systemd timer 应按自然日运行，例如每天 `08:10 Asia/Shanghai`。周六运行负责记录周五；不要把 timer 配成只跑周一到周五。
 
 ### 写入被阻断
 

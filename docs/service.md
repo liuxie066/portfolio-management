@@ -99,7 +99,7 @@ Behavior:
 
 1. Resolve `nav_date`. `auto` means the most recent business day before
    `run_date`.
-2. Skip weekends and configured `calendar.holidays` unless
+2. Skip NAV dates that are weekends or configured `calendar.holidays` unless
    `force_non_business_day=true`.
 3. Resolve accounts from the request or current holdings.
 4. Block duplicate `nav_history` account/date records.

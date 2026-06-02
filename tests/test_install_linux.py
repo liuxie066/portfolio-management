@@ -29,7 +29,7 @@ def test_install_linux_plan_uses_yaml_config_and_daily_timer(tmp_path):
     assert payload["paths"]["config_file"].endswith("/etc/config.yaml")
     assert payload["paths"]["env_file"].endswith("/etc/portfolio-management.env")
     assert payload["paths"]["launcher"].endswith("/bin/pm")
-    assert payload["systemd"]["on_calendar"] == "*-*-* 08:10:00"
+    assert payload["systemd"]["on_calendar"] == "*-*-* 08:10:00 Asia/Shanghai"
     assert payload["daily_job_args"] == [
         "daily-job",
         "--write",
