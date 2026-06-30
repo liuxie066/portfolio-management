@@ -212,8 +212,25 @@ class PortfolioServiceClient:
     def audit_nav_history_duplicates(self, *, account: Optional[str] = None) -> Dict[str, Any]:
         return self._get("/nav/duplicates", {"account": account})
 
-    def get_distribution(self, *, account: str) -> Dict[str, Any]:
-        return self._get("/distribution", {"account": account})
+    def get_distribution(
+        self,
+        *,
+        account: Optional[str] = None,
+        accounts: Any = None,
+        by_asset: bool = False,
+        include_value: bool = True,
+        group_cash: bool = False,
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {}
+        if account is not None:
+            params["account"] = account
+        if accounts is not None:
+            params["accounts"] = _query_value(accounts)
+        params["by_asset"] = by_asset
+        params["include_value"] = include_value
+        if group_cash:
+            params["group_cash"] = True
+        return self._get("/distribution", params)
 
     def full_report(self, *, account: str, price_timeout: int = 30) -> Dict[str, Any]:
         return self._get("/report/full", {"account": account, "price_timeout": price_timeout})

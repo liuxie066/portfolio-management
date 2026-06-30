@@ -94,6 +94,10 @@ def _print_distribution(payload):
         print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
         return
 
+    if payload.get("by_asset") is not None:
+        _print_asset_distribution(payload)
+        return
+
     print(f"Total value: {_money(payload.get('total_value'))}")
 
     sections = (
@@ -109,6 +113,49 @@ def _print_distribution(payload):
         for row in rows:
             label = row.get(label_key) or "unknown"
             print(f"  {label}: {_money(row.get('value'))} ({_pct(row.get('ratio'))})")
+
+
+def _qty(value) -> str:
+    try:
+        return f"{float(value or 0):,.4f}"
+    except (TypeError, ValueError):
+        return "0.0000"
+
+
+def _print_asset_distribution(payload):
+    rows = payload.get("by_asset") or []
+    if not rows:
+        print("No asset positions found.")
+        return
+
+    include_value = "total_value" in payload
+    if include_value:
+        print(f"Total value: {_money(payload.get('total_value'))}")
+
+    accounts = payload.get("accounts") or []
+    if accounts:
+        print(f"Accounts: {', '.join(str(a) for a in accounts)}")
+
+    print("")
+    for row in rows:
+        code = row.get("code") or "unknown"
+        name = row.get("name") or code
+        asset_type = row.get("normalized_type") or row.get("type") or "unknown"
+        line = f"{code} ({name}) [{asset_type}] qty={_qty(row.get('quantity'))}"
+        if include_value:
+            line += f" value={_money(row.get('value'))} ({_pct(row.get('ratio'))})"
+        else:
+            line += f" ({_pct(row.get('quantity_ratio'))})"
+        print(line)
+
+        breakdown = row.get("breakdown") or []
+        for item in breakdown:
+            account = item.get("account") or "default"
+            broker = item.get("broker") or "-"
+            detail = f"    {account}/{broker}: qty={_qty(item.get('quantity'))}"
+            if include_value and "value" in item:
+                detail += f" value={_money(item.get('value'))}"
+            print(detail)
 
 
 def _print_daily(payload):
@@ -404,13 +451,38 @@ def cmd_nav_record(args):
 
 
 def cmd_positions_distribution(args):
+    accounts = getattr(args, "accounts", None)
+    by_asset = bool(getattr(args, "by_asset", False))
+    include_value = not bool(getattr(args, "no_value", False))
+    group_cash = bool(getattr(args, "group_cash", False))
+
     def via_service(client):
-        return client.get_distribution(account=_default_account(args.account))
+        kwargs = {
+            "by_asset": by_asset,
+            "include_value": include_value,
+        }
+        if group_cash:
+            kwargs["group_cash"] = True
+        if accounts is not None:
+            kwargs["accounts"] = accounts
+        else:
+            kwargs["account"] = _default_account(args.account)
+        return client.get_distribution(**kwargs)
 
     def direct():
         from src.service.application import PortfolioService
 
-        return PortfolioService().get_distribution(account=args.account)
+        kwargs = {
+            "by_asset": by_asset,
+            "include_value": include_value,
+        }
+        if group_cash:
+            kwargs["group_cash"] = True
+        if accounts is not None:
+            kwargs["accounts"] = accounts
+        else:
+            kwargs["account"] = args.account
+        return PortfolioService().get_distribution(**kwargs)
 
     res = _service_or_fallback(args, via_service, direct)
     _emit_distribution(res, args.json)
@@ -731,14 +803,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_positions = sp.add_parser("positions", help="position analytics")
     positions_sub = p_positions.add_subparsers(dest="positions_cmd", required=True)
-    p_positions_distribution = positions_sub.add_parser("distribution", help="show position distribution by type, broker, and currency")
+    p_positions_distribution = positions_sub.add_parser("distribution", help="show position distribution by type, broker, currency, or asset")
     p_positions_distribution.add_argument("--account", default=argparse.SUPPRESS, help="account to operate on; defaults to config/PORTFOLIO_ACCOUNT")
+    p_positions_distribution.add_argument("--accounts", default=None, help="comma-separated accounts to merge; overrides --account")
+    p_positions_distribution.add_argument("--by-asset", action="store_true", help="group distribution by asset code across accounts")
+    p_positions_distribution.add_argument("--group-cash", action="store_true", help="collapse cash and MMF into one row")
+    p_positions_distribution.add_argument("--no-value", action="store_true", help="hide market value fields; show quantities only")
     p_positions_distribution.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
     add_service_args(p_positions_distribution)
     p_positions_distribution.set_defaults(func=cmd_positions_distribution)
 
     p_distribution = sp.add_parser("distribution", help="shortcut for positions distribution")
     p_distribution.add_argument("--account", default=argparse.SUPPRESS, help="account to operate on; defaults to config/PORTFOLIO_ACCOUNT")
+    p_distribution.add_argument("--accounts", default=None, help="comma-separated accounts to merge; overrides --account")
+    p_distribution.add_argument("--by-asset", action="store_true", help="group distribution by asset code across accounts")
+    p_distribution.add_argument("--group-cash", action="store_true", help="collapse cash and MMF into one row")
+    p_distribution.add_argument("--no-value", action="store_true", help="hide market value fields; show quantities only")
     p_distribution.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
     add_service_args(p_distribution)
     p_distribution.set_defaults(func=cmd_positions_distribution)

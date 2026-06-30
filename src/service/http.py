@@ -172,12 +172,40 @@ def create_app(service: Optional[PortfolioService] = None) -> FastAPI:
         return _service(request).audit_nav_history_duplicates(account=account)
 
     @app.get("/distribution", tags=["positions"])
-    def get_distribution_query(request: Request, account: str = Query(...)):
-        return _service(request).get_distribution(account=account)
+    def get_distribution_query(
+        request: Request,
+        account: Optional[str] = Query(None),
+        accounts: Optional[str] = Query(None, description="Comma-separated accounts; overrides account."),
+        by_asset: bool = Query(False, description="Group distribution by asset code."),
+        include_value: bool = Query(True, description="Include market value and ratio fields."),
+        group_cash: bool = Query(False, description="Collapse cash and MMF into one row."),
+    ):
+        kwargs = {
+            "account": account,
+            "accounts": accounts,
+            "by_asset": by_asset,
+            "include_value": include_value,
+        }
+        if group_cash:
+            kwargs["group_cash"] = True
+        return _service(request).get_distribution(**kwargs)
 
     @app.get("/accounts/{account}/distribution", tags=["positions"])
-    def get_distribution(request: Request, account: str):
-        return _service(request).get_distribution(account=account)
+    def get_distribution(
+        request: Request,
+        account: str,
+        by_asset: bool = Query(False, description="Group distribution by asset code."),
+        include_value: bool = Query(True, description="Include market value and ratio fields."),
+        group_cash: bool = Query(False, description="Collapse cash and MMF into one row."),
+    ):
+        kwargs = {
+            "account": account,
+            "by_asset": by_asset,
+            "include_value": include_value,
+        }
+        if group_cash:
+            kwargs["group_cash"] = True
+        return _service(request).get_distribution(**kwargs)
 
     @app.get("/report/full", tags=["reports"])
     def full_report_query(

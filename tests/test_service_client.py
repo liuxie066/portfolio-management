@@ -80,7 +80,7 @@ def test_service_client_uses_query_routes_for_account_values():
         (f"http://127.0.0.1:8765/holdings?account={encoded_account}&include_cash=False&group_by_market=True&include_price=True", 1.0),
         (f"http://127.0.0.1:8765/cash?account={encoded_account}", 1.0),
         (f"http://127.0.0.1:8765/nav?account={encoded_account}&days=14", 1.0),
-        (f"http://127.0.0.1:8765/distribution?account={encoded_account}", 1.0),
+        (f"http://127.0.0.1:8765/distribution?account={encoded_account}&by_asset=False&include_value=True", 1.0),
         (f"http://127.0.0.1:8765/report/full?account={encoded_account}&price_timeout=9", 1.0),
         (f"http://127.0.0.1:8765/report/monthly%2Fspecial?account={encoded_account}&price_timeout=11", 1.0),
     ]

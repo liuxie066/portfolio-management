@@ -1,7 +1,7 @@
 """Portfolio reporting read service."""
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from src.reporting_utils import normalize_asset_type
 
@@ -126,3 +126,128 @@ class ReportingService:
             "by_broker": by_market,
             "by_currency": [{"currency": k, "value": v, "ratio": v / total if total > 0 else 0} for k, v in sort_by_value(currency_dist)],
         }
+
+    def build_asset_distribution(
+        self,
+        snapshot: Dict[str, Any],
+        *,
+        include_value: bool = True,
+        group_cash: bool = False,
+    ) -> Dict[str, Any]:
+        """Build asset-level distribution, optionally including market value.
+
+        Returns a merged view across accounts/brokers for the same asset code.
+        Each row contains quantity, per-account breakdown, and (when requested)
+        value/ratio fields.
+
+        When ``group_cash`` is True, all cash-like positions (normalized type
+        ``cash``) are collapsed into a single "CASH+MMF" row.
+        """
+        valuation = snapshot.get("valuation")
+        holdings_data = snapshot.get("holdings_data") or {}
+        holdings = holdings_data.get("holdings") or []
+
+        total = (
+            valuation.total_value_cny
+            if valuation is not None
+            else holdings_data.get("total_value", 0)
+        ) or 0
+
+        asset_map: Dict[str, Dict[str, Any]] = {}
+        total_quantity = 0.0
+        cash_entry: Optional[Dict[str, Any]] = None
+
+        for holding in holdings:
+            code = holding.get("code") or ""
+            if not code:
+                continue
+
+            normalized_type = holding.get("normalized_type") or normalize_asset_type(
+                holding.get("type"), code
+            )
+            quantity = float(holding.get("quantity") or 0)
+            market_value = float(holding.get("market_value") or 0)
+            account = holding.get("account") or "default"
+            broker = holding.get("broker") or "未指定券商"
+            currency = holding.get("currency") or "CNY"
+
+            is_cash = normalized_type == "cash"
+            if group_cash and is_cash:
+                if cash_entry is None:
+                    cash_entry = {
+                        "code": "CASH+MMF",
+                        "name": "现金及货基",
+                        "type": holding.get("type"),
+                        "normalized_type": "cash",
+                        "currency": currency,
+                        "quantity": 0.0,
+                        "value": 0.0,
+                        "accounts": {},
+                        "brokers": set(),
+                        "breakdown": [],
+                    }
+                entry = cash_entry
+            else:
+                if code not in asset_map:
+                    asset_map[code] = {
+                        "code": code,
+                        "name": holding.get("name") or code,
+                        "type": holding.get("type"),
+                        "normalized_type": normalized_type,
+                        "currency": currency,
+                        "quantity": 0.0,
+                        "value": 0.0,
+                        "accounts": {},
+                        "brokers": set(),
+                        "breakdown": [],
+                    }
+                entry = asset_map[code]
+
+            entry["quantity"] += quantity
+            entry["value"] += market_value
+            entry["accounts"][account] = entry["accounts"].get(account, 0.0) + quantity
+            entry["brokers"].add(broker)
+            breakdown_item = {
+                "account": account,
+                "broker": broker,
+                "quantity": quantity,
+            }
+            if include_value:
+                breakdown_item["value"] = market_value
+            entry["breakdown"].append(breakdown_item)
+
+            total_quantity += quantity
+
+        if group_cash and cash_entry is not None:
+            asset_map["CASH+MMF"] = cash_entry
+
+        def sort_key(item):
+            return item[1]["value"] if include_value else item[1]["quantity"]
+
+        sorted_assets = sorted(asset_map.items(), key=sort_key, reverse=True)
+
+        by_asset = []
+        for code, entry in sorted_assets:
+            row = {
+                "code": entry["code"],
+                "name": entry["name"],
+                "normalized_type": entry["normalized_type"],
+                "currency": entry["currency"],
+                "quantity": entry["quantity"],
+                "accounts": entry["accounts"],
+                "brokers": sorted(entry["brokers"]),
+                "breakdown": entry["breakdown"],
+            }
+            if include_value:
+                row["value"] = entry["value"]
+                row["ratio"] = entry["value"] / total if total > 0 else 0.0
+            else:
+                row["quantity_ratio"] = entry["quantity"] / total_quantity if total_quantity > 0 else 0.0
+            by_asset.append(row)
+
+        result: Dict[str, Any] = {"success": True, "by_asset": by_asset}
+        if include_value:
+            result["total_value"] = total
+        else:
+            result["total_quantity"] = total_quantity
+        return result

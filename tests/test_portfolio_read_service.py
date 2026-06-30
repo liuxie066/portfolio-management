@@ -161,6 +161,48 @@ def test_get_position_delegates_to_reporting_service_snapshot():
     service.reporting_service.build_position.assert_called_once_with(snapshot)
 
 
+def test_merge_holdings_data_preserves_account_and_sums_total():
+    merged = PortfolioReadService.merge_holdings_data([
+        {
+            "success": True,
+            "holdings": [
+                {"code": "AAPL", "account": "lx", "quantity": 5},
+            ],
+            "total_value": 100.0,
+        },
+        {
+            "success": True,
+            "holdings": [
+                {"code": "AAPL", "account": "alice", "quantity": 5},
+            ],
+            "total_value": 100.0,
+        },
+    ])
+
+    assert merged["success"] is True
+    assert merged["total_value"] == 200.0
+    assert [h["account"] for h in merged["holdings"]] == ["lx", "alice"]
+
+
+def test_get_asset_distribution_delegates_to_reporting_service():
+    holdings_data = {"success": True, "holdings": [{"code": "AAPL"}], "total_value": 1}
+    service = PortfolioReadService(
+        account="lx",
+        storage=Mock(),
+        portfolio=SimpleNamespace(calculate_valuation=Mock()),
+        reporting_service=Mock(),
+    )
+    service.reporting_service.build_asset_distribution.return_value = {"success": True, "by_asset": []}
+
+    result = service.get_asset_distribution(holdings_data=holdings_data, include_value=False)
+
+    assert result == {"success": True, "by_asset": []}
+    service.reporting_service.build_asset_distribution.assert_called_once()
+    passed_snapshot = service.reporting_service.build_asset_distribution.call_args[0][0]
+    assert passed_snapshot["holdings_data"] is holdings_data
+    assert service.reporting_service.build_asset_distribution.call_args[1]["include_value"] is False
+
+
 def test_get_distribution_accepts_prebuilt_holdings_data_without_refetch():
     holdings_data = {
         "success": True,

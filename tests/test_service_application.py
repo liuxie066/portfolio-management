@@ -476,6 +476,46 @@ def test_portfolio_service_get_distribution_uses_direct_read_service():
     read_service.get_distribution.assert_called_once_with()
 
 
+def test_portfolio_service_get_distribution_merges_accounts_by_asset():
+    portfolio = SimpleNamespace(reporting_service=object())
+    read_services = []
+
+    def read_service_factory(**kwargs):
+        account = kwargs["account"]
+        service = SimpleNamespace(
+            build_snapshot=Mock(return_value={
+                "holdings_data": {
+                    "success": True,
+                    "holdings": [
+                        {"code": "AAPL", "name": "Apple", "normalized_type": "stock", "account": account, "broker": "futu", "currency": "USD", "quantity": 5, "market_value": 100.0},
+                    ],
+                    "total_value": 100.0,
+                },
+            }),
+            get_asset_distribution=Mock(return_value={"success": True, "by_asset": []}),
+        )
+        read_services.append(service)
+        return service
+
+    service = PortfolioService(
+        storage=object(),
+        portfolio=portfolio,
+        read_service_factory=read_service_factory,
+    )
+
+    result = service.get_distribution(accounts="alice,bob", by_asset=True, include_value=False)
+
+    assert result["success"] is True
+    assert result["accounts"] == ["alice", "bob"]
+    # The service resolves the first account again for the final builder call.
+    final_read_service = read_services[-1]
+    final_read_service.get_asset_distribution.assert_called_once()
+    passed_holdings_data = final_read_service.get_asset_distribution.call_args[0][0]
+    assert passed_holdings_data["total_value"] == 200.0
+    assert len(passed_holdings_data["holdings"]) == 2
+    assert final_read_service.get_asset_distribution.call_args[1]["include_value"] is False
+
+
 def test_portfolio_service_full_report_uses_direct_app_service():
     storage = SimpleNamespace(get_nav_history=Mock(return_value=[]))
     portfolio = SimpleNamespace(reporting_service=object())

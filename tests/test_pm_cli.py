@@ -413,8 +413,8 @@ def test_pm_positions_distribution_prefers_service_when_available():
         def __init__(self, base_url=None, timeout=0.5):
             calls.append(("init", base_url, timeout))
 
-        def get_distribution(self, *, account):
-            calls.append(("get_distribution", account))
+        def get_distribution(self, *, account, accounts=None, by_asset=False, include_value=True):
+            calls.append(("get_distribution", account, accounts, by_asset, include_value))
             return {"success": True, "total_value": 10, "source": "service"}
 
     old_client = client_module.PortfolioServiceClient
@@ -428,7 +428,34 @@ def test_pm_positions_distribution_prefers_service_when_available():
 
     out = json.loads(stdout.getvalue())
     assert out["source"] == "service"
-    assert calls == [("init", "http://local", 0.5), ("get_distribution", "bob")]
+    assert calls == [("init", "http://local", 0.5), ("get_distribution", "bob", None, False, True)]
+
+
+def test_pm_positions_distribution_by_asset_no_value_flags_passed_to_service():
+    import src.service.client as client_module
+
+    calls = []
+
+    class FakeClient:
+        def __init__(self, base_url=None, timeout=0.5):
+            calls.append(("init", base_url, timeout))
+
+        def get_distribution(self, *, account=None, accounts=None, by_asset=False, include_value=True):
+            calls.append(("get_distribution", account, accounts, by_asset, include_value))
+            return {"success": True, "by_asset": []}
+
+    old_client = client_module.PortfolioServiceClient
+    try:
+        client_module.PortfolioServiceClient = FakeClient
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            assert pm.main(["positions", "distribution", "--accounts", "alice,bob", "--by-asset", "--no-value", "--service-url", "http://local", "--json"]) == 0
+    finally:
+        client_module.PortfolioServiceClient = old_client
+
+    out = json.loads(stdout.getvalue())
+    assert out["success"] is True
+    assert calls == [("init", "http://local", 0.5), ("get_distribution", None, "alice,bob", True, False)]
 
 
 def test_pm_nav_record_prefers_service_when_available():

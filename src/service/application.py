@@ -228,9 +228,59 @@ class PortfolioService:
             use_bulk_persist=use_bulk_persist,
         )
 
-    def get_distribution(self, *, account: Optional[str] = None) -> Dict[str, Any]:
+    def get_distribution(
+        self,
+        *,
+        account: Optional[str] = None,
+        accounts: Any = None,
+        by_asset: bool = False,
+        include_value: bool = True,
+        group_cash: bool = False,
+    ) -> Dict[str, Any]:
         try:
-            return self._read_service(self._resolve_account(account)).get_distribution()
+            from src.app.account_service import normalize_accounts
+
+            target_accounts = normalize_accounts(accounts)
+            if target_accounts is None:
+                if account is not None:
+                    target_accounts = [account]
+                else:
+                    target_accounts = [self._resolve_account(None)]
+
+            if len(target_accounts) == 1 and not by_asset:
+                return self._read_service(target_accounts[0]).get_distribution()
+
+            snapshots = []
+            errors = []
+            for acc in target_accounts:
+                try:
+                    snapshot = self._read_service(acc).build_snapshot()
+                    snapshots.append(snapshot)
+                except Exception as e:
+                    errors.append({"account": acc, "error": str(e)})
+
+            if not snapshots:
+                return {"success": False, "error": errors[0]["error"] if errors else "no holdings data"}
+
+            from src.app.portfolio_read_service import PortfolioReadService
+
+            merged_holdings_data = PortfolioReadService.merge_holdings_data(
+                [(s.get("holdings_data") or {}) for s in snapshots]
+            )
+            read_service = self._read_service(target_accounts[0])
+            if by_asset:
+                result = read_service.get_asset_distribution(
+                    merged_holdings_data,
+                    include_value=include_value,
+                    group_cash=group_cash,
+                )
+            else:
+                result = read_service.get_distribution(merged_holdings_data)
+
+            result["accounts"] = target_accounts
+            if errors:
+                result["errors"] = errors
+            return result
         except Exception as e:
             return {"success": False, "error": str(e)}
 

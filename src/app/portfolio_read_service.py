@@ -31,6 +31,7 @@ class PortfolioReadService:
                 "quantity": h.quantity,
                 "type": h.asset_type.value if h.asset_type else None,
                 "normalized_type": normalize_asset_type(h.asset_type, h.asset_id),
+                "account": getattr(h, "account", None),
                 "broker": h.broker,
                 "currency": h.currency,
                 "price": h.current_price,
@@ -138,6 +139,43 @@ class PortfolioReadService:
     def get_distribution(self, holdings_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         snapshot = self._snapshot_from_holdings_data(holdings_data) if holdings_data is not None else self.build_snapshot()
         return self.reporting_service.build_distribution(snapshot)
+
+    def get_asset_distribution(
+        self,
+        holdings_data: Optional[Dict[str, Any]] = None,
+        *,
+        include_value: bool = True,
+        group_cash: bool = False,
+    ) -> Dict[str, Any]:
+        snapshot = self._snapshot_from_holdings_data(holdings_data) if holdings_data is not None else self.build_snapshot()
+        return self.reporting_service.build_asset_distribution(
+            snapshot,
+            include_value=include_value,
+            group_cash=group_cash,
+        )
+
+    @staticmethod
+    def merge_holdings_data(holdings_data_list: list) -> Dict[str, Any]:
+        """Merge holdings_data snapshots from multiple accounts.
+
+        Preserves per-row ``account`` so downstream builders can still break down
+        by account.  Values and totals are summed; metadata like ``cash_value``
+        is omitted because it is not needed for distribution reports.
+        """
+        merged_holdings: list = []
+        total_value = 0.0
+        for holdings_data in holdings_data_list:
+            if not isinstance(holdings_data, dict):
+                continue
+            for holding in (holdings_data.get("holdings") or []):
+                merged_holdings.append(dict(holding))
+            total_value += float(holdings_data.get("total_value") or 0)
+
+        return {
+            "success": True,
+            "holdings": merged_holdings,
+            "total_value": total_value,
+        }
 
     @staticmethod
     def _format_holdings_result(

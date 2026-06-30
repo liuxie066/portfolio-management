@@ -44,7 +44,7 @@ def test_audit_ignores_initial_record_without_month_base():
     skill.portfolio._calc_mtd_pnl = Mock(return_value=0.0)
     skill.portfolio._calc_ytd_pnl = Mock(return_value=0.0)
 
-    result = skill.audit_nav_history_metrics(write_report=False)
+    result = skill.audit_nav_history_metrics(days=0, write_report=False)
 
     assert result['summary']['mtd_nav_change_mismatch'] == 0
     assert result['summary']['base_missing_month'] == 1

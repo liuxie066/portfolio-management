@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.9 - 2026-06-30
+
+- Added asset-level position distribution for CLI and service callers,
+  including multi-account merging by asset code.
+- Preserved per-account and broker breakdowns, with optional cash/MMF grouping
+  and quantity-only output.
+- Made the initial NAV audit test independent of the rolling default audit
+  window.
+
 ## 0.1.8 - 2026-06-30
 
 - Let confirmed daily NAV writes automatically reconcile system-managed fields

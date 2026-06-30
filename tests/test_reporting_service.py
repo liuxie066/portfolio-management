@@ -178,3 +178,62 @@ def test_reporting_service_build_distribution_uses_snapshot_holdings():
         {"currency": "CNY", "value": 200.0, "ratio": 2 / 3},
         {"currency": "USD", "value": 100.0, "ratio": 1 / 3},
     ]
+
+
+def test_reporting_service_build_asset_distribution_merges_accounts_and_includes_value():
+    storage = Mock()
+    manager = Mock()
+    service = ReportingService(manager=manager, storage=storage)
+    valuation = PortfolioValuation(account="a", total_value_cny=300.0)
+    snapshot = {
+        "valuation": valuation,
+        "holdings_data": {
+            "holdings": [
+                {"code": "AAPL", "name": "Apple", "normalized_type": "stock", "broker": "富途", "currency": "USD", "account": "lx", "quantity": 5, "market_value": 100.0},
+                {"code": "AAPL", "name": "Apple", "normalized_type": "stock", "broker": "老虎", "currency": "USD", "account": "alice", "quantity": 5, "market_value": 100.0},
+                {"code": "CNY-MMF", "name": "MMF", "normalized_type": "cash", "broker": "富途", "currency": "CNY", "account": "lx", "quantity": 50, "market_value": 50.0},
+            ],
+        },
+    }
+
+    result = service.build_asset_distribution(snapshot, include_value=True)
+
+    assert result["success"] is True
+    assert result["total_value"] == 300.0
+    assert len(result["by_asset"]) == 2
+    aapl = result["by_asset"][0]
+    assert aapl["code"] == "AAPL"
+    assert aapl["quantity"] == 10.0
+    assert aapl["value"] == 200.0
+    assert aapl["ratio"] == 2 / 3
+    assert aapl["accounts"] == {"lx": 5.0, "alice": 5.0}
+    assert aapl["breakdown"] == [
+        {"account": "lx", "broker": "富途", "quantity": 5, "value": 100.0},
+        {"account": "alice", "broker": "老虎", "quantity": 5, "value": 100.0},
+    ]
+
+
+def test_reporting_service_build_asset_distribution_hides_value_when_requested():
+    storage = Mock()
+    manager = Mock()
+    service = ReportingService(manager=manager, storage=storage)
+    snapshot = {
+        "holdings_data": {
+            "holdings": [
+                {"code": "AAPL", "name": "Apple", "normalized_type": "stock", "broker": "富途", "currency": "USD", "account": "lx", "quantity": 5, "market_value": 100.0},
+                {"code": "AAPL", "name": "Apple", "normalized_type": "stock", "broker": "老虎", "currency": "USD", "account": "alice", "quantity": 5, "market_value": 100.0},
+            ],
+        },
+    }
+
+    result = service.build_asset_distribution(snapshot, include_value=False)
+
+    assert result["success"] is True
+    assert "total_value" not in result
+    assert result["total_quantity"] == 10.0
+    aapl = result["by_asset"][0]
+    assert "value" not in aapl
+    assert "ratio" not in aapl
+    assert aapl["quantity"] == 10.0
+    assert aapl["quantity_ratio"] == 1.0
+    assert "value" not in aapl["breakdown"][0]
