@@ -490,6 +490,49 @@ def test_daily_nav_job_blocks_cash_flow_pending():
     assert result["items"][0]["status"] == "cash_flow_pending"
 
 
+def test_daily_nav_job_applies_cash_flow_reconcile_before_write():
+    calls = []
+
+    class FakeStorage:
+        def audit_nav_history_duplicates(self, account=None):
+            return {"success": True, "duplicate_group_count": 0}
+
+        def get_nav_on_date(self, account, nav_date):
+            return None
+
+        def reconcile_cash_flows(self, **kwargs):
+            calls.append(("reconcile_cash_flows", kwargs["account"], kwargs["dry_run"]))
+            return {
+                "success": True,
+                "account": kwargs["account"],
+                "change_count": 1,
+                "updated_count": 1,
+                "error_count": 0,
+            }
+
+    class FakeRunner:
+        def __init__(self, account):
+            self.account = account
+
+        def run(self, **kwargs):
+            calls.append(("runner", self.account, kwargs["dry_run"]))
+            return {"success": True, "account": self.account}
+
+    result = DailyNavJobService(
+        storage=FakeStorage(),
+        portfolio=SimpleNamespace(reporting_service=object()),
+        calendar=BusinessCalendarService(),
+        account_runner_factory=FakeRunner,
+    ).run(nav_date="2026-05-22", account="alice", dry_run=False, confirm=True)
+
+    assert result["success"] is True
+    assert result["summary"] == {"written": 1}
+    assert calls == [
+        ("reconcile_cash_flows", "alice", False),
+        ("runner", "alice", False),
+    ]
+
+
 def test_daily_nav_job_blocks_cash_flow_pending_before_existing_nav_skip():
     calls = []
 

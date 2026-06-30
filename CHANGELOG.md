@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.8 - 2026-06-30
+
+- Let confirmed daily NAV writes automatically reconcile system-managed fields
+  for manually entered `cash_flow` rows before NAV calculation.
+- Kept dry-run daily jobs as a non-mutating guard that reports pending
+  `cash_flow` generated fields without writing Feishu.
+- Added regression coverage for the write-mode reconcile path.
+
 ## 0.1.7 - 2026-06-02
 
 - Made the Linux installer default systemd timer run daily at
