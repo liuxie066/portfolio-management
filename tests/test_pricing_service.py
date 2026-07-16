@@ -102,7 +102,7 @@ def test_fetch_quote_returns_fixed_usd_crypto_value():
     fetcher._fetch_exchange_rates = lambda: {"USDCNY": 7.2}
     service = PriceService([], fetcher_context=fetcher)
 
-    quote = service.fetch_quote("BINANCE-TRADING-CRYPTO-USD")
+    quote = service.fetch_quote("TRADING-CRYPTO-USD")
 
     assert isinstance(quote, PriceQuote)
     payload = quote.to_payload()
@@ -190,10 +190,10 @@ def test_fetch_batch_returns_fixed_usd_crypto_value():
     fetcher._fetch_exchange_rates = lambda: {"USDCNY": 7.2}
     service = PriceService([], fetcher_context=fetcher)
 
-    result = service.fetch_batch(["BINANCE-WALLET-CRYPTO-USD"])
+    result = service.fetch_batch(["WALLET-CRYPTO-USD"])
 
     assert result.ok
-    payload = result.quotes["BINANCE-WALLET-CRYPTO-USD"].to_payload()
+    payload = result.quotes["WALLET-CRYPTO-USD"].to_payload()
     assert payload["price"] == 1.0
     assert payload["cny_price"] == 7.2
     assert payload["market_type"] == "crypto"

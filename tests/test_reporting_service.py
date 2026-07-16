@@ -48,7 +48,7 @@ def test_normalize_asset_type_treats_split_funds_as_fund():
 
 
 def test_normalize_asset_type_keeps_crypto_separate_from_cash_and_stock():
-    assert normalize_asset_type(AssetType.CRYPTO, "BINANCE-TRADING-CRYPTO-USD") == "crypto"
+    assert normalize_asset_type(AssetType.CRYPTO, "TRADING-CRYPTO-USD") == "crypto"
 
 
 def test_reporting_service_industry_distribution_with_price_and_cny_fallback():
@@ -250,14 +250,14 @@ def test_reporting_service_group_cash_keeps_crypto_separate():
             "total_value": 150.0,
             "holdings": [
                 {"code": "CNY-CASH", "name": "人民币现金", "type": "cash", "broker": "富途", "currency": "CNY", "account": "lx", "quantity": 100, "market_value": 100.0},
-                {"code": "BINANCE-TRADING-CRYPTO-USD", "name": "币安交易账户", "type": "crypto", "broker": "币安", "currency": "USD", "account": "lx", "quantity": 7.0, "market_value": 50.0},
+                {"code": "TRADING-CRYPTO-USD", "name": "币安交易账户", "type": "crypto", "broker": "币安", "currency": "USD", "account": "lx", "quantity": 7.0, "market_value": 50.0},
             ],
         },
     }
 
     result = service.build_asset_distribution(snapshot, group_cash=True)
 
-    assert [row["code"] for row in result["by_asset"]] == ["CASH+MMF", "BINANCE-TRADING-CRYPTO-USD"]
+    assert [row["code"] for row in result["by_asset"]] == ["CASH+MMF", "TRADING-CRYPTO-USD"]
     assert result["by_asset"][1]["normalized_type"] == "crypto"
 
 

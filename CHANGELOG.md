@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.12 - 2026-07-16
+
+- Classified currency-valued virtual-asset account buckets as `crypto`, added
+  fixed FX-backed pricing for `*-CRYPTO-{CNY,USD,HKD}` identifiers, and kept
+  them out of cash/MMF aggregation. The production Binance records use
+  `TRADING-CRYPTO-USD` and `WALLET-CRYPTO-USD`, with the broker retained in the
+  dedicated `broker` field.
+- Removed obsolete MCP, storage-factory, migration-state, module-export, and
+  compatibility HTTP surfaces, together with historical audit/pattern/failure
+  artifacts, and aligned the documentation with the current CLI + local HTTP
+  service architecture.
+- Dropped the unused `mcp` and `pytz` dependencies, using the standard-library
+  timezone implementation and direct current service/storage paths instead.
+
 ## 0.1.11 - 2026-07-16
 
 - Made `--group-cash` automatically use asset-level distribution so rows with
