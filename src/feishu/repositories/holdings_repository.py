@@ -443,6 +443,10 @@ class HoldingsRepository:
                     'quantity': new_quantity,
                     'updated_at': now_str,
                 }
+                if mode == 'replace':
+                    # Broker snapshots replace the current quantity and average
+                    # cost together. None explicitly clears cost after exit.
+                    update_fields['avg_cost'] = incoming.avg_cost
                 new_name = incoming.asset_name or existing.asset_name
                 if new_name and new_name != (existing.asset_name or ''):
                     update_fields['asset_name'] = new_name
@@ -451,6 +455,8 @@ class HoldingsRepository:
 
                 existing.quantity = new_quantity
                 existing.updated_at = now
+                if mode == 'replace':
+                    existing.avg_cost = incoming.avg_cost
                 if 'asset_name' in update_fields:
                     existing.asset_name = update_fields['asset_name']
                 update_targets.append(Holding(**existing.model_dump()))

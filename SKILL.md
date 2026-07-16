@@ -35,6 +35,7 @@ from skill_api import (
     daily_nav_job,
     full_report,
     sync_futu_cash_mmf,
+    sync_futu_holdings,
 )
 ```
 
@@ -44,7 +45,8 @@ from skill_api import (
 - `get_nav(account=None, days=30)`：查询最近 NAV。
 - `record_nav(account=None, dry_run=True, confirm=False)`：单账户 NAV 兼容写入入口。
 - `daily_nav_job(account=None, accounts=None, dry_run=True, confirm=False)`：统一日净值任务兼容入口。
-- `sync_futu_cash_mmf(account=None, dry_run=True)`：同步 Futu 现金/MMF 到 holdings。
+- `sync_futu_cash_mmf(account=None, dry_run=True)`：旧兼容入口，仅同步 Futu 现金/MMF。
+- `sync_futu_holdings(account=None, dry_run=True, confirm=False)`：同步 Futu 现金/MMF、股票/ETF 数量及平均成本。
 - `full_report(account=None)`：只读完整报告。
 
 写入类操作必须明确账户、日期、券商/平台、币种、手续费等关键字段；不确定时先 dry-run 或询问。
@@ -58,8 +60,11 @@ from skill_api import (
 ./pm nav duplicates --json
 ./pm daily-job --json
 ./pm daily-job --accounts lx,alice --write --confirm --json
-./pm daily-job --account lx --sync-futu-cash-mmf --write --confirm --json
+./pm futu sync --account lx --write --confirm --json
+./pm daily-job --account lx --write --confirm --json
 ```
+
+Futu 真实写入后会由配置的飞书“刘看山”应用发送回执；多账户 `daily-job` 真实执行后也会发送一条汇总 NAV 回执。dry-run 不发送。回执配置键为 `feishu.receipt.app_id`、`feishu.receipt.app_secret`、`feishu.receipt.open_id`；也兼容 `options-monitor` 已有的 `OM_FEISHU_BOT_APP_ID`、`OM_FEISHU_BOT_APP_SECRET`、`OM_FEISHU_BOT_USER_OPEN_ID`。通知失败只反映在返回值 `receipt` 中，不改变同步或 NAV 写入本身的 `success`。完整 Futu 同步由外层调度脚本调用，不放进 `daily-job`。
 
 正式日报：
 

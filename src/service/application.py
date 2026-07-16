@@ -20,6 +20,8 @@ class PortfolioService:
         storage_factory: Optional[Any] = None,
         portfolio_factory: Optional[Any] = None,
         read_service_factory: Optional[Any] = None,
+        futu_receipt_service: Optional[Any] = None,
+        nav_receipt_service: Optional[Any] = None,
         default_account: Optional[str] = None,
     ):
         self._storage = storage
@@ -28,6 +30,8 @@ class PortfolioService:
         self._storage_factory = storage_factory
         self._portfolio_factory = portfolio_factory
         self._read_service_factory = read_service_factory
+        self._futu_receipt_service = futu_receipt_service
+        self._nav_receipt_service = nav_receipt_service
         self._default_account = default_account
 
     @property
@@ -155,6 +159,40 @@ class PortfolioService:
         from src.app import CashService
 
         return CashService(self.storage).get_cash(self._resolve_account(account))
+
+    def sync_futu_holdings(
+        self,
+        *,
+        account: Optional[str] = None,
+        dry_run: bool = True,
+        confirm: bool = False,
+        allow_empty_stock_snapshot: bool = False,
+    ) -> Dict[str, Any]:
+        from src.app import FutuBalanceSyncService
+        from src.app.futu_sync_receipt_service import FutuSyncReceiptService
+
+        resolved_account = self._resolve_account(account)
+        try:
+            result = FutuBalanceSyncService(self.storage).sync_portfolio(
+                account=resolved_account,
+                dry_run=dry_run,
+                confirm=confirm,
+                allow_empty_stock_snapshot=allow_empty_stock_snapshot,
+            )
+        except Exception as exc:
+            result = {
+                "success": False,
+                "status": "failed",
+                "account": resolved_account,
+                "broker": "富途",
+                "dry_run": dry_run,
+                "error": str(exc),
+            }
+
+        receipt_service = self._futu_receipt_service or FutuSyncReceiptService()
+        result = dict(result)
+        result["receipt"] = receipt_service.send(result)
+        return result
 
     def get_nav(self, *, account: Optional[str] = None, days: int = 30) -> Dict[str, Any]:
         from src.app import NavReadService
@@ -373,8 +411,9 @@ class PortfolioService:
         run_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         from src.app import DailyNavJobService
+        from src.app.nav_history_receipt_service import NavHistoryReceiptService
 
-        return DailyNavJobService(
+        result = DailyNavJobService(
             storage=self.storage,
             portfolio=self.portfolio,
             default_account=self._resolve_account(None),
@@ -394,3 +433,9 @@ class PortfolioService:
             force_non_business_day=force_non_business_day,
             run_id=run_id,
         )
+        result = dict(result)
+        result.setdefault("dry_run", dry_run)
+        result.setdefault("confirm", confirm)
+        receipt_service = self._nav_receipt_service or NavHistoryReceiptService()
+        result["receipt"] = receipt_service.send(result)
+        return result

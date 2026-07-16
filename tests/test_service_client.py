@@ -340,3 +340,42 @@ def test_service_client_uses_first_structured_error_on_success_false_payload():
             client.multi_account_overview()
     finally:
         client_module.urlopen = old_urlopen
+
+
+def test_service_client_posts_futu_holdings_sync_payload():
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        calls.append((
+            request.full_url,
+            request.get_method(),
+            json.loads(request.data.decode("utf-8")),
+            timeout,
+        ))
+        return FakeResponse({"success": True, "dry_run": False})
+
+    old_urlopen = client_module.urlopen
+    try:
+        client_module.urlopen = fake_urlopen
+        client = PortfolioServiceClient(base_url="http://127.0.0.1:8765", timeout=2.0)
+        result = client.sync_futu_holdings(
+            account="lx",
+            dry_run=False,
+            confirm=True,
+            allow_empty_stock_snapshot=True,
+        )
+    finally:
+        client_module.urlopen = old_urlopen
+
+    assert result["success"] is True
+    assert calls == [(
+        "http://127.0.0.1:8765/futu/holdings/sync",
+        "POST",
+        {
+            "account": "lx",
+            "dry_run": False,
+            "confirm": True,
+            "allow_empty_stock_snapshot": True,
+        },
+        2.0,
+    )]

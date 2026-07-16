@@ -44,6 +44,12 @@ feishu:
   app_id: ""
   app_secret: ""
   app_token: ""
+  # Futu真实写入及多账户NAV任务回执由“刘看山”应用发送。
+  # 留空时可从 options-monitor 的 OM_FEISHU_BOT_* 环境变量读取。
+  receipt:
+    app_id: ""
+    app_secret: ""
+    open_id: ""
   tables:
     holdings: ""
     transactions: ""

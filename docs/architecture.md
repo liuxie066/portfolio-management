@@ -37,6 +37,7 @@ flowchart TB
         ReportPayload["daily_report_payload_service.py"]
         ReportQuery["report_query_service.py"]
         FutuSync["futu_balance_sync_service.py"]
+        FutuReceipt["futu_sync_receipt_service.py"]
     end
 
     subgraph Domain["Domain Layer"]
@@ -92,10 +93,12 @@ flowchart TB
     AppFacade --> InitNav
     AppFacade --> ReportPayload
     AppFacade --> ReportQuery
+    AppFacade --> FutuSync
+    AppFacade --> FutuReceipt
     AppFacade --> StorageFactory
 
     DailyJob --> AccountNav
-    DailyJob --> FutuSync
+    DailyJob -.legacy cash/MMF option.-> FutuSync
     AccountNav --> Read
     AccountNav --> FeishuStorage
     ReportPayload --> ReportQuery
@@ -113,6 +116,7 @@ flowchart TB
 
     StorageFactory --> FeishuStorage
     FeishuStorage --> Repos
+    FutuReceipt --> FeishuClient
     Repos --> FeishuClient
     Repos --> LocalCache
     FeishuClient --> Feishu
@@ -141,15 +145,23 @@ flowchart TB
 4. Audit duplicate `nav_history` account/date rows and block writes if found.
 5. Reconcile-check manual `cash_flow` rows and block writes if generated fields
    are pending.
-6. Optionally sync Futu cash/MMF holdings before valuation.
-7. Build one priced valuation snapshot per account.
-8. Record NAV and then persist `holdings_snapshot`.
-9. Return per-account status and summary.
+6. Build one priced valuation snapshot per account.
+7. Record NAV and then persist `holdings_snapshot`.
+8. Return per-account status and summary.
+9. `PortfolioService` sends one best-effort consolidated NAV receipt for a real job.
+
+Production Futu accounts run `pm futu sync` as an independent step before
+`daily-job`. This updates cash/MMF, STOCK/ETF quantity, and `average_cost` even
+when `daily-job` later skips an already-recorded NAV date. The embedded
+cash/MMF option remains only for compatibility.
 
 ## Report Boundaries
 
-- `AccountNavRecorderService` owns side effects for one account: optional Futu
-  sync, snapshot build, NAV write, and holdings snapshot persistence.
+- `FutuBalanceSyncService` independently owns broker holdings synchronization.
+- `FutuSyncReceiptService` owns the best-effort Feishu receipt after a real Futu write; delivery failure is reported separately from sync success.
+- `NavHistoryReceiptService` owns the one-message multi-account NAV receipt after a real `daily-job`; delivery failure is reported separately from NAV success.
+- `scripts/portfolio_scheduled_job.sh` owns production ordering: lx/sy Futu sync first, then the morning multi-account NAV job.
+- `AccountNavRecorderService` owns snapshot build, NAV write, and holdings snapshot persistence; its embedded cash/MMF sync remains a compatibility path.
 - `DailyReportPayloadService` consumes the already-built snapshot and NAV fact.
   It does not fetch prices or write NAV.
 - `ReportQueryService` owns read-only full-report queries. Synthetic NAV preview

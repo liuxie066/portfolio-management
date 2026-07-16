@@ -23,23 +23,26 @@
 3. 解析账户列表；未指定时从当前 holdings 发现账户。
 4. 审计 `nav_history` 同账户同日期重复记录。
 5. 检查人工 `cash_flow` 行是否还有待补齐系统字段。
-6. 可选同步 Futu 现金/MMF 到 holdings。
+6. 外层调度脚本先独立运行 lx/sy `pm futu sync`；内嵌现金/MMF同步仅兼容旧流程。
 7. 为每个账户构建一次带价格的估值快照。
 8. 写入 `nav_history`，成功后写入 `holdings_snapshot`。
+9. 正式多账户任务发送一条 NAV 汇总回执；dry-run 不发送。
 
 常用命令：
 
 ```bash
 ./pm daily-job --json
 ./pm daily-job --accounts lx,alice --write --confirm --json
-./pm daily-job --account lx --sync-futu-cash-mmf --write --confirm --json
+./pm futu sync --account lx --write --confirm --json
+./pm daily-job --account lx --write --confirm --json
 ```
 
 Linux 安装后可直接用 `/usr/local/bin/pm`：
 
 ```bash
 pm daily-job --json
-pm daily-job --write --confirm --sync-futu-cash-mmf --json
+pm futu sync --account lx --write --confirm --json
+pm daily-job --account lx --write --confirm --json
 ```
 
 ## 2) 数据真相来源
@@ -87,11 +90,17 @@ python scripts/publish_daily_report.py --account lx --dry-run
 python scripts/migrate_schema.py check-live
 ```
 
-启用 Futu 现金/MMF 同步前再跑：
+启用完整 Futu holdings 同步前再跑：
 
 ```bash
 ./pm config doctor --require-futu --json
+./pm futu sync --account lx --json
 ```
+
+Futu dry-run 应检查股票/ETF数量和 `average_cost` 差异；不得使用
+`diluted_cost`。真实写入必须 `--write --confirm`。
+真实写入后检查 JSON 中的 `receipt.status=sent`，确认飞书“刘看山”回执已送达；
+dry-run 的状态为 `skipped`。通知失败不会改写同步本身的 `success`。
 
 ## 5) 常见故障
 
@@ -99,7 +108,7 @@ python scripts/migrate_schema.py check-live
 
 `daily-job` 的自动日期是“运行日前最近业务日”，不是日历昨天。周一默认记录上一个周五。
 
-systemd timer 应按自然日运行，例如每天 `08:10 Asia/Shanghai`。周六运行负责记录周五；不要把 timer 配成只跑周一到周五。
+生产早间 timer 为周一至周六 `08:10 Asia/Shanghai`，晚间 Futu-only timer 为周一至周五 `17:10`。周六早间先同步 holdings 再记录周五 NAV；17:10 不调用 `daily-job`。
 
 ### 写入被阻断
 

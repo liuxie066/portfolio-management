@@ -22,13 +22,14 @@ Purpose: current positions. This is the main manual-maintained table.
 Business key: `(asset_id, account, broker)`
 
 Manual edit policy:
-- Normal stock/fund/other holding rows are maintained manually in the manual view.
-- Broker-synced cash-like rows are system-updated rows. For the current Futu workflow this means `account=lx`, `broker=富途`, `asset_id in (CNY-CASH, CNY-MMF)`.
-- Futu sync treats the fetched broker balance as an absolute target and refreshes descriptor fields (`asset_name`, `asset_type`, `quantity`, `currency`, `asset_class`, `industry`, `updated_at`) before the NAV snapshot is built.
+- Non-Futu stock/fund/other holding rows are maintained manually in the manual view.
+- For `broker=富途`, `pm futu sync` treats Futu as the source of truth for cash/MMF balances and STOCK/ETF quantities plus average cost.
+- Existing Futu stock/ETF rows update only `quantity`, `avg_cost`, and `updated_at`; names and manual metadata remain unchanged. New rows use Futu name/type/currency metadata.
+- `avg_cost` maps only from Futu `average_cost`; `diluted_cost` and deprecated `cost_price` are never used. Closed positions keep the row with `quantity=0` and clear `avg_cost`.
 
 Manual view fields:
 - `asset_id`, `asset_name`, `asset_type`, `account`, `broker`, `quantity`, `currency`
-- Optional manual metadata: `avg_cost`, `asset_class`, `industry`, `tag`
+- Optional metadata: `avg_cost`, `asset_class`, `industry`, `tag` (`avg_cost` is system-managed for Futu stock/ETF rows)
 
 System fields:
 - `created_at`, `updated_at`
@@ -43,7 +44,7 @@ Required fields:
 - `currency` (text) - manual
 
 Optional fields:
-- `avg_cost` (number) - manual
+- `avg_cost` (number) - manual except system-managed Futu stock/ETF rows
 - `asset_class` (text/select) - manual
 - `industry` (text/select) - manual
 - `tag` (text/json) - manual

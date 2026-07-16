@@ -2,6 +2,7 @@ flowchart TB
     subgraph Operators["Operators / Automation"]
         Human["Human"]
         Scheduler["systemd / cron"]
+        ScheduledJob["scripts/portfolio_scheduled_job.sh<br/>morning / evening orchestration"]
         Agent["MCP / legacy Skill caller"]
     end
 
@@ -28,6 +29,8 @@ flowchart TB
         ReportPayload["daily_report_payload_service.py"]
         ReportQuery["report_query_service.py"]
         FutuSync["futu_balance_sync_service.py"]
+        FutuReceipt["futu_sync_receipt_service.py"]
+        NavReceipt["nav_history_receipt_service.py"]
     end
 
     subgraph Domain["Domain Layer"]
@@ -61,7 +64,8 @@ flowchart TB
     end
 
     Human --> CLI
-    Scheduler --> CLI
+    Scheduler --> ScheduledJob
+    ScheduledJob --> CLI
     Scheduler --> Publisher
     Agent --> MCP
     Agent --> SkillAPI
@@ -83,10 +87,13 @@ flowchart TB
     AppFacade --> InitNav
     AppFacade --> ReportPayload
     AppFacade --> ReportQuery
+    AppFacade --> FutuSync
+    AppFacade --> FutuReceipt
+    AppFacade --> NavReceipt
     AppFacade --> StorageFactory
 
     DailyJob --> AccountNav
-    DailyJob --> FutuSync
+    DailyJob -.legacy cash/MMF option.-> FutuSync
     AccountNav --> Read
     AccountNav --> FeishuStorage
     ReportPayload --> ReportQuery
@@ -104,6 +111,8 @@ flowchart TB
 
     StorageFactory --> FeishuStorage
     FeishuStorage --> Repos
+    FutuReceipt --> FeishuClient
+    NavReceipt --> FeishuClient
     Repos --> FeishuClient
     Repos --> LocalCache
     FeishuClient --> Feishu

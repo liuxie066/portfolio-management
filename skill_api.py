@@ -653,6 +653,25 @@ class PortfolioSkill:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    def sync_futu_holdings(
+        self,
+        dry_run: bool = True,
+        confirm: bool = False,
+        allow_empty_stock_snapshot: bool = False,
+    ) -> Dict[str, Any]:
+        """同步 Futu 现金/MMF、股票/ETF 数量及平均成本。"""
+        try:
+            return PortfolioService(
+                storage=self.storage,
+                default_account=self.account,
+            ).sync_futu_holdings(
+                dry_run=dry_run,
+                confirm=confirm,
+                allow_empty_stock_snapshot=allow_empty_stock_snapshot,
+            )
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
     # ---------- 完整报告 ----------
 
     def generate_report(self, report_type: str = "daily",
@@ -1173,6 +1192,10 @@ def sub_cash(amount: float, account: str = None, **kwargs) -> Dict:
 def sync_futu_cash_mmf(account: str = None, **kwargs) -> Dict:
     """通过富途 OpenAPI 同步现金/货基余额到 holdings"""
     return get_skill(account).sync_futu_cash_mmf(**kwargs)
+
+def sync_futu_holdings(account: str = None, **kwargs) -> Dict:
+    """同步 Futu 现金/MMF、股票/ETF 数量及平均成本。"""
+    return get_skill(account).sync_futu_holdings(**kwargs)
 
 # 报告
 def generate_report(report_type: str = "daily", price_timeout: int = 30,

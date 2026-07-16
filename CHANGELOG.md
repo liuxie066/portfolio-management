@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.10 - 2026-07-16
+
+- Added `pm futu sync` to synchronize Futu cash, MMF, STOCK/ETF quantities,
+  and `avg_cost`, using only Futu `average_cost` with empty-snapshot and
+  unsupported-position safety guards.
+- Added best-effort Feishu receipts for real Futu synchronization and one
+  consolidated multi-account NAV History run, reusing only the three
+  `OM_FEISHU_BOT_*` credentials from options-monitor.
+- Split production scheduling into a Monday-Saturday 08:10 Beijing morning
+  workflow (lx/sy sync, then one lx/hb/sy NAV job) and a Monday-Friday 17:10
+  Beijing holdings-only workflow, with a shared lock and persistent timers.
+- Updated the Linux installer, service/CLI interfaces, documentation, and
+  regression coverage for the new synchronization and scheduling boundaries.
+
 ## 0.1.9 - 2026-06-30
 
 - Added asset-level position distribution for CLI and service callers,

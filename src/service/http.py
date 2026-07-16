@@ -36,6 +36,13 @@ class DailyReportBundleRequest(BaseModel):
     run_id: Optional[str] = None
 
 
+class FutuHoldingsSyncRequest(BaseModel):
+    account: Optional[str] = None
+    dry_run: bool = True
+    confirm: bool = False
+    allow_empty_stock_snapshot: bool = False
+
+
 class DailyNavJobRequest(BaseModel):
     account: Optional[str] = None
     accounts: Optional[Any] = None
@@ -139,6 +146,16 @@ def create_app(service: Optional[PortfolioService] = None) -> FastAPI:
     @app.get("/accounts/{account}/cash", tags=["cash"])
     def get_cash(request: Request, account: str):
         return _service(request).get_cash(account=account)
+
+    @app.post("/futu/holdings/sync", tags=["holdings"])
+    def sync_futu_holdings_query(request: Request, payload: FutuHoldingsSyncRequest):
+        return _service(request).sync_futu_holdings(**_payload_dict(payload))
+
+    @app.post("/accounts/{account}/futu/holdings/sync", tags=["holdings"])
+    def sync_futu_holdings(request: Request, account: str, payload: FutuHoldingsSyncRequest):
+        kwargs = _payload_dict(payload)
+        kwargs["account"] = account
+        return _service(request).sync_futu_holdings(**kwargs)
 
     @app.get("/nav", tags=["nav"])
     def get_nav_query(

@@ -180,6 +180,21 @@ class PortfolioServiceClient:
     def get_cash(self, *, account: str) -> Dict[str, Any]:
         return self._get("/cash", {"account": account})
 
+    def sync_futu_holdings(
+        self,
+        *,
+        account: Optional[str] = None,
+        dry_run: bool = True,
+        confirm: bool = False,
+        allow_empty_stock_snapshot: bool = False,
+    ) -> Dict[str, Any]:
+        return self._post("/futu/holdings/sync", {
+            "account": account,
+            "dry_run": dry_run,
+            "confirm": confirm,
+            "allow_empty_stock_snapshot": allow_empty_stock_snapshot,
+        })
+
     def get_nav(self, *, account: str, days: int = 30) -> Dict[str, Any]:
         return self._get("/nav", {"account": account, "days": days})
 

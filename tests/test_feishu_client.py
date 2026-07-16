@@ -534,3 +534,26 @@ class TestFeishuClientRateLimit:
         client._last_request_time = 1000.1  # 上次请求在0.02秒前
         client._rate_limit()
         mock_sleep.assert_called_once()  # 间隔<0.06，需要sleep
+
+
+def test_send_text_message_uses_open_id_endpoint_and_text_payload():
+    client = FeishuClient(app_id="cli_liukanshan", app_secret="secret")
+    client._request = Mock(return_value={"message_id": "om_123"})
+
+    result = client.send_text_message(open_id="ou_user", text="同步完成")
+
+    assert result == {
+        "success": True,
+        "message_id": "om_123",
+        "receive_id_type": "open_id",
+    }
+    client._request.assert_called_once_with(
+        "POST",
+        "/im/v1/messages",
+        params={"receive_id_type": "open_id"},
+        json={
+            "receive_id": "ou_user",
+            "msg_type": "text",
+            "content": json.dumps({"text": "同步完成"}, ensure_ascii=False),
+        },
+    )

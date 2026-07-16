@@ -80,6 +80,26 @@ def test_config_file_env_can_point_to_legacy_json_for_migration():
             config.reload_config()
 
 
+def test_receipt_config_falls_back_to_options_monitor_bot_env():
+    patch = MonkeyPatch()
+    try:
+        patch.delenv("FEISHU_RECEIPT_APP_ID", raising=False)
+        patch.delenv("FEISHU_RECEIPT_APP_SECRET", raising=False)
+        patch.delenv("FEISHU_RECEIPT_OPEN_ID", raising=False)
+        patch.setenv("OM_FEISHU_BOT_APP_ID", "cli_liukanshan")
+        patch.setenv("OM_FEISHU_BOT_APP_SECRET", "bot_secret")
+        patch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_user")
+
+        assert config.get_with_source("feishu.receipt.app_id") == (
+            "cli_liukanshan",
+            "env:OM_FEISHU_BOT_APP_ID",
+        )
+        assert config.get("feishu.receipt.app_secret") == "bot_secret"
+        assert config.get("feishu.receipt.open_id") == "ou_user"
+    finally:
+        patch.undo()
+
+
 def test_inspect_config_redacts_values_and_reports_sources():
     with TemporaryDirectory() as tmp:
         config_file = Path(tmp) / "config.yaml"
@@ -91,6 +111,9 @@ data:
 feishu:
   app_id: cli_abc123456
   app_secret: secret123456
+  receipt:
+    app_secret: receiptsecret123
+    open_id: ou_abcdef123456
 """,
             encoding="utf-8",
         )
@@ -98,16 +121,32 @@ feishu:
         patch = MonkeyPatch()
         try:
             patch.setenv(config.CONFIG_FILE_ENV, str(config_file))
-            _clear_env(patch, "account", "data.dir", "feishu.app_id", "feishu.app_secret")
+            _clear_env(
+                patch,
+                "account",
+                "data.dir",
+                "feishu.app_id",
+                "feishu.app_secret",
+                "feishu.receipt.app_secret",
+                "feishu.receipt.open_id",
+            )
             config.reload_config()
 
-            payload = config.inspect_config(keys=["account", "data.dir", "feishu.app_secret"])
+            payload = config.inspect_config(keys=[
+                "account",
+                "data.dir",
+                "feishu.app_secret",
+                "feishu.receipt.app_secret",
+                "feishu.receipt.open_id",
+            ])
             assert payload["success"] is True
             assert payload["config_format"] == "yaml"
             assert payload["values"]["account"]["value"] == "lx"
             assert payload["values"]["data.dir"]["value"] == "/var/lib/portfolio-management/.data"
             assert payload["values"]["feishu.app_secret"]["value"] == "sec...456"
             assert payload["values"]["feishu.app_secret"]["source"] == f"file:{config_file}"
+            assert payload["values"]["feishu.receipt.app_secret"]["value"] == "rec...123"
+            assert payload["values"]["feishu.receipt.open_id"]["value"] == "ou_...456"
         finally:
             patch.undo()
             config.reload_config()
@@ -149,6 +188,55 @@ feishu:
             payload = config.validate_deploy_config()
             assert payload["success"] is True
             assert payload["issues"] == []
+        finally:
+            patch.undo()
+            config.reload_config()
+
+
+def test_validate_futu_config_requires_receipt_bot_credentials():
+    with TemporaryDirectory() as tmp:
+        config_file = Path(tmp) / "config.yaml"
+        config_file.write_text(
+            """
+feishu:
+  app_id: cli_table
+  app_secret: table_secret
+  app_token: appToken
+  tables:
+    holdings: appToken/tbl_holdings
+    nav_history: appToken/tbl_nav
+    cash_flow: appToken/tbl_cash
+    holdings_snapshot: appToken/tbl_snapshot
+futu:
+  opend:
+    host: 127.0.0.1
+    port: 11111
+""",
+            encoding="utf-8",
+        )
+
+        patch = MonkeyPatch()
+        try:
+            patch.setenv(config.CONFIG_FILE_ENV, str(config_file))
+            _clear_env(
+                patch,
+                *config.REQUIRED_DAILY_JOB_KEYS,
+                "futu.opend.host",
+                "futu.opend.port",
+                "feishu.receipt.app_id",
+                "feishu.receipt.app_secret",
+                "feishu.receipt.open_id",
+            )
+            config.reload_config()
+
+            payload = config.validate_deploy_config(require_futu=True)
+
+            assert payload["success"] is False
+            assert {issue["key"] for issue in payload["issues"]} >= {
+                "feishu.receipt.app_id",
+                "feishu.receipt.app_secret",
+                "feishu.receipt.open_id",
+            }
         finally:
             patch.undo()
             config.reload_config()

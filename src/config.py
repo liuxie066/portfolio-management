@@ -45,6 +45,9 @@ ENV_MAP = {
     "feishu.app_id": "FEISHU_APP_ID",
     "feishu.app_secret": "FEISHU_APP_SECRET",
     "feishu.user_token": "FEISHU_USER_TOKEN",
+    "feishu.receipt.app_id": "FEISHU_RECEIPT_APP_ID",
+    "feishu.receipt.app_secret": "FEISHU_RECEIPT_APP_SECRET",
+    "feishu.receipt.open_id": "FEISHU_RECEIPT_OPEN_ID",
     "feishu.tables.holdings": "FEISHU_TABLE_HOLDINGS",
     "feishu.tables.transactions": "FEISHU_TABLE_TRANSACTIONS",
     "feishu.tables.price_cache": "FEISHU_TABLE_PRICE_CACHE",
@@ -54,6 +57,12 @@ ENV_MAP = {
     "feishu.tables.compensation_tasks": "FEISHU_TABLE_COMPENSATION_TASKS",
     "feishu.tables.schema_version": "FEISHU_TABLE_SCHEMA_VERSION",
     "finnhub_api_key": "FINNHUB_API_KEY",
+}
+
+ENV_FALLBACKS = {
+    "feishu.receipt.app_id": ("OM_FEISHU_BOT_APP_ID",),
+    "feishu.receipt.app_secret": ("OM_FEISHU_BOT_APP_SECRET",),
+    "feishu.receipt.open_id": ("OM_FEISHU_BOT_USER_OPEN_ID",),
 }
 
 OPERATOR_CONFIG_KEYS = (
@@ -75,6 +84,9 @@ OPERATOR_CONFIG_KEYS = (
     "feishu.app_id",
     "feishu.app_secret",
     "feishu.app_token",
+    "feishu.receipt.app_id",
+    "feishu.receipt.app_secret",
+    "feishu.receipt.open_id",
     "feishu.tables.holdings",
     "feishu.tables.nav_history",
     "feishu.tables.cash_flow",
@@ -96,6 +108,9 @@ SECRET_KEYS = {
     "feishu.app_id",
     "feishu.app_secret",
     "feishu.user_token",
+    "feishu.receipt.app_id",
+    "feishu.receipt.app_secret",
+    "feishu.receipt.open_id",
     "finnhub_api_key",
 }
 
@@ -182,8 +197,12 @@ def _get_from_file(key: str, default=None) -> tuple[Any, bool]:
 
 
 def get_with_source(key: str, default=None) -> tuple[Any, str]:
-    env_key = ENV_MAP.get(key)
-    if env_key:
+    env_keys = tuple(
+        env_key
+        for env_key in (ENV_MAP.get(key), *ENV_FALLBACKS.get(key, ()))
+        if env_key
+    )
+    for env_key in env_keys:
         env_val = os.environ.get(env_key)
         if env_val not in (None, ""):
             return env_val, f"env:{env_key}"
@@ -229,6 +248,7 @@ def inspect_config(*, keys: Optional[Iterable[str]] = None, redact: bool = True)
             "value": _redact_value(key, value) if redact else value,
             "source": source,
             "env": ENV_MAP.get(key),
+            "env_fallbacks": list(ENV_FALLBACKS.get(key, ())),
             "set": source != "default" and value not in (None, ""),
         }
     return {
@@ -271,6 +291,13 @@ def validate_deploy_config(*, require_futu: bool = False) -> Dict[str, Any]:
             issues.append({"key": "futu.opend.host", "error": "missing Futu OpenD host", "env": ENV_MAP.get("futu.opend.host")})
         if get_int("futu.opend.port") is None:
             issues.append({"key": "futu.opend.port", "error": "missing or invalid Futu OpenD port", "env": ENV_MAP.get("futu.opend.port")})
+        for key in (
+            "feishu.receipt.app_id",
+            "feishu.receipt.app_secret",
+            "feishu.receipt.open_id",
+        ):
+            if not get(key):
+                issues.append({"key": key, "error": "missing Futu sync receipt config", "env": ENV_MAP.get(key)})
         try:
             __import__("futu")
         except Exception:

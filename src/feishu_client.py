@@ -172,6 +172,31 @@ class FeishuClient:
 
         return app_token, table_id
 
+    def send_text_message(self, *, open_id: str, text: str) -> Dict[str, Any]:
+        """Send a plain-text message from the configured Feishu app."""
+        open_id_value = str(open_id or '').strip()
+        text_value = str(text or '').strip()
+        if not open_id_value:
+            raise ValueError("open_id is required")
+        if not text_value:
+            raise ValueError("text is required")
+
+        data = self._request(
+            'POST',
+            '/im/v1/messages',
+            params={'receive_id_type': 'open_id'},
+            json={
+                'receive_id': open_id_value,
+                'msg_type': 'text',
+                'content': json.dumps({'text': text_value}, ensure_ascii=False),
+            },
+        )
+        return {
+            'success': True,
+            'message_id': data.get('message_id'),
+            'receive_id_type': 'open_id',
+        }
+
     def list_records(self, table_name: str, filter_str: str = None,
                      field_names: List[str] = None, page_size: int = 500) -> List[Dict]:
         """

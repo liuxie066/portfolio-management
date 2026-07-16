@@ -10,7 +10,7 @@
 - 多账户日净值任务：自动跳过周末和配置的法定节假日
 - 写入前审计 `nav_history` 同账户同日期重复记录
 - 写入前阻断待补齐的人工 `cash_flow` 行
-- 可选通过 Futu OpenD 同步现金/MMF 到 holdings
+- 通过 Futu OpenD 独立同步现金/MMF、股票/ETF 数量及平均成本到 holdings
 - 统计仓位分布，生成日报 payload 和本地 HTML 产物
 - 通过 `config.yaml` 和 systemd timer 部署到 Linux 长期运行
 
@@ -79,16 +79,26 @@ feishu:
 # 多账户真实写入
 ./pm daily-job --accounts lx,alice --write --confirm --json
 
-# 同步 Futu 现金/MMF 后再估值和写 NAV
-./pm daily-job --account lx --sync-futu-cash-mmf --write --confirm --json
+# 先独立同步 Futu holdings，再估值和写 NAV
+./pm futu sync --account lx --write --confirm --json
+./pm daily-job --account lx --write --confirm --json
 
 # 手工指定 NAV 日期
 ./pm daily-job --accounts lx,alice --nav-date 2026-05-22 --write --confirm --json
 ```
 
-`daily-job` 是单账户和多账户的统一入口。未显式传 `--nav-date` 时，它会取运行日前最近业务日；周六任务会记录周五，周日/周一会在周五已存在时跳过同日重复写入。
+`pm futu sync` 真实写入完成后会通过飞书“刘看山”发送成功或失败回执；
+dry-run 不发消息。需要配置 `feishu.receipt.app_id`、
+`feishu.receipt.app_secret` 和接收人的 `feishu.receipt.open_id`（也可使用
+`FEISHU_RECEIPT_APP_ID`、`FEISHU_RECEIPT_APP_SECRET`、
+`FEISHU_RECEIPT_OPEN_ID`）。如果未设置这些专用变量，会依次复用
+`options-monitor` 的 `OM_FEISHU_BOT_APP_ID`、`OM_FEISHU_BOT_APP_SECRET`、
+`OM_FEISHU_BOT_USER_OPEN_ID`。通知失败会记录在返回值的 `receipt` 字段，
+不会覆盖已经完成的 holdings 同步结果。
 
-定时器应按自然日运行，例如每天 `08:10 Asia/Shanghai`。不要把 systemd timer 配成只跑周一到周五；如果必须减少运行日，至少要覆盖周二到周六，否则周五的次日记录窗口会被漏掉。
+`daily-job` 是单账户和多账户的统一入口。未显式传 `--nav-date` 时，它会取运行日前最近业务日；周六任务会记录周五，周一通常会因周五已存在而幂等跳过。真实执行完成后会通过同一“刘看山”应用发送一条多账户 NAV 汇总回执；dry-run 不发送，通知失败不会覆盖 NAV 写入结果。
+
+生产 installer 生成两组独立 timer：周一至周六 `08:10 Asia/Shanghai` 先同步 lx/sy Futu holdings，再单次执行 `daily-job --accounts lx,hb,sy`；周一至周五 `17:10` 只同步 lx/sy，不写 NAV。完整 Futu 同步位于外层调度脚本，不属于 `daily-job`。
 
 写入保护：
 
@@ -145,17 +155,17 @@ python scripts/publish_daily_report.py --account lx
 写入交给保守的 Python 安装器。
 
 ```bash
-sudo scripts/install.sh --apply --sync-futu-cash-mmf
-sudo systemctl status portfolio-nav-daily.timer
+sudo scripts/install.sh --apply
+sudo systemctl status portfolio-nav-daily.timer portfolio-futu-evening.timer
 ```
 
 首次运行不会自动启用 timer；确认配置后再显式启用：
 
 ```bash
-sudo scripts/install.sh --apply --enable-timer --sync-futu-cash-mmf
+sudo scripts/install.sh --apply --enable-timer
 ```
 
-完整步骤见 `docs/deploy-linux.md`。
+完整步骤见 `docs/deploy-linux.md`。安装器使用版本化的 `scripts/portfolio_scheduled_job.sh` 编排独立 `pm futu sync` 和 `pm daily-job`；`daily-job` 中的现金/MMF内嵌参数只保留旧调用兼容。
 
 ## 配置优先级
 

@@ -20,7 +20,7 @@
 
 ```bash
 # 在目标 checkout 内运行；脚本会使用当前 checkout 作为 app 目录
-sudo scripts/install.sh --apply --sync-futu-cash-mmf
+sudo scripts/install.sh --apply
 ```
 
 这个 bootstrap installer 会：
@@ -34,13 +34,13 @@ sudo scripts/install.sh --apply --sync-futu-cash-mmf
 如果希望安装脚本自己从 GitHub 拉取指定版本：
 
 ```bash
-sudo bash -c 'curl -fsSL https://raw.githubusercontent.com/liuxie066/portfolio-management/main/scripts/install.sh | bash -s -- --apply --ref main --sync-futu-cash-mmf'
+sudo bash -c 'curl -fsSL https://raw.githubusercontent.com/liuxie066/portfolio-management/main/scripts/install.sh | bash -s -- --apply --ref main'
 ```
 
 如果网络环境对 PyPI 慢或不稳定，可以指定镜像：
 
 ```bash
-sudo scripts/install.sh --apply --pip-index-url https://mirrors.aliyun.com/pypi/simple/ --sync-futu-cash-mmf
+sudo scripts/install.sh --apply --pip-index-url https://mirrors.aliyun.com/pypi/simple/
 ```
 
 底层 Python 安装器仍然可直接使用：
@@ -55,7 +55,7 @@ python3 -m venv .venv
 python3 scripts/install_linux.py --json
 
 # 写入 config/env/systemd unit；不会覆盖已有 config.yaml
-sudo python3 scripts/install_linux.py --apply --sync-futu-cash-mmf
+sudo python3 scripts/install_linux.py --apply
 ```
 
 安装脚本会生成：
@@ -65,6 +65,8 @@ sudo python3 scripts/install_linux.py --apply --sync-futu-cash-mmf
 - `/usr/local/bin/pm`
 - `/etc/systemd/system/portfolio-nav-daily.service`
 - `/etc/systemd/system/portfolio-nav-daily.timer`
+- `/etc/systemd/system/portfolio-futu-evening.service`
+- `/etc/systemd/system/portfolio-futu-evening.timer`
 
 如果已有 `config.yaml`，默认保留不覆盖；确需重建模板时显式加 `--overwrite-config`。
 
@@ -97,7 +99,7 @@ pm nav duplicates --json
 pm daily-job --json --no-service
 ```
 
-如果需要富途现金/MMF 同步，再检查：
+如果需要完整 Futu holdings 同步，再检查：
 
 ```bash
 pm config doctor --require-futu --json
@@ -105,28 +107,54 @@ pm config doctor --require-futu --json
 
 ## 启用定时任务
 
-默认 timer 使用北京时间语义，每天 `08:10` 运行：
+安装器生成两组北京时间 timer：
+
+- `portfolio-nav-daily.timer`：周一至周六 `08:10`，先同步 lx/sy holdings，再记录 lx/hb/sy NAV。
+- `portfolio-futu-evening.timer`：周一至周五 `17:10`，只同步 lx/sy holdings。
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now portfolio-nav-daily.timer
-systemctl list-timers portfolio-nav-daily.timer
+sudo systemctl enable --now portfolio-nav-daily.timer portfolio-futu-evening.timer
+systemctl list-timers portfolio-nav-daily.timer portfolio-futu-evening.timer
 ```
 
-这个 timer 是按自然日运行，不是按交易日运行。`daily-job` 会把运行日解析为前一个业务日：周六运行用于记录周五；周日运行通常会因周五已存在而跳过重复写入。不要把 timer 改成只跑周一到周五；如果必须减少运行日，至少覆盖周二到周六。
+周六早间同步用于捕获周五晚间美股成交，然后记录周五 NAV。周一早间通常会因周五 NAV 已存在而幂等跳过，也能在周六任务失败时提供一次补偿机会。两个 timer 都使用 `Persistent=true`。
 
-手动触发一次：
+手动触发属于真实 holdings/NAV 写入操作。确认后可分别执行：
 
 ```bash
 sudo systemctl start portfolio-nav-daily.service
-sudo journalctl -u portfolio-nav-daily.service -n 200 --no-pager
+sudo systemctl start portfolio-futu-evening.service
+sudo journalctl -u portfolio-nav-daily.service -u portfolio-futu-evening.service -n 200 --no-pager
 ```
 
-定时任务执行：
+定时任务由版本化的 `scripts/portfolio_scheduled_job.sh` 编排。早间模式依次执行 lx、sy 完整 Futu 同步，再单次执行：
 
 ```bash
-pm daily-job --write --confirm --sync-futu-cash-mmf --json
+pm daily-job --accounts lx,hb,sy --write --confirm --json --no-service
 ```
+
+晚间模式只执行两个 `pm futu sync`。两个账户都会被尝试；任一同步失败时，早间模式会阻断 NAV，避免使用过期 holdings 估值。sy 的连接参数只在 subshell 中从 `/etc/portfolio-management/futu-sy.env` 加载。`daily-job` 中的现金/MMF内嵌参数只保留旧调用兼容，不用于生产完整同步。
+
+完整 Futu 同步还需要配置飞书“刘看山”回执：
+
+```yaml
+feishu:
+  receipt:
+    app_id: "cli_..."
+    app_secret: "..."
+    open_id: "ou_..."
+```
+
+也可使用 `FEISHU_RECEIPT_APP_ID`、`FEISHU_RECEIPT_APP_SECRET` 和
+`FEISHU_RECEIPT_OPEN_ID`。未设置时会兼容读取 `options-monitor` 已有的
+`OM_FEISHU_BOT_APP_ID`、`OM_FEISHU_BOT_APP_SECRET` 和
+`OM_FEISHU_BOT_USER_OPEN_ID`。执行 `scripts/install.sh --apply` 时，安装器会从
+`/etc/options-monitor/options-monitor.env` 只提取这三项并写入
+`/etc/portfolio-management/portfolio-management.env`；不会复制或加载整份
+`options-monitor.env`。源文件存在但三项缺失或为空时，部署会在写文件前失败。
+
+`pm config doctor --require-futu --json` 会检查三项最终解析结果。Futu 真实写入成功或失败都会分别发送回执；多账户 NAV 任务会再发送一条汇总回执。dry-run 不发送。飞书应用需要具备发送消息权限，并能向该 `open_id` 发起单聊。
 
 核心保护：
 

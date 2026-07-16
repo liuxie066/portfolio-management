@@ -195,3 +195,75 @@ def test_bulk_upsert_replace_mixed_update_create_updates_caches():
     key_baba = storage._get_holding_cache_key('09988', 'lx', 'futu')
     assert local_idx.items[key_tencent]['quantity'] == 80
     assert local_idx.items[key_baba]['quantity'] == 50
+
+
+def test_bulk_replace_updates_and_clears_avg_cost_without_touching_manual_metadata():
+    client = StubBulkClient(
+        initial_records=[
+            {
+                'record_id': 'rec_lx_futu',
+                'fields': {
+                    'asset_id': 'FUTU',
+                    'asset_name': '人工名称',
+                    'asset_type': 'us_stock',
+                    'account': 'lx',
+                    'broker': '富途',
+                    'quantity': 10,
+                    'avg_cost': 72.8,
+                    'currency': 'USD',
+                    'asset_class': '美国资产',
+                    'industry': '科技',
+                    'tag': '["核心"]',
+                },
+            }
+        ]
+    )
+    local_idx = StubLocalHoldingsIndexCache()
+    storage = FeishuStorage(client=client, local_holdings_index_cache=local_idx)
+    storage.preload_holdings_index(account='lx')
+
+    result = storage.upsert_holdings_bulk([
+        Holding(
+            asset_id='FUTU',
+            asset_name='人工名称',
+            asset_type=AssetType.US_STOCK,
+            account='lx',
+            broker='富途',
+            quantity=12.1256,
+            avg_cost=100.25,
+            currency='USD',
+        )
+    ], mode='replace')
+
+    assert result['updated'] == 1
+    fields = client.batch_update_records_calls[-1][0]['fields']
+    assert fields['quantity'] == 12.1256
+    assert fields['avg_cost'] == 100.25
+    assert 'industry' not in fields
+    assert 'tag' not in fields
+    cached = storage.get_holding('FUTU', 'lx', '富途')
+    assert cached.quantity == 12.1256
+    assert cached.avg_cost == 100.25
+    key = storage._get_holding_cache_key('FUTU', 'lx', '富途')
+    assert local_idx.items[key]['avg_cost'] == 100.25
+
+    storage.upsert_holdings_bulk([
+        Holding(
+            asset_id='FUTU',
+            asset_name='人工名称',
+            asset_type=AssetType.US_STOCK,
+            account='lx',
+            broker='富途',
+            quantity=0,
+            avg_cost=None,
+            currency='USD',
+        )
+    ], mode='replace')
+
+    clear_fields = client.batch_update_records_calls[-1][0]['fields']
+    assert clear_fields['quantity'] == 0
+    assert 'avg_cost' in clear_fields and clear_fields['avg_cost'] is None
+    cached = storage.get_holding('FUTU', 'lx', '富途')
+    assert cached.quantity == 0
+    assert cached.avg_cost is None
+    assert local_idx.items[key]['avg_cost'] is None

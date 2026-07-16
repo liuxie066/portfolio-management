@@ -595,3 +595,142 @@ def _snapshot(*, total_value: float, cash_ratio: float, stock_ratio: float, fund
             "fund_ratio": fund_ratio,
         },
     }
+
+
+def test_portfolio_service_sync_futu_holdings_uses_resolved_account(monkeypatch):
+    calls = []
+
+    class FakeSyncService:
+        def __init__(self, storage):
+            calls.append(("init", storage))
+
+        def sync_portfolio(self, **kwargs):
+            calls.append(("sync", kwargs))
+            return {"success": True, **kwargs}
+
+    class FakeReceiptService:
+        def send(self, result):
+            calls.append(("receipt", result))
+            return {"success": True, "status": "sent"}
+
+    import src.app as app_module
+
+    storage = object()
+    monkeypatch.setattr(app_module, "FutuBalanceSyncService", FakeSyncService)
+    result = PortfolioService(
+        storage=storage,
+        default_account="lx",
+        futu_receipt_service=FakeReceiptService(),
+    ).sync_futu_holdings(
+        dry_run=False,
+        confirm=True,
+        allow_empty_stock_snapshot=True,
+    )
+
+    assert result["success"] is True
+    assert result["receipt"] == {"success": True, "status": "sent"}
+    assert calls[0] == ("init", storage)
+    assert calls[1] == ("sync", {
+        "account": "lx",
+        "dry_run": False,
+        "confirm": True,
+        "allow_empty_stock_snapshot": True,
+    })
+    assert calls[2][0] == "receipt"
+    assert calls[2][1]["account"] == "lx"
+
+
+def test_portfolio_service_receipt_failure_does_not_change_sync_success(monkeypatch):
+    class FakeSyncService:
+        def __init__(self, storage):
+            self.storage = storage
+
+        def sync_portfolio(self, **kwargs):
+            return {"success": True, **kwargs}
+
+    class FailedReceiptService:
+        def send(self, result):
+            return {"success": False, "status": "failed", "error": "send failed"}
+
+    import src.app as app_module
+
+    monkeypatch.setattr(app_module, "FutuBalanceSyncService", FakeSyncService)
+    result = PortfolioService(
+        storage=object(),
+        default_account="lx",
+        futu_receipt_service=FailedReceiptService(),
+    ).sync_futu_holdings(dry_run=False, confirm=True)
+
+    assert result["success"] is True
+    assert result["receipt"]["success"] is False
+
+
+def test_portfolio_service_daily_nav_job_sends_one_receipt(monkeypatch):
+    calls = []
+
+    class FakeDailyNavJobService:
+        def __init__(self, **kwargs):
+            calls.append(("init", kwargs))
+
+        def run(self, **kwargs):
+            calls.append(("run", kwargs))
+            return {
+                "success": True,
+                "status": "completed",
+                "date": "2026-07-17",
+                "items": [],
+            }
+
+    class FakeReceiptService:
+        def send(self, result):
+            calls.append(("receipt", dict(result)))
+            return {"success": True, "status": "sent"}
+
+    import src.app as app_module
+
+    monkeypatch.setattr(app_module, "DailyNavJobService", FakeDailyNavJobService)
+    result = PortfolioService(
+        storage=object(),
+        portfolio=SimpleNamespace(reporting_service=object()),
+        default_account="lx",
+        nav_receipt_service=FakeReceiptService(),
+    ).daily_nav_job(
+        accounts="lx,hb,sy",
+        dry_run=False,
+        confirm=True,
+        run_id="run-nav-receipt",
+    )
+
+    assert result["success"] is True
+    assert result["receipt"] == {"success": True, "status": "sent"}
+    assert calls[1][0] == "run"
+    assert calls[1][1]["accounts"] == "lx,hb,sy"
+    assert calls[2][0] == "receipt"
+    assert calls[2][1]["dry_run"] is False
+    assert calls[2][1]["confirm"] is True
+
+
+def test_portfolio_service_nav_receipt_failure_does_not_change_job_success(monkeypatch):
+    class FakeDailyNavJobService:
+        def __init__(self, **_kwargs):
+            pass
+
+        def run(self, **_kwargs):
+            return {"success": True, "status": "completed", "items": []}
+
+    class FailedReceiptService:
+        def send(self, _result):
+            return {"success": False, "status": "failed", "error": "send failed"}
+
+    import src.app as app_module
+
+    monkeypatch.setattr(app_module, "DailyNavJobService", FakeDailyNavJobService)
+    result = PortfolioService(
+        storage=object(),
+        portfolio=SimpleNamespace(reporting_service=object()),
+        default_account="lx",
+        nav_receipt_service=FailedReceiptService(),
+    ).daily_nav_job(dry_run=False, confirm=True)
+
+    assert result["success"] is True
+    assert result["receipt"]["success"] is False

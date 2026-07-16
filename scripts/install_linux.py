@@ -23,7 +23,17 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SERVICE_NAME = "portfolio-nav-daily.service"
 TIMER_NAME = "portfolio-nav-daily.timer"
-DEFAULT_ON_CALENDAR = "*-*-* 08:10:00 Asia/Shanghai"
+EVENING_SERVICE_NAME = "portfolio-futu-evening.service"
+EVENING_TIMER_NAME = "portfolio-futu-evening.timer"
+DEFAULT_MORNING_ON_CALENDAR = "Mon..Sat *-*-* 08:10:00 Asia/Shanghai"
+DEFAULT_EVENING_ON_CALENDAR = "Mon..Fri *-*-* 17:10:00 Asia/Shanghai"
+SCHEDULE_LOCK_FILE = "/var/lock/portfolio-management-scheduled.lock"
+DEFAULT_OPTIONS_MONITOR_ENV_FILE = "/etc/options-monitor/options-monitor.env"
+OPTIONS_MONITOR_FEISHU_KEYS = (
+    "OM_FEISHU_BOT_APP_ID",
+    "OM_FEISHU_BOT_APP_SECRET",
+    "OM_FEISHU_BOT_USER_OPEN_ID",
+)
 
 
 @dataclass(frozen=True)
@@ -118,15 +128,44 @@ def render_config_yaml(paths: InstallPaths) -> str:
     return header + yaml.safe_dump(payload, allow_unicode=True, sort_keys=False)
 
 
-def render_env_file(paths: InstallPaths) -> str:
-    return "\n".join([
+def read_options_monitor_feishu_env(path: str | Path) -> dict[str, str]:
+    """Read only the three Feishu receipt values from options-monitor."""
+    source = _as_path(path)
+    if not source.exists():
+        return {}
+
+    selected: dict[str, str] = {}
+    for line in source.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        if key not in OPTIONS_MONITOR_FEISHU_KEYS:
+            continue
+        if key in selected:
+            raise ValueError(f"duplicate options-monitor env key: {key}")
+        value = value.strip()
+        if value not in {"", "''", '\"\"'}:
+            selected[key] = value
+
+    missing = [key for key in OPTIONS_MONITOR_FEISHU_KEYS if key not in selected]
+    if missing:
+        raise ValueError(f"missing options-monitor Feishu env keys: {', '.join(missing)}")
+    return selected
+
+
+def render_env_file(paths: InstallPaths, *, receipt_env: dict[str, str] | None = None) -> str:
+    lines = [
         f"PORTFOLIO_CONFIG_FILE={paths.config_file}",
         f"PM_DATA_DIR={paths.data_dir}",
         f"PM_REPORTS_DIR={paths.reports_dir}",
         f"PORTFOLIO_PM_BIN={paths.launcher_path}",
         "PYTHONUNBUFFERED=1",
-        "",
-    ])
+    ]
+    receipt_env = receipt_env or {}
+    lines.extend(f"{key}={receipt_env[key]}" for key in OPTIONS_MONITOR_FEISHU_KEYS if key in receipt_env)
+    return "\n".join([*lines, ""])
 
 
 def render_launcher(paths: InstallPaths) -> str:
@@ -140,17 +179,18 @@ exec "{paths.python_bin}" "{paths.app_dir / "scripts" / "pm.py"}" "$@"
 """
 
 
-def _daily_job_args(*, sync_futu_cash_mmf: bool) -> list[str]:
-    args = ["daily-job", "--write", "--confirm", "--json"]
-    if sync_futu_cash_mmf:
-        args.append("--sync-futu-cash-mmf")
-    return args
-
-
-def render_service_unit(paths: InstallPaths, *, run_user: str, sync_futu_cash_mmf: bool) -> str:
-    job_args = " ".join(_daily_job_args(sync_futu_cash_mmf=sync_futu_cash_mmf))
+def render_service_unit(paths: InstallPaths, *, run_user: str, mode: str) -> str:
+    if mode not in {"morning", "evening"}:
+        raise ValueError(f"unsupported scheduled job mode: {mode}")
+    description = (
+        "portfolio-management morning Futu sync and NAV job"
+        if mode == "morning"
+        else "portfolio-management evening Futu holdings sync"
+    )
+    schedule_script = paths.app_dir / "scripts" / "portfolio_scheduled_job.sh"
+    sy_env_file = paths.config_dir / "futu-sy.env"
     return f"""[Unit]
-Description=portfolio-management daily NAV job
+Description={description}
 Wants=network-online.target
 After=network-online.target
 
@@ -162,30 +202,39 @@ Environment=TZ=Asia/Shanghai
 Environment=APP_DIR={paths.app_dir}
 Environment=PYTHON_BIN={paths.python_bin}
 Environment=PORTFOLIO_PM_BIN={paths.launcher_path}
+Environment=PORTFOLIO_FUTU_SY_ENV_FILE={sy_env_file}
 EnvironmentFile={paths.env_file}
-ExecStart=/bin/sh -lc 'exec /usr/bin/flock -n /var/lock/portfolio-nav-daily.lock "$PORTFOLIO_PM_BIN" {job_args}'
+ExecStart=/usr/bin/flock -n {SCHEDULE_LOCK_FILE} {schedule_script} {mode}
 """
 
 
-def render_timer_unit(*, on_calendar: str) -> str:
+def render_timer_unit(*, on_calendar: str, service_name: str, description: str) -> str:
     return f"""[Unit]
-Description=Run portfolio-management daily NAV job
+Description={description}
 
 [Timer]
 OnCalendar={on_calendar}
 Persistent=true
 AccuracySec=1min
-Unit={SERVICE_NAME}
+Unit={service_name}
 
 [Install]
 WantedBy=timers.target
 """
 
 
+def _unit_paths(paths: InstallPaths) -> dict[str, Path]:
+    return {
+        "morning_service": paths.systemd_dir / SERVICE_NAME,
+        "morning_timer": paths.systemd_dir / TIMER_NAME,
+        "evening_service": paths.systemd_dir / EVENING_SERVICE_NAME,
+        "evening_timer": paths.systemd_dir / EVENING_TIMER_NAME,
+    }
+
+
 def build_plan(args) -> dict:
     paths = build_paths(args)
-    service_file = paths.systemd_dir / SERVICE_NAME
-    timer_file = paths.systemd_dir / TIMER_NAME
+    units = _unit_paths(paths)
     return {
         "success": True,
         "dry_run": not bool(args.apply),
@@ -195,8 +244,10 @@ def build_plan(args) -> dict:
             "env_file": str(paths.env_file),
             "data_dir": str(paths.data_dir),
             "reports_dir": str(paths.reports_dir),
-            "systemd_service": str(service_file),
-            "systemd_timer": str(timer_file),
+            "morning_service": str(units["morning_service"]),
+            "morning_timer": str(units["morning_timer"]),
+            "evening_service": str(units["evening_service"]),
+            "evening_timer": str(units["evening_timer"]),
             "python_bin": str(paths.python_bin),
             "launcher": str(paths.launcher_path),
         },
@@ -211,18 +262,33 @@ def build_plan(args) -> dict:
             {"path": str(paths.config_file), "mode": "0600", "overwrite": bool(args.overwrite_config)},
             {"path": str(paths.env_file), "mode": "0600", "overwrite": True},
             {"path": str(paths.launcher_path), "mode": "0755", "overwrite": True},
-            {"path": str(service_file), "mode": "0644", "overwrite": True},
-            {"path": str(timer_file), "mode": "0644", "overwrite": True},
+            *[
+                {"path": str(path), "mode": "0644", "overwrite": True}
+                for path in units.values()
+            ],
         ],
         "systemd": {
-            "enable_timer": bool(args.enable_timer),
-            "timer": TIMER_NAME,
-            "service": SERVICE_NAME,
-            "on_calendar": args.on_calendar,
+            "enable_timers": bool(args.enable_timer),
+            "lock_file": SCHEDULE_LOCK_FILE,
+            "morning": {
+                "timer": TIMER_NAME,
+                "service": SERVICE_NAME,
+                "on_calendar": args.morning_on_calendar,
+                "mode": "morning",
+            },
+            "evening": {
+                "timer": EVENING_TIMER_NAME,
+                "service": EVENING_SERVICE_NAME,
+                "on_calendar": args.evening_on_calendar,
+                "mode": "evening",
+            },
         },
-        "daily_job_args": _daily_job_args(sync_futu_cash_mmf=bool(args.sync_futu_cash_mmf)),
+        "feishu_receipt_env": {
+            "source": str(_as_path(args.options_monitor_env_file)),
+            "target": str(paths.env_file),
+            "keys": list(OPTIONS_MONITOR_FEISHU_KEYS),
+        },
     }
-
 
 def _write_text(path: Path, content: str, *, mode: int, overwrite: bool) -> str:
     if path.exists() and not overwrite:
@@ -243,8 +309,8 @@ def _mkdirs(paths: Iterable[Path]) -> list[str]:
 
 def apply_install(args) -> dict:
     paths = build_paths(args)
-    service_file = paths.systemd_dir / SERVICE_NAME
-    timer_file = paths.systemd_dir / TIMER_NAME
+    units = _unit_paths(paths)
+    receipt_env = read_options_monitor_feishu_env(args.options_monitor_env_file)
     _mkdirs([paths.config_dir, paths.data_dir, paths.reports_dir, paths.systemd_dir, paths.launcher_path.parent])
 
     writes = {
@@ -254,33 +320,64 @@ def apply_install(args) -> dict:
             mode=0o600,
             overwrite=bool(args.overwrite_config),
         ),
-        str(paths.env_file): _write_text(paths.env_file, render_env_file(paths), mode=0o600, overwrite=True),
+        str(paths.env_file): _write_text(
+            paths.env_file,
+            render_env_file(paths, receipt_env=receipt_env),
+            mode=0o600,
+            overwrite=True,
+        ),
         str(paths.launcher_path): _write_text(paths.launcher_path, render_launcher(paths), mode=0o755, overwrite=True),
-        str(service_file): _write_text(
-            service_file,
-            render_service_unit(paths, run_user=args.run_user, sync_futu_cash_mmf=bool(args.sync_futu_cash_mmf)),
+        str(units["morning_service"]): _write_text(
+            units["morning_service"],
+            render_service_unit(paths, run_user=args.run_user, mode="morning"),
             mode=0o644,
             overwrite=True,
         ),
-        str(timer_file): _write_text(timer_file, render_timer_unit(on_calendar=args.on_calendar), mode=0o644, overwrite=True),
+        str(units["morning_timer"]): _write_text(
+            units["morning_timer"],
+            render_timer_unit(
+                on_calendar=args.morning_on_calendar,
+                service_name=SERVICE_NAME,
+                description="Run portfolio-management morning sync and NAV job",
+            ),
+            mode=0o644,
+            overwrite=True,
+        ),
+        str(units["evening_service"]): _write_text(
+            units["evening_service"],
+            render_service_unit(paths, run_user=args.run_user, mode="evening"),
+            mode=0o644,
+            overwrite=True,
+        ),
+        str(units["evening_timer"]): _write_text(
+            units["evening_timer"],
+            render_timer_unit(
+                on_calendar=args.evening_on_calendar,
+                service_name=EVENING_SERVICE_NAME,
+                description="Run portfolio-management evening Futu holdings sync",
+            ),
+            mode=0o644,
+            overwrite=True,
+        ),
     }
 
     systemd_commands = [["systemctl", "daemon-reload"]]
     if args.enable_timer:
-        systemd_commands.append(["systemctl", "enable", "--now", TIMER_NAME])
+        systemd_commands.append(["systemctl", "enable", "--now", TIMER_NAME, EVENING_TIMER_NAME])
     for command in systemd_commands:
         subprocess.run(command, check=True)
 
     result = build_plan(args)
     result["dry_run"] = False
     result["writes"] = writes
+    result["feishu_receipt_env"]["status"] = "imported" if receipt_env else "source_missing"
     result["next_steps"] = [
         f"edit {paths.config_file} and fill Feishu/Futu credentials",
+        f"create {paths.config_dir / 'futu-sy.env'} with sy Futu connection values",
         f"{paths.launcher_path} config doctor --json",
-        f"systemctl status {TIMER_NAME}",
+        f"systemctl status {TIMER_NAME} {EVENING_TIMER_NAME}",
     ]
     return result
-
 
 def _print_plan(payload: dict, *, as_json: bool) -> None:
     if as_json:
@@ -290,13 +387,14 @@ def _print_plan(payload: dict, *, as_json: bool) -> None:
     print(f"portfolio-management Linux install plan ({mode})")
     for key, value in payload.get("paths", {}).items():
         print(f"  {key}: {value}")
-    print(f"  timer: {payload.get('systemd', {}).get('on_calendar')}")
-    print(f"  daily-job: {' '.join(payload.get('daily_job_args') or [])}")
+    systemd = payload.get("systemd", {})
+    for name in ("morning", "evening"):
+        job = systemd.get(name, {})
+        print(f"  {name}: {job.get('on_calendar')} -> {job.get('service')}")
     if payload.get("writes"):
         print("  writes:")
         for path, status in payload["writes"].items():
             print(f"    {path}: {status}")
-
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Install portfolio-management Linux systemd assets")
@@ -306,16 +404,31 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config-dir", default="/etc/portfolio-management", help="configuration directory")
     parser.add_argument("--config-file", default=None, help="config YAML path; defaults to CONFIG_DIR/config.yaml")
     parser.add_argument("--env-file", default=None, help="systemd EnvironmentFile path")
+    parser.add_argument(
+        "--options-monitor-env-file",
+        default=DEFAULT_OPTIONS_MONITOR_ENV_FILE,
+        help="source env file for the three OM_FEISHU_BOT_* receipt values",
+    )
     parser.add_argument("--data-dir", default="/var/lib/portfolio-management/.data", help="runtime state/cache directory")
     parser.add_argument("--reports-dir", default="/var/lib/portfolio-management/reports", help="report output directory")
     parser.add_argument("--systemd-dir", default="/etc/systemd/system", help="systemd unit directory")
     parser.add_argument("--python", default=None, help="Python interpreter for systemd job")
     parser.add_argument("--launcher", default="/usr/local/bin/pm", help="pm launcher path")
     parser.add_argument("--run-user", default=_default_user(), help="systemd User for the oneshot service")
-    parser.add_argument("--on-calendar", default=DEFAULT_ON_CALENDAR, help="systemd OnCalendar value")
-    parser.add_argument("--sync-futu-cash-mmf", action="store_true", help="include Futu cash/MMF sync in daily job")
+    parser.add_argument(
+        "--morning-on-calendar",
+        "--on-calendar",
+        dest="morning_on_calendar",
+        default=DEFAULT_MORNING_ON_CALENDAR,
+        help="systemd OnCalendar value for morning Futu sync and NAV",
+    )
+    parser.add_argument(
+        "--evening-on-calendar",
+        default=DEFAULT_EVENING_ON_CALENDAR,
+        help="systemd OnCalendar value for evening Futu sync",
+    )
     parser.add_argument("--overwrite-config", action="store_true", help="overwrite an existing config.yaml")
-    parser.add_argument("--enable-timer", action="store_true", help="run systemctl enable --now after writing units")
+    parser.add_argument("--enable-timer", action="store_true", help="run systemctl enable --now for both timers")
     return parser
 
 

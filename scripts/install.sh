@@ -22,7 +22,6 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 RUN_USER="${SUDO_USER:-${USER:-portfolio}}"
 APPLY=false
 ENABLE_TIMER=false
-SYNC_FUTU=false
 OVERWRITE_CONFIG=false
 PIP_INDEX_URL_VALUE="${PIP_INDEX_URL:-}"
 SCRIPT_DIR=""
@@ -43,8 +42,7 @@ Usage:
 
 Options:
   --apply                 Write config/env/systemd/launcher files.
-  --enable-timer          Enable and start portfolio-nav-daily.timer.
-  --sync-futu-cash-mmf    Add Futu cash/MMF sync to the scheduled daily job.
+  --enable-timer          Enable and start morning NAV and evening Futu timers.
   --overwrite-config      Replace an existing config.yaml.
   --repo URL              Git repository URL.
   --ref REF               Branch, tag, or commit to checkout (default: main).
@@ -65,6 +63,10 @@ Defaults:
 
 By default this prepares code and the Python environment, then prints the
 system install plan. Add --apply to write system files.
+
+When /etc/options-monitor/options-monitor.env exists, --apply copies only
+OM_FEISHU_BOT_APP_ID, OM_FEISHU_BOT_APP_SECRET, and
+OM_FEISHU_BOT_USER_OPEN_ID into portfolio-management.env.
 USAGE
 }
 
@@ -72,7 +74,6 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --apply) APPLY=true; shift ;;
     --enable-timer) ENABLE_TIMER=true; shift ;;
-    --sync-futu-cash-mmf) SYNC_FUTU=true; shift ;;
     --overwrite-config) OVERWRITE_CONFIG=true; shift ;;
     --repo) REPO_URL="$2"; shift 2 ;;
     --ref) REF="$2"; shift 2 ;;
@@ -200,9 +201,6 @@ run_asset_installer() {
   if [[ "$ENABLE_TIMER" == true ]]; then
     args+=(--enable-timer)
   fi
-  if [[ "$SYNC_FUTU" == true ]]; then
-    args+=(--sync-futu-cash-mmf)
-  fi
   if [[ "$OVERWRITE_CONFIG" == true ]]; then
     args+=(--overwrite-config)
   fi
@@ -223,5 +221,5 @@ Next:
   $LAUNCHER daily-job --json --no-service
 
 To enable the timer later:
-  sudo $APP_DIR/scripts/install.sh --apply --enable-timer --sync-futu-cash-mmf --dir $APP_DIR
+  sudo $APP_DIR/scripts/install.sh --apply --enable-timer --dir $APP_DIR
 EOF

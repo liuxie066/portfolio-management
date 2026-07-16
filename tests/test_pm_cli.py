@@ -672,3 +672,38 @@ def test_pm_config_doctor_returns_nonzero_for_missing_deploy_config():
     out = json.loads(stdout.getvalue())
     assert out["success"] is False
     assert {issue["key"] for issue in out["issues"]} >= set(config.REQUIRED_DAILY_JOB_KEYS)
+
+
+def test_pm_futu_sync_defaults_to_dry_run_and_passes_safety_flags():
+    calls = []
+
+    class FakePortfolioService:
+        def sync_futu_holdings(self, **kwargs):
+            calls.append(kwargs)
+            return {"success": True, **kwargs}
+
+    stdout = io.StringIO()
+    with _PortfolioServicePatch(FakePortfolioService), redirect_stdout(stdout):
+        assert pm.main(["futu", "sync", "--account", "lx", "--no-service", "--json"]) == 0
+
+    out = json.loads(stdout.getvalue())
+    assert out["dry_run"] is True
+    assert calls == [{
+        "account": "lx",
+        "dry_run": True,
+        "confirm": False,
+        "allow_empty_stock_snapshot": False,
+    }]
+
+
+def test_pm_futu_sync_write_and_empty_override_require_confirm():
+    for argv in (
+        ["futu", "sync", "--account", "lx", "--write"],
+        ["futu", "sync", "--account", "lx", "--allow-empty-stock-snapshot"],
+    ):
+        try:
+            pm.main(argv)
+        except SystemExit as exc:
+            assert "confirm" in str(exc)
+        else:
+            raise AssertionError("expected SystemExit")

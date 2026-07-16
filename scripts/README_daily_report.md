@@ -59,7 +59,7 @@ python scripts/publish_daily_report.py --nav-date 2026-05-22
 - `--require-service` fails when the local service is unavailable; `--no-service` forces the direct application service path.
 - `--run-id` lets operators supply a trace id; otherwise the script generates one and carries it through NAV, report bundle, HTML, and publish output.
 - `report.sync_futu_cash_mmf` / `PM_SYNC_FUTU_CASH_MMF` controls publisher-side Futu cash/MMF sync; CLI flags still override config.
-- In the unified `pm daily-job` path, omitted `sync_futu_dry_run` follows the job mode: dry-run previews holdings changes, write mode updates holdings before valuation.
+- The embedded `pm daily-job` cash/MMF sync flags are compatibility-only. Production full holdings synchronization is a separate `pm futu sync` step orchestrated by `scripts/portfolio_scheduled_job.sh`.
 - `publish_report(...)` returns local artifact paths. `public_url` is always `null` and `public_url_status` is `disabled`.
 - This script is intentionally split into three layers:
   - data collection: `build_report_data(...)`

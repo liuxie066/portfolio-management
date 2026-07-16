@@ -13,6 +13,7 @@ Usage examples:
   ./pm daily --write --confirm
   python scripts/pm.py cash
   python scripts/pm.py cash --account alice
+  python scripts/pm.py futu sync --account alice --json
   python scripts/pm.py accounts
   python scripts/pm.py overview --accounts alice,bob --json
   python scripts/pm.py holdings
@@ -339,6 +340,32 @@ def cmd_cash(args):
     res = _service_or_fallback(args, via_service, direct)
     _dump(res, args.json)
     return res
+
+
+def cmd_futu_sync(args):
+    if not bool(args.dry_run) and not bool(args.confirm):
+        raise SystemExit("Futu holdings write requires --confirm. Re-run without --write for dry-run.")
+    if bool(args.allow_empty_stock_snapshot) and not bool(args.confirm):
+        raise SystemExit("--allow-empty-stock-snapshot requires --confirm.")
+
+    kwargs = {
+        "account": _default_account(getattr(args, "account", None)),
+        "dry_run": bool(args.dry_run),
+        "confirm": bool(args.confirm),
+        "allow_empty_stock_snapshot": bool(args.allow_empty_stock_snapshot),
+    }
+
+    def via_service(client):
+        return client.sync_futu_holdings(**kwargs)
+
+    def direct():
+        from src.service.application import PortfolioService
+
+        return PortfolioService().sync_futu_holdings(**kwargs)
+
+    result = _service_or_fallback(args, via_service, direct)
+    _dump(result, args.json)
+    return result
 
 
 def cmd_cash_flow_reconcile(args):
@@ -757,6 +784,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_cash.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
     add_service_args(p_cash)
     p_cash.set_defaults(func=cmd_cash)
+
+    p_futu = sp.add_parser("futu", help="Futu holdings synchronization")
+    futu_sub = p_futu.add_subparsers(dest="futu_cmd", required=True)
+    p_futu_sync = futu_sub.add_parser("sync", help="sync Futu cash/MMF and stock/ETF quantity + average cost")
+    p_futu_sync.add_argument("--account", default=argparse.SUPPRESS, help="account to operate on; defaults to config/PORTFOLIO_ACCOUNT")
+    p_futu_sync.add_argument("--dry-run", action="store_true", default=True, help="preview only (default)")
+    p_futu_sync.add_argument("--write", dest="dry_run", action="store_false", help="write holdings changes")
+    p_futu_sync.add_argument("--confirm", action="store_true", help="required with --write and empty-snapshot override")
+    p_futu_sync.add_argument("--allow-empty-stock-snapshot", action="store_true", help="allow an empty eligible stock snapshot to zero existing Futu stocks")
+    p_futu_sync.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
+    add_service_args(p_futu_sync)
+    p_futu_sync.set_defaults(func=cmd_futu_sync)
 
     p_cash_flow = sp.add_parser("cash-flow", help="cash-flow ledger maintenance")
     cash_flow_sub = p_cash_flow.add_subparsers(dest="cash_flow_cmd", required=True)

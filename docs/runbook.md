@@ -12,11 +12,25 @@ go through `./pm` or the local service, not ad hoc Python calls.
 python scripts/migrate_schema.py check-live
 ```
 
-If Futu cash/MMF sync is enabled:
+If full Futu holdings sync is enabled:
 
 ```bash
 ./pm config doctor --require-futu --json
+./pm futu sync --account lx --json
 ```
+
+`pm futu sync` is dry-run by default. It synchronizes cash/MMF plus LONG
+STOCK/ETF quantity and Futu `average_cost`; `diluted_cost` is never used. Run
+it independently before `daily-job` so holdings refresh even when NAV skips an
+existing date.
+
+A real write sends a success/failure receipt from the configured Feishu
+“刘看山” app. Dry-runs do not send. Check `receipt.status` in JSON output;
+notification failure does not replace the holdings sync result. Required
+configuration: `feishu.receipt.app_id`, `feishu.receipt.app_secret`, and
+`feishu.receipt.open_id`. If these are absent, the resolver accepts the
+existing options-monitor variables `OM_FEISHU_BOT_APP_ID`,
+`OM_FEISHU_BOT_APP_SECRET`, and `OM_FEISHU_BOT_USER_OPEN_ID`.
 
 ## Read-Only Checks
 
@@ -45,7 +59,8 @@ Write:
 
 ```bash
 ./pm daily-job --accounts lx,alice --write --confirm --json
-./pm daily-job --account lx --sync-futu-cash-mmf --write --confirm --json
+./pm futu sync --account lx --write --confirm --json
+./pm daily-job --account lx --write --confirm --json
 ```
 
 Manual date:
@@ -149,9 +164,7 @@ holdings_snapshot.
 Business dates use Beijing date semantics. `daily-job` auto-date means previous
 business day before the run date, not calendar yesterday.
 
-The systemd timer should run every calendar day, for example
-`*-*-* 08:10:00 Asia/Shanghai`. A Saturday timer run records Friday NAV; do not
-limit the timer to Monday-Friday.
+The installer creates a Monday-Saturday 08:10 Beijing morning timer that synchronizes lx/sy before one multi-account NAV job, plus a Monday-Friday 17:10 Futu-only timer. Saturday morning records Friday NAV; the evening timer never calls `daily-job`.
 
 ### Prices Missing
 

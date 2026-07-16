@@ -45,6 +45,8 @@ New clients should pass account as a query parameter.
 
 ## Write Endpoints
 
+- `POST /futu/holdings/sync`
+- `POST /accounts/{account}/futu/holdings/sync`
 - `POST /nav/record`
 - `POST /accounts/{account}/nav/record`
 - `POST /report/daily-bundle`
@@ -54,6 +56,36 @@ New clients should pass account as a query parameter.
 
 Writes are dry-run by default. A real write requires `dry_run=false` and
 `confirm=true`.
+
+## Futu Holdings Sync
+
+Request:
+
+```json
+{
+  "account": "lx",
+  "dry_run": true,
+  "confirm": false,
+  "allow_empty_stock_snapshot": false
+}
+```
+
+This independently synchronizes CNY cash/MMF plus Futu LONG STOCK/ETF quantity
+and `average_cost`. It never uses `diluted_cost` or deprecated `cost_price`.
+Real writes require `dry_run=false` and `confirm=true`. An empty eligible stock
+snapshot is blocked while existing Futu stocks are non-zero; the override also
+requires `confirm=true`.
+
+For real writes, the application service sends a Feishu receipt through the
+configured “刘看山” app and adds a `receipt` object to the response. Dry-runs
+return `receipt.status=skipped`. Delivery failure is reported as
+`receipt.status=failed` without changing the holdings sync `success` value.
+Configure `feishu.receipt.app_id`, `feishu.receipt.app_secret`, and
+`feishu.receipt.open_id`, or inject options-monitor's existing
+`OM_FEISHU_BOT_APP_ID`, `OM_FEISHU_BOT_APP_SECRET`, and
+`OM_FEISHU_BOT_USER_OPEN_ID` variables.
+
+Run this endpoint or `pm futu sync` before `daily-nav-job`. Keeping the commands independent ensures holdings still refresh when NAV recording skips an existing date. Production ordering is owned by `scripts/portfolio_scheduled_job.sh`, not by `DailyNavJobService`.
 
 ## NAV Record
 
@@ -72,8 +104,7 @@ Request:
 }
 ```
 
-Use this for a single account NAV write. For scheduled production work prefer
-`daily-nav-job`.
+Use this for a single account NAV write. For scheduled production work prefer `daily-nav-job`. A real multi-account job adds one best-effort Feishu `receipt` object to the response; dry-run returns `receipt.status=skipped`.
 
 ## Daily NAV Job
 
@@ -104,8 +135,7 @@ Behavior:
 3. Resolve accounts from the request or current holdings.
 4. Block duplicate `nav_history` account/date records.
 5. Block pending generated-field reconciliation in manual `cash_flow` rows.
-6. Optionally sync Futu cash/MMF holdings before valuation.
-7. Build one priced snapshot per account and write NAV.
+6. Build one priced snapshot per account and write NAV. The embedded Futu cash/MMF fields remain a legacy compatibility path; full holdings sync is a separate endpoint.
 
 Top-level response includes:
 
@@ -117,6 +147,7 @@ Top-level response includes:
 - `accounts`
 - `items`
 - `summary`
+- `receipt` (consolidated Feishu receipt for real jobs; delivery failure does not change top-level `success`)
 
 ## Daily Report Bundle
 
@@ -143,7 +174,8 @@ for NAV recording, report payload, and recent NAV output.
 
 Internal boundaries:
 
-- `AccountNavRecorderService`: optional Futu sync, priced snapshot, NAV write.
+- `FutuBalanceSyncService`: independent Futu cash/MMF and stock/ETF quantity + average-cost sync.
+- `AccountNavRecorderService`: priced snapshot and NAV write; embedded cash/MMF sync is compatibility-only.
 - `DailyReportPayloadService`: report/distribution/recent-NAV payload from the
   existing snapshot and NAV fact.
 - `DailyAccountNavService`: response-shape orchestrator for the two services.

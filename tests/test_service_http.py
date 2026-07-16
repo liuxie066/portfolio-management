@@ -131,3 +131,41 @@ def test_http_service_rejects_unknown_report_type():
     assert "unsupported report_type=weekly" in response.json()["detail"]
     assert query_response.status_code == 400
     assert "unsupported report_type=weekly" in query_response.json()["detail"]
+
+
+def test_http_futu_holdings_sync_routes_delegate_to_service():
+    class FutuService(FakePortfolioService):
+        def sync_futu_holdings(self, **kwargs):
+            self.calls.append(("sync_futu_holdings", kwargs))
+            return {"success": True, **kwargs}
+
+    service = FutuService()
+    client = TestClient(create_app(service=service))
+
+    query = client.post("/futu/holdings/sync", json={
+        "account": "lx",
+        "dry_run": False,
+        "confirm": True,
+        "allow_empty_stock_snapshot": True,
+    }).json()
+    account = client.post("/accounts/sy/futu/holdings/sync", json={
+        "dry_run": True,
+        "confirm": False,
+    }).json()
+
+    assert query["account"] == "lx"
+    assert account["account"] == "sy"
+    assert service.calls == [
+        ("sync_futu_holdings", {
+            "account": "lx",
+            "dry_run": False,
+            "confirm": True,
+            "allow_empty_stock_snapshot": True,
+        }),
+        ("sync_futu_holdings", {
+            "account": "sy",
+            "dry_run": True,
+            "confirm": False,
+            "allow_empty_stock_snapshot": False,
+        }),
+    ]
