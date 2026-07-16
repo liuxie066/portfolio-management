@@ -1,6 +1,6 @@
 """Service facade for portfolio-management use cases.
 
-This layer gives HTTP, CLI, MCP, and future workers one application boundary.
+This layer gives HTTP, CLI, and future workers one application boundary.
 `skill_api.py` remains a caller-facing adapter and is not a service dependency.
 """
 from __future__ import annotations
@@ -43,9 +43,9 @@ class PortfolioService:
                 except TypeError:
                     self._storage = self._storage_factory()
             else:
-                from src.storage import create_storage
+                from src.feishu_storage import FeishuStorage
 
-                self._storage = create_storage(healthcheck=False)
+                self._storage = FeishuStorage()
         return self._storage
 
     @property
@@ -195,12 +195,19 @@ class PortfolioService:
         return result
 
     def get_nav(self, *, account: Optional[str] = None, days: int = 30) -> Dict[str, Any]:
-        from src.app import NavReadService
+        from src.app.nav_payload import format_nav_history_item, format_nav_payload
 
-        return NavReadService(storage=self.storage).get_nav(
-            account=self._resolve_account(account),
-            days=days,
-        )
+        try:
+            navs = self.storage.get_nav_history(self._resolve_account(account), days=days)
+            if not navs:
+                return {"success": False, "message": "无净值记录"}
+            return {
+                "success": True,
+                "latest": format_nav_payload(navs[-1]),
+                "history": [format_nav_history_item(nav) for nav in navs],
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
     def record_nav(
         self,

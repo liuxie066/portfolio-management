@@ -18,7 +18,6 @@ sys.path.insert(0, str(SKILL_DIR))
 from src.feishu_storage import FeishuStorage, FeishuClient
 from src.portfolio import PortfolioManager
 from src.price_fetcher import PriceFetcher
-from src.storage import create_storage
 from src.models import AssetType, AssetClass, Industry, Holding, NAVHistory
 from src.asset_utils import (
     validate_code as validate_asset_code,
@@ -94,7 +93,7 @@ class PortfolioSkill:
             price_fetcher: 价格获取器实例（可选）
         """
         self.account = account
-        self.storage = storage or (FeishuStorage(feishu_client) if feishu_client else create_storage(healthcheck=False))
+        self.storage = storage or FeishuStorage(feishu_client)
         self.portfolio = portfolio or PortfolioManager(self.storage)
         self.price_fetcher = price_fetcher or PriceFetcher(storage=self.storage)
         self._audit_service = AuditService(

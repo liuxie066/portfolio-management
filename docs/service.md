@@ -41,19 +41,12 @@ Config keys:
 - `GET /report/full?account=alice&price_timeout=30`
 - `GET /report/{daily|monthly|yearly}?account=alice&price_timeout=30`
 
-Legacy `/accounts/{account}/...` routes remain available for compatibility.
-New clients should pass account as a query parameter.
-
 ## Write Endpoints
 
 - `POST /futu/holdings/sync`
-- `POST /accounts/{account}/futu/holdings/sync`
 - `POST /nav/record`
-- `POST /accounts/{account}/nav/record`
 - `POST /report/daily-bundle`
-- `POST /accounts/{account}/report/daily-bundle`
 - `POST /daily-nav-job`
-- `POST /accounts/{account}/daily-nav-job`
 
 Writes are dry-run by default. A real write requires `dry_run=false` and
 `confirm=true`.
@@ -190,7 +183,7 @@ plus `confirm=true` for real NAV writes.
 - `PortfolioService.multi_account_overview()` -> `AccountService.multi_account_overview()`
 - `PortfolioService.record_nav()` -> `AccountNavRecorderService.record()`
 - `PortfolioService.init_nav_history()` -> `NavInitializationService.init_nav_history()`
-- `PortfolioService.get_nav()` -> `NavReadService.get_nav()`
+- `PortfolioService.get_nav()` -> direct `nav_history` read + shared NAV payload formatting
 - `PortfolioService.get_holdings()` -> `PortfolioReadService.get_holdings()`
 - `PortfolioService.get_cash()` -> `CashService.get_cash()`
 - `PortfolioService.get_distribution()` -> `PortfolioReadService.get_distribution()`

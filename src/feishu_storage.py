@@ -130,7 +130,7 @@ class FeishuStorage(
             local_cash_flow_agg_cache: 本地现金流聚合缓存实例（可注入用于测试）
         """
         self.client = client or FeishuClient()
-        use_memory_indexes = client is not None and self.client.__class__.__module__ == 'unittest.mock'
+        use_memory_indexes = client is not None and not isinstance(client, FeishuClient)
 
         # 内存缓存：减少 API 调用次数
         # key: "asset_id:account:broker" -> value: record_id

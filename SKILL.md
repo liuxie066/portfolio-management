@@ -1,7 +1,7 @@
 ---
 name: portfolio-management
 description: |
-  投资组合管理兼容 Skill。用于通过既有 Python API/MCP adapter 查询或触发投资组合操作。
+  投资组合管理兼容 Skill。用于通过既有 Python API adapter 查询或触发投资组合操作。
 ---
 
 # Portfolio Management Skill Adapter
@@ -86,9 +86,6 @@ src/feishu/          # Feishu 表级 repository 和薄 mixin
 skill_api.py         # 兼容 adapter
 ```
 
-新增公共服务必须加入 `src/app/__init__.py` 或 `src/domain/__init__.py`
-的 `__all__`，并补 `tests/test_module_exports.py`。
-
 ## 开发规则
 
 - 新业务先进 `src/service/application.py` 和 `src/app/*`。
@@ -103,7 +100,6 @@ skill_api.py         # 兼容 adapter
 
 ```bash
 python3 -m pytest tests -q
-python3 tests/run_tests.py
 git diff --check
 python3 -X pycache_prefix=/tmp/pm_pycache -m compileall src skill_api.py scripts/pm.py scripts/publish_daily_report.py
 ```

@@ -9,7 +9,6 @@ flowchart LR
         CLI["scripts/pm.py"]
         ServiceRunner["scripts/service.py"]
         Publisher["scripts/publish_daily_report.py"]
-        MCP["mcp_server.py"]
         SkillAPI["skill_api.py<br/>compat adapter"]
         RepairCLI["scripts/nav_history_repair.py"]
     end
@@ -40,12 +39,10 @@ flowchart LR
     end
 
     subgraph Storage["Storage"]
-        StorageFactory["src/storage.py"]
         FeishuStorage["src/feishu_storage.py"]
         FeishuRepos["src/feishu/repositories/*"]
         FeishuClient["src/feishu_client.py"]
         LocalCache["src/local_cache.py"]
-        Migrations["src/migrations/*"]
     end
 
     subgraph External["External"]
@@ -62,12 +59,11 @@ flowchart LR
     ServiceRunner --> HTTP
     ServiceClient --> HTTP
     HTTP --> PortfolioService
-    MCP --> SkillAPI
     SkillAPI --> PortfolioService
-    RepairCLI --> StorageFactory
+    RepairCLI --> FeishuStorage
 
     PortfolioService --> AppServices
-    PortfolioService --> StorageFactory
+    PortfolioService --> FeishuStorage
     AppServices --> DomainServices
     AppServices --> Models
     AppServices --> PriceFetcher
@@ -84,12 +80,10 @@ flowchart LR
     PriceProviders --> Quotes
     Fx --> Quotes
 
-    StorageFactory --> FeishuStorage
     FeishuStorage --> FeishuRepos
     FeishuRepos --> FeishuClient
     FeishuRepos --> LocalCache
     FeishuClient --> Feishu
-    Migrations --> FeishuClient
     Publisher --> Reports
 ```
 
@@ -99,8 +93,6 @@ flowchart LR
   `PortfolioService`; it no longer falls back through `skill_api.py`.
 - `scripts/publish_daily_report.py` also follows service-first behavior and
   falls back to `PortfolioService` for local recovery.
-- MCP still goes through `skill_api.py` because that is the compatibility API
-  surface.
 - `skill_api.py` delegates inward to `PortfolioService` / app services and
   should not own new behavior.
 - Feishu table logic belongs in `src/feishu/repositories/*`; mixins are only

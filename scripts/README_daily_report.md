@@ -55,7 +55,6 @@ python scripts/publish_daily_report.py --nav-date 2026-05-22
 - `--account-label` is display-only.
 - `--account` controls which portfolio account is loaded; if omitted, the script uses `PORTFOLIO_ACCOUNT` / `config.yaml` default.
 - `--service-url` overrides the local service endpoint.
-- `--publish-base-url` is deprecated and ignored. The old external daily-report domain is no longer valid.
 - `--require-service` fails when the local service is unavailable; `--no-service` forces the direct application service path.
 - `--run-id` lets operators supply a trace id; otherwise the script generates one and carries it through NAV, report bundle, HTML, and publish output.
 - `report.sync_futu_cash_mmf` / `PM_SYNC_FUTU_CASH_MMF` controls publisher-side Futu cash/MMF sync; CLI flags still override config.

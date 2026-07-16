@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""Canonical schema migration/check entrypoint.
-
-Default mode is dry-run planning. ``--apply`` records migrations in local state;
-actual Feishu table/field creation is still manual until write-safe migration
-operations are implemented.
-
-Use this script for schema-related checks.
-"""
+"""Validate documented Feishu schema expectations."""
 from __future__ import annotations
 
 import argparse
@@ -21,8 +14,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.migrations import MigrationRunner
-from src.migrations.feishu import get_migrations
 from src.feishu_client import FeishuClient
 
 
@@ -38,38 +29,23 @@ class TableSpec:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Plan/apply schema migration state.")
+    parser = argparse.ArgumentParser(description="Inspect documented or live Feishu schema.")
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["plan", "apply", "expectations", "check-live"],
-        default="plan",
-        help="schema action (default: plan)",
+        choices=["expectations", "check-live"],
+        default="expectations",
+        help="schema action (default: expectations)",
     )
-    parser.add_argument("--apply", action="store_true", help="Mark pending migrations as applied in local migration state.")
-    parser.add_argument("--strict", action="store_true", help="For check-live, exit non-zero if required fields are missing.")
+    parser.add_argument("--strict", action="store_true", help="Exit non-zero when required live fields are missing.")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    if args.apply:
-        args.command = "apply"
-
-    if args.command == "expectations":
-        result = schema_expectations()
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0
-
-    if args.command == "check-live":
-        result = run_schema_check(strict=args.strict)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0 if result.get("ok", True) else 1
-
-    runner = MigrationRunner(get_migrations())
-    result = runner.apply() if args.command == "apply" else runner.plan()
+    result = run_schema_check(strict=args.strict) if args.command == "check-live" else schema_expectations()
     print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 0 if result.get("success", True) else 1
+    return 0 if result.get("ok", result.get("success", True)) else 1
 
 
 def schema_expectations() -> dict:

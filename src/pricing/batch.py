@@ -7,7 +7,14 @@ from typing import Any, Dict, List
 from src.asset_utils import detect_market_type
 
 from .cache import PriceCachePolicy, market_type_from_asset_type
-from .fixed import get_cash_price, get_cash_price_with_rates, get_mmf_price
+from .fixed import (
+    get_cash_price,
+    get_cash_price_with_rates,
+    get_crypto_value_price,
+    get_crypto_value_price_with_rates,
+    get_mmf_price,
+    is_crypto_value_code,
+)
 from .providers.tencent_batch import fetch_tencent_quotes_batch
 from .providers.us_batch import fetch_us_batch
 
@@ -62,6 +69,19 @@ class BatchPricePlanner:
 
         for code in codes:
             normalized_code = (code or "").upper().strip()
+
+            if is_crypto_value_code(normalized_code):
+                try:
+                    if batch_rates:
+                        results[code] = get_crypto_value_price_with_rates(normalized_code, batch_rates)
+                    else:
+                        results[code] = get_crypto_value_price(
+                            normalized_code,
+                            getattr(fetcher, "_fetch_exchange_rates", None),
+                        )
+                    continue
+                except Exception:
+                    pass
 
             if normalized_code == "CASH" or normalized_code.endswith("-CASH"):
                 try:

@@ -1,8 +1,7 @@
 # Architecture
 
 The project is now a CLI + local-service portfolio product. The service and app
-layers own product behavior; `skill_api.py` and MCP remain compatibility
-adapters for older callers.
+layers own product behavior; `skill_api.py` remains a compatibility adapter for older Python callers.
 
 ## Current Shape
 
@@ -11,14 +10,13 @@ flowchart TB
     subgraph Operators["Operators / Automation"]
         Human["Human"]
         Scheduler["systemd / cron"]
-        Agent["MCP / legacy Skill caller"]
+        Agent["legacy Skill caller"]
     end
 
     subgraph Entry["Entrypoints"]
         CLI["./pm / scripts/pm.py<br/>CLI product surface"]
         ServiceRunner["scripts/service.py<br/>local service process"]
         Publisher["scripts/publish_daily_report.py<br/>daily report publisher"]
-        MCP["mcp_server.py<br/>compatibility adapter"]
         SkillAPI["skill_api.py<br/>compatibility Python API"]
     end
 
@@ -57,7 +55,6 @@ flowchart TB
     end
 
     subgraph Storage["Storage"]
-        StorageFactory["storage.py"]
         FeishuStorage["feishu_storage.py"]
         Repos["feishu/repositories/*"]
         FeishuClient["feishu_client.py"]
@@ -73,7 +70,6 @@ flowchart TB
     Human --> CLI
     Scheduler --> CLI
     Scheduler --> Publisher
-    Agent --> MCP
     Agent --> SkillAPI
 
     CLI --> ServiceClient
@@ -83,7 +79,6 @@ flowchart TB
     ServiceRunner --> HTTP
     ServiceClient --> HTTP
     HTTP --> AppFacade
-    MCP --> SkillAPI
     SkillAPI --> AppFacade
 
     AppFacade --> Account
@@ -95,7 +90,7 @@ flowchart TB
     AppFacade --> ReportQuery
     AppFacade --> FutuSync
     AppFacade --> FutuReceipt
-    AppFacade --> StorageFactory
+    AppFacade --> FeishuStorage
 
     DailyJob --> AccountNav
     DailyJob -.legacy cash/MMF option.-> FutuSync
@@ -114,7 +109,6 @@ flowchart TB
     Providers --> Quotes
     Fx --> Quotes
 
-    StorageFactory --> FeishuStorage
     FeishuStorage --> Repos
     FutuReceipt --> FeishuClient
     Repos --> FeishuClient

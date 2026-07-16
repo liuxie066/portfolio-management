@@ -181,8 +181,8 @@ Finnhub/Yahoo Chart paths; A/H quotes use Tencent paths.
 python scripts/migrate_schema.py check-live
 ```
 
-Compare with `docs/schema.md`. Schema changes must also update migration
-registry files.
+Compare with `docs/schema.md`. Schema changes must also update the schema
+documentation and checks.
 
 ### Duplicate NAV Rows
 
@@ -196,7 +196,6 @@ Repair duplicates before running the daily job.
 
 ```bash
 python3 -m pytest tests -q
-python3 tests/run_tests.py
 git diff --check
 python3 -X pycache_prefix=/tmp/pm_pycache -m compileall src skill_api.py scripts/pm.py scripts/publish_daily_report.py
 ```

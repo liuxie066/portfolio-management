@@ -2,7 +2,7 @@
 import pytest
 from datetime import datetime, timedelta
 from unittest.mock import Mock, patch, MagicMock
-import pytz
+from zoneinfo import ZoneInfo
 
 from src.market_time import MarketTimeUtil
 from src.price_fetcher import PriceFetcher
@@ -21,15 +21,15 @@ class TestMarketTimeUtil:
 
     def test_is_cn_market_open_weekend(self):
         """测试A股周末休市"""
-        saturday = datetime(2025, 3, 15, 10, 0, 0, tzinfo=pytz.timezone('Asia/Shanghai'))
+        saturday = datetime(2025, 3, 15, 10, 0, 0, tzinfo=ZoneInfo('Asia/Shanghai'))
         assert MarketTimeUtil.is_cn_market_open(saturday) == False
 
-        sunday = datetime(2025, 3, 16, 10, 0, 0, tzinfo=pytz.timezone('Asia/Shanghai'))
+        sunday = datetime(2025, 3, 16, 10, 0, 0, tzinfo=ZoneInfo('Asia/Shanghai'))
         assert MarketTimeUtil.is_cn_market_open(sunday) == False
 
     def test_is_cn_market_open_trading_hours(self):
         """测试A股交易时间"""
-        tz = pytz.timezone('Asia/Shanghai')
+        tz = ZoneInfo('Asia/Shanghai')
 
         # 上午开盘时间 9:30
         morning_open = datetime(2025, 3, 14, 9, 30, 0, tzinfo=tz)
@@ -57,7 +57,7 @@ class TestMarketTimeUtil:
 
     def test_is_hk_market_open_trading_hours(self):
         """测试港股交易时间"""
-        tz = pytz.timezone('Asia/Shanghai')
+        tz = ZoneInfo('Asia/Shanghai')
 
         # 上午开盘时间 9:30
         morning_open = datetime(2025, 3, 14, 9, 30, 0, tzinfo=tz)
@@ -73,13 +73,13 @@ class TestMarketTimeUtil:
 
     def test_is_us_market_open_weekend(self):
         """测试美股周末休市"""
-        tz = pytz.timezone('America/New_York')
+        tz = ZoneInfo('America/New_York')
         saturday = datetime(2025, 3, 15, 10, 0, 0, tzinfo=tz)
         assert MarketTimeUtil.is_us_market_open(saturday) == False
 
     def test_is_us_market_open_trading_hours(self):
         """测试美股交易时间（北京时间判断）"""
-        tz_sh = pytz.timezone('Asia/Shanghai')
+        tz_sh = ZoneInfo('Asia/Shanghai')
 
         # 夏令时: 北京时间 21:30-04:00
         # 周一 21:30 开盘（夏令时7月）

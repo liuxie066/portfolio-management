@@ -64,10 +64,7 @@ def _service(request: Request) -> PortfolioService:
 
 
 def _payload_dict(payload: BaseModel) -> dict:
-    model_dump = getattr(payload, "model_dump", None)
-    if callable(model_dump):
-        return model_dump(exclude_none=True)
-    return payload.dict(exclude_none=True)
+    return payload.model_dump(exclude_none=True)
 
 
 def create_app(service: Optional[PortfolioService] = None) -> FastAPI:
@@ -124,38 +121,16 @@ def create_app(service: Optional[PortfolioService] = None) -> FastAPI:
             include_price=include_price,
         )
 
-    @app.get("/accounts/{account}/holdings", tags=["holdings"])
-    def get_holdings(
-        request: Request,
-        account: str,
-        include_cash: bool = Query(True),
-        group_by_market: bool = Query(False),
-        include_price: bool = Query(False),
-    ):
-        return _service(request).get_holdings(
-            account=account,
-            include_cash=include_cash,
-            group_by_market=group_by_market,
-            include_price=include_price,
-        )
 
     @app.get("/cash", tags=["cash"])
     def get_cash_query(request: Request, account: str = Query(...)):
         return _service(request).get_cash(account=account)
 
-    @app.get("/accounts/{account}/cash", tags=["cash"])
-    def get_cash(request: Request, account: str):
-        return _service(request).get_cash(account=account)
 
     @app.post("/futu/holdings/sync", tags=["holdings"])
     def sync_futu_holdings_query(request: Request, payload: FutuHoldingsSyncRequest):
         return _service(request).sync_futu_holdings(**_payload_dict(payload))
 
-    @app.post("/accounts/{account}/futu/holdings/sync", tags=["holdings"])
-    def sync_futu_holdings(request: Request, account: str, payload: FutuHoldingsSyncRequest):
-        kwargs = _payload_dict(payload)
-        kwargs["account"] = account
-        return _service(request).sync_futu_holdings(**kwargs)
 
     @app.get("/nav", tags=["nav"])
     def get_nav_query(
@@ -165,24 +140,12 @@ def create_app(service: Optional[PortfolioService] = None) -> FastAPI:
     ):
         return _service(request).get_nav(account=account, days=days)
 
-    @app.get("/accounts/{account}/nav", tags=["nav"])
-    def get_nav(
-        request: Request,
-        account: str,
-        days: int = Query(30, ge=1, le=10000),
-    ):
-        return _service(request).get_nav(account=account, days=days)
 
     @app.post("/nav/record", tags=["nav"])
     def record_nav_query(request: Request, payload: NavRecordRequest):
         kwargs = _payload_dict(payload)
         return _service(request).record_nav(**kwargs)
 
-    @app.post("/accounts/{account}/nav/record", tags=["nav"])
-    def record_nav(request: Request, account: str, payload: NavRecordRequest):
-        kwargs = _payload_dict(payload)
-        kwargs["account"] = account
-        return _service(request).record_nav(**kwargs)
 
     @app.get("/nav/duplicates", tags=["nav"])
     def audit_nav_history_duplicates(request: Request, account: Optional[str] = Query(None)):
@@ -207,22 +170,6 @@ def create_app(service: Optional[PortfolioService] = None) -> FastAPI:
             kwargs["group_cash"] = True
         return _service(request).get_distribution(**kwargs)
 
-    @app.get("/accounts/{account}/distribution", tags=["positions"])
-    def get_distribution(
-        request: Request,
-        account: str,
-        by_asset: bool = Query(False, description="Group distribution by asset code."),
-        include_value: bool = Query(True, description="Include market value and ratio fields."),
-        group_cash: bool = Query(False, description="Collapse cash and MMF into one row."),
-    ):
-        kwargs = {
-            "account": account,
-            "by_asset": by_asset,
-            "include_value": include_value,
-        }
-        if group_cash:
-            kwargs["group_cash"] = True
-        return _service(request).get_distribution(**kwargs)
 
     @app.get("/report/full", tags=["reports"])
     def full_report_query(
@@ -232,35 +179,18 @@ def create_app(service: Optional[PortfolioService] = None) -> FastAPI:
     ):
         return _service(request).full_report(account=account, price_timeout=price_timeout)
 
-    @app.get("/accounts/{account}/report/full", tags=["reports"])
-    def full_report(
-        request: Request,
-        account: str,
-        price_timeout: int = Query(30, ge=1, le=300),
-    ):
-        return _service(request).full_report(account=account, price_timeout=price_timeout)
 
     @app.post("/report/daily-bundle", tags=["reports"])
     def daily_report_bundle_query(request: Request, payload: DailyReportBundleRequest):
         kwargs = _payload_dict(payload)
         return _service(request).daily_report_bundle(**kwargs)
 
-    @app.post("/accounts/{account}/report/daily-bundle", tags=["reports"])
-    def daily_report_bundle(request: Request, account: str, payload: DailyReportBundleRequest):
-        kwargs = _payload_dict(payload)
-        kwargs["account"] = account
-        return _service(request).daily_report_bundle(**kwargs)
 
     @app.post("/daily-nav-job", tags=["nav"])
     def daily_nav_job_query(request: Request, payload: DailyNavJobRequest):
         kwargs = _payload_dict(payload)
         return _service(request).daily_nav_job(**kwargs)
 
-    @app.post("/accounts/{account}/daily-nav-job", tags=["nav"])
-    def daily_nav_job(request: Request, account: str, payload: DailyNavJobRequest):
-        kwargs = _payload_dict(payload)
-        kwargs["account"] = account
-        return _service(request).daily_nav_job(**kwargs)
 
     @app.get("/report/{report_type}", tags=["reports"])
     def generate_report_query(
@@ -280,23 +210,6 @@ def create_app(service: Optional[PortfolioService] = None) -> FastAPI:
             price_timeout=price_timeout,
         )
 
-    @app.get("/accounts/{account}/report/{report_type}", tags=["reports"])
-    def generate_report(
-        request: Request,
-        account: str,
-        report_type: str,
-        price_timeout: int = Query(30, ge=1, le=300),
-    ):
-        if report_type not in REPORT_TYPES:
-            raise HTTPException(
-                status_code=400,
-                detail=f"unsupported report_type={report_type}; expected one of {sorted(REPORT_TYPES)}",
-            )
-        return _service(request).generate_report(
-            account=account,
-            report_type=report_type,
-            price_timeout=price_timeout,
-        )
 
     return app
 

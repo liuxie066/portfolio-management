@@ -1,28 +1,18 @@
-# Schema Migrations
+# Schema Checks
 
-Schema migrations are versioned in `src/migrations/feishu/registry.py`.
+`docs/schema.md` is the schema authority. Feishu table and field changes remain
+manual; this project does not maintain a second local migration-state ledger.
 
-Default command:
+Inspect documented expectations:
 
 ```bash
 python scripts/migrate_schema.py
-```
-
-This prints the pending migration plan and does not mutate Feishu.
-
-Other schema checks:
-
-```bash
-python scripts/migrate_schema.py check-live
 python scripts/migrate_schema.py expectations
 ```
 
-To mark migrations as applied in local state after the Feishu tables/fields have been created:
+Compare the documented schema with live Feishu fields:
 
 ```bash
-python scripts/migrate_schema.py --apply
+python scripts/migrate_schema.py check-live
+python scripts/migrate_schema.py check-live --strict
 ```
-
-State is stored in `config.get_data_dir() / "schema_migrations.json"` (default `.data/schema_migrations.json`; production can override with `data.dir` / `PM_DATA_DIR`).
-
-Current policy: migrations are check/documentation-first. Actual Feishu field creation remains manual until write-safe migration operations are implemented.

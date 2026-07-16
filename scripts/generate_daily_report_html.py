@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from html import escape
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
@@ -40,15 +41,8 @@ def kpi_class(v: Any) -> str:
     return "up" if float(v) >= 0 else "down"
 
 
-def html_escape(s: Any) -> str:
-    text = "" if s is None else str(s)
-    return (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-        .replace("'", "&#39;")
-    )
+def html_escape(value: Any) -> str:
+    return escape("" if value is None else str(value), quote=True)
 
 
 def build_market_breakdown(holdings: List[Dict[str, Any]], total_value: float) -> List[Dict[str, Any]]:

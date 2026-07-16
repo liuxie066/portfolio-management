@@ -5,7 +5,7 @@ from typing import Any, Iterable, List, Optional
 
 from .batch import BatchPricePlanner
 from .cache import PriceCachePolicy
-from .fixed import get_cash_price, get_mmf_price
+from .fixed import get_cash_price, get_crypto_value_price, get_mmf_price, is_crypto_value_code
 from .provider import PriceProvider
 from .payload import normalize_price_payload
 from .result import BatchPriceResult, PriceFailure, PriceQuote
@@ -76,6 +76,22 @@ class PriceService:
         original_code = code
         code = (code or "").upper().strip()
         asset_name = (asset_name or "").strip()
+
+        if is_crypto_value_code(code):
+            try:
+                return PriceQuote.from_payload(
+                    get_crypto_value_price(code, getattr(self.fetcher_context, "_fetch_exchange_rates", None)),
+                    code=code,
+                    cache_status="realtime",
+                    source_chain=["crypto_value"],
+                )
+            except Exception as exc:
+                return PriceFailure(
+                    code=code,
+                    error_type="fx_rate_unavailable",
+                    message=f"crypto value quote unavailable: {exc}",
+                    source_chain=["crypto_value"],
+                )
 
         if code == "CASH" or code.endswith("-CASH"):
             try:

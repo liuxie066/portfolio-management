@@ -6,7 +6,7 @@ from typing import Any, Optional
 
 from src import config
 from src.portfolio import PortfolioManager
-from src.storage import create_storage
+from src.feishu_storage import FeishuStorage
 
 
 @dataclass
@@ -17,7 +17,7 @@ class NavRepairContext:
 
 
 def create_nav_repair_context(*, account: Optional[str] = None) -> NavRepairContext:
-    storage = create_storage(healthcheck=False)
+    storage = FeishuStorage()
     resolved_account = account or config.get_account()
     return NavRepairContext(
         account=resolved_account,

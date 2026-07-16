@@ -330,7 +330,6 @@ def test_publish_daily_report_parse_args_uses_config_defaults_and_cli_overrides(
             assert args.account_label == "family"
             assert args.reports_dir == "out/reports"
             assert args.publish_root == "out/publish"
-            assert args.publish_base_url is None
             assert args.sync_futu_cash_mmf is True
             assert args.sync_futu_dry_run is False
 

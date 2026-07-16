@@ -84,15 +84,6 @@ def test_http_service_routes_delegate_to_portfolio_service():
     assert client.post("/report/daily-bundle", json={"account": "alice/bob", "price_timeout": 10, "dry_run": False, "confirm": True, "use_bulk_persist": True, "sync_futu_cash_mmf": True, "sync_futu_dry_run": False, "run_id": "run-report-1"}).json()["dry_run"] is False
     assert client.post("/daily-nav-job", json={"accounts": ["alice", "bob"], "nav_date": "2026-05-22", "price_timeout": 12, "dry_run": True, "overwrite_existing": False}).json()["status"] == "completed"
     assert client.get("/report/monthly", params={"account": "alice/bob", "price_timeout": 11}).json()["report_type"] == "monthly"
-    assert client.get("/accounts/alice/holdings", params={"include_cash": False, "group_by_market": True, "include_price": True}).json()["account"] == "alice"
-    assert client.get("/accounts/alice/cash").json()["account"] == "alice"
-    assert client.get("/accounts/alice/nav", params={"days": 14}).json()["days"] == 14
-    assert client.post("/accounts/alice/nav/record", json={"price_timeout": 9, "dry_run": True, "confirm": False, "use_bulk_persist": True}).json()["account"] == "alice"
-    assert client.get("/accounts/alice/distribution").json()["account"] == "alice"
-    assert client.get("/accounts/alice/report/full", params={"price_timeout": 9}).json()["account"] == "alice"
-    assert client.post("/accounts/alice/report/daily-bundle", json={"price_timeout": 10, "dry_run": True, "confirm": False}).json()["account"] == "alice"
-    assert client.post("/accounts/alice/daily-nav-job", json={"nav_date": "2026-05-22", "dry_run": True}).json()["status"] == "completed"
-    assert client.get("/accounts/alice/report/monthly", params={"price_timeout": 11}).json()["report_type"] == "monthly"
 
     assert service.calls == [
         ("health", {}),
@@ -109,28 +100,15 @@ def test_http_service_routes_delegate_to_portfolio_service():
         ("daily_report_bundle", {"account": "alice/bob", "price_timeout": 10, "dry_run": False, "confirm": True, "overwrite_existing": True, "use_bulk_persist": True, "sync_futu_cash_mmf": True, "sync_futu_dry_run": False, "run_id": "run-report-1"}),
         ("daily_nav_job", {"accounts": ["alice", "bob"], "nav_date": "2026-05-22", "price_timeout": 12, "dry_run": True, "confirm": False, "overwrite_existing": False, "use_bulk_persist": False, "sync_futu_cash_mmf": False, "force_non_business_day": False}),
         ("generate_report", {"account": "alice/bob", "report_type": "monthly", "price_timeout": 11}),
-        ("holdings", {"account": "alice", "include_cash": False, "group_by_market": True, "include_price": True}),
-        ("cash", {"account": "alice"}),
-        ("nav", {"account": "alice", "days": 14}),
-        ("record_nav", {"account": "alice", "price_timeout": 9, "dry_run": True, "confirm": False, "overwrite_existing": True, "use_bulk_persist": True}),
-        ("distribution", {"account": "alice", "by_asset": False, "include_value": True}),
-        ("full_report", {"account": "alice", "price_timeout": 9}),
-        ("daily_report_bundle", {"account": "alice", "price_timeout": 10, "dry_run": True, "confirm": False, "overwrite_existing": True, "use_bulk_persist": False, "sync_futu_cash_mmf": False}),
-        ("daily_nav_job", {"nav_date": "2026-05-22", "dry_run": True, "confirm": False, "overwrite_existing": False, "use_bulk_persist": False, "sync_futu_cash_mmf": False, "force_non_business_day": False, "price_timeout": 30, "account": "alice"}),
-        ("generate_report", {"account": "alice", "report_type": "monthly", "price_timeout": 11}),
     ]
 
-
 def test_http_service_rejects_unknown_report_type():
-    client = TestClient(create_app(service=FakePortfolioService()))
-
-    response = client.get("/accounts/alice/report/weekly")
-    query_response = client.get("/report/weekly", params={"account": "alice"})
+    response = TestClient(create_app(service=FakePortfolioService())).get(
+        "/report/weekly", params={"account": "alice"}
+    )
 
     assert response.status_code == 400
     assert "unsupported report_type=weekly" in response.json()["detail"]
-    assert query_response.status_code == 400
-    assert "unsupported report_type=weekly" in query_response.json()["detail"]
 
 
 def test_http_futu_holdings_sync_routes_delegate_to_service():
@@ -148,24 +126,12 @@ def test_http_futu_holdings_sync_routes_delegate_to_service():
         "confirm": True,
         "allow_empty_stock_snapshot": True,
     }).json()
-    account = client.post("/accounts/sy/futu/holdings/sync", json={
-        "dry_run": True,
-        "confirm": False,
-    }).json()
-
     assert query["account"] == "lx"
-    assert account["account"] == "sy"
     assert service.calls == [
         ("sync_futu_holdings", {
             "account": "lx",
             "dry_run": False,
             "confirm": True,
             "allow_empty_stock_snapshot": True,
-        }),
-        ("sync_futu_holdings", {
-            "account": "sy",
-            "dry_run": True,
-            "confirm": False,
-            "allow_empty_stock_snapshot": False,
         }),
     ]

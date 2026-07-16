@@ -12,7 +12,7 @@ historical Skill/Python API remains available only as a compatibility adapter.
 - Architecture map: `docs/architecture.md`
 - Dependency graph: `docs/dependency-graph.md`
 - Feishu schema: `docs/schema.md`
-- Schema migration notes: `docs/migrations.md`
+- Schema checks: `docs/migrations.md`
 
 ## Product Entrypoints
 
@@ -26,7 +26,6 @@ historical Skill/Python API remains available only as a compatibility adapter.
 - Daily report publisher: `scripts/publish_daily_report.py`
 - NAV repair CLI: `scripts/nav_history_repair.py`
 - Compatibility Python API: `skill_api.py`
-- MCP compatibility adapter: `mcp_server.py`
 
 ## Main Workflows
 
@@ -98,7 +97,6 @@ python scripts/nav_history_repair.py backfill --account lx --from 2025-01-01 --t
 
 ```bash
 python3 -m pytest tests -q
-python3 tests/run_tests.py
 git diff --check
 python3 -X pycache_prefix=/tmp/pm_pycache -m compileall src skill_api.py scripts/pm.py scripts/publish_daily_report.py
 ```

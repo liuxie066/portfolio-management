@@ -48,11 +48,6 @@ def parse_args() -> argparse.Namespace:
         default=str(app_config.get("report.publish_root", str(WORKSPACE / "prototypes"))),
         help="Root directory for published static pages.",
     )
-    parser.add_argument(
-        "--publish-base-url",
-        default=None,
-        help="Deprecated and ignored. External daily-report publish domains are disabled.",
-    )
     parser.add_argument("--price-timeout", type=int, default=30, help="Price fetch timeout in seconds.")
     parser.add_argument("--nav-date", default=None, help="NAV date to record (YYYY-MM-DD). Defaults to Beijing today.")
     parser.add_argument("--dry-run", action="store_true", help="Do not persist NAV writes.")

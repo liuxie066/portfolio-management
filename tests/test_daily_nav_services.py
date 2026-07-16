@@ -3,8 +3,6 @@ from __future__ import annotations
 from datetime import date
 from types import SimpleNamespace
 
-from pytest import MonkeyPatch
-
 from src.app.account_nav_recorder_service import AccountNavRecorderService
 from src.app.business_calendar_service import BusinessCalendarService
 from src.app.daily_account_nav_service import DailyAccountNavService
@@ -89,36 +87,20 @@ def test_daily_account_nav_service_reuses_one_snapshot_and_respects_nav_date():
             calls.append(("get_nav_history", account, days))
             return []
 
-    class FakeNavReadService:
-        def __init__(self, **_kwargs):
-            pass
-
-        def get_nav(self, **kwargs):
-            calls.append(("get_nav", kwargs))
-            return {"success": True, "latest": {"date": "2026-05-22"}}
-
-    import src.app as app_module
-
-    patch = MonkeyPatch()
-    try:
-        patch.setattr(app_module, "NavReadService", FakeNavReadService)
-
-        result = DailyAccountNavService(
-            account="alice",
-            storage=FakeStorage(),
-            portfolio=FakePortfolio(),
-            read_service=FakeReadService(),
-        ).run(
-            nav_date="2026-05-22",
-            price_timeout=7,
-            dry_run=False,
-            confirm=True,
-            overwrite_existing=False,
-            use_bulk_persist=True,
-            run_id="run-daily-1",
-        )
-    finally:
-        patch.undo()
+    result = DailyAccountNavService(
+        account="alice",
+        storage=FakeStorage(),
+        portfolio=FakePortfolio(),
+        read_service=FakeReadService(),
+    ).run(
+        nav_date="2026-05-22",
+        price_timeout=7,
+        dry_run=False,
+        confirm=True,
+        overwrite_existing=False,
+        use_bulk_persist=True,
+        run_id="run-daily-1",
+    )
 
     assert result["success"] is True
     assert result["date"] == "2026-05-22"

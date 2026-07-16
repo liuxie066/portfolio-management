@@ -2,7 +2,7 @@
 
 基于飞书多维表的本地投资组合管理工具。核心目标是每天为一个或多个账户计算并记录 NAV，输出仓位分布，并保留可审计的持仓快照。
 
-当前产品形态是 **CLI + 本地 HTTP 服务**。`skill_api.py` 和 `mcp_server.py` 只作为历史 Python/Skill/MCP 兼容 adapter，不再是主业务路径。
+当前产品形态是 **CLI + 本地 HTTP 服务**。`skill_api.py` 只作为历史 Python/Skill 兼容 adapter，不再是主业务路径。
 
 ## 核心能力
 
@@ -210,7 +210,6 @@ src/
 
 ```bash
 python3 -m pytest tests -q
-python3 tests/run_tests.py
 git diff --check
 python3 -X pycache_prefix=/tmp/pm_pycache -m compileall src skill_api.py scripts/pm.py scripts/publish_daily_report.py
 ```

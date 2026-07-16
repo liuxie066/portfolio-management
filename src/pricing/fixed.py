@@ -10,6 +10,12 @@ def _currency_from_code(code: str) -> str:
     return code.split("-")[0] if "-" in code else "CNY"
 
 
+def is_crypto_value_code(code: str) -> bool:
+    """Return whether code represents a crypto basket already valued in currency."""
+    parts = (code or "").upper().split("-")
+    return len(parts) >= 3 and parts[-2] == "CRYPTO" and parts[-1] in {"CNY", "USD", "HKD"}
+
+
 def _rate_for_currency(currency: str, rates: Dict[str, float]) -> float:
     if currency == "CNY":
         return 1.0
@@ -71,3 +77,36 @@ def get_mmf_price(code: str) -> Dict:
             "source": "fixed",
         }
     )
+
+
+def get_crypto_value_price_with_rates(code: str, rates: Dict[str, float]) -> Dict:
+    """Build a fixed quote for a crypto basket whose quantity is currency value."""
+    currency = code.upper().split("-")[-1]
+    exchange_rate = _rate_for_currency(currency, rates)
+    return normalize_price_payload(
+        {
+            "code": code,
+            "name": f"{currency}计价虚拟币",
+            "price": 1.0,
+            "currency": currency,
+            "cny_price": exchange_rate,
+            "exchange_rate": exchange_rate,
+            "market_type": "crypto",
+            "source": "fixed",
+        }
+    )
+
+
+def get_crypto_value_price(
+    code: str,
+    fetch_exchange_rates: Callable[[], Dict[str, float]] | None = None,
+) -> Dict:
+    """Build a fixed quote for an already currency-valued crypto basket."""
+    currency = code.upper().split("-")[-1]
+    if currency == "CNY":
+        rates = {"CNYCNY": 1.0}
+    else:
+        if fetch_exchange_rates is None:
+            raise KeyError(f"rates missing {currency}CNY")
+        rates = fetch_exchange_rates()
+    return get_crypto_value_price_with_rates(code, rates)

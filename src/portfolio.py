@@ -1,7 +1,7 @@
 """
 组合计算逻辑
 """
-from datetime import date
+from datetime import date, timedelta
 
 from decimal import Decimal
 from typing import Any, Dict, Optional, Union
@@ -17,11 +17,9 @@ from .app import (
     CashFlowSummaryService,
     CashService,
     CompensationService,
-    NavBaselineService,
     NavRecordService,
     NavSummaryPrinter,
     ReportingService,
-    ShareService,
     SnapshotService,
     TradeService,
     ValuationService,
@@ -47,14 +45,12 @@ class PortfolioManager:
         self.compensation = CompensationService(storage=storage)
         self.cash_service = CashService(storage=storage)
         self.cash_flow_summary_service = CashFlowSummaryService(storage=storage)
-        self.nav_baseline_service = NavBaselineService(storage=storage)
         self.trade_service = TradeService(manager=self, storage=storage)
         self.valuation_service = ValuationService(manager=self, storage=storage, price_fetcher=self.price_fetcher)
         self.snapshot_service = SnapshotService(storage=storage)
         self.nav_record_service = NavRecordService(manager=self, storage=storage)
         self.nav_summary_printer = NavSummaryPrinter()
         self.reporting_service = ReportingService(manager=self, storage=storage)
-        self.share_service = ShareService(storage=storage)
         self.nav_calculator = NavCalculator()
 
     def _record_compensation(self, *, operation_type: str, account: str, payload: Dict[str, Any], error: Union[Exception, str], related_record_id: Optional[str] = None):
@@ -437,7 +433,7 @@ class PortfolioManager:
 
     def _get_last_day_nav(self, account: str, current_date: date) -> Optional[NAVHistory]:
         """获取昨日净值记录（严格要求指定日期的前一天）"""
-        return self.nav_baseline_service.get_last_day_nav(account, current_date)
+        return self.storage.get_nav_on_date(account, current_date - timedelta(days=1))
 
     @classmethod
     def _sum_cash_flows(cls, flows) -> float:
@@ -467,7 +463,12 @@ class PortfolioManager:
     def _get_initial_value(self, account: str, all_navs: list = None) -> Optional[float]:
         """获取初始账户净值（净值=1时的初始值）
         从数据库最早的净值记录推算，或使用 config 中的默认值"""
-        return self.nav_baseline_service.get_initial_value(account, all_navs=all_navs)
+        navs = all_navs if all_navs is not None else self.storage.get_nav_history(account, days=365 * 2)
+        if navs:
+            earliest_nav = min(navs, key=lambda nav: nav.date)
+            if earliest_nav.nav and abs(earliest_nav.nav - 1.0) < 0.01:
+                return earliest_nav.total_value
+        return config.get_initial_value() or None
 
     # ========== 内存查询辅助（避免重复 API 调用）==========
 
@@ -513,14 +514,17 @@ class PortfolioManager:
 
     def get_shares(self, account: str) -> float:
         """获取账户总份额"""
-        return self.share_service.get_shares(account)
+        return self.storage.get_total_shares(account)
 
     def calculate_shares_change(self, account: str, cny_amount: float, nav: Optional[float] = None) -> float:
         """
         计算入金/出金对应的份额变动
         份额变动 = 人民币金额 / 当前净值
         """
-        return self.share_service.calculate_shares_change(account, cny_amount, nav=nav)
+        if nav is None:
+            latest_nav = self.storage.get_latest_nav(account)
+            nav = latest_nav.nav if latest_nav else 1.0
+        return cny_amount / (nav if nav > 0 else 1.0)
 
     # ========== 统计报表 ==========
 

@@ -5,7 +5,7 @@ from typing import Literal, Optional
 
 from .models import AssetType, Holding
 
-NormalizedType = Literal["cash", "fund", "stock", "other"]
+NormalizedType = Literal["cash", "fund", "stock", "crypto", "other"]
 
 
 def is_cash_like(asset_type: Optional[AssetType | str], asset_id: str = "") -> bool:
@@ -37,9 +37,11 @@ def normalize_asset_type(asset_type: Optional[AssetType | str], asset_id: str = 
         "hk_fund",
     ):
         return "fund"
+    if t in (AssetType.CRYPTO.value, "crypto"):
+        return "crypto"
     if t in (AssetType.A_STOCK.value, AssetType.HK_STOCK.value, AssetType.US_STOCK.value,
-             AssetType.BOND.value, AssetType.CRYPTO.value,
-             "a_stock", "hk_stock", "us_stock", "bond", "crypto"):
+             AssetType.BOND.value,
+             "a_stock", "hk_stock", "us_stock", "bond"):
         return "stock"
     return "other"
 

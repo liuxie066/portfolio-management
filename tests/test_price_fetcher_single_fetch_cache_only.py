@@ -1,6 +1,6 @@
 """Regression tests for PriceFetcher.fetch() cache-only + stale fallback semantics.
 
-We intentionally avoid pytest dependency; tests are called from tests/run_tests.py.
+These tests are collected by pytest.
 """
 
 from __future__ import annotations

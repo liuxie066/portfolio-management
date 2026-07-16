@@ -12,7 +12,7 @@
 - Linux 推荐路径：`/opt/portfolio-management/current`
 - 生产配置：`/etc/portfolio-management/config.yaml`
 
-`skill_api.py` / MCP 只保留兼容 adapter，不作为新运维入口。
+`skill_api.py` 只保留兼容 adapter，不作为新运维入口。
 
 ## 1) 日净值主流程
 
@@ -141,7 +141,6 @@ python scripts/diagnose_pricing.py --account lx --json
 
 ```bash
 python3 -m pytest tests -q
-python3 tests/run_tests.py
 git diff --check
 python3 -X pycache_prefix=/tmp/pm_pycache -m compileall src skill_api.py scripts/pm.py scripts/publish_daily_report.py
 ```
