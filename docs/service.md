@@ -22,6 +22,20 @@ The service is unauthenticated and binds to loopback hosts only by default.
 Binding to `0.0.0.0` or any other non-loopback address requires
 `--allow-remote` and an authenticated outer network boundary.
 
+
+For a long-running Linux loopback service, render and explicitly enable the
+systemd unit:
+
+```bash
+sudo scripts/install.sh --apply --enable-api-service
+systemctl status portfolio-management-api.service
+```
+
+The generated unit runs `scripts/serve.py --host 127.0.0.1 --port 8765`, restarts
+on failure, and is independent from the NAV/Futu timers. It never adds
+`--allow-remote`; this is the supported boundary for a same-host
+options-monitor Copilot reader.
+
 Config keys:
 
 - `service.host` / `PORTFOLIO_SERVICE_HOST`

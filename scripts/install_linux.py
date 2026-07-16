@@ -4,7 +4,7 @@
 The script is intentionally conservative:
 - default mode is dry-run;
 - it never overwrites an existing config.yaml unless --overwrite-config is set;
-- it only enables the systemd timer when --enable-timer is explicitly set.
+- it only enables timers or the loopback API when explicitly requested.
 """
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ SERVICE_NAME = "portfolio-nav-daily.service"
 TIMER_NAME = "portfolio-nav-daily.timer"
 EVENING_SERVICE_NAME = "portfolio-futu-evening.service"
 EVENING_TIMER_NAME = "portfolio-futu-evening.timer"
+API_SERVICE_NAME = "portfolio-management-api.service"
 DEFAULT_MORNING_ON_CALENDAR = "Mon..Sat *-*-* 08:10:00 Asia/Shanghai"
 DEFAULT_EVENING_ON_CALENDAR = "Mon..Fri *-*-* 17:10:00 Asia/Shanghai"
 SCHEDULE_LOCK_FILE = "/var/lock/portfolio-management-scheduled.lock"
@@ -208,6 +209,27 @@ ExecStart=/usr/bin/flock -n {SCHEDULE_LOCK_FILE} {schedule_script} {mode}
 """
 
 
+def render_api_service_unit(paths: InstallPaths, *, run_user: str) -> str:
+    return f"""[Unit]
+Description=portfolio-management loopback HTTP API
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User={run_user}
+WorkingDirectory={paths.app_dir}
+Environment=TZ=Asia/Shanghai
+EnvironmentFile={paths.env_file}
+ExecStart={paths.python_bin} {paths.app_dir / "scripts" / "serve.py"} --host 127.0.0.1 --port 8765
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
 def render_timer_unit(*, on_calendar: str, service_name: str, description: str) -> str:
     return f"""[Unit]
 Description={description}
@@ -229,6 +251,7 @@ def _unit_paths(paths: InstallPaths) -> dict[str, Path]:
         "morning_timer": paths.systemd_dir / TIMER_NAME,
         "evening_service": paths.systemd_dir / EVENING_SERVICE_NAME,
         "evening_timer": paths.systemd_dir / EVENING_TIMER_NAME,
+        "api_service": paths.systemd_dir / API_SERVICE_NAME,
     }
 
 
@@ -248,6 +271,7 @@ def build_plan(args) -> dict:
             "morning_timer": str(units["morning_timer"]),
             "evening_service": str(units["evening_service"]),
             "evening_timer": str(units["evening_timer"]),
+            "api_service": str(units["api_service"]),
             "python_bin": str(paths.python_bin),
             "launcher": str(paths.launcher_path),
         },
@@ -269,6 +293,7 @@ def build_plan(args) -> dict:
         ],
         "systemd": {
             "enable_timers": bool(args.enable_timer),
+            "enable_api_service": bool(args.enable_api_service),
             "lock_file": SCHEDULE_LOCK_FILE,
             "morning": {
                 "timer": TIMER_NAME,
@@ -281,6 +306,11 @@ def build_plan(args) -> dict:
                 "service": EVENING_SERVICE_NAME,
                 "on_calendar": args.evening_on_calendar,
                 "mode": "evening",
+            },
+            "api": {
+                "service": API_SERVICE_NAME,
+                "host": "127.0.0.1",
+                "port": 8765,
             },
         },
         "feishu_receipt_env": {
@@ -359,11 +389,19 @@ def apply_install(args) -> dict:
             mode=0o644,
             overwrite=True,
         ),
+        str(units["api_service"]): _write_text(
+            units["api_service"],
+            render_api_service_unit(paths, run_user=args.run_user),
+            mode=0o644,
+            overwrite=True,
+        ),
     }
 
     systemd_commands = [["systemctl", "daemon-reload"]]
     if args.enable_timer:
         systemd_commands.append(["systemctl", "enable", "--now", TIMER_NAME, EVENING_TIMER_NAME])
+    if args.enable_api_service:
+        systemd_commands.append(["systemctl", "enable", "--now", API_SERVICE_NAME])
     for command in systemd_commands:
         subprocess.run(command, check=True)
 
@@ -376,6 +414,7 @@ def apply_install(args) -> dict:
         f"create {paths.config_dir / 'futu-sy.env'} with sy Futu connection values",
         f"{paths.launcher_path} config doctor --json",
         f"systemctl status {TIMER_NAME} {EVENING_TIMER_NAME}",
+        f"systemctl status {API_SERVICE_NAME}",
     ]
     return result
 
@@ -429,6 +468,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--overwrite-config", action="store_true", help="overwrite an existing config.yaml")
     parser.add_argument("--enable-timer", action="store_true", help="run systemctl enable --now for both timers")
+    parser.add_argument(
+        "--enable-api-service",
+        action="store_true",
+        help="enable and start the loopback-only portfolio HTTP API",
+    )
     return parser
 
 

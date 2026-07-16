@@ -42,6 +42,12 @@ def test_install_linux_plan_uses_yaml_config_and_two_timers(tmp_path):
         "on_calendar": "Mon..Fri *-*-* 17:10:00 Asia/Shanghai",
         "mode": "evening",
     }
+    assert payload["systemd"]["enable_api_service"] is False
+    assert payload["systemd"]["api"] == {
+        "service": install_linux.API_SERVICE_NAME,
+        "host": "127.0.0.1",
+        "port": 8765,
+    }
     assert "daily_job_args" not in payload
 
 
@@ -78,6 +84,7 @@ def test_install_linux_apply_writes_files_without_overwriting_existing_config(tm
         install_linux.TIMER_NAME,
         install_linux.EVENING_SERVICE_NAME,
         install_linux.EVENING_TIMER_NAME,
+        install_linux.API_SERVICE_NAME,
     ):
         assert (paths.systemd_dir / unit_name).exists()
     assert commands == [["systemctl", "daemon-reload"]]
@@ -99,6 +106,32 @@ def test_install_linux_enable_starts_both_timers(tmp_path, monkeypatch):
             install_linux.EVENING_TIMER_NAME,
         ],
     ]
+
+
+def test_install_linux_enable_api_service_is_independent_from_timers(tmp_path, monkeypatch):
+    commands = []
+    monkeypatch.setattr(install_linux.subprocess, "run", lambda command, check: commands.append(command))
+
+    install_linux.apply_install(_args(tmp_path, "--apply", "--enable-api-service"))
+
+    assert commands == [
+        ["systemctl", "daemon-reload"],
+        ["systemctl", "enable", "--now", install_linux.API_SERVICE_NAME],
+    ]
+
+
+def test_install_linux_api_service_is_loopback_only_and_long_running(tmp_path):
+    paths = install_linux.build_paths(_args(tmp_path))
+    unit = install_linux.render_api_service_unit(paths, run_user="portfolio")
+
+    assert "Type=simple" in unit
+    assert f"ExecStart={paths.python_bin} {paths.app_dir / 'scripts' / 'serve.py'} --host 127.0.0.1 --port 8765" in unit
+    assert "Restart=on-failure" in unit
+    assert "RestartSec=5" in unit
+    assert "WantedBy=multi-user.target" in unit
+    assert "--allow-remote" not in unit
+    assert "scripts/service.py" not in unit
+    assert "flock" not in unit
 
 
 def test_install_linux_apply_imports_only_three_options_monitor_feishu_values(tmp_path, monkeypatch):
@@ -202,6 +235,7 @@ def test_install_shell_help_is_available():
 
     assert "portfolio-management installer" in result.stdout
     assert "--enable-timer" in result.stdout
+    assert "--enable-api-service" in result.stdout
     assert "evening Futu timers" in result.stdout
     assert "--sync-futu-cash-mmf" not in result.stdout
     assert "OM_FEISHU_BOT_APP_ID" in result.stdout

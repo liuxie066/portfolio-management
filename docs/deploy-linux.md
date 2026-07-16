@@ -67,6 +67,7 @@ sudo python3 scripts/install_linux.py --apply
 - `/etc/systemd/system/portfolio-nav-daily.timer`
 - `/etc/systemd/system/portfolio-futu-evening.service`
 - `/etc/systemd/system/portfolio-futu-evening.timer`
+- `/etc/systemd/system/portfolio-management-api.service`
 
 如果已有 `config.yaml`，默认保留不覆盖；确需重建模板时显式加 `--overwrite-config`。
 
@@ -104,6 +105,18 @@ pm daily-job --json --no-service
 ```bash
 pm config doctor --require-futu --json
 ```
+
+## 启用同机只读 API 边界
+
+当 `options-monitor` Copilot 与本项目运行在同一台主机时，可独立启用 HTTP API：
+
+```bash
+sudo scripts/install.sh --apply --enable-api-service
+systemctl status portfolio-management-api.service
+curl http://127.0.0.1:8765/health
+```
+
+安装器始终生成 unit，但只有显式传入 `--enable-api-service` 才会执行 `systemctl enable --now`。unit 固定运行 `scripts/serve.py --host 127.0.0.1 --port 8765`，不使用 `--allow-remote`，也不依赖两个 timer。服务当前无鉴权，禁止把它直接绑定或转发到非 loopback 网络。
 
 ## 启用定时任务
 

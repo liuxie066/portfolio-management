@@ -118,7 +118,7 @@ curl http://127.0.0.1:8765/health
 curl 'http://127.0.0.1:8765/accounts/overview?accounts=lx,alice'
 ```
 
-`./pm` 常用命令会优先访问本地服务；服务不可用时回退到 `PortfolioService` 本地直连。使用 `--no-service` 可强制直连，使用 `--require-service` 可禁止 fallback。
+`./pm` 常用命令会优先访问本地服务；服务不可用时回退到 `PortfolioService` 本地直连。使用 `--no-service` 可强制直连，使用 `--require-service` 可禁止 fallback。Linux 上可用 `scripts/install.sh --apply --enable-api-service` 显式启用 `portfolio-management-api.service`；安装器只生成 loopback unit，不会自动启用。
 
 HTTP 服务默认只绑定 `127.0.0.1` / `localhost` / `::1`，且当前不带鉴权。非 loopback 绑定必须显式 `--allow-remote`，并放在已有鉴权的网络边界后面。
 
@@ -165,6 +165,9 @@ sudo systemctl status portfolio-nav-daily.timer portfolio-futu-evening.timer
 
 ```bash
 sudo scripts/install.sh --apply --enable-timer
+
+# 如需供同机 options-monitor Copilot 读取，再独立启用 loopback API
+sudo scripts/install.sh --apply --enable-api-service
 ```
 
 完整步骤见 `docs/deploy-linux.md`。安装器使用版本化的 `scripts/portfolio_scheduled_job.sh` 编排独立 `pm futu sync` 和 `pm daily-job`；`daily-job` 中的现金/MMF内嵌参数只保留旧调用兼容。

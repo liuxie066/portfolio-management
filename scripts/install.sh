@@ -22,6 +22,7 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 RUN_USER="${SUDO_USER:-${USER:-portfolio}}"
 APPLY=false
 ENABLE_TIMER=false
+ENABLE_API_SERVICE=false
 OVERWRITE_CONFIG=false
 PIP_INDEX_URL_VALUE="${PIP_INDEX_URL:-}"
 SCRIPT_DIR=""
@@ -43,6 +44,7 @@ Usage:
 Options:
   --apply                 Write config/env/systemd/launcher files.
   --enable-timer          Enable and start morning NAV and evening Futu timers.
+  --enable-api-service     Enable and start the loopback-only portfolio HTTP API.
   --overwrite-config      Replace an existing config.yaml.
   --repo URL              Git repository URL.
   --ref REF               Branch, tag, or commit to checkout (default: main).
@@ -74,6 +76,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --apply) APPLY=true; shift ;;
     --enable-timer) ENABLE_TIMER=true; shift ;;
+    --enable-api-service) ENABLE_API_SERVICE=true; shift ;;
     --overwrite-config) OVERWRITE_CONFIG=true; shift ;;
     --repo) REPO_URL="$2"; shift 2 ;;
     --ref) REF="$2"; shift 2 ;;
@@ -201,6 +204,9 @@ run_asset_installer() {
   if [[ "$ENABLE_TIMER" == true ]]; then
     args+=(--enable-timer)
   fi
+  if [[ "$ENABLE_API_SERVICE" == true ]]; then
+    args+=(--enable-api-service)
+  fi
   if [[ "$OVERWRITE_CONFIG" == true ]]; then
     args+=(--overwrite-config)
   fi
@@ -222,4 +228,7 @@ Next:
 
 To enable the timer later:
   sudo $APP_DIR/scripts/install.sh --apply --enable-timer --dir $APP_DIR
+
+To enable the loopback portfolio API later:
+  sudo $APP_DIR/scripts/install.sh --apply --enable-api-service --dir $APP_DIR
 EOF
