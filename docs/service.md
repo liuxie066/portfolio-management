@@ -37,6 +37,7 @@ Config keys:
 - `GET /cash?account=alice`
 - `GET /nav?account=alice&days=30`
 - `GET /distribution?account=alice`
+- `GET /distribution?accounts=lx,sy&group_cash=true` merges rows with the same asset code and collapses cash/MMF into one `现金及等价物` row; `group_cash=true` implies asset-level distribution.
 - `GET /report/full?account=alice&price_timeout=30`
 - `GET /report/{daily|monthly|yearly}?account=alice&price_timeout=30`
 

@@ -213,6 +213,32 @@ def test_reporting_service_build_asset_distribution_merges_accounts_and_includes
     ]
 
 
+def test_reporting_service_build_asset_distribution_groups_cash_equivalents():
+    service = ReportingService(manager=Mock(), storage=Mock())
+    snapshot = {
+        "holdings_data": {
+            "total_value": 350.0,
+            "holdings": [
+                {"code": "AAPL", "name": "Apple", "normalized_type": "stock", "broker": "富途", "currency": "USD", "account": "lx", "quantity": 1, "market_value": 100.0},
+                {"code": "AAPL", "name": "Apple", "normalized_type": "stock", "broker": "富途", "currency": "USD", "account": "sy", "quantity": 1, "market_value": 100.0},
+                {"code": "CNY-CASH", "name": "人民币现金", "type": "cash", "broker": "富途", "currency": "CNY", "account": "lx", "quantity": 100, "market_value": 100.0},
+                {"code": "CNY-MMF", "name": "货币基金", "type": "mmf", "broker": "富途", "currency": "CNY", "account": "sy", "quantity": 50, "market_value": 50.0},
+            ],
+        },
+    }
+
+    result = service.build_asset_distribution(snapshot, group_cash=True)
+
+    assert [row["code"] for row in result["by_asset"]] == ["AAPL", "CASH+MMF"]
+    assert result["by_asset"][0]["quantity"] == 2.0
+    cash = result["by_asset"][1]
+    assert cash["name"] == "现金及等价物"
+    assert cash["quantity"] == 150.0
+    assert cash["value"] == 150.0
+    assert cash["ratio"] == 150 / 350
+    assert cash["accounts"] == {"lx": 100.0, "sy": 50.0}
+
+
 def test_reporting_service_build_asset_distribution_hides_value_when_requested():
     storage = Mock()
     manager = Mock()

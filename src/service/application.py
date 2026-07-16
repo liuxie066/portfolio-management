@@ -278,6 +278,7 @@ class PortfolioService:
         try:
             from src.app.account_service import normalize_accounts
 
+            by_asset = bool(by_asset or group_cash)
             target_accounts = normalize_accounts(accounts)
             if target_accounts is None:
                 if account is not None:

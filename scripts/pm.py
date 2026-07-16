@@ -479,9 +479,9 @@ def cmd_nav_record(args):
 
 def cmd_positions_distribution(args):
     accounts = getattr(args, "accounts", None)
-    by_asset = bool(getattr(args, "by_asset", False))
-    include_value = not bool(getattr(args, "no_value", False))
     group_cash = bool(getattr(args, "group_cash", False))
+    by_asset = bool(getattr(args, "by_asset", False) or group_cash)
+    include_value = not bool(getattr(args, "no_value", False))
 
     def via_service(client):
         kwargs = {
@@ -846,7 +846,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_positions_distribution.add_argument("--account", default=argparse.SUPPRESS, help="account to operate on; defaults to config/PORTFOLIO_ACCOUNT")
     p_positions_distribution.add_argument("--accounts", default=None, help="comma-separated accounts to merge; overrides --account")
     p_positions_distribution.add_argument("--by-asset", action="store_true", help="group distribution by asset code across accounts")
-    p_positions_distribution.add_argument("--group-cash", action="store_true", help="collapse cash and MMF into one row")
+    p_positions_distribution.add_argument("--group-cash", action="store_true", help="group by asset and collapse cash/MMF into one 现金及等价物 row")
     p_positions_distribution.add_argument("--no-value", action="store_true", help="hide market value fields; show quantities only")
     p_positions_distribution.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
     add_service_args(p_positions_distribution)
@@ -856,7 +856,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_distribution.add_argument("--account", default=argparse.SUPPRESS, help="account to operate on; defaults to config/PORTFOLIO_ACCOUNT")
     p_distribution.add_argument("--accounts", default=None, help="comma-separated accounts to merge; overrides --account")
     p_distribution.add_argument("--by-asset", action="store_true", help="group distribution by asset code across accounts")
-    p_distribution.add_argument("--group-cash", action="store_true", help="collapse cash and MMF into one row")
+    p_distribution.add_argument("--group-cash", action="store_true", help="group by asset and collapse cash/MMF into one 现金及等价物 row")
     p_distribution.add_argument("--no-value", action="store_true", help="hide market value fields; show quantities only")
     p_distribution.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
     add_service_args(p_distribution)

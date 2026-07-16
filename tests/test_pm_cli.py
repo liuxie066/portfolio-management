@@ -458,6 +458,59 @@ def test_pm_positions_distribution_by_asset_no_value_flags_passed_to_service():
     assert calls == [("init", "http://local", 0.5), ("get_distribution", None, "alice,bob", True, False)]
 
 
+def test_pm_positions_distribution_group_cash_implies_asset_merge():
+    import src.service.client as client_module
+
+    calls = []
+
+    class FakeClient:
+        def __init__(self, base_url=None, timeout=0.5):
+            calls.append(("init", base_url, timeout))
+
+        def get_distribution(
+            self,
+            *,
+            account=None,
+            accounts=None,
+            by_asset=False,
+            include_value=True,
+            group_cash=False,
+        ):
+            calls.append((
+                "get_distribution",
+                account,
+                accounts,
+                by_asset,
+                include_value,
+                group_cash,
+            ))
+            return {"success": True, "by_asset": []}
+
+    old_client = client_module.PortfolioServiceClient
+    try:
+        client_module.PortfolioServiceClient = FakeClient
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            assert pm.main([
+                "positions",
+                "distribution",
+                "--accounts",
+                "lx,sy",
+                "--group-cash",
+                "--service-url",
+                "http://local",
+                "--json",
+            ]) == 0
+    finally:
+        client_module.PortfolioServiceClient = old_client
+
+    assert json.loads(stdout.getvalue())["success"] is True
+    assert calls == [
+        ("init", "http://local", 0.5),
+        ("get_distribution", None, "lx,sy", True, True, True),
+    ]
+
+
 def test_pm_nav_record_prefers_service_when_available():
     import src.service.client as client_module
 

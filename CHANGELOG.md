@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.11 - 2026-07-16
+
+- Made `--group-cash` automatically use asset-level distribution so rows with
+  the same asset code are merged across accounts and brokers.
+- Renamed the combined cash/MMF distribution row to `现金及等价物` while
+  retaining the stable `CASH+MMF` code and per-account breakdown.
+- Added CLI, application-service, reporting, and documentation coverage for
+  the consolidated lx/sy holdings distribution workflow.
+
 ## 0.1.10 - 2026-07-16
 
 - Added `pm futu sync` to synchronize Futu cash, MMF, STOCK/ETF quantities,

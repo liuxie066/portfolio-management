@@ -67,6 +67,8 @@ feishu:
 ./pm cash --account lx --json
 ./pm nav --account lx --json
 ./pm positions distribution --account lx --json
+# 合并 lx/sy 相同标的，并将现金和货币基金合并为“现金及等价物”
+./pm positions distribution --accounts lx,sy --group-cash --json
 ./pm nav duplicates --json
 ```
 

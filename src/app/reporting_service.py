@@ -141,7 +141,7 @@ class ReportingService:
         value/ratio fields.
 
         When ``group_cash`` is True, all cash-like positions (normalized type
-        ``cash``) are collapsed into a single "CASH+MMF" row.
+        ``cash``) are collapsed into a single "现金及等价物" row.
         """
         valuation = snapshot.get("valuation")
         holdings_data = snapshot.get("holdings_data") or {}
@@ -176,7 +176,7 @@ class ReportingService:
                 if cash_entry is None:
                     cash_entry = {
                         "code": "CASH+MMF",
-                        "name": "现金及货基",
+                        "name": "现金及等价物",
                         "type": holding.get("type"),
                         "normalized_type": "cash",
                         "currency": currency,

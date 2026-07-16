@@ -516,6 +516,36 @@ def test_portfolio_service_get_distribution_merges_accounts_by_asset():
     assert final_read_service.get_asset_distribution.call_args[1]["include_value"] is False
 
 
+def test_portfolio_service_group_cash_implies_asset_distribution():
+    read_service = SimpleNamespace(
+        build_snapshot=Mock(return_value={
+            "holdings_data": {
+                "success": True,
+                "holdings": [],
+                "total_value": 0.0,
+            },
+        }),
+        get_distribution=Mock(return_value={"success": True}),
+        get_asset_distribution=Mock(return_value={"success": True, "by_asset": []}),
+    )
+    service = PortfolioService(
+        storage=object(),
+        portfolio=SimpleNamespace(reporting_service=object()),
+        read_service_factory=lambda **_kwargs: read_service,
+    )
+
+    result = service.get_distribution(account="alice", group_cash=True)
+
+    assert result["success"] is True
+    assert result["accounts"] == ["alice"]
+    read_service.get_distribution.assert_not_called()
+    read_service.get_asset_distribution.assert_called_once()
+    assert read_service.get_asset_distribution.call_args[1] == {
+        "include_value": True,
+        "group_cash": True,
+    }
+
+
 def test_portfolio_service_full_report_uses_direct_app_service():
     storage = SimpleNamespace(get_nav_history=Mock(return_value=[]))
     portfolio = SimpleNamespace(reporting_service=object())
