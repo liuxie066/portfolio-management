@@ -30,11 +30,9 @@ from src.app.account_service import AccountService, normalize_accounts
 from src.app.audit_service import AuditService
 from src.domain.nav.performance import (
     calc_month_return,
-    calc_risk_metrics,
     calc_since_inception_return,
     calc_year_return,
 )
-from src.domain.report.holdings_projection import merge_top_holdings
 from src.service.application import PortfolioService
 from src.write_guard import validate_and_normalize_trade_input, validate_and_normalize_nav_input
 from src import config
@@ -775,18 +773,6 @@ class PortfolioSkill:
             run_id=run_id,
         )
 
-    def _merge_daily_top_holdings(self, holdings: list, total_value: float, top_n: int = 10) -> list:
-        """日报 Top 持仓合并口径：
-        1) 同代码（跨券商/市场）合并为一行
-        2) 现金/货基（asset_type= cash/mmf 或代码后缀 -CASH/-MMF）合并为一行
-        3) 权重按 total_value 重新计算
-        """
-        return merge_top_holdings(
-            holdings=holdings,
-            total_value=total_value,
-            top_n=top_n,
-        )
-
     def full_report(self, price_timeout: int = 30, snapshot: Optional[Dict[str, Any]] = None, navs: Optional[list] = None) -> Dict[str, Any]:
         """生成完整报告（只读，不记录净值）
 
@@ -959,10 +945,6 @@ class PortfolioSkill:
             confirm=confirm,
             use_bulk_persist=use_bulk_persist,
         )
-
-    def _calc_risk_metrics(self, navs) -> tuple:
-        """计算风险指标：波动率和最大回撤"""
-        return calc_risk_metrics(navs)
 
     def _service(self) -> PortfolioService:
         return PortfolioService(

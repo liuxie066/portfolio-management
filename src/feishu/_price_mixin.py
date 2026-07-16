@@ -26,22 +26,6 @@ class PriceMixin:
         """获取所有有效价格缓存 - 使用本地文件（零 API 调用）"""
         return self._local_price_cache.get_all()
 
-    def _price_cache_to_dict(self, price: PriceCache) -> Dict:
-        """PriceCache 转字典"""
-        return {
-            'asset_id': price.asset_id,
-            'asset_name': price.asset_name,
-            'asset_type': price.asset_type,
-            'price': price.price,
-            'currency': price.currency,
-            'cny_price': price.cny_price,
-            'change': price.change,
-            'change_pct': price.change_pct,
-            'exchange_rate': price.exchange_rate,
-            'data_source': price.data_source,
-            'expires_at': price.expires_at,
-        }
-
     def _dict_to_price_cache(self, data: Dict) -> PriceCache:
         """字典转 PriceCache"""
         return PriceCache(

@@ -480,14 +480,6 @@ class FeishuStorage(
             value = str(value)
         return value.replace('\\', '\\\\').replace('"', '\\"')
 
-    def _date_to_timestamp_ms(self, d: date) -> int:
-        """将业务 date 转换为 Unix 时间戳（毫秒），用于飞书日期字段过滤。
-
-        按业务语义，date 解释为北京时间(UTC+8)的 00:00。
-        """
-        dt = datetime.combine(d, datetime.min.time(), tzinfo=self.FEISHU_DATE_TZ)
-        return int(dt.timestamp() * 1000)
-
     @staticmethod
     def _safe_date_str(d: Optional[date]) -> Optional[str]:
         if not d:

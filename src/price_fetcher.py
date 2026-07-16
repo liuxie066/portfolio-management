@@ -26,8 +26,6 @@ from .pricing.payload import (
     RATE_QUANT,
     normalize_price_payload,
     quantize_money,
-    quantize_pct,
-    quantize_rate,
     to_decimal,
 )
 
@@ -69,14 +67,6 @@ class PriceFetcher:
     @classmethod
     def _quantize_money(cls, value) -> float:
         return quantize_money(value)
-
-    @classmethod
-    def _quantize_rate(cls, value) -> float:
-        return quantize_rate(value)
-
-    @classmethod
-    def _quantize_pct(cls, value) -> float:
-        return quantize_pct(value)
 
     @classmethod
     def _normalize_price_payload(cls, payload: Dict) -> Dict:

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.14 - 2026-07-16
+
+- Removed eight unused private compatibility and helper methods from the Skill, storage, portfolio, and pricing facades.
+- Removed the obsolete imports left behind by those methods without changing public CLI, service, or Python compatibility behavior.
+- Kept the cleanup deletion-only: 66 lines removed with the full test suite still passing.
+
 ## 0.1.13 - 2026-07-16
 
 - Added an explicitly enabled, loopback-only portfolio HTTP API systemd service for same-host consumers such as options-monitor.

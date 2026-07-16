@@ -303,15 +303,6 @@ class PortfolioManager:
         return NavCalculator.approx_equal(a, b, tolerance=tolerance)
 
     @classmethod
-    def _approx_equal_quantized(cls, a: Optional[float], b: Optional[float], quantizer, *, tolerance: float = 0.0) -> bool:
-        """Compare two numbers after applying the same quantizer.
-
-        This avoids false negatives where one side is quantized (e.g., stored field) and
-        the other is raw computed (e.g., expected_*), which can differ by one quant unit.
-        """
-        return NavCalculator.approx_equal_quantized(a, b, quantizer, tolerance=tolerance)
-
-    @classmethod
     def _money_equal(cls, a: Optional[float], b: Optional[float]) -> bool:
         return NavCalculator.money_equal(a, b)
 
@@ -434,11 +425,6 @@ class PortfolioManager:
     def _get_last_day_nav(self, account: str, current_date: date) -> Optional[NAVHistory]:
         """获取昨日净值记录（严格要求指定日期的前一天）"""
         return self.storage.get_nav_on_date(account, current_date - timedelta(days=1))
-
-    @classmethod
-    def _sum_cash_flows(cls, flows) -> float:
-        """汇总 cash_flow 列表的人民币金额；内部用 Decimal，输出 float。"""
-        return CashFlowSummaryService.sum_cash_flows(flows)
 
     def _summarize_cash_flows(self, account: str, today: date, start_year: int, last_nav=None) -> dict:
         """使用预加载聚合缓存计算资金变动口径。"""
