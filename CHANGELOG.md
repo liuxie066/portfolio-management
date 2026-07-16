@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.13 - 2026-07-16
+
+- Added an explicitly enabled, loopback-only portfolio HTTP API systemd service for same-host consumers such as options-monitor.
+- Kept the API service independent from NAV/Futu timers and fixed its supported long-running bind to `127.0.0.1:8765`.
+- Updated the Linux installer and deployment/service documentation with the opt-in `--enable-api-service` workflow and unauthenticated loopback safety boundary.
+
 ## 0.1.12 - 2026-07-16
 
 - Classified currency-valued virtual-asset account buckets as `crypto`, added
