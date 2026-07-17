@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.17 - 2026-07-17
+
+- Added read-only MTD/YTD capital facts for per-account total-asset bridge analysis, including explicit period anchors, portfolio change, and cash-flow evidence.
+- Exposed the capability through the loopback HTTP API and service client while preserving unavailable and partial upstream evidence instead of coercing missing values to zero.
+- Added application, client, HTTP, documentation, and regression coverage for the new analysis boundary.
+
 ## 0.1.16 - 2026-07-17
 
 - Added signed year-to-date NAV change to each successfully written account in the consolidated NAV History receipt.
