@@ -209,6 +209,24 @@ class PortfolioService:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    def get_capital_facts(
+        self,
+        *,
+        account: Optional[str] = None,
+        period: str,
+        as_of_month: str,
+    ) -> Dict[str, Any]:
+        from src.app import CapitalFactsService
+
+        try:
+            return CapitalFactsService(storage=self.storage).get(
+                account=self._resolve_account(account),
+                period=period,
+                as_of_month=as_of_month,
+            )
+        except Exception as exc:
+            return {"success": False, "status": "failed", "error": str(exc)}
+
     def record_nav(
         self,
         *,

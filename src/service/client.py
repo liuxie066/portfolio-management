@@ -198,6 +198,12 @@ class PortfolioServiceClient:
     def get_nav(self, *, account: str, days: int = 30) -> Dict[str, Any]:
         return self._get("/nav", {"account": account, "days": days})
 
+    def get_capital_facts(self, *, account: str, period: str, as_of_month: str) -> Dict[str, Any]:
+        return self._get(
+            "/analysis/capital-facts",
+            {"account": account, "period": period, "as_of_month": as_of_month},
+        )
+
     def record_nav(
         self,
         *,

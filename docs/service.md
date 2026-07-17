@@ -18,6 +18,22 @@ curl http://127.0.0.1:8765/health
 
 Default URL: `http://127.0.0.1:8765`.
 
+## Capital bridge facts
+
+The read-only capital facts endpoint exposes deterministic MTD/YTD inputs for
+same-host consumers such as options-monitor:
+
+```bash
+curl 'http://127.0.0.1:8765/analysis/capital-facts?account=lx&period=mtd&as_of_month=2026-06'
+curl 'http://127.0.0.1:8765/analysis/capital-facts?account=lx&period=ytd&as_of_month=2026-06'
+```
+
+`as_of_month` is required. MTD uses the last NAV in the previous calendar month
+as its strict opening anchor; YTD uses the last NAV in the previous calendar
+year. External cash flow is summed only through the actual ending NAV date.
+Missing strict anchors are returned as `status=unavailable`, not silently
+replaced by the first NAV inside the requested period.
+
 The service is unauthenticated and binds to loopback hosts only by default.
 Binding to `0.0.0.0` or any other non-loopback address requires
 `--allow-remote` and an authenticated outer network boundary.
