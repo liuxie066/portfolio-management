@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.16 - 2026-07-17
+
+- Added signed year-to-date NAV change to each successfully written account in the consolidated NAV History receipt.
+- Displayed unavailable YTD NAV change explicitly as `-` and added regression coverage for positive, negative, and missing values.
+
 ## 0.1.15 - 2026-07-17
 
 - Added the previously omitted fund allocation to NAV History receipts so the displayed stock, fund, and cash ratios account for the full portfolio.

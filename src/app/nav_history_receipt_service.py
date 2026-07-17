@@ -186,7 +186,8 @@ class NavHistoryReceiptService:
                 f"｜当期盈亏 {_format_signed_money(report.get('pnl'))}"
             )
             detail = (
-                f"   股票 {_format_pct(overview.get('stock_ratio'))}"
+                f"   YTD NAV {_format_signed_pct(report.get('ytd_nav_change'))}"
+                f"｜股票 {_format_pct(overview.get('stock_ratio'))}"
                 f"｜基金 {_format_pct(overview.get('fund_ratio'))}"
                 f"｜现金 {_format_pct(overview.get('cash_ratio'))}"
             )
@@ -282,3 +283,11 @@ def _format_signed_money(value: Any) -> str:
 def _format_pct(value: Any) -> str:
     number = _as_float(value)
     return f"{number * 100:.2f}%" if number is not None else "-"
+
+
+def _format_signed_pct(value: Any) -> str:
+    number = _as_float(value)
+    if number is None:
+        return "-"
+    sign = "+" if number >= 0 else "-"
+    return f"{sign}{abs(number) * 100:.2f}%"

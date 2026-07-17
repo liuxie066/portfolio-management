@@ -3,7 +3,16 @@ from datetime import datetime
 from src.app.nav_history_receipt_service import NavHistoryReceiptService
 
 
-def _written(account, *, nav=1.0, total_value=100.0, pnl=2.0, cash_flow=0.0, warnings=None):
+def _written(
+    account,
+    *,
+    nav=1.0,
+    total_value=100.0,
+    pnl=2.0,
+    cash_flow=0.0,
+    ytd_nav_change=0.05,
+    warnings=None,
+):
     return {
         "success": True,
         "status": "written",
@@ -13,6 +22,7 @@ def _written(account, *, nav=1.0, total_value=100.0, pnl=2.0, cash_flow=0.0, war
             "total_value": total_value,
             "pnl": pnl,
             "cash_flow": cash_flow,
+            "ytd_nav_change": ytd_nav_change,
             "overview": {"stock_ratio": 0.7, "fund_ratio": 0.1, "cash_ratio": 0.2},
             "warnings": warnings or [],
         },
@@ -84,10 +94,18 @@ def test_nav_receipt_sends_one_consolidated_success_message():
     assert "结果：写入 3，跳过 0，失败 0" in text
     assert "✅ lx｜NAV 0.957931｜总资产 ¥3,893,292.82｜当期盈亏 +¥65,375.44" in text
     assert "✅ hb｜NAV 1.023482｜总资产 ¥1,286,450.20｜当期盈亏 -¥3,421.18" in text
-    assert "股票 70.00%｜基金 10.00%｜现金 20.00%" in text
+    assert "YTD NAV +5.00%｜股票 70.00%｜基金 10.00%｜现金 20.00%" in text
     assert "资金变动 +¥5,000.00" in text
     assert "告警：无" in text
     assert "Run ID：daily-nav-job-multi-1" in text
+
+
+def test_nav_receipt_formats_negative_and_missing_ytd_nav_change():
+    negative = NavHistoryReceiptService._item_lines(_written("lx", ytd_nav_change=-0.0123))
+    missing = NavHistoryReceiptService._item_lines(_written("hb", ytd_nav_change=None))
+
+    assert "YTD NAV -1.23%" in negative[2]
+    assert "YTD NAV -｜" in missing[2]
 
 
 def test_nav_receipt_formats_existing_nav_skip():
