@@ -37,6 +37,10 @@ class FakePortfolioService:
         self.calls.append(("nav", kwargs))
         return {"success": True, "days": kwargs["days"]}
 
+    def get_capital_facts(self, **kwargs):
+        self.calls.append(("capital_facts", kwargs))
+        return {"success": True, "status": "ok", **kwargs}
+
     def record_nav(self, **kwargs):
         self.calls.append(("record_nav", kwargs))
         return {"success": True, "dry_run": kwargs["dry_run"], "account": kwargs["account"]}
@@ -77,6 +81,7 @@ def test_http_service_routes_delegate_to_portfolio_service():
     assert client.get("/holdings", params={"account": "alice/bob", "include_cash": False, "group_by_market": True, "include_price": True}).json()["account"] == "alice/bob"
     assert client.get("/cash", params={"account": "alice/bob"}).json()["account"] == "alice/bob"
     assert client.get("/nav", params={"account": "alice/bob", "days": 14}).json()["days"] == 14
+    assert client.get("/analysis/capital-facts", params={"account": "alice/bob", "period": "mtd", "as_of_month": "2026-06"}).json()["status"] == "ok"
     assert client.post("/nav/record", json={"account": "alice/bob", "price_timeout": 8, "dry_run": False, "confirm": True, "overwrite_existing": False, "run_id": "run-nav-1"}).json()["dry_run"] is False
     assert client.get("/nav/duplicates", params={"account": "alice/bob"}).json()["duplicate_group_count"] == 0
     assert client.get("/distribution", params={"account": "alice/bob"}).json()["account"] == "alice/bob"
@@ -93,6 +98,7 @@ def test_http_service_routes_delegate_to_portfolio_service():
         ("holdings", {"account": "alice/bob", "include_cash": False, "group_by_market": True, "include_price": True}),
         ("cash", {"account": "alice/bob"}),
         ("nav", {"account": "alice/bob", "days": 14}),
+        ("capital_facts", {"account": "alice/bob", "period": "mtd", "as_of_month": "2026-06"}),
         ("record_nav", {"account": "alice/bob", "price_timeout": 8, "dry_run": False, "confirm": True, "overwrite_existing": False, "use_bulk_persist": False, "run_id": "run-nav-1"}),
         ("audit_nav_history_duplicates", {"account": "alice/bob"}),
         ("distribution", {"account": "alice/bob", "accounts": None, "by_asset": False, "include_value": True}),
@@ -101,6 +107,23 @@ def test_http_service_routes_delegate_to_portfolio_service():
         ("daily_nav_job", {"accounts": ["alice", "bob"], "nav_date": "2026-05-22", "price_timeout": 12, "dry_run": True, "confirm": False, "overwrite_existing": False, "use_bulk_persist": False, "sync_futu_cash_mmf": False, "force_non_business_day": False}),
         ("generate_report", {"account": "alice/bob", "report_type": "monthly", "price_timeout": 11}),
     ]
+
+
+def test_http_capital_facts_validates_period_and_month():
+    client = TestClient(create_app(service=FakePortfolioService()))
+
+    assert client.get(
+        "/analysis/capital-facts",
+        params={"account": "alice", "period": "weekly", "as_of_month": "2026-06"},
+    ).status_code == 422
+    assert client.get(
+        "/analysis/capital-facts",
+        params={"account": "alice", "period": "mtd", "as_of_month": "2026-6"},
+    ).status_code == 422
+    assert client.get(
+        "/analysis/capital-facts",
+        params={"account": "alice", "period": "mtd"},
+    ).status_code == 422
 
 def test_http_service_rejects_unknown_report_type():
     response = TestClient(create_app(service=FakePortfolioService())).get(

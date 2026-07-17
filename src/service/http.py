@@ -1,7 +1,7 @@
 """FastAPI HTTP service for portfolio-management."""
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -139,6 +139,19 @@ def create_app(service: Optional[PortfolioService] = None) -> FastAPI:
         days: int = Query(30, ge=1, le=10000),
     ):
         return _service(request).get_nav(account=account, days=days)
+
+    @app.get("/analysis/capital-facts", tags=["analysis"])
+    def get_capital_facts_query(
+        request: Request,
+        account: str = Query(...),
+        period: Literal["mtd", "ytd"] = Query(...),
+        as_of_month: str = Query(..., pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
+    ):
+        return _service(request).get_capital_facts(
+            account=account,
+            period=period,
+            as_of_month=as_of_month,
+        )
 
 
     @app.post("/nav/record", tags=["nav"])

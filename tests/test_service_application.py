@@ -764,3 +764,53 @@ def test_portfolio_service_nav_receipt_failure_does_not_change_job_success(monke
 
     assert result["success"] is True
     assert result["receipt"]["success"] is False
+
+
+def test_portfolio_service_get_capital_facts_uses_capital_facts_service(monkeypatch):
+    calls = []
+
+    class FakeCapitalFactsService:
+        def __init__(self, **kwargs):
+            calls.append(("init", kwargs))
+
+        def get(self, **kwargs):
+            calls.append(("get", kwargs))
+            return {"success": True, "status": "unavailable", "reason": "target_month_nav_missing"}
+
+    import src.app as app_module
+
+    monkeypatch.setattr(app_module, "CapitalFactsService", FakeCapitalFactsService)
+    storage = object()
+    result = PortfolioService(storage=storage, default_account="lx").get_capital_facts(
+        period="mtd",
+        as_of_month="2026-06",
+    )
+
+    assert result == {"success": True, "status": "unavailable", "reason": "target_month_nav_missing"}
+    assert calls == [
+        ("init", {"storage": storage}),
+        ("get", {"account": "lx", "period": "mtd", "as_of_month": "2026-06"}),
+    ]
+
+
+def test_portfolio_service_get_capital_facts_reports_system_failure(monkeypatch):
+    class FailedCapitalFactsService:
+        def __init__(self, **_kwargs):
+            pass
+
+        def get(self, **_kwargs):
+            raise RuntimeError("storage unavailable")
+
+    import src.app as app_module
+
+    monkeypatch.setattr(app_module, "CapitalFactsService", FailedCapitalFactsService)
+    result = PortfolioService(storage=object(), default_account="lx").get_capital_facts(
+        period="mtd",
+        as_of_month="2026-06",
+    )
+
+    assert result == {
+        "success": False,
+        "status": "failed",
+        "error": "storage unavailable",
+    }

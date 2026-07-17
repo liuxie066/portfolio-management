@@ -13,6 +13,7 @@ from .cash_flow_summary_service import CashFlowSummaryService
 from .cash_service import CashService
 from .compensation_service import CompensationService
 from .business_calendar_service import BusinessCalendarService
+from .capital_facts_service import CapitalFactsService
 from .daily_account_nav_service import DailyAccountNavService
 from .daily_nav_job_service import DailyNavJobService
 from .daily_report_payload_service import DailyReportPayloadService
