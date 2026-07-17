@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.15 - 2026-07-17
+
+- Added the previously omitted fund allocation to NAV History receipts so the displayed stock, fund, and cash ratios account for the full portfolio.
+- Replaced verbose per-account pricing diagnostics with one compact aggregate price status while keeping genuine warnings readable as separate lines.
+- Added regression coverage for healthy aggregate pricing summaries and account-specific stale or missing price alerts.
+
 ## 0.1.14 - 2026-07-16
 
 - Removed eight unused private compatibility and helper methods from the Skill, storage, portfolio, and pricing facades.

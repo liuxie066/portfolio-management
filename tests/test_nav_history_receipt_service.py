@@ -13,7 +13,7 @@ def _written(account, *, nav=1.0, total_value=100.0, pnl=2.0, cash_flow=0.0, war
             "total_value": total_value,
             "pnl": pnl,
             "cash_flow": cash_flow,
-            "overview": {"stock_ratio": 0.8, "cash_ratio": 0.2},
+            "overview": {"stock_ratio": 0.7, "fund_ratio": 0.1, "cash_ratio": 0.2},
             "warnings": warnings or [],
         },
     }
@@ -84,7 +84,9 @@ def test_nav_receipt_sends_one_consolidated_success_message():
     assert "结果：写入 3，跳过 0，失败 0" in text
     assert "✅ lx｜NAV 0.957931｜总资产 ¥3,893,292.82｜当期盈亏 +¥65,375.44" in text
     assert "✅ hb｜NAV 1.023482｜总资产 ¥1,286,450.20｜当期盈亏 -¥3,421.18" in text
+    assert "股票 70.00%｜基金 10.00%｜现金 20.00%" in text
     assert "资金变动 +¥5,000.00" in text
+    assert "告警：无" in text
     assert "Run ID：daily-nav-job-multi-1" in text
 
 
@@ -136,7 +138,73 @@ def test_nav_receipt_formats_partial_failure_and_price_warning():
     assert "【NAV History 记录回执｜部分失败】" in text
     assert "结果：写入 1，跳过 0，失败 1" in text
     assert "❌ hb｜cash_flow_error｜cash_flow has invalid manual rows" in text
-    assert "告警：lx: FUTU price unavailable" in text
+    assert "价格：" not in text
+    assert "告警：\n- lx: FUTU price unavailable" in text
+
+
+def test_nav_receipt_compacts_healthy_price_summaries_across_accounts():
+    text = NavHistoryReceiptService.build_message(
+        {
+            "success": True,
+            "status": "completed",
+            "dry_run": False,
+            "date": "2026-07-16",
+            "items": [
+                _written(
+                    "lx",
+                    warnings=[
+                        "[价格汇总] realtime=29, cache=0, stale_fallback=0, missing=0; "
+                        "tencent_batch=reqs=1, elapsed_ms=20, returned=15/15"
+                    ],
+                ),
+                _written(
+                    "hb",
+                    warnings=[
+                        "[价格汇总] realtime=14, cache=0, stale_fallback=0, missing=0; "
+                        "tencent_batch=reqs=1, elapsed_ms=9, returned=12/12"
+                    ],
+                ),
+                _written(
+                    "sy",
+                    warnings=[
+                        "[价格汇总] realtime=16, cache=0, stale_fallback=0, missing=0; "
+                        "tencent_batch=reqs=1, elapsed_ms=9, returned=8/8"
+                    ],
+                ),
+            ],
+        },
+        executed_at=datetime(2026, 7, 17, 8, 11),
+    )
+
+    assert "价格：正常｜实时 59" in text
+    assert "tencent_batch" not in text
+    assert "elapsed_ms" not in text
+    assert "告警：无" in text
+
+
+def test_nav_receipt_highlights_only_problematic_price_accounts():
+    text = NavHistoryReceiptService.build_message(
+        {
+            "success": True,
+            "status": "completed",
+            "dry_run": False,
+            "date": "2026-07-16",
+            "items": [
+                _written(
+                    "lx",
+                    warnings=["[价格汇总] realtime=28, cache=0, stale_fallback=1, missing=0"],
+                ),
+                _written(
+                    "hb",
+                    warnings=["[价格汇总] realtime=13, cache=0, stale_fallback=0, missing=1"],
+                ),
+            ],
+        },
+        executed_at=datetime(2026, 7, 17, 8, 11),
+    )
+
+    assert "价格：异常｜实时 41｜过期回退 1｜缺失 1（lx 过期回退 1；hb 缺失 1）" in text
+    assert "告警：无" in text
 
 
 def test_nav_receipt_missing_config_and_send_failure_are_reported():

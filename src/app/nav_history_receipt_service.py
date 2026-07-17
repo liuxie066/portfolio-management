@@ -1,6 +1,7 @@
 """Send one consolidated Feishu receipt after a real daily NAV job."""
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any, Callable, Optional
 from zoneinfo import ZoneInfo
@@ -18,6 +19,13 @@ _BLOCKING_STATUSES = {
     "cash_flow_pending",
     "nav_history_duplicate",
 }
+_PRICE_SUMMARY_RE = re.compile(
+    r"^\[价格汇总\]\s*"
+    r"realtime=(?P<realtime>\d+),\s*"
+    r"cache=(?P<cache>\d+),\s*"
+    r"stale_fallback=(?P<stale>\d+),\s*"
+    r"missing=(?P<missing>\d+)"
+)
 
 
 class NavHistoryReceiptService:
@@ -119,8 +127,15 @@ class NavHistoryReceiptService:
         if not items and job_result.get("error"):
             lines.extend(["", f"错误：{job_result.get('error')}"])
 
-        warnings = cls._warnings(items)
-        lines.extend(["", f"告警：{'；'.join(warnings) if warnings else '无'}"])
+        price_summary, warnings = cls._warning_summary(items)
+        lines.append("")
+        if price_summary:
+            lines.append(price_summary)
+        if warnings:
+            lines.append("告警：")
+            lines.extend(f"- {warning}" for warning in warnings)
+        else:
+            lines.append("告警：无")
         if job_result.get("run_id"):
             lines.append(f"Run ID：{job_result['run_id']}")
         return "\n".join(lines)
@@ -172,6 +187,7 @@ class NavHistoryReceiptService:
             )
             detail = (
                 f"   股票 {_format_pct(overview.get('stock_ratio'))}"
+                f"｜基金 {_format_pct(overview.get('fund_ratio'))}"
                 f"｜现金 {_format_pct(overview.get('cash_ratio'))}"
             )
             cash_flow = _as_float(report.get("cash_flow"))
@@ -193,14 +209,49 @@ class NavHistoryReceiptService:
         return ["", f"❌ {account}｜{status or 'failed'}｜{error}"]
 
     @staticmethod
-    def _warnings(items: list[dict[str, Any]]) -> list[str]:
+    def _warning_summary(items: list[dict[str, Any]]) -> tuple[Optional[str], list[str]]:
         warnings: list[str] = []
+        price_totals = {"realtime": 0, "cache": 0, "stale": 0, "missing": 0}
+        price_accounts: list[str] = []
         for item in items:
             account = item.get("account") or "-"
             report = item.get("report") or {}
             for warning in report.get("warnings") or []:
+                match = _PRICE_SUMMARY_RE.match(str(warning))
+                if match:
+                    counts = {key: int(value) for key, value in match.groupdict().items()}
+                    for key, value in counts.items():
+                        price_totals[key] += value
+                    account_issues = []
+                    if counts["stale"]:
+                        account_issues.append(f"过期回退 {counts['stale']}")
+                    if counts["missing"]:
+                        account_issues.append(f"缺失 {counts['missing']}")
+                    if account_issues:
+                        price_accounts.append(f"{account} {'、'.join(account_issues)}")
+                    continue
                 warnings.append(f"{account}: {warning}")
-        return warnings
+
+        if not any(price_totals.values()):
+            price_summary = None
+        elif price_totals["missing"] or price_totals["stale"]:
+            status = "异常" if price_totals["missing"] else "需关注"
+            parts = [f"价格：{status}", f"实时 {price_totals['realtime']}"]
+            if price_totals["cache"]:
+                parts.append(f"缓存 {price_totals['cache']}")
+            if price_totals["stale"]:
+                parts.append(f"过期回退 {price_totals['stale']}")
+            if price_totals["missing"]:
+                parts.append(f"缺失 {price_totals['missing']}")
+            price_summary = "｜".join(parts)
+        else:
+            price_summary = f"价格：正常｜实时 {price_totals['realtime']}"
+            if price_totals["cache"]:
+                price_summary += f"｜缓存 {price_totals['cache']}"
+
+        if price_summary and price_accounts:
+            price_summary += f"（{'；'.join(price_accounts)}）"
+        return price_summary, warnings
 
 
 def _as_float(value: Any) -> Optional[float]:
