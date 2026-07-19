@@ -9,7 +9,7 @@
 - Artifact path: `docs/gateflow/repo-review-27/implementation-plan.md`
 - Status: `accepted`
 - Current gate: `accepted slice commit`
-- Next entry point: `S2 implementation`
+- Next entry point: `S3 implementation`
 
 
 ## Plan review decision

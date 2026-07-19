@@ -1,8 +1,10 @@
 from datetime import date
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
+from src.app.compensation_service import PartialWriteError
 from src.app.trade_service import TradeService
 from src.models import AssetType, Holding
 from src.portfolio import PortfolioManager
@@ -14,10 +16,24 @@ def _manager(storage):
     return manager
 
 
-def test_trade_service_buy_records_transaction_and_holding():
+def _holding(asset_id="000001", quantity=100, *, asset_type=AssetType.A_STOCK, broker=""):
+    return Holding(
+        record_id=f"holding-{asset_id}",
+        asset_id=asset_id,
+        asset_name=asset_id,
+        asset_type=asset_type,
+        account="a",
+        broker=broker,
+        quantity=quantity,
+        currency="CNY",
+    )
+
+
+def test_trade_service_buy_records_transaction_and_absolute_holding_target():
     storage = Mock()
+    storage.get_holding.return_value = None
     storage.add_transaction.side_effect = lambda tx: tx
-    storage.upsert_holding.side_effect = lambda holding: holding
+    storage.replace_holding.side_effect = lambda holding: holding
     manager = _manager(storage)
     service = TradeService(manager=manager, storage=storage)
 
@@ -34,52 +50,90 @@ def test_trade_service_buy_records_transaction_and_holding():
         auto_deduct_cash=False,
     )
 
-    holding = storage.upsert_holding.call_args[0][0]
+    target = storage.replace_holding.call_args[0][0]
     assert tx.quantity == 1.005
     assert tx.price == 1.01
     assert tx.amount == 1.02
-    assert holding.quantity == 1.005
+    assert target.quantity == 1.005
 
 
-def test_trade_service_buy_records_compensation_when_cash_deduct_fails():
+def test_trade_service_buy_raises_partial_and_records_complete_targets_on_cash_failure():
+    stock = None
+    cash = _holding("CNY-CASH", 100, asset_type=AssetType.CASH)
+    mmf = _holding("CNY-MMF", 0, asset_type=AssetType.MMF)
     storage = Mock()
+    storage.get_holding.side_effect = lambda asset_id, account, broker=None: {
+        "000001": stock,
+        "CNY-CASH": cash,
+        "CNY-MMF": mmf,
+    }.get(asset_id)
     storage.add_transaction.side_effect = lambda tx: tx
-    storage.upsert_holding.side_effect = lambda holding: holding
+
+    def replace(holding):
+        if holding.asset_id == "CNY-CASH":
+            raise RuntimeError("cash write failed")
+        return holding
+
+    storage.replace_holding.side_effect = replace
     manager = _manager(storage)
-    manager.cash_service.has_sufficient_cash = Mock(return_value=True)
-    manager.cash_service.deduct_cash = Mock(return_value=False)
-    manager._record_compensation = Mock()
+    manager._record_compensation = Mock(return_value=SimpleNamespace(task_id="repair-1"))
     service = TradeService(manager=manager, storage=storage)
 
-    service.buy(
-        tx_date=date(2025, 3, 14),
-        asset_id="000001",
-        asset_name="平安银行",
-        asset_type=AssetType.A_STOCK,
-        account="a",
-        quantity=1,
-        price=10,
-        currency="CNY",
-        auto_deduct_cash=True,
-    )
+    with pytest.raises(PartialWriteError) as captured:
+        service.buy(
+            tx_date=date(2025, 3, 14),
+            asset_id="000001",
+            asset_name="平安银行",
+            asset_type=AssetType.A_STOCK,
+            account="a",
+            quantity=1,
+            price=10,
+            currency="CNY",
+            auto_deduct_cash=True,
+        )
 
-    manager._record_compensation.assert_called()
-    assert manager._record_compensation.call_args.kwargs["operation_type"] == "BUY_CASH_DEDUCT_FAILED"
+    error = captured.value
+    assert error.compensation_persisted is True
+    assert error.task_id == "repair-1"
+    assert error.completed_steps == ["transaction_created", "target[0]/HOLDING_TARGET_SET"]
+    payload = manager._record_compensation.call_args.kwargs["payload"]
+    assert [target["type"] for target in payload["targets"]] == ["HOLDING_TARGET_SET", "CASH_TARGET_SET"]
 
 
-def test_trade_service_sell_uses_cash_service_add_cash():
+def test_trade_service_reports_compensation_durability_failure():
     storage = Mock()
-    storage.get_holding.return_value = Holding(
-        asset_id="000001",
-        asset_name="平安银行",
-        asset_type=AssetType.A_STOCK,
-        account="a",
-        quantity=100,
-        currency="CNY",
-    )
+    storage.get_holding.return_value = None
     storage.add_transaction.side_effect = lambda tx: tx
+    storage.replace_holding.side_effect = RuntimeError("holding write failed")
     manager = _manager(storage)
-    manager.cash_service.add_cash = Mock()
+    manager._record_compensation = Mock(side_effect=OSError("disk full"))
+    service = TradeService(manager=manager, storage=storage)
+
+    with pytest.raises(PartialWriteError) as captured:
+        service.buy(
+            tx_date=date(2025, 3, 14),
+            asset_id="000001",
+            asset_name="平安银行",
+            asset_type=AssetType.A_STOCK,
+            account="a",
+            quantity=1,
+            price=10,
+            currency="CNY",
+            auto_deduct_cash=False,
+        )
+
+    assert captured.value.compensation_persisted is False
+    assert captured.value.task_id is None
+    assert "disk full" in captured.value.original_error
+
+
+def test_trade_service_sell_applies_holding_then_cash_targets():
+    stock = _holding(quantity=100)
+    storage = Mock()
+    storage.get_holding.side_effect = lambda asset_id, account, broker=None: stock if asset_id == "000001" else None
+    storage.add_transaction.side_effect = lambda tx: tx
+    storage.replace_holding.side_effect = lambda holding: holding
+    manager = _manager(storage)
     service = TradeService(manager=manager, storage=storage)
 
     tx = service.sell(
@@ -94,14 +148,16 @@ def test_trade_service_sell_uses_cash_service_add_cash():
     )
 
     assert tx.quantity == -1.0
-    manager.cash_service.add_cash.assert_called_once_with("a", 9.0)
+    targets = [call.args[0] for call in storage.replace_holding.call_args_list]
+    assert [(target.asset_id, target.quantity) for target in targets] == [("000001", 99.0), ("CNY-CASH", 9.0)]
 
 
-def test_trade_service_deposit_uses_cash_service_update():
+def test_trade_service_deposit_applies_absolute_cash_target():
     storage = Mock()
+    storage.get_holding.return_value = None
     storage.add_cash_flow.side_effect = lambda cf: cf
+    storage.replace_holding.side_effect = lambda holding: holding
     manager = _manager(storage)
-    manager.cash_service.update_cash_holding = Mock()
     service = TradeService(manager=manager, storage=storage)
 
     cf = service.deposit(
@@ -113,11 +169,14 @@ def test_trade_service_deposit_uses_cash_service_update():
     )
 
     assert cf.amount == 1.01
-    manager.cash_service.update_cash_holding.assert_called_once_with("a", 1.01, "CNY", 1.01)
+    target = storage.replace_holding.call_args[0][0]
+    assert target.asset_id == "CNY-CASH"
+    assert target.quantity == 1.01
 
 
 def test_trade_service_replay_skips_buy_side_effects():
     storage = Mock()
+    storage.get_holding.return_value = None
 
     def replay(tx):
         tx.record_id = "tx-existing"
@@ -126,8 +185,6 @@ def test_trade_service_replay_skips_buy_side_effects():
 
     storage.add_transaction.side_effect = replay
     manager = _manager(storage)
-    manager.cash_service.has_sufficient_cash = Mock(return_value=True)
-    manager.cash_service.deduct_cash = Mock()
     service = TradeService(manager=manager, storage=storage)
 
     tx = service.buy(
@@ -139,17 +196,17 @@ def test_trade_service_replay_skips_buy_side_effects():
         quantity=1,
         price=10,
         currency="CNY",
-        auto_deduct_cash=True,
+        auto_deduct_cash=False,
         request_id="same-request",
     )
 
     assert tx.was_replayed is True
-    storage.upsert_holding.assert_not_called()
-    manager.cash_service.deduct_cash.assert_not_called()
+    storage.replace_holding.assert_not_called()
 
 
 def test_trade_service_replay_skips_deposit_cash_side_effect():
     storage = Mock()
+    storage.get_holding.return_value = None
 
     def replay(cf):
         cf.record_id = "cf-existing"
@@ -158,7 +215,6 @@ def test_trade_service_replay_skips_deposit_cash_side_effect():
 
     storage.add_cash_flow.side_effect = replay
     manager = _manager(storage)
-    manager.cash_service.update_cash_holding = Mock()
     service = TradeService(manager=manager, storage=storage)
 
     cf = service.deposit(
@@ -169,24 +225,15 @@ def test_trade_service_replay_skips_deposit_cash_side_effect():
     )
 
     assert cf.was_replayed is True
-    manager.cash_service.update_cash_holding.assert_not_called()
+    storage.replace_holding.assert_not_called()
 
 
 def test_trade_service_rejects_oversell_before_transaction_write():
     storage = Mock()
-    storage.get_holding.return_value = Holding(
-        record_id="holding-1",
-        asset_id="000001",
-        asset_name="平安银行",
-        asset_type=AssetType.A_STOCK,
-        account="a",
-        quantity=1,
-        currency="CNY",
-    )
+    storage.get_holding.return_value = _holding(quantity=1)
     manager = _manager(storage)
     service = TradeService(manager=manager, storage=storage)
 
-    import pytest
     with pytest.raises(ValueError, match="持仓不足"):
         service.sell(
             tx_date=date(2025, 3, 14),
@@ -246,4 +293,4 @@ def test_trade_service_rejects_invalid_buy_before_any_write(field, value):
         )
 
     storage.add_transaction.assert_not_called()
-    storage.upsert_holding.assert_not_called()
+    storage.replace_holding.assert_not_called()

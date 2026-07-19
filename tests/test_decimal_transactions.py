@@ -21,16 +21,9 @@ def test_buy_uses_decimal_quantized_total_cost(mock_get_name):
         price=1.005,
         currency='CNY',
     )
-    storage.upsert_holding.return_value = Holding(
-        asset_id='000001',
-        asset_name='平安银行',
-        asset_type=AssetType.A_STOCK,
-        account='测试账户',
-        quantity=1,
-        currency='CNY',
-    )
-    manager.cash_service.has_sufficient_cash = Mock(return_value=True)
-    manager.cash_service.deduct_cash = Mock(return_value=True)
+    storage.get_holding.return_value = None
+    storage.replace_holding.side_effect = lambda holding: holding
+    manager.cash_service.plan_deduct_cash_targets = Mock(return_value=[])
 
     manager.buy(
         tx_date=date(2025, 3, 14),
@@ -45,15 +38,15 @@ def test_buy_uses_decimal_quantized_total_cost(mock_get_name):
         auto_deduct_cash=True,
     )
 
-    manager.cash_service.has_sufficient_cash.assert_called_once_with('测试账户', 1.02)
-    manager.cash_service.deduct_cash.assert_called_once_with('测试账户', 1.02)
+    manager.cash_service.plan_deduct_cash_targets.assert_called_once_with('测试账户', 1.02)
 
 
 def test_sell_uses_decimal_quantized_proceeds():
     storage = Mock()
     fetcher = Mock()
     manager = PortfolioManager(storage=storage, price_fetcher=fetcher)
-    storage.get_holding.return_value = Holding(
+    stock_holding = Holding(
+        record_id='holding-1',
         asset_id='000001',
         asset_name='平安银行',
         asset_type=AssetType.A_STOCK,
@@ -61,8 +54,16 @@ def test_sell_uses_decimal_quantized_proceeds():
         quantity=1000,
         currency='CNY',
     )
-    storage.add_transaction.return_value = Mock()
-    manager.cash_service.add_cash = Mock()
+    storage.get_holding.side_effect = (
+        lambda asset_id, account, broker=None: stock_holding if asset_id == '000001' else None
+    )
+    storage.add_transaction.side_effect = lambda tx: tx
+    storage.replace_holding.side_effect = lambda holding: holding
+    cash_target = Holding(
+        asset_id='CNY-CASH', asset_name='人民币现金', asset_type=AssetType.CASH,
+        account='测试账户', quantity=1.0, currency='CNY'
+    )
+    manager.cash_service.plan_add_cash_target = Mock(return_value=(None, cash_target))
 
     manager.sell(
         tx_date=date(2025, 3, 14),
@@ -75,4 +76,4 @@ def test_sell_uses_decimal_quantized_proceeds():
         auto_add_cash=True,
     )
 
-    manager.cash_service.add_cash.assert_called_once_with('测试账户', 1.0)
+    manager.cash_service.plan_add_cash_target.assert_called_once_with('测试账户', 1.0)

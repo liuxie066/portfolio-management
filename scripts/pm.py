@@ -386,6 +386,28 @@ def cmd_cash_flow_reconcile(args):
     return res
 
 
+def cmd_compensation_list(args):
+    from src.app.compensation_service import CompensationService
+
+    tasks = CompensationService().list_tasks(include_resolved=bool(args.include_resolved))
+    result = {"success": True, "count": len(tasks), "tasks": tasks}
+    _dump(result, args.json)
+    return result
+
+
+def cmd_compensation_retry(args):
+    if not bool(args.confirm):
+        raise SystemExit("compensation retry requires --confirm")
+    from src.service.application import PortfolioService
+
+    result = _call_backend(
+        args,
+        lambda: PortfolioService().portfolio.compensation.retry(args.task_id, confirm=True),
+    )
+    _dump(result, args.json)
+    return result
+
+
 def cmd_accounts(args):
     def via_service(client):
         return client.list_accounts(include_default=not bool(args.exclude_default))
@@ -808,6 +830,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_cash_flow_reconcile.add_argument("--confirm", action="store_true", help="required with --apply")
     p_cash_flow_reconcile.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
     p_cash_flow_reconcile.set_defaults(func=cmd_cash_flow_reconcile)
+
+    p_compensation = sp.add_parser("compensation", help="inspect and retry durable compensation tasks")
+    compensation_sub = p_compensation.add_subparsers(dest="compensation_cmd", required=True)
+    p_compensation_list = compensation_sub.add_parser("list", help="list unresolved compensation tasks")
+    p_compensation_list.add_argument("--include-resolved", action="store_true", help="include resolved tasks")
+    p_compensation_list.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
+    p_compensation_list.set_defaults(func=cmd_compensation_list)
+    p_compensation_retry = compensation_sub.add_parser("retry", help="retry one supported compensation task")
+    p_compensation_retry.add_argument("--task-id", required=True, help="compensation task id")
+    p_compensation_retry.add_argument("--confirm", action="store_true", help="required to apply target writes")
+    p_compensation_retry.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
+    p_compensation_retry.set_defaults(func=cmd_compensation_retry)
 
     p_accounts = sp.add_parser("accounts", help="list discovered accounts")
     p_accounts.add_argument("--exclude-default", action="store_true", help="do not include the configured default account when it has no data")

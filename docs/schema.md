@@ -209,7 +209,9 @@ Optional fields:
 
 Role: optional
 
-Purpose: repair queue for partial multi-table write failures. This is a system-only table.
+Purpose: optional Feishu mirror for partial multi-table write failures. The same-host source of truth is the append-only `${PM_DATA_DIR}/compensation_tasks.jsonl` event log; every append is process-locked, flushed, and fsync'd before the mirror is attempted. Events fold by `task_id` through `PENDING`, `RUNNING`, `FAILED`, and `RESOLVED`.
+
+Automatic retry only accepts absolute compare-and-set targets of type `HOLDING_TARGET_SET`, `HOLDING_ZERO_DELETE`, `CASH_TARGET_SET`, or `HOLDINGS_SNAPSHOT_TARGET_SET`. Legacy delta payloads remain inspectable with `supported=false` but must not be replayed automatically.
 
 Required fields:
 - `task_id` (text) - system

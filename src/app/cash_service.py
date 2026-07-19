@@ -174,6 +174,59 @@ class CashService:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    @staticmethod
+    def _copy_with_quantity(holding: Holding, quantity: Any) -> Holding:
+        replacement = Holding(**holding.model_dump())
+        replacement.quantity = float(quantity)
+        return replacement
+
+    def plan_cash_holding_target(self, account: str, amount: float, currency: str) -> tuple[Holding | None, Holding]:
+        """Return the current and absolute target cash holding without writing."""
+        asset_id = self.cash_asset_id_for_currency(currency)
+        before = self.storage.get_holding(asset_id, account)
+        delta = self.quantize_money(amount)
+        if before:
+            target = self._copy_with_quantity(before, self.quantize_money(self.to_decimal(before.quantity) + delta))
+        else:
+            target = Holding(
+                asset_id=asset_id,
+                asset_name=f"{currency}现金",
+                asset_type=AssetType.CASH,
+                account=account,
+                quantity=float(delta),
+                currency=currency,
+                asset_class=AssetClass.CASH,
+                industry="现金",
+            )
+        return before, target
+
+    def plan_add_cash_target(self, account: str, amount: float) -> tuple[Holding | None, Holding]:
+        return self.plan_cash_holding_target(account, amount, "CNY")
+
+    def plan_deduct_cash_targets(self, account: str, amount: float) -> list[tuple[Holding, Holding]]:
+        """Plan absolute CASH/MMF targets in the same order as cash deduction."""
+        remaining = self.to_decimal(amount)
+        cash_holding, mmf_holding = self.get_cash_like_holdings(account)
+        total_available = sum(
+            (self.to_decimal(holding.quantity) for holding in (cash_holding, mmf_holding) if holding and holding.quantity > 0),
+            Decimal("0"),
+        )
+        if total_available < remaining:
+            raise ValueError(
+                f"账户 {account} 现金不足，需要 ¥{float(self.quantize_money(remaining)):,.2f}，"
+                f"可用 ¥{float(self.quantize_money(total_available)):,.2f}"
+            )
+
+        targets: list[tuple[Holding, Holding]] = []
+        for holding in (cash_holding, mmf_holding):
+            if remaining <= 0 or not holding or holding.quantity <= 0:
+                continue
+            deduction = min(self.to_decimal(holding.quantity), remaining)
+            target_quantity = self.quantize_money(self.to_decimal(holding.quantity) - deduction)
+            targets.append((holding, self._copy_with_quantity(holding, target_quantity)))
+            remaining -= deduction
+        return targets
+
     def has_sufficient_cash(self, account: str, amount: float) -> bool:
         if amount <= 0:
             return True

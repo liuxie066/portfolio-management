@@ -17,7 +17,7 @@ class NavHistoryRepository:
     NAV_INDEX_PROJECTION_FIELDS: List[str] = [
         'date', 'account', 'total_value', 'shares', 'nav',
         'cash_flow', 'pnl', 'mtd_nav_change', 'ytd_nav_change',
-        'mtd_pnl', 'ytd_pnl', 'updated_at',
+        'mtd_pnl', 'ytd_pnl', 'details', 'updated_at',
     ]
 
     NAV_DERIVED_PATCH_FIELDS = {
@@ -755,6 +755,15 @@ class NavHistoryRepository:
             fields,
             dry_run=dry_run,
             allowed_fields=self.NAV_DERIVED_PATCH_FIELDS,
+        )
+
+    def patch_nav_details(self, record_id: str, details: Dict[str, any], dry_run: bool = False):
+        """Patch only the recovery/status details object on one NAV row."""
+        return self._patch_nav_fields(
+            record_id,
+            {"details": dict(details or {})},
+            dry_run=dry_run,
+            allowed_fields={"details"},
         )
 
     def get_latest_nav_before(self, account: str, before_date: date) -> Optional[NAVHistory]:

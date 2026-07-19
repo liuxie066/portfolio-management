@@ -6,6 +6,8 @@ from datetime import date
 from typing import Any, Optional
 
 from src import config
+from src.app.compensation_service import PartialWriteError
+from src.app.snapshot_service import snapshot_digest
 from src.models import NAVHistory, PortfolioValuation
 from src.time_utils import bj_today
 
@@ -47,16 +49,6 @@ class NavRecordService:
                 if isinstance(history, list):
                     return list(history)
         return []
-
-    @staticmethod
-    def _mark_snapshot_failure(nav_record: NAVHistory, exc: Exception) -> None:
-        details = dict(nav_record.details or {})
-        details.update({
-            "snapshot_persisted": False,
-            "snapshot_error": str(exc),
-            "snapshot_status": "failed",
-        })
-        nav_record.details = details
 
     @staticmethod
     def _blocking_valuation_warnings(valuation: PortfolioValuation) -> list[str]:
@@ -190,6 +182,12 @@ class NavRecordService:
                 cumulative_cash_flow=cumulative_cash_flow,
             )
 
+        snapshot_rows = []
+        if persist:
+            snapshot_rows = self.manager.snapshot_service.build_holdings_snapshots(
+                account=account, as_of=today.isoformat(), valuation=valuation
+            )
+
         if persist:
             if use_bulk_persist and (not dry_run) and overwrite_existing:
                 write_records = getattr(self.storage, "write_nav_records", None)
@@ -204,7 +202,7 @@ class NavRecordService:
                 else:
                     raise AttributeError("storage does not support NAV writes")
 
-        # Snapshot after NAV record to avoid orphaned snapshots on NAV write failure
+        # Snapshot after NAV record to avoid orphaned snapshots on NAV write failure.
         if persist:
             try:
                 self.manager.snapshot_service.persist_holdings_snapshot(
@@ -214,20 +212,62 @@ class NavRecordService:
                     dry_run=dry_run,
                 )
             except Exception as exc:
-                self._mark_snapshot_failure(nav_record, exc)
-                record_compensation = getattr(self.manager, "_record_compensation", None)
-                if callable(record_compensation) and not dry_run:
-                    record_compensation(
-                        operation_type="NAV_HOLDINGS_SNAPSHOT_FAILED",
-                        account=account,
-                        payload={
-                            "date": today.isoformat(),
-                            "nav": nav_record.nav,
-                            "total_value": nav_record.total_value,
-                        },
-                        error=exc,
-                        related_record_id=nav_record.record_id,
-                    )
+                original_details = dict(nav_record.details or {})
+                task_id = self.manager.compensation.new_task_id()
+                failed_details = {
+                    **original_details,
+                    "snapshot_persisted": False,
+                    "snapshot_error": str(exc),
+                    "snapshot_status": "failed",
+                    "snapshot_task_id": task_id,
+                    "snapshot_retry_command": f"pm compensation retry --task-id {task_id} --confirm",
+                }
+                complete_details = {
+                    **original_details,
+                    "snapshot_persisted": True,
+                    "snapshot_status": "complete",
+                    "snapshot_digest": snapshot_digest(snapshot_rows),
+                }
+                target = {
+                    "type": "HOLDINGS_SNAPSHOT_TARGET_SET",
+                    "account": account,
+                    "as_of": today.isoformat(),
+                    "nav_record_id": nav_record.record_id,
+                    "before": {"one_of": [original_details, failed_details]},
+                    "target": {"details": complete_details},
+                    "snapshots": [row.model_dump(mode="json") for row in snapshot_rows],
+                    "digest": complete_details["snapshot_digest"],
+                }
+                nav_record.details = failed_details
+                if not dry_run:
+                    try:
+                        self.manager._record_compensation(
+                            operation_type="NAV_HOLDINGS_SNAPSHOT_FAILED",
+                            account=account,
+                            payload={"targets": [target]},
+                            error=exc,
+                            related_record_id=nav_record.record_id,
+                            task_id=task_id,
+                        )
+                    except Exception as compensation_error:
+                        raise PartialWriteError(
+                            operation="NAV_RECORD",
+                            account=account,
+                            related_record_id=nav_record.record_id,
+                            completed_steps=["nav_record_created"],
+                            failed_step="holdings_snapshot",
+                            task_id=None,
+                            target_count=1,
+                            compensation_persisted=False,
+                            original_error=f"{exc}; compensation persistence failed: {compensation_error}",
+                        ) from exc
+
+                    patch = getattr(getattr(self.storage, "nav_history", None), "patch_nav_details", None)
+                    if callable(patch) and nav_record.record_id:
+                        try:
+                            patch(nav_record.record_id, failed_details, dry_run=False)
+                        except Exception as patch_error:
+                            nav_record.details = {**failed_details, "snapshot_details_patch_error": str(patch_error)}
                 logging.getLogger(__name__).warning(
                     "holdings_snapshot write failed for %s (%s): %s - NAV record was saved successfully",
                     today, account, exc,

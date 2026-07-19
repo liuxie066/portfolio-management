@@ -760,3 +760,53 @@ def test_pm_futu_sync_write_and_empty_override_require_confirm():
             assert "confirm" in str(exc)
         else:
             raise AssertionError("expected SystemExit")
+
+
+def test_pm_compensation_list_outputs_folded_tasks():
+    import src.app.compensation_service as compensation_module
+
+    class FakeCompensationService:
+        def list_tasks(self, include_resolved=False):
+            assert include_resolved is False
+            return [{"task_id": "repair-1", "status": "PENDING", "supported": True}]
+
+    old = compensation_module.CompensationService
+    compensation_module.CompensationService = FakeCompensationService
+    stdout = io.StringIO()
+    try:
+        with redirect_stdout(stdout):
+            assert pm.main(["compensation", "list", "--json"]) == 0
+    finally:
+        compensation_module.CompensationService = old
+
+    out = json.loads(stdout.getvalue())
+    assert out["count"] == 1
+    assert out["tasks"][0]["task_id"] == "repair-1"
+
+
+def test_pm_compensation_retry_requires_confirm():
+    try:
+        pm.main(["compensation", "retry", "--task-id", "repair-1", "--json"])
+    except SystemExit as exc:
+        assert "--confirm" in str(exc)
+    else:
+        raise AssertionError("expected SystemExit")
+
+
+def test_pm_compensation_retry_calls_local_recovery_service():
+    class FakeCompensation:
+        def retry(self, task_id, confirm=False):
+            return {"success": True, "task_id": task_id, "status": "RESOLVED", "confirm": confirm}
+
+    class FakePortfolioService:
+        def __init__(self):
+            self.portfolio = type("Portfolio", (), {"compensation": FakeCompensation()})()
+
+    stdout = io.StringIO()
+    with _PortfolioServicePatch(FakePortfolioService), redirect_stdout(stdout):
+        assert pm.main([
+            "compensation", "retry", "--task-id", "repair-1", "--confirm", "--json",
+        ]) == 0
+
+    out = json.loads(stdout.getvalue())
+    assert out == {"success": True, "task_id": "repair-1", "status": "RESOLVED", "confirm": True}

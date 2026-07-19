@@ -119,6 +119,25 @@ instead of falling back:
 ./pm daily-job --require-service --json
 ```
 
+## Compensation Recovery
+
+List unresolved partial writes before retrying anything:
+
+```bash
+./pm compensation list --json
+./pm compensation list --include-resolved --json
+```
+
+Inspect `task_id`, `status`, `supported`, `target_count`, `error_type`, and `target_outcomes`. A `state_conflict` means the current holding or NAV details match neither the recorded before state nor the intended target; investigate the live state instead of forcing an overwrite.
+
+Retry one supported task explicitly:
+
+```bash
+./pm compensation retry --task-id repair_... --confirm --json
+```
+
+Retries use target-level compare-and-set semantics and can resume `PENDING`, `FAILED`, or orphaned `RUNNING` tasks. Do not manually replay legacy delta payloads (`supported=false`); repair those from the authoritative ledger and current holdings with a separately reviewed procedure.
+
 ## Cash Flow Reconcile
 
 Manual `cash_flow` rows may omit generated fields, but daily NAV writes will
