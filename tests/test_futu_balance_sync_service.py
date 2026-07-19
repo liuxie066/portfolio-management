@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -453,6 +454,124 @@ def test_sync_portfolio_recognizes_existing_market_fund_and_preserves_metadata()
     assert replacement.asset_class.value == "美国资产"
     assert replacement.industry.value == "非行业指数"
     assert replacement.tag == ["指数"]
+
+
+def test_sync_portfolio_leaves_unmatched_legacy_fund_untouched_and_zeros_canonical_stock():
+    legacy_fund = Holding(
+        record_id="rec_fund",
+        asset_id="FUND1",
+        asset_name="Legacy Fund",
+        asset_type=AssetType.CN_FUND,
+        account="lx",
+        broker="富途",
+        quantity=100,
+        avg_cost=1,
+        currency="CNY",
+    )
+    absent_stock = Holding(
+        record_id="rec_old",
+        asset_id="OLD",
+        asset_name="Old Stock",
+        asset_type=AssetType.US_STOCK,
+        account="lx",
+        broker="富途",
+        quantity=3,
+        avg_cost=10,
+        currency="USD",
+    )
+    storage = FakePortfolioStorage([legacy_fund, absent_stock])
+    service = FutuBalanceSyncService(storage, FakePortfolioProvider([_position(code="US.FUTU")]))
+
+    result = service.sync_portfolio(account="lx", dry_run=False, confirm=True)
+
+    assert result["success"] is True
+    assert {item["asset_id"]: item["action"] for item in result["positions"]} == {
+        "FUTU": "create",
+        "OLD": "zero",
+    }
+    replacements = storage.bulk_calls[0][0]
+    assert {holding.asset_id for holding in replacements} == {"FUTU", "OLD"}
+    assert all(holding.asset_id != "FUND1" for holding in replacements)
+
+
+def test_sync_portfolio_ignores_only_filtered_fund_snapshot_without_zeroing_legacy_fund():
+    legacy_fund = Holding(
+        record_id="rec_fund",
+        asset_id="FUND1",
+        asset_name="Legacy Fund",
+        asset_type=AssetType.CN_FUND,
+        account="lx",
+        broker="富途",
+        quantity=100,
+        avg_cost=1,
+        currency="CNY",
+    )
+    storage = FakePortfolioStorage([legacy_fund])
+    service = FutuBalanceSyncService(
+        storage,
+        FakePortfolioProvider([_position(code="SH.FUND1", security_type="FUND", currency="CNY", market="SH")]),
+    )
+
+    result = service.sync_portfolio(account="lx", dry_run=False, confirm=True)
+
+    assert result["success"] is True
+    assert result["positions"] == []
+    assert storage.bulk_calls == []
+
+
+def test_sync_portfolio_holds_account_lock_across_diff_and_all_writes(monkeypatch):
+    state = {"locked": False}
+
+    @contextmanager
+    def fake_lock(key):
+        assert key.startswith("account-write:")
+        assert state["locked"] is False
+        state["locked"] = True
+        try:
+            yield
+        finally:
+            state["locked"] = False
+
+    class LockCheckingStorage(FakePortfolioStorage):
+        def get_holdings(self, *args, **kwargs):
+            assert state["locked"] is True
+            return super().get_holdings(*args, **kwargs)
+
+        def get_holding(self, *args, **kwargs):
+            assert state["locked"] is True
+            return super().get_holding(*args, **kwargs)
+
+        def upsert_holdings_bulk(self, *args, **kwargs):
+            assert state["locked"] is True
+            return super().upsert_holdings_bulk(*args, **kwargs)
+
+    import src.app.futu_balance_sync_service as futu_sync_module
+
+    monkeypatch.setattr(futu_sync_module, "process_lock", fake_lock)
+    storage = LockCheckingStorage()
+    result = FutuBalanceSyncService(
+        storage,
+        FakePortfolioProvider([_position()]),
+    ).sync_portfolio(account="lx", dry_run=False, confirm=True)
+
+    assert result["success"] is True
+    assert state["locked"] is False
+
+    class LockCheckingCashStorage(FakeStorage):
+        def get_holding(self, *args, **kwargs):
+            assert state["locked"] is True
+            return super().get_holding(*args, **kwargs)
+
+        def upsert_holding(self, *args, **kwargs):
+            assert state["locked"] is True
+            return super().upsert_holding(*args, **kwargs)
+
+    cash_result = FutuBalanceSyncService(LockCheckingCashStorage()).sync_cash_and_mmf(
+        account="lx", cash_balance=1, mmf_balance=2,
+    )
+
+    assert cash_result["success"] is True
+    assert state["locked"] is False
 
 
 def test_sync_portfolio_reports_partial_write_when_cash_sync_fails_after_positions():
