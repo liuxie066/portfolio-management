@@ -14,6 +14,7 @@ import time
 import random
 from typing import Dict, Optional, List, Any
 
+from .asset_utils import detect_asset_type
 from .pricing import PriceRequest, PriceService
 from .pricing.fx import FxRateService
 from .pricing.classifier import (
@@ -26,6 +27,7 @@ from .pricing.payload import (
     RATE_QUANT,
     normalize_price_payload,
     quantize_money,
+    sleep_with_deadline,
     to_decimal,
 )
 
@@ -108,6 +110,7 @@ class PriceFetcher:
         accept_stale_when_closed: bool = False,
         max_stale_after_expiry_sec: int = 0,
         use_cache_only: bool = False,
+        deadline: float | None = None,
     ) -> Optional[Dict]:
         """获取单个资产价格（带缓存）。
 
@@ -135,6 +138,7 @@ class PriceFetcher:
             accept_stale_when_closed=accept_stale_when_closed,
             max_stale_after_expiry_sec=max_stale_after_expiry_sec,
             use_cache_only=use_cache_only,
+            deadline=deadline,
         )
 
     def fetch_batch(self, codes: List[str], name_map: Dict[str, str] = None,
@@ -143,7 +147,8 @@ class PriceFetcher:
                     accept_stale_when_closed: bool = False,
                     max_stale_after_expiry_sec: int = 0,
                     force_refresh: bool = False, use_concurrent: bool = True,
-                    skip_us: bool = False, use_cache_only: bool = False) -> Dict[str, Dict]:
+                    skip_us: bool = False, use_cache_only: bool = False,
+                    deadline: float | None = None) -> Dict[str, Dict]:
         """批量获取价格 (智能缓存 + 并发查询)
 
         Args:
@@ -168,9 +173,12 @@ class PriceFetcher:
             use_concurrent=use_concurrent,
             skip_us=skip_us,
             use_cache_only=use_cache_only,
+            deadline=deadline,
         ).payloads()
 
-    def _retry_with_backoff(self, func, max_retries: int = 3, base_delay: float = 1.0):
+    def _retry_with_backoff(
+        self, func, max_retries: int = 3, base_delay: float = 1.0, *, deadline: float | None = None
+    ):
         """带指数退避的重试机制
 
         Args:
@@ -211,17 +219,22 @@ class PriceFetcher:
                     # 指数退避 + 随机抖动
                     delay = base_delay * (2 ** attempt) + random.uniform(0, 0.5)
                     print(f"  请求限流，{delay:.1f}秒后重试 ({attempt + 1}/{max_retries - 1})...")
-                    time.sleep(delay)
+                    sleep_with_deadline(delay, deadline)
 
         raise last_exception
 
-    def _fetch_realtime(self, code: str, asset_name: str, asset_type: Any = None) -> Optional[Dict]:
+    def _fetch_realtime(
+        self, code: str, asset_name: str, asset_type: Any = None, *, deadline: float | None = None
+    ) -> Optional[Dict]:
         """获取实时价格 (内部方法)"""
         # 根据名称辅助判断类型
         name_hints = get_type_hints_from_name(asset_name)
 
         # 根据名称辅助判断并补全代码前缀
-        normalized_code = normalize_code_with_name(code, asset_name)
+        original_code = (code or "").strip().upper()
+        normalized_code = normalize_code_with_name(original_code, asset_name)
+        if asset_type is None and original_code.endswith((".US", ".HK", ".SH", ".SZ")):
+            asset_type = detect_asset_type(original_code)[0]
         request = PriceRequest(
             code=code,
             asset_name=asset_name or "",
@@ -229,11 +242,13 @@ class PriceFetcher:
             normalized_code=normalized_code,
             hints=name_hints,
         )
-        result = self.price_service.fetch_realtime(request)
+        result = self.price_service.fetch_realtime(request, deadline=deadline)
         self._last_price_service_diagnostics = list(self.price_service.last_diagnostics)
         return result
 
-    def _fetch_exchange_rates(self, max_retries: int = 3) -> Dict[str, float]:
+    def _fetch_exchange_rates(
+        self, max_retries: int = 3, *, deadline: float | None = None
+    ) -> Dict[str, float]:
         """获取汇率 (带24小时缓存，并发请求+重试机制)
 
         Args:
@@ -243,4 +258,4 @@ class PriceFetcher:
             汇率字典。获取失败时，如果有过期缓存则使用缓存并打印警告；
             完全没有缓存时抛出 RuntimeError。
         """
-        return self.fx_service.fetch_exchange_rates(max_retries=max_retries)
+        return self.fx_service.fetch_exchange_rates(max_retries=max_retries, deadline=deadline)

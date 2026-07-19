@@ -339,3 +339,85 @@ class TestPriceFetcher:
         assert result["000001"]["cache_status"] == "stale_fallback"
         assert result["000001"]["is_stale"] is True
         fetcher._fetch_realtime.assert_not_called()
+
+
+def test_us_market_uses_new_york_local_weekday_across_beijing_date_boundary():
+    beijing = ZoneInfo("Asia/Shanghai")
+
+    # Saturday in Beijing is still Friday 15:00 in New York.
+    assert MarketTimeUtil.is_us_market_open(
+        datetime(2026, 7, 18, 3, 0, tzinfo=beijing)
+    ) is True
+    assert MarketTimeUtil.is_us_market_open(
+        datetime(2026, 7, 18, 4, 0, tzinfo=beijing)
+    ) is False
+
+
+def test_us_next_open_elapsed_handles_dst_change():
+    new_york = ZoneInfo("America/New_York")
+    friday_after_close = datetime(2026, 3, 6, 16, 30, tzinfo=new_york)
+
+    # DST starts on Sunday: 64 absolute hours to Monday 09:30, not 65 wall hours.
+    assert MarketTimeUtil._seconds_until_next_us_open(friday_after_close) == 64 * 3600
+
+
+def test_fx_invalid_file_cache_never_becomes_fresh(tmp_path, monkeypatch):
+    import json
+
+    from src.pricing.fx import FxRateService
+    from src.time_utils import bj_now_naive
+
+    cache_file = tmp_path / "rate_cache.json"
+    cache_file.write_text(
+        json.dumps({"rates": {"USDCNY": 7.1}, "timestamp": bj_now_naive().isoformat()}),
+        encoding="utf-8",
+    )
+    service = FxRateService(Mock(), cache_file=cache_file)
+
+    def fail(_currency, *, deadline=None):
+        raise RuntimeError("offline")
+
+    for name in (
+        "_fetch_from_open_er_api",
+        "_fetch_from_exchangerate_api",
+        "_fetch_from_chinamoney",
+        "_fetch_from_exchangerate_host",
+    ):
+        monkeypatch.setattr(service, name, fail)
+
+    with pytest.raises(RuntimeError, match="没有可用缓存"):
+        service.fetch_exchange_rates(max_retries=1)
+
+    assert service._rate_cache == {}
+    assert service._rate_cache_time is None
+
+
+def test_fx_retry_backoff_stops_at_deadline(tmp_path, monkeypatch):
+    import time
+
+    from src.pricing.fx import FxRateService
+
+    service = FxRateService(Mock(), cache_file=tmp_path / "missing.json")
+    calls = []
+
+    def fail(currency, *, deadline=None):
+        calls.append(currency)
+        raise RuntimeError("offline")
+
+    for name in (
+        "_fetch_from_open_er_api",
+        "_fetch_from_exchangerate_api",
+        "_fetch_from_chinamoney",
+        "_fetch_from_exchangerate_host",
+    ):
+        monkeypatch.setattr(service, name, fail)
+
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="没有可用缓存"):
+        service.fetch_exchange_rates(
+            max_retries=3,
+            deadline=time.monotonic() + 0.02,
+        )
+
+    assert time.monotonic() - started < 0.1
+    assert calls == ["USD"]

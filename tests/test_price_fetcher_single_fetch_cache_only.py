@@ -81,3 +81,23 @@ def test_single_fetch_cache_only_and_stale_fallback() -> None:
     assert r2.get("is_from_cache") is True
     assert r2.get("is_stale") is True
     assert r2.get("source") == "cache_fallback"
+
+
+def test_cache_only_fixed_assets_never_fetch_fx_or_realtime() -> None:
+    from unittest.mock import Mock
+
+    from src.price_fetcher import PriceFetcher
+
+    pf = PriceFetcher(storage=None, use_cache=False)
+    pf._fetch_exchange_rates = Mock(side_effect=AssertionError("FX must not run"))
+    pf._fetch_realtime = Mock(side_effect=AssertionError("provider must not run"))
+
+    for code in ("USD-CASH", "USD-MMF", "WALLET-CRYPTO-USD"):
+        assert pf.fetch(code, use_cache_only=True) is None
+
+    assert pf.fetch_batch(
+        ["USD-CASH", "USD-MMF", "WALLET-CRYPTO-USD"],
+        use_cache_only=True,
+    ) == {}
+    pf._fetch_exchange_rates.assert_not_called()
+    pf._fetch_realtime.assert_not_called()

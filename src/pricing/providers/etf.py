@@ -6,7 +6,7 @@ import time
 from typing import Optional
 
 from ..classifier import get_exchange_prefix, is_etf
-from ..payload import normalize_price_payload
+from ..payload import normalize_price_payload, remaining_timeout
 from ..types import PriceRequest, ProviderResult
 
 
@@ -17,27 +17,32 @@ class ETFProvider:
         self.fetcher = fetcher
 
     def supports(self, request: PriceRequest) -> bool:
+        asset_type = request.asset_type.value if hasattr(request.asset_type, "value") else request.asset_type
+        if asset_type in ("a_stock", "hk_stock", "us_stock"):
+            return False
         return is_etf(request.normalized_code or request.code)
 
     def fetch_one(self, request: PriceRequest) -> ProviderResult:
         started = time.time()
         code = request.normalized_code or request.code
+        deadline = (request.hints or {}).get("_deadline")
         try:
+            payload = self.fetch_etf(code, deadline=deadline) if deadline is not None else self.fetch_etf(code)
             return ProviderResult(
-                payload=self.fetch_etf(code),
+                payload=payload,
                 provider=self.name,
                 latency_ms=int((time.time() - started) * 1000),
             )
         except Exception as exc:
             return ProviderResult(None, self.name, f"{type(exc).__name__}: {exc}", int((time.time() - started) * 1000))
 
-    def fetch_etf(self, code: str) -> Optional[dict]:
+    def fetch_etf(self, code: str, *, deadline: float | None = None) -> Optional[dict]:
         try:
             prefix = get_exchange_prefix(code)
             query_code = f"{prefix}{code}"
 
             url = f"https://qt.gtimg.cn/q={query_code}"
-            response = self.fetcher.session.get(url, timeout=10)
+            response = self.fetcher.session.get(url, timeout=remaining_timeout(deadline, 10))
             response.encoding = "gb2312"
             text = response.text
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, Optional
 
-from ..payload import normalize_price_payload
+from ..payload import normalize_price_payload, remaining_timeout
 
 
 YAHOO_CHART_HEADERS = {
@@ -85,15 +85,29 @@ def parse_yahoo_chart_payload(
     )
 
 
-def fetch_yahoo_chart_quote(fetcher: Any, quote_code: str, *, code: str | None = None, timeout: int = 15) -> Optional[dict]:
+def fetch_yahoo_chart_quote(
+    fetcher: Any,
+    quote_code: str,
+    *,
+    code: str | None = None,
+    timeout: float = 15,
+    deadline: float | None = None,
+) -> Optional[dict]:
     """Fetch and normalize a Yahoo Chart quote."""
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{quote_code}?interval=1d&range=2d"
-    response = fetcher.session.get(url, headers=YAHOO_CHART_HEADERS, timeout=timeout)
+    response = fetcher.session.get(
+        url, headers=YAHOO_CHART_HEADERS, timeout=remaining_timeout(deadline, timeout)
+    )
     if response.status_code == 429:
         raise Exception("Rate limited")
     response.raise_for_status()
+    rate_lookup = (
+        fetcher._fetch_exchange_rates
+        if deadline is None
+        else lambda: fetcher._fetch_exchange_rates(deadline=deadline)
+    )
     return parse_yahoo_chart_payload(
         response.json(),
         code=code or quote_code,
-        rate_lookup=fetcher._fetch_exchange_rates,
+        rate_lookup=rate_lookup,
     )

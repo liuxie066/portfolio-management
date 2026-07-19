@@ -150,3 +150,19 @@ def test_snapshot_service_ignores_local_snapshot_write_failure(tmp_path):
     )
 
     assert len(snapshots) == 1
+
+
+def test_holding_snapshot_preserves_quantity_precision():
+    from src.snapshot_models import HoldingSnapshot
+
+    base = {
+        "as_of": "2026-07-19",
+        "account": "a",
+        "asset_id": "asset",
+        "currency": "USD",
+        "dedup_key": "a:2026-07-19::asset",
+    }
+
+    assert HoldingSnapshot(**base, quantity=10.1256).quantity == 10.1256
+    assert HoldingSnapshot(**base, quantity=0.004).quantity == 0.004
+    assert HoldingSnapshot(**base, quantity=0.00000001).quantity == 0.00000001

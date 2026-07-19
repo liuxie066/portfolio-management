@@ -36,3 +36,16 @@ def test_price_cache_to_payload_is_normalized_on_fetch_path():
     assert result['change'] == 1.24
     assert result['change_pct'] == 1.01
     assert result['exchange_rate'] == 7.123457
+
+
+def test_foreign_mmf_uses_same_fx_conversion_as_cash():
+    from src.pricing.fixed import get_mmf_price
+
+    fetch_exchange_rates = Mock(return_value={"HKDCNY": 0.9123456})
+    result = get_mmf_price("HKD-MMF", fetch_exchange_rates)
+
+    assert result["price"] == 1.0
+    assert result["currency"] == "HKD"
+    assert result["cny_price"] == 0.91
+    assert result["exchange_rate"] == 0.912346
+    assert result["market_type"] == "mmf"

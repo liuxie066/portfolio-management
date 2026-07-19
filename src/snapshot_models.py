@@ -7,11 +7,14 @@ Snapshots are written at NAV record time to make each NAV point reproducible.
 from __future__ import annotations
 
 from datetime import date
+from decimal import Decimal
 from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
 
 from .models import _quantize_decimal, MONEY_QUANT
+
+QUANTITY_QUANT = Decimal("0.00000001")
 
 
 class HoldingSnapshot(BaseModel):
@@ -42,7 +45,12 @@ class HoldingSnapshot(BaseModel):
     source: Optional[str] = None
     remark: Optional[str] = None
 
-    @field_validator('quantity', 'price', 'cny_price', 'market_value_cny', 'avg_cost', mode='before')
+    @field_validator('quantity', mode='before')
+    @classmethod
+    def _quantize_quantity(cls, v):
+        return _quantize_decimal(v, QUANTITY_QUANT)
+
+    @field_validator('price', 'cny_price', 'market_value_cny', 'avg_cost', mode='before')
     @classmethod
     def _quantize_money_fields(cls, v):
         if v is None:

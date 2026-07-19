@@ -9,7 +9,7 @@
 - Artifact path: `docs/gateflow/repo-review-27/implementation-plan.md`
 - Status: `accepted`
 - Current gate: `accepted slice commit`
-- Next entry point: `S5 implementation`
+- Next entry point: `S6 implementation`
 
 
 ## Plan review decision
@@ -385,6 +385,7 @@ PLANNED -> APPLYING -> COMPLETED
 - Completion signal: valuation never fabricates convertibility/value, cache-only is network-free, and the deadline is end-to-end.
 - Residual risk classification: third-party provider latency beyond configured request timeout is `fixed in current slice`; market holidays remain existing documented limitation, not introduced by this work unit.
 - Commit: `gateflow: accept repo-review-27 S5-pricing-correctness`
+- Completion: `complete`; implementation `docs/gateflow/repo-review-27/S5-implementation.md`, fix `docs/gateflow/repo-review-27/S5-fix.md`, review/re-review `docs/reviews/code-review-20260719-185414.md`; validation `63 focused / 635 full`, compile and diff-check passed.
 
 ### S6 — Feishu transport, response mapping, delete semantics, and typed schema
 
