@@ -160,6 +160,31 @@ def test_nav_receipt_formats_partial_failure_and_price_warning():
     assert "告警：\n- lx: FUTU price unavailable" in text
 
 
+def test_nav_receipt_formats_snapshot_recovery_error():
+    text = NavHistoryReceiptService.build_message(
+        {
+            "success": False,
+            "status": "recovery_required",
+            "dry_run": False,
+            "date": "2026-07-17",
+            "items": [
+                {
+                    "success": False,
+                    "status": "recovery_required",
+                    "account": "lx",
+                    "error": "snapshot write failed",
+                    "snapshot_error": "snapshot write failed",
+                    "task_id": "repair_snapshot_1",
+                }
+            ],
+        },
+        executed_at=datetime(2026, 7, 18, 8, 11),
+    )
+
+    assert "❌ lx｜recovery_required｜snapshot write failed" in text
+    assert "unknown error" not in text
+
+
 def test_nav_receipt_compacts_healthy_price_summaries_across_accounts():
     text = NavHistoryReceiptService.build_message(
         {

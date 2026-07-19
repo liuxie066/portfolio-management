@@ -332,15 +332,19 @@ def test_daily_account_nav_service_returns_failure_when_payload_stage_raises():
         run_id="run-payload-error",
     )
 
-    assert result == {
+    assert {key: value for key, value in result.items() if key != "nav_result"} == {
         "success": False,
+        "status": "partial",
         "error": "distribution failed",
         "account": "alice",
         "date": "2026-05-22",
         "run_id": "run-payload-error",
         "dry_run": False,
         "confirm": True,
+        "nav_persisted": True,
     }
+    assert result["nav_result"]["success"] is True
+    assert result["nav_result"]["nav"] == 1.2345
 
 
 def test_daily_nav_job_skips_non_business_day():
@@ -429,6 +433,117 @@ def test_daily_nav_job_skips_existing_nav_when_no_overwrite():
         ("reconcile_cash_flows", "alice"),
         ("get_nav_on_date", "alice", date(2026, 5, 22)),
     ]
+
+
+def test_daily_nav_job_reports_existing_nav_snapshot_recovery_required():
+    class FakeStorage:
+        def audit_nav_history_duplicates(self, account=None):
+            return {"success": True, "duplicate_group_count": 0}
+
+        def get_nav_on_date(self, account, nav_date):
+            return SimpleNamespace(
+                record_id="rec_nav_1",
+                nav=1.23,
+                total_value=123.0,
+                details={
+                    "snapshot_status": "failed",
+                    "snapshot_task_id": "repair_snapshot_1",
+                    "snapshot_error": "snapshot write failed",
+                },
+            )
+
+        def reconcile_cash_flows(self, **_kwargs):
+            return {"success": True, "change_count": 0, "error_count": 0}
+
+    result = DailyNavJobService(
+        storage=FakeStorage(),
+        portfolio=SimpleNamespace(reporting_service=object()),
+        calendar=BusinessCalendarService(),
+        account_runner_factory=lambda _account: (_ for _ in ()).throw(AssertionError("runner should not run")),
+    ).run(nav_date="2026-05-22", account="alice")
+
+    assert result["success"] is False
+    assert result["status"] == "recovery_required"
+    assert result["items"][0] == {
+        "status": "recovery_required",
+        "success": False,
+        "account": "alice",
+        "date": "2026-05-22",
+        "record_id": "rec_nav_1",
+        "nav": 1.23,
+        "total_value": 123.0,
+        "snapshot_persisted": False,
+        "snapshot_error": "snapshot write failed",
+        "error": "snapshot write failed",
+        "task_id": "repair_snapshot_1",
+        "retry_command": "pm compensation retry --task-id repair_snapshot_1 --confirm",
+    }
+
+
+def test_daily_nav_job_reports_unresolved_local_snapshot_recovery_required():
+    class FakeStorage:
+        def audit_nav_history_duplicates(self, account=None):
+            return {"success": True, "duplicate_group_count": 0}
+
+        def get_nav_on_date(self, account, nav_date):
+            return SimpleNamespace(record_id="rec_nav_1", nav=1.23, total_value=123.0, details={})
+
+        def reconcile_cash_flows(self, **_kwargs):
+            return {"success": True, "change_count": 0, "error_count": 0}
+
+    compensation = SimpleNamespace(
+        find_unresolved_by_related_record=lambda record_id: {
+            "task_id": "repair_snapshot_2",
+            "error": "details patch failed",
+        }
+        if record_id == "rec_nav_1"
+        else None
+    )
+    result = DailyNavJobService(
+        storage=FakeStorage(),
+        portfolio=SimpleNamespace(reporting_service=object(), compensation=compensation),
+        calendar=BusinessCalendarService(),
+        account_runner_factory=lambda _account: (_ for _ in ()).throw(AssertionError("runner should not run")),
+    ).run(nav_date="2026-05-22", account="alice")
+
+    assert result["success"] is False
+    assert result["status"] == "recovery_required"
+    assert result["items"][0]["status"] == "recovery_required"
+    assert result["items"][0]["task_id"] == "repair_snapshot_2"
+    assert result["items"][0]["error"] == "details patch failed"
+    assert result["items"][0]["retry_command"] == "pm compensation retry --task-id repair_snapshot_2 --confirm"
+
+
+def test_daily_nav_job_preserves_account_runner_partial_status():
+    class FakeStorage:
+        def audit_nav_history_duplicates(self, account=None):
+            return {"success": True, "duplicate_group_count": 0}
+
+        def get_nav_on_date(self, account, nav_date):
+            return None
+
+        def reconcile_cash_flows(self, **_kwargs):
+            return {"success": True, "change_count": 0, "error_count": 0}
+
+    class FakeRunner:
+        def __init__(self, account):
+            self.account = account
+
+        def run(self, **_kwargs):
+            return {"success": False, "status": "partial", "account": self.account, "nav_persisted": True}
+
+    result = DailyNavJobService(
+        storage=FakeStorage(),
+        portfolio=SimpleNamespace(reporting_service=object()),
+        calendar=BusinessCalendarService(),
+        account_runner_factory=FakeRunner,
+    ).run(nav_date="2026-05-22", account="alice")
+
+    assert result["success"] is False
+    assert result["status"] == "partial"
+    assert result["summary"] == {"partial": 1}
+    assert result["items"][0]["status"] == "partial"
+    assert result["items"][0]["nav_persisted"] is True
 
 
 def test_daily_nav_job_skips_when_discovery_finds_no_accounts():

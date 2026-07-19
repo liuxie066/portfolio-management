@@ -75,7 +75,8 @@ class SnapshotService:
         if should_write_snapshot:
             self.storage.batch_upsert_holding_snapshots(snapshots, dry_run=dry_run)
 
-        self._write_local_snapshot(account=account, as_of=as_of, snapshots=snapshots)
+        if not dry_run:
+            self._write_local_snapshot(account=account, as_of=as_of, snapshots=snapshots)
         return snapshots
 
     def _write_local_snapshot(self, *, account: str, as_of: str, snapshots: list[HoldingSnapshot]) -> None:

@@ -1,4 +1,5 @@
 import json
+import os
 from datetime import date
 from unittest.mock import Mock
 
@@ -97,6 +98,27 @@ def test_snapshot_service_passes_dry_run_to_actual_write(tmp_path):
 
     assert storage.batch_upsert_holding_snapshots.call_count == 2
     assert storage.batch_upsert_holding_snapshots.call_args_list[1].kwargs["dry_run"] is True
+
+
+def test_snapshot_service_dry_run_does_not_modify_existing_local_snapshot(tmp_path):
+    storage = Mock()
+    storage.batch_upsert_holding_snapshots.return_value = {"to_create": [], "to_update": []}
+    service = SnapshotService(storage=storage, data_dir=tmp_path)
+    out_file = tmp_path / "holdings_snapshot" / "a" / "2026-03-19.json"
+    out_file.parent.mkdir(parents=True)
+    out_file.write_text('{"digest":"existing"}\n', encoding="utf-8")
+    old_mtime_ns = 1_700_000_000_000_000_000
+    os.utime(out_file, ns=(old_mtime_ns, old_mtime_ns))
+
+    service.persist_holdings_snapshot(
+        account="a",
+        today=date(2026, 3, 19),
+        valuation=_valuation(),
+        dry_run=True,
+    )
+
+    assert out_file.read_text(encoding="utf-8") == '{"digest":"existing"}\n'
+    assert out_file.stat().st_mtime_ns == old_mtime_ns
 
 
 def test_snapshot_service_raises_when_feishu_write_fails(tmp_path):

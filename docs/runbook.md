@@ -138,6 +138,28 @@ Retry one supported task explicitly:
 
 Retries use target-level compare-and-set semantics and can resume `PENDING`, `FAILED`, or orphaned `RUNNING` tasks. Do not manually replay legacy delta payloads (`supported=false`); repair those from the authoritative ledger and current holdings with a separately reviewed procedure.
 
+## NAV History Patch Recovery
+
+Always preview a patch before applying it:
+
+```bash
+python scripts/nav_history_repair.py patch \
+  --account lx \
+  --patch-file audit/nav_patch.json \
+  --dry-run
+```
+
+`--validate-scope changed` validates every changed date and its first chronological successor. Apply fails before the first Feishu write if any target date is missing, duplicated, lacks a record ID, or violates validation.
+
+```bash
+python scripts/nav_history_repair.py patch \
+  --account lx \
+  --patch-file audit/nav_patch.json \
+  --apply
+```
+
+Apply writes an append-only journal under `${PM_DATA_DIR}/nav_repair/`. Inspect the returned `status`, `applied`, `failed`, `pending`, and `journal_path`; do not treat a non-zero exit as a full rollback. For `partial`, run the exact returned `resume_command` after fixing the underlying error, or use `rollback_command` to restore recorded original target fields in reverse order. Resume rejects a changed patch plan digest, and both resume and rollback fail closed when the current live row matches neither the recorded original nor target state.
+
 ## Cash Flow Reconcile
 
 Manual `cash_flow` rows may omit generated fields, but daily NAV writes will

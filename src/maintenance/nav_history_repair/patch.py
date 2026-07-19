@@ -38,14 +38,19 @@ Notes
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
+import shlex
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from src import config
 from src.maintenance.nav_history_repair.context import NavRepairContext, create_nav_repair_context
 from src.models import NAVHistory
+from src.process_lock import account_lock_key, process_lock
 
 
 MONEY_EPS = 0.06  # tolerate rounding/quantization noise
@@ -95,6 +100,8 @@ def load_patch_rows(patch_file: str, mode: str) -> List[PatchRow]:
     rows = data.get("rebuilt") or data.get("rows")
     if not isinstance(rows, list):
         raise ValueError("patch-file must contain a list under 'rebuilt' or 'rows'")
+    if not rows:
+        raise ValueError("patch-file contains no rows")
 
     out: List[PatchRow] = []
     for r in rows:
@@ -118,9 +125,11 @@ def load_patch_rows(patch_file: str, mode: str) -> List[PatchRow]:
         else:
             raise ValueError(f"unsupported mode: {mode}")
 
-    # de-dup by date (keep last)
-    m = {p.d: p for p in out}
-    return [m[d] for d in sorted(m.keys())]
+    dates = [p.d for p in out]
+    duplicates = sorted({d for d in dates if dates.count(d) > 1})
+    if duplicates:
+        raise ValueError(f"patch-file contains duplicate dates: {[d.isoformat() for d in duplicates]}")
+    return sorted(out, key=lambda row: row.d)
 
 
 def merge_existing(existing: NAVHistory, patch: PatchRow, patch_none: bool = False) -> NAVHistory:
@@ -294,163 +303,574 @@ def validate_math(
     return errs
 
 
+
+PATCH_FIELDS = [
+    "cash_flow",
+    "share_change",
+    "shares",
+    "nav",
+    "pnl",
+    "mtd_nav_change",
+    "ytd_nav_change",
+    "mtd_pnl",
+    "ytd_pnl",
+]
+NON_TARGET_FIELDS = [
+    "cash_value",
+    "stock_value",
+    "fund_value",
+    "cn_stock_value",
+    "us_stock_value",
+    "hk_stock_value",
+    "total_value",
+]
+
+
+def _target_fields(nav: NAVHistory) -> Dict[str, Any]:
+    return {field: getattr(nav, field) for field in PATCH_FIELDS}
+
+
+def _with_target_fields(nav: NAVHistory, fields: Dict[str, Any]) -> NAVHistory:
+    payload = nav.model_dump()
+    payload.update({field: fields.get(field) for field in PATCH_FIELDS})
+    return NAVHistory(**payload)
+
+
+def _same_target_fields(nav: NAVHistory, fields: Dict[str, Any]) -> bool:
+    return _target_fields(nav) == {field: fields.get(field) for field in PATCH_FIELDS}
+
+
+def _resolve_patch_targets(
+    *,
+    navs: List[NAVHistory],
+    patches: List[PatchRow],
+    account: str,
+    mode: str,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[NAVHistory], str]:
+    by_date: Dict[date, List[NAVHistory]] = {}
+    for nav in navs:
+        by_date.setdefault(nav.date, []).append(nav)
+
+    errors = []
+    rows = []
+    merged = []
+    diffs = []
+    for patch in patches:
+        matches = by_date.get(patch.d) or []
+        if len(matches) != 1:
+            errors.append({"date": patch.d.isoformat(), "match_count": len(matches)})
+            continue
+        existing = matches[0]
+        if not existing.record_id:
+            errors.append({"date": patch.d.isoformat(), "match_count": 1, "error": "missing record_id"})
+            continue
+        candidate = merge_existing(existing, patch)
+        for field in NON_TARGET_FIELDS:
+            if getattr(existing, field) != getattr(candidate, field):
+                raise SystemExit(f"safety abort: non-target field changed: {patch.d} {field}")
+        original_fields = _target_fields(existing)
+        target_fields = _target_fields(candidate)
+        changes = {
+            field: {"old": original_fields[field], "new": target_fields[field]}
+            for field in PATCH_FIELDS
+            if original_fields[field] != target_fields[field]
+        }
+        rows.append({
+            "date": patch.d.isoformat(),
+            "record_id": existing.record_id,
+            "original_fields": original_fields,
+            "target_fields": target_fields,
+            "status": "pending",
+        })
+        merged.append(candidate)
+        diffs.append({"date": patch.d.isoformat(), "record_id": existing.record_id, "changes": changes})
+
+    if errors:
+        raise SystemExit(f"patch preflight failed: every target date must resolve to exactly one record: {errors}")
+
+    digest_payload = {
+        "account": account,
+        "mode": mode,
+        "rows": [
+            {
+                "date": row["date"],
+                "record_id": row["record_id"],
+                "target_fields": row["target_fields"],
+            }
+            for row in rows
+        ],
+    }
+    digest_raw = json.dumps(digest_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    plan_digest = hashlib.sha256(digest_raw.encode("utf-8")).hexdigest()
+    return rows, diffs, merged, plan_digest
+
+
+def _validation_dates(
+    *,
+    series: List[NAVHistory],
+    rows: List[Dict[str, Any]],
+    validate_scope: str,
+) -> set[date]:
+    patched_dates = {_iso_to_date(row["date"]) for row in rows}
+    changed_dates = {
+        _iso_to_date(row["date"])
+        for row in rows
+        if row["original_fields"] != row["target_fields"]
+    }
+    if validate_scope == "all":
+        return {nav.date for nav in series}
+    if validate_scope == "patched":
+        return patched_dates
+
+    selected = set(changed_dates)
+    ordered_dates = [nav.date for nav in series]
+    positions = {nav_date: idx for idx, nav_date in enumerate(ordered_dates)}
+    for changed_date in changed_dates:
+        idx = positions.get(changed_date)
+        if idx is not None and idx + 1 < len(ordered_dates):
+            selected.add(ordered_dates[idx + 1])
+    return selected
+
+
+def _append_journal(path: Path, event: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        with path.open("r+b") as handle:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell():
+                handle.seek(-1, os.SEEK_END)
+                if handle.read(1) != b"\n":
+                    handle.seek(0)
+                    data = handle.read()
+                    handle.truncate(data.rfind(b"\n") + 1)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+    line = json.dumps(event, ensure_ascii=False, sort_keys=True, default=str) + "\n"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        with os.fdopen(fd, "a", encoding="utf-8") as handle:
+            handle.write(line)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+
+
+def _read_journal(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        raise SystemExit(f"journal not found: {path}")
+    events = []
+    data = path.read_bytes()
+    raw_lines = data.split(b"\n")
+    for line_number, raw_line in enumerate(raw_lines, start=1):
+        if not raw_line.strip():
+            continue
+        try:
+            line = raw_line.decode("utf-8")
+            event = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            if line_number == len(raw_lines) and not data.endswith(b"\n"):
+                break
+            raise SystemExit(f"invalid journal JSON at line {line_number}: {exc}") from exc
+        if not isinstance(event, dict):
+            raise SystemExit(f"invalid journal event at line {line_number}")
+        events.append(event)
+    if not events or events[0].get("state") != "PLANNED" or not events[0].get("rows"):
+        raise SystemExit(f"invalid nav repair journal: {path}")
+
+    plan = dict(events[0])
+    rows = {
+        str(row["record_id"]): {**row, "status": "pending", "error": None}
+        for row in plan["rows"]
+    }
+    state = "PLANNED"
+    for event in events[1:]:
+        if event.get("event") == "STATE":
+            state = str(event.get("state") or state)
+        elif event.get("event") == "ROW":
+            row = rows.get(str(event.get("record_id")))
+            if row is None:
+                raise SystemExit(f"journal row event references unknown record_id: {event.get('record_id')}")
+            row["status"] = str(event.get("status") or row["status"])
+            row["error"] = event.get("error")
+    plan["state"] = state
+    plan["rows"] = list(rows.values())
+    return plan
+
+
+def _commands(plan: Dict[str, Any], journal_path: Path) -> Tuple[str, str]:
+    parts = [
+        "python",
+        "scripts/nav_history_repair.py",
+        "patch",
+        "--account",
+        str(plan["account"]),
+        "--patch-file",
+        str(plan["patch_file"]),
+        "--mode",
+        str(plan["mode"]),
+        "--resume-journal",
+        str(journal_path),
+    ]
+    resume = " ".join(shlex.quote(part) for part in parts)
+    rollback = " ".join(
+        shlex.quote(part)
+        for part in [
+            "python",
+            "scripts/nav_history_repair.py",
+            "patch",
+            "--rollback-journal",
+            str(journal_path),
+        ]
+    )
+    return resume, rollback
+
+
+def _result(plan: Dict[str, Any], journal_path: Path, status: str, **extra: Any) -> Dict[str, Any]:
+    rows = plan["rows"]
+    resume_command, rollback_command = _commands(plan, journal_path)
+    result = {
+        "success": status in {"completed", "rolled_back"},
+        "status": status,
+        "plan_digest": plan["plan_digest"],
+        "journal_path": str(journal_path),
+        "applied": [row for row in rows if row["status"] == "applied"],
+        "failed": [row for row in rows if row["status"] == "failed"],
+        "pending": [row for row in rows if row["status"] == "pending"],
+        "rolled_back": [row for row in rows if row["status"] == "rolled_back"],
+        "rollback_failed": [row for row in rows if row["status"] == "rollback_failed"],
+        "resume_command": resume_command,
+        "rollback_command": rollback_command,
+    }
+    result.update(extra)
+    return result
+
+
+def _apply_failure_status(plan: Dict[str, Any]) -> str:
+    return "partial" if any(row["status"] == "applied" for row in plan["rows"]) else "failed"
+
+
+def _current_rows(context: NavRepairContext, plan: Dict[str, Any]) -> Dict[str, NAVHistory]:
+    navs = context.storage.get_nav_history(context.account, days=9999)
+    by_date: Dict[date, List[NAVHistory]] = {}
+    for nav in navs:
+        by_date.setdefault(nav.date, []).append(nav)
+    current = {}
+    errors = []
+    for row in plan["rows"]:
+        row_date = _iso_to_date(row["date"])
+        matches = by_date.get(row_date) or []
+        if len(matches) != 1 or str(getattr(matches[0], "record_id", "")) != str(row["record_id"]):
+            errors.append({
+                "date": row["date"],
+                "expected_record_id": row["record_id"],
+                "match_count": len(matches),
+                "actual_record_ids": [getattr(match, "record_id", None) for match in matches],
+            })
+            continue
+        current[str(row["record_id"])] = matches[0]
+    if errors:
+        raise SystemExit(f"journal preflight failed: {errors}")
+    return current
+
+
+def _apply_journal(*, context: NavRepairContext, journal_path: Path, resume: bool) -> Dict[str, Any]:
+    with process_lock(account_lock_key(context.account)):
+        with process_lock(f"nav-repair:{journal_path.resolve()}"):
+            return _apply_journal_locked(context=context, journal_path=journal_path, resume=resume)
+
+
+def _apply_journal_locked(*, context: NavRepairContext, journal_path: Path, resume: bool) -> Dict[str, Any]:
+    plan = _read_journal(journal_path)
+    if plan["state"] in {"ROLLING_BACK", "ROLLBACK_PARTIAL", "ROLLED_BACK"}:
+        raise SystemExit(f"cannot apply journal in state {plan['state']}")
+    current = _current_rows(context, plan)
+
+    conflict = None
+    for row in plan["rows"]:
+        nav = current[str(row["record_id"])]
+        if row["status"] == "applied":
+            if not _same_target_fields(nav, row["target_fields"]):
+                conflict = (row, "applied row no longer matches target fields")
+                break
+        elif _same_target_fields(nav, row["target_fields"]):
+            _append_journal(journal_path, {
+                "event": "ROW",
+                "record_id": row["record_id"],
+                "date": row["date"],
+                "status": "applied",
+                "recovered": True,
+            })
+        elif not _same_target_fields(nav, row["original_fields"]):
+            conflict = (row, "current row matches neither original nor target fields")
+            break
+    if conflict:
+        row, error = conflict
+        _append_journal(journal_path, {
+            "event": "ROW",
+            "record_id": row["record_id"],
+            "date": row["date"],
+            "status": "failed",
+            "error": error,
+        })
+        _append_journal(journal_path, {"event": "STATE", "state": "PARTIAL", "error": error})
+        failed_plan = _read_journal(journal_path)
+        return _result(failed_plan, journal_path, _apply_failure_status(failed_plan))
+
+    _append_journal(journal_path, {"event": "STATE", "state": "APPLYING", "resume": resume})
+    plan = _read_journal(journal_path)
+    for row in plan["rows"]:
+        if row["status"] == "applied":
+            continue
+        nav = current[str(row["record_id"])]
+        try:
+            context.storage.write_nav_record(
+                _with_target_fields(nav, row["target_fields"]),
+                overwrite_existing=True,
+                dry_run=False,
+            )
+        except Exception as exc:
+            _append_journal(journal_path, {
+                "event": "ROW",
+                "record_id": row["record_id"],
+                "date": row["date"],
+                "status": "failed",
+                "error": str(exc),
+            })
+            _append_journal(journal_path, {"event": "STATE", "state": "PARTIAL", "error": str(exc)})
+            failed_plan = _read_journal(journal_path)
+            return _result(failed_plan, journal_path, _apply_failure_status(failed_plan))
+        _append_journal(journal_path, {
+            "event": "ROW",
+            "record_id": row["record_id"],
+            "date": row["date"],
+            "status": "applied",
+        })
+
+    _append_journal(journal_path, {"event": "STATE", "state": "COMPLETED"})
+    return _result(_read_journal(journal_path), journal_path, "completed")
+
+
+def _rollback_journal(*, context: NavRepairContext, journal_path: Path) -> Dict[str, Any]:
+    with process_lock(account_lock_key(context.account)):
+        with process_lock(f"nav-repair:{journal_path.resolve()}"):
+            return _rollback_journal_locked(context=context, journal_path=journal_path)
+
+
+def _rollback_journal_locked(*, context: NavRepairContext, journal_path: Path) -> Dict[str, Any]:
+    plan = _read_journal(journal_path)
+    if plan["state"] == "ROLLED_BACK":
+        return _result(plan, journal_path, "rolled_back")
+    current = _current_rows(context, plan)
+    _append_journal(journal_path, {"event": "STATE", "state": "ROLLING_BACK"})
+
+    for row in reversed(plan["rows"]):
+        if row["status"] == "rolled_back":
+            continue
+        nav = current[str(row["record_id"])]
+        if _same_target_fields(nav, row["original_fields"]):
+            _append_journal(journal_path, {
+                "event": "ROW",
+                "record_id": row["record_id"],
+                "date": row["date"],
+                "status": "rolled_back",
+                "recovered": True,
+            })
+            continue
+        if not _same_target_fields(nav, row["target_fields"]):
+            error = "current row matches neither target nor original fields"
+            _append_journal(journal_path, {
+                "event": "ROW",
+                "record_id": row["record_id"],
+                "date": row["date"],
+                "status": "rollback_failed",
+                "error": error,
+            })
+            _append_journal(journal_path, {"event": "STATE", "state": "ROLLBACK_PARTIAL", "error": error})
+            return _result(_read_journal(journal_path), journal_path, "rollback_partial")
+        try:
+            context.storage.write_nav_record(
+                _with_target_fields(nav, row["original_fields"]),
+                overwrite_existing=True,
+                dry_run=False,
+            )
+        except Exception as exc:
+            _append_journal(journal_path, {
+                "event": "ROW",
+                "record_id": row["record_id"],
+                "date": row["date"],
+                "status": "rollback_failed",
+                "error": str(exc),
+            })
+            _append_journal(journal_path, {"event": "STATE", "state": "ROLLBACK_PARTIAL", "error": str(exc)})
+            return _result(_read_journal(journal_path), journal_path, "rollback_partial")
+        _append_journal(journal_path, {
+            "event": "ROW",
+            "record_id": row["record_id"],
+            "date": row["date"],
+            "status": "rolled_back",
+        })
+
+    _append_journal(journal_path, {"event": "STATE", "state": "ROLLED_BACK"})
+    return _result(_read_journal(journal_path), journal_path, "rolled_back")
+
+
+def _print_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    return result
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--account", default=None)
-    ap.add_argument("--patch-file", required=True)
+    ap.add_argument("--patch-file", default=None)
     ap.add_argument("--mode", choices=["strong-consistency-gap"], default="strong-consistency-gap")
-    ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--apply", action="store_true")
+    action = ap.add_mutually_exclusive_group(required=True)
+    action.add_argument("--dry-run", action="store_true")
+    action.add_argument("--apply", action="store_true")
+    action.add_argument("--resume-journal")
+    action.add_argument("--rollback-journal")
     ap.add_argument("--backup-file", default=None, help="where to write backup JSON before apply")
     ap.add_argument("--no-validate", action="store_true")
-    ap.add_argument("--validate-level", choices=["basic","full"], default="basic")
-    ap.add_argument(
-        "--validate-scope",
-        choices=["changed", "patched", "all"],
-        default="changed",
-        help=(
-            "changed: validate only records that will actually change (default). "
-            "patched: validate all dates present in the patch file. "
-            "all: validate the entire series."
-        ),
-    )
+    ap.add_argument("--validate-level", choices=["basic", "full"], default="basic")
+    ap.add_argument("--validate-scope", choices=["changed", "patched", "all"], default="changed")
     args = ap.parse_args(argv)
-    run(args)
+    return run(args)
 
 
-def run(args: argparse.Namespace) -> None:
-    if not args.dry_run and not args.apply:
-        raise SystemExit("must pass --dry-run or --apply")
-    if args.dry_run and args.apply:
-        raise SystemExit("choose only one of --dry-run / --apply")
+def run(args: argparse.Namespace) -> Dict[str, Any]:
+    resume_journal = getattr(args, "resume_journal", None)
+    rollback_journal = getattr(args, "rollback_journal", None)
+    dry_run = bool(getattr(args, "dry_run", False))
+    apply = bool(getattr(args, "apply", False))
+    selected = sum(bool(value) for value in [dry_run, apply, resume_journal, rollback_journal])
+    if selected != 1:
+        raise SystemExit("choose exactly one of --dry-run / --apply / --resume-journal / --rollback-journal")
 
-    context = create_nav_repair_context(account=args.account)
+    if rollback_journal:
+        journal_path = Path(rollback_journal)
+        plan = _read_journal(journal_path)
+        requested_account = getattr(args, "account", None)
+        if requested_account and requested_account != plan["account"]:
+            raise SystemExit(f"journal account mismatch: {requested_account} != {plan['account']}")
+        context = create_nav_repair_context(account=plan["account"])
+        return _print_result(_rollback_journal(context=context, journal_path=journal_path))
 
-    patches = load_patch_rows(args.patch_file, args.mode)
+    patch_file = getattr(args, "patch_file", None)
+    if not patch_file:
+        raise SystemExit("--patch-file is required unless --rollback-journal is used")
+    context = create_nav_repair_context(account=getattr(args, "account", None))
+    patches = load_patch_rows(patch_file, args.mode)
+    navs = sorted(context.storage.get_nav_history(context.account, days=9999), key=lambda nav: nav.date)
+    rows, diffs, merged, plan_digest = _resolve_patch_targets(
+        navs=navs,
+        patches=patches,
+        account=context.account,
+        mode=args.mode,
+    )
 
-    navs = context.storage.get_nav_history(context.account, days=9999)
-    navs = sorted(navs, key=lambda n: n.date)
-    nav_by_date = {n.date: n for n in navs}
+    if resume_journal:
+        journal_path = Path(resume_journal)
+        plan = _read_journal(journal_path)
+        if plan["plan_digest"] != plan_digest:
+            raise SystemExit(f"resume plan digest mismatch: {plan_digest} != {plan['plan_digest']}")
+        if plan["account"] != context.account or plan["mode"] != args.mode:
+            raise SystemExit("resume plan account/mode mismatch")
+        return _print_result(_apply_journal(context=context, journal_path=journal_path, resume=True))
 
-    # build candidate merged list
-    merged: List[NAVHistory] = []
-    diffs: List[Dict[str, Any]] = []
+    patched_by_date = {candidate.date: candidate for candidate in merged}
+    series = [patched_by_date.get(nav.date, nav) for nav in navs]
     violations: List[Dict[str, Any]] = []
-
-    patch_fields = [
-        "cash_flow",
-        "share_change",
-        "shares",
-        "nav",
-        "pnl",
-        "mtd_nav_change",
-        "ytd_nav_change",
-        "mtd_pnl",
-        "ytd_pnl",
-    ]
-
-    for p in patches:
-        existing = nav_by_date.get(p.d)
-        if not existing:
-            diffs.append({"date": p.d.isoformat(), "status": "missing_existing"})
-            continue
-
-        cand = merge_existing(existing, p)
-
-        # diff only target fields
-        change = {"date": p.d.isoformat(), "record_id": existing.record_id, "changes": {}}
-        for f in patch_fields:
-            old = getattr(existing, f)
-            new = getattr(cand, f)
-            if old != new:
-                change["changes"][f] = {"old": old, "new": new}
-
-        diffs.append(change)
-        merged.append(cand)
-
-    # validate in full-date order: create a combined series (original, with patches applied)
-    patched_by_date = {m.date: m for m in merged}
-    series = [patched_by_date.get(n.date, n) for n in navs]
-
+    validation_dates = set()
     if not args.no_validate:
-        # Dates to validate depend on scope
-        dates_in_patch = set(patched_by_date.keys())
-        dates_changed = set()
-        for d in dates_in_patch:
-            old = nav_by_date.get(d)
-            new = patched_by_date.get(d)
-            if old and new:
-                # if any target field differs, mark as changed
-                for f in [
-                    "cash_flow",
-                    "share_change",
-                    "shares",
-                    "nav",
-                    "pnl",
-                    "mtd_nav_change",
-                    "ytd_nav_change",
-                    "mtd_pnl",
-                    "ytd_pnl",
-                ]:
-                    if getattr(old, f) != getattr(new, f):
-                        dates_changed.add(d)
-                        break
-
-        for i, n in enumerate(series):
-            if args.validate_scope == "changed" and n.date not in dates_changed:
+        validation_dates = _validation_dates(series=series, rows=rows, validate_scope=args.validate_scope)
+        for idx, nav in enumerate(series):
+            if nav.date not in validation_dates:
                 continue
-            if args.validate_scope == "patched" and n.date not in dates_in_patch:
-                continue
-            errs = validate_math(context=context, navs_sorted=series, idx=i, candidate=n, mode=args.mode, validate_level=args.validate_level)
-            if errs:
-                violations.append({"date": n.date.isoformat(), "record_id": n.record_id, "errors": errs})
+            errors = validate_math(
+                context=context,
+                navs_sorted=series,
+                idx=idx,
+                candidate=nav,
+                mode=args.mode,
+                validate_level=args.validate_level,
+            )
+            if errors:
+                violations.append({"date": nav.date.isoformat(), "record_id": nav.record_id, "errors": errors})
 
     out_dir = Path("audit")
     out_dir.mkdir(exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     diff_path = out_dir / f"nav_history_repair_patch_diff_{context.account}_{stamp}.json"
-    diff_path.write_text(json.dumps({"account": context.account, "mode": args.mode, "diffs": diffs, "violations": violations}, ensure_ascii=False, indent=2), encoding="utf-8")
+    diff_path.write_text(
+        json.dumps({
+            "account": context.account,
+            "mode": args.mode,
+            "plan_digest": plan_digest,
+            "diffs": diffs,
+            "validation_dates": sorted(d.isoformat() for d in validation_dates),
+            "violations": violations,
+        }, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     print("wrote", diff_path)
 
-    if violations:
-        print("VALIDATION FAILED; first 5 violations:")
-        for v in violations[:5]:
-            print(v["date"], v["errors"][:3])
-        if args.apply:
-            raise SystemExit("abort apply due to validation errors")
+    if violations and apply:
+        raise SystemExit("abort apply due to validation errors")
+    if dry_run:
+        return _print_result({
+            "success": not violations,
+            "status": "dry_run" if not violations else "failed",
+            "plan_digest": plan_digest,
+            "changed": sum(1 for diff in diffs if diff["changes"]),
+            "target_count": len(rows),
+            "validation_dates": sorted(d.isoformat() for d in validation_dates),
+            "violations": violations,
+            "diff_path": str(diff_path),
+        })
 
-    if args.dry_run:
-        # summary
-        changed = sum(1 for d in diffs if d.get("changes"))
-        print("dry-run ok; records with changes:", changed, "of", len(diffs))
-        return
-
-    # apply
-    backup_file = args.backup_file or str(out_dir / f"nav_history_repair_patch_backup_{context.account}_{stamp}.json")
-    backup = []
-    for p in patches:
-        existing = nav_by_date.get(p.d)
-        if not existing:
-            continue
-        backup.append(context.storage.write_nav_record(existing, overwrite_existing=True, dry_run=True))
-    Path(backup_file).write_text(json.dumps(backup, ensure_ascii=False, indent=2), encoding="utf-8")
+    backup_file = getattr(args, "backup_file", None) or str(
+        out_dir / f"nav_history_repair_patch_backup_{context.account}_{stamp}.json"
+    )
+    Path(backup_file).write_text(
+        json.dumps({
+            "account": context.account,
+            "plan_digest": plan_digest,
+            "rows": [
+                {
+                    "date": nav.date.isoformat(),
+                    "record_id": nav.record_id,
+                    "fields": nav.model_dump(mode="json"),
+                }
+                for nav in navs
+                if nav.date in {_iso_to_date(row["date"]) for row in rows}
+            ],
+        }, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     print("backup wrote", backup_file)
 
-    # perform updates
-    updated = 0
-    for p in patches:
-        existing = nav_by_date.get(p.d)
-        if not existing:
-            continue
-        cand = merge_existing(existing, p)
-        # hard safety: do not allow breakdown fields to change in this patch tool
-        for f in ["cash_value", "stock_value", "fund_value", "cn_stock_value", "us_stock_value", "hk_stock_value", "total_value"]:
-            if getattr(existing, f) != getattr(cand, f):
-                raise SystemExit(f"safety abort: non-target field changed: {p.d} {f}")
-        context.storage.write_nav_record(cand, overwrite_existing=True, dry_run=False)
-        updated += 1
+    journal_dir = config.get_data_dir() / "nav_repair"
+    journal_path = journal_dir / f"{plan_digest[:16]}-{stamp}.jsonl"
+    with process_lock(f"nav-repair:{journal_path.resolve()}"):
+        if journal_path.exists():
+            raise SystemExit(f"journal already exists: {journal_path}")
+        _append_journal(journal_path, {
+            "event": "STATE",
+            "state": "PLANNED",
+            "account": context.account,
+            "mode": args.mode,
+            "patch_file": str(Path(patch_file).resolve()),
+            "plan_digest": plan_digest,
+            "created_at": datetime.now().isoformat(),
+            "rows": rows,
+        })
 
-    print("applied patches; updated", updated, "records")
+    return _print_result(_apply_journal(context=context, journal_path=journal_path, resume=False))
 
 
 if __name__ == "__main__":
