@@ -34,9 +34,12 @@ year. External cash flow is summed only through the actual ending NAV date.
 Missing strict anchors are returned as `status=unavailable`, not silently
 replaced by the first NAV inside the requested period.
 
-The service is unauthenticated and binds to loopback hosts only by default.
-Binding to `0.0.0.0` or any other non-loopback address requires
-`--allow-remote` and an authenticated outer network boundary.
+The service is unauthenticated and both binds to and accepts loopback clients only by default.
+The ASGI application enforces the actual client IP, so direct Uvicorn startup does not bypass
+this boundary and forwarding headers are not trusted. Binding to `0.0.0.0` or accepting any
+non-loopback client requires `--allow-remote` (or explicit
+`PORTFOLIO_SERVICE_ALLOW_REMOTE=1` for direct ASGI startup) and an authenticated outer network
+boundary.
 
 
 For a long-running Linux loopback service, render and explicitly enable the
@@ -79,7 +82,9 @@ Config keys:
 - `POST /daily-nav-job`
 
 Writes are dry-run by default. A real write requires `dry_run=false` and
-`confirm=true`.
+`confirm=true`. If a write POST loses its response, the result is reported as unknown and the
+CLI does not automatically replay it through the direct backend. Inspect state before retrying;
+use `--no-service` only when intentionally bypassing the service.
 
 ## Futu Holdings Sync
 

@@ -16,7 +16,11 @@ class PortfolioServiceError(RuntimeError):
 
 
 class PortfolioServiceUnavailable(PortfolioServiceError):
-    """Raised when the local service cannot be reached."""
+    """Raised when a read-only local service request cannot be reached."""
+
+
+class PortfolioServiceOutcomeUnknown(PortfolioServiceError):
+    """Raised when a write request may have executed without returning a response."""
 
 
 class PortfolioServiceResponseError(PortfolioServiceError):
@@ -107,6 +111,12 @@ class PortfolioServiceClient:
             detail = e.read().decode("utf-8", errors="replace")
             raise PortfolioServiceResponseError(f"service returned HTTP {e.code}: {detail}") from e
         except (OSError, URLError) as e:
+            if method.upper() == "POST":
+                raise PortfolioServiceOutcomeUnknown(
+                    "local service write outcome is unknown: the request may already have executed; "
+                    "direct fallback was not attempted. Do not blindly retry; inspect state first, "
+                    "or use --no-service only when intentionally bypassing the service."
+                ) from e
             raise PortfolioServiceUnavailable(str(e)) from e
 
         try:

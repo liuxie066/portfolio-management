@@ -6,7 +6,12 @@ from urllib.error import HTTPError, URLError
 
 import pytest
 import src.service.client as client_module
-from src.service.client import PortfolioServiceClient, PortfolioServiceResponseError, PortfolioServiceUnavailable
+from src.service.client import (
+    PortfolioServiceClient,
+    PortfolioServiceOutcomeUnknown,
+    PortfolioServiceResponseError,
+    PortfolioServiceUnavailable,
+)
 
 
 class FakeResponse:
@@ -272,6 +277,24 @@ def test_service_client_marks_unavailable_on_connection_error():
             raise AssertionError("expected PortfolioServiceUnavailable")
     finally:
         client_module.urlopen = old_urlopen
+
+
+def test_service_client_marks_post_transport_failure_outcome_unknown():
+    def fake_urlopen(_request, **_kwargs):
+        raise URLError("timed out")
+
+    old_urlopen = client_module.urlopen
+    try:
+        client_module.urlopen = fake_urlopen
+        client = PortfolioServiceClient(base_url="http://127.0.0.1:8765", timeout=0.1)
+        with pytest.raises(PortfolioServiceOutcomeUnknown, match="request may already have executed") as exc_info:
+            client.sync_futu_holdings(account="lx", dry_run=True, confirm=False)
+    finally:
+        client_module.urlopen = old_urlopen
+
+    assert not isinstance(exc_info.value, PortfolioServiceUnavailable)
+    assert "direct fallback was not attempted" in str(exc_info.value)
+    assert "Do not blindly retry" in str(exc_info.value)
 
 
 def test_service_client_raises_response_error_on_http_error():

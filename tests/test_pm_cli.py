@@ -234,6 +234,87 @@ def test_pm_require_service_fails_instead_of_fallback():
     assert calls == [("init", "http://local", 0.5), ("get_cash", "bob")]
 
 
+def test_pm_read_unavailable_falls_back_once():
+    import src.service.client as client_module
+    from src.service.client import PortfolioServiceUnavailable
+
+    calls = []
+
+    class FakeClient:
+        def __init__(self, base_url=None, timeout=0.5):
+            calls.append(("client", base_url, timeout))
+
+        def get_cash(self, *, account):
+            calls.append(("service", account))
+            raise PortfolioServiceUnavailable("down")
+
+    class FakePortfolioService:
+        def get_cash(self, *, account):
+            calls.append(("direct", account))
+            return {"success": True, "account": account, "source": "direct"}
+
+    old_client = client_module.PortfolioServiceClient
+    try:
+        client_module.PortfolioServiceClient = FakeClient
+        stdout = io.StringIO()
+        with _PortfolioServicePatch(FakePortfolioService), redirect_stdout(stdout):
+            assert pm.main(["cash", "--account", "bob", "--service-url", "http://local", "--json"]) == 0
+    finally:
+        client_module.PortfolioServiceClient = old_client
+
+    assert json.loads(stdout.getvalue())["source"] == "direct"
+    assert calls == [
+        ("client", "http://local", 0.5),
+        ("service", "bob"),
+        ("direct", "bob"),
+    ]
+
+
+def test_pm_write_unavailable_never_falls_back():
+    import src.service.client as client_module
+    from src.service.client import PortfolioServiceUnavailable
+
+    calls = []
+
+    class FakeClient:
+        def __init__(self, base_url=None, timeout=0.5):
+            calls.append(("client", base_url, timeout))
+
+        def sync_futu_holdings(self, **kwargs):
+            calls.append(("service", kwargs))
+            raise PortfolioServiceUnavailable("down")
+
+    class FakePortfolioService:
+        def sync_futu_holdings(self, **kwargs):
+            calls.append(("direct", kwargs))
+            return {"success": True, **kwargs}
+
+    old_client = client_module.PortfolioServiceClient
+    try:
+        client_module.PortfolioServiceClient = FakeClient
+        stdout = io.StringIO()
+        with _PortfolioServicePatch(FakePortfolioService), redirect_stdout(stdout):
+            assert pm.main(["futu", "sync", "--account", "lx", "--service-url", "http://local", "--json"]) == 1
+    finally:
+        client_module.PortfolioServiceClient = old_client
+
+    error = json.loads(stdout.getvalue())["error"]
+    assert "outcome is unknown" in error
+    assert "request may already have executed" in error
+    assert "direct fallback was not attempted" in error
+    assert "Do not blindly retry" in error
+    assert "--no-service" in error
+    assert calls == [
+        ("client", "http://local", 0.5),
+        ("service", {
+            "account": "lx",
+            "dry_run": True,
+            "confirm": False,
+            "allow_empty_stock_snapshot": False,
+        }),
+    ]
+
+
 def test_pm_init_nav_passes_account_and_write_flags():
     class FakePortfolioService:
         def init_nav_history(self, **kwargs):
