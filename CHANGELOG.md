@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.18 - 2026-07-19
+
+- Hardened financial writes with decimal-safe validation, idempotency, oversell prevention, durable compensation, and truthful partial-write reporting.
+- Corrected Futu synchronization to preserve broker-reported quantities and true `average_cost`, with safer installer credential handling and empty-snapshot guards.
+- Added recoverable NAV History write/repair state machines and tightened pricing, FX, deadline, cache-only, and market-time correctness.
+- Strengthened Feishu storage consistency and loopback service safety, including timeout-aware batching, schema validation, and explicit outcome-unknown handling.
+
 ## 0.1.17 - 2026-07-17
 
 - Added read-only MTD/YTD capital facts for per-account total-asset bridge analysis, including explicit period anchors, portfolio change, and cash-flow evidence.
