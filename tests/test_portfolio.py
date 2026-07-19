@@ -268,16 +268,17 @@ class TestPortfolioManagerSell:
         self.mock_fetcher.fetch.return_value = {'name': '未知资产'}
         self.mock_storage.add_transaction.return_value = Mock()
 
-        result = self.manager.sell(
-            tx_date=date(2025, 3, 14),
-            asset_id='UNKNOWN',
-            account='测试账户',
-            quantity=100,
-            price=10.0,
-            currency='CNY'
-        )
+        with pytest.raises(ValueError, match='未找到持仓'):
+            self.manager.sell(
+                tx_date=date(2025, 3, 14),
+                asset_id='UNKNOWN',
+                account='测试账户',
+                quantity=100,
+                price=10.0,
+                currency='CNY'
+            )
 
-        assert result is not None
+        self.mock_storage.add_transaction.assert_not_called()
 
     def test_sell_delete_zero_holding(self):
         """测试卖出后持仓为0时删除"""

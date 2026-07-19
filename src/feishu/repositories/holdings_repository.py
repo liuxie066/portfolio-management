@@ -504,10 +504,16 @@ class HoldingsRepository:
 
         holding = self.get_holding(asset_id, account, broker)
         if not holding or not holding.record_id:
-            return
+            raise ValueError(f"holding not found: asset_id={asset_id}, account={account}, broker={broker or ''}")
 
         is_cash_like = (holding.asset_type and holding.asset_type.value in ('cash', 'mmf'))
         new_quantity = self._quantize_money(holding.quantity + quantity_change) if is_cash_like else (holding.quantity + quantity_change)
+        if new_quantity < -1e-8:
+            raise ValueError(
+                f"holding quantity would become negative: asset_id={asset_id}, current={holding.quantity}, change={quantity_change}"
+            )
+        if abs(new_quantity) <= 1e-8:
+            new_quantity = 0.0
         now_str = bj_now_naive().strftime('%Y-%m-%d %H:%M:%S')
         update_fields = {
             'quantity': new_quantity,
@@ -522,6 +528,7 @@ class HoldingsRepository:
         holding.quantity = new_quantity
         holding.updated_at = datetime.strptime(now_str, DATETIME_FORMAT)
         self._put_holding_cache(holding)
+        return holding
 
     def delete_holding_if_zero(self, asset_id: str, account: str, broker: Optional[str] = None):
         """如果持仓为0则删除（容忍极小浮点残值）"""

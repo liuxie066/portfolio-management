@@ -8,8 +8,8 @@
 - Source review: `docs/reviews/repo-review-20260719-142425.md`
 - Artifact path: `docs/gateflow/repo-review-27/implementation-plan.md`
 - Status: `accepted`
-- Current gate: `accepted plan commit`
-- Next entry point: `accepted plan commit`
+- Current gate: `accepted slice commit`
+- Next entry point: `S2 implementation`
 
 
 ## Plan review decision

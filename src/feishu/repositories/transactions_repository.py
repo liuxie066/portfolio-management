@@ -6,6 +6,7 @@ from ...models import (
     Transaction, TransactionType, AssetType,
     make_tx_dedup_key, make_request_id, DATETIME_FORMAT,
 )
+from ...process_lock import process_lock
 
 
 class TransactionsRepository:
@@ -29,52 +30,49 @@ class TransactionsRepository:
         )
 
     def add_transaction(self, tx: Transaction) -> Transaction:
-        """添加交易记录（自动防止重复提交）
-
-        防重机制（按优先级）：
-        1. request_id: 调用方传入的幂等键
-        2. dedup_key: 内容指纹，自动生成
-        """
-        if not tx.request_id:
-            tx.request_id = make_request_id(prefix="tx")
+        """Add one transaction with same-host atomic idempotency."""
         if not tx.dedup_key:
+            # Compute content identity before assigning a random fallback request ID.
             tx.dedup_key = make_tx_dedup_key(tx)
 
-        # 1. request_id 幂等性检查
-        if tx.request_id:
-            existing = self._find_by_request_id(tx.request_id)
-            if existing:
-                print(f"[幂等性保护] 发现重复请求(request_id={tx.request_id})，跳过创建")
-                tx.record_id = existing.record_id
-                return tx
+        claim = tx.request_id or tx.dedup_key
+        lock_key = f"transactions:{tx.account}:{claim}"
+        with process_lock(lock_key):
+            if tx.request_id:
+                existing = self._find_by_request_id(tx.request_id)
+                if existing:
+                    print(f"[幂等性保护] 发现重复请求(request_id={tx.request_id})，跳过创建")
+                    existing.mark_replayed()
+                    return existing
 
-        # 2. dedup_key 内容指纹检查
-        if tx.dedup_key:
-            existing = self._find_by_dedup_key('transactions', tx.dedup_key)
-            if existing:
-                print(f"[防重保护] 发现相同内容交易(dedup_key={tx.dedup_key})，跳过创建")
-                tx.record_id = existing
-                return tx
+            if tx.dedup_key:
+                existing_record_id = self._find_by_dedup_key('transactions', tx.dedup_key)
+                if existing_record_id:
+                    print(f"[防重保护] 发现相同内容交易(dedup_key={tx.dedup_key})，跳过创建")
+                    existing = self.get_transaction(existing_record_id)
+                    if existing is None:
+                        raise RuntimeError(f"replayed transaction could not be loaded: record_id={existing_record_id}")
+                    existing.mark_replayed()
+                    return existing
 
-        fields = self._transaction_to_dict(tx)
-        feishu_fields = self._to_feishu_fields(fields, 'transactions')
+            if not tx.request_id:
+                tx.request_id = make_request_id(prefix="tx")
 
-        try:
-            result = self.client.create_record('transactions', feishu_fields)
-        except Exception as e:
-            if self._is_missing_field_error(e):
-                raise ValueError("Feishu transactions 表缺少 request_id/dedup_key 等幂等字段，已拒绝降级写入；请先补齐表字段") from e
-            raise
+            fields = self._transaction_to_dict(tx)
+            feishu_fields = self._to_feishu_fields(fields, 'transactions')
+            try:
+                result = self.client.create_record('transactions', feishu_fields)
+            except Exception as exc:
+                if self._is_missing_field_error(exc):
+                    raise ValueError(
+                        "Feishu transactions 表缺少 request_id/dedup_key 等幂等字段，已拒绝降级写入；请先补齐表字段"
+                    ) from exc
+                raise
 
-        tx.record_id = result['record_id']
-
-        # 写入防重缓存
-        if tx.request_id:
+            tx.record_id = result['record_id']
             self._request_id_cache[tx.request_id] = tx.record_id
-        if tx.dedup_key:
             self._dedup_key_cache[f"transactions:{tx.dedup_key}"] = tx.record_id
-
-        return tx
+            return tx
 
     def _find_by_request_id(self, request_id: str) -> Optional[Transaction]:
         """通过 request_id 查找交易记录（用于幂等性检查，带本地缓存）"""
@@ -103,7 +101,7 @@ class TransactionsRepository:
         except Exception as e:
             if self._is_missing_field_error(e):
                 raise ValueError("Feishu transactions 表缺少 request_id 字段，无法保证幂等性；请先补齐表字段") from e
-            print(f"[警告] 幂等性检查失败: {e}")
+            raise RuntimeError(f"transaction idempotency lookup failed for request_id={request_id}") from e
 
         return None
 
