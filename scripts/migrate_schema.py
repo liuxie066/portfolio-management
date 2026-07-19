@@ -23,9 +23,19 @@ DOCS_SCHEMA = REPO_ROOT / "docs" / "schema.md"
 @dataclass
 class TableSpec:
     name: str
-    required: set[str]
-    optional: set[str]
+    required: dict[str, frozenset[str]]
+    optional: dict[str, frozenset[str]]
     role: str = "core"
+
+
+FIELD_TYPE_IDS = {
+    "text": {1},
+    "number": {2},
+    "select": {3, 4},
+    "date": {5},
+    "datetime": {5},
+    "json-text": {1},
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,7 +47,11 @@ def parse_args() -> argparse.Namespace:
         default="expectations",
         help="schema action (default: expectations)",
     )
-    parser.add_argument("--strict", action="store_true", help="Exit non-zero when required live fields are missing.")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit non-zero when required live fields are missing or have incompatible types.",
+    )
     return parser.parse_args()
 
 
@@ -69,6 +83,10 @@ def schema_expectations() -> dict:
             "role": spec.role,
             "required": sorted(spec.required),
             "optional": sorted(spec.optional),
+            "field_types": {
+                field_name: sorted(accepted)
+                for field_name, accepted in sorted({**spec.required, **spec.optional}.items())
+            },
             "numeric_fields": numeric_fields.get(table_name, []),
         }
         for table_name, spec in specs.items()
@@ -76,8 +94,19 @@ def schema_expectations() -> dict:
     return {"success": True, "tables": expects}
 
 
+def _normalize_doc_type(raw_type: str) -> frozenset[str]:
+    accepted = []
+    for value in str(raw_type or "").lower().split("/"):
+        family = value.strip()
+        if family == "json":
+            family = "json-text"
+        if family:
+            accepted.append(family)
+    return frozenset(accepted)
+
+
 def parse_docs_schema(path: Path = DOCS_SCHEMA) -> dict[str, TableSpec]:
-    """Parse docs/schema.md into expected Feishu field names."""
+    """Parse docs/schema.md into expected Feishu field names and type families."""
     text = path.read_text(encoding="utf-8")
     tables: dict[str, TableSpec] = {}
     cur_table: str | None = None
@@ -88,7 +117,7 @@ def parse_docs_schema(path: Path = DOCS_SCHEMA) -> dict[str, TableSpec]:
         heading = heading_re.match(line.strip())
         if heading:
             cur_table = heading.group(1)
-            tables[cur_table] = TableSpec(name=cur_table, required=set(), optional=set())
+            tables[cur_table] = TableSpec(name=cur_table, required={}, optional={})
             mode = None
             continue
 
@@ -113,13 +142,53 @@ def parse_docs_schema(path: Path = DOCS_SCHEMA) -> dict[str, TableSpec]:
             mode = None
             continue
 
-        field = re.match(r"^-\s+`([^`]+)`", stripped)
+        field = re.match(r"^-\s+`([^`]+)`\s+\(([^)]+)\)", stripped)
         if field and mode in ("required", "optional"):
             field_name = field.group(1).strip()
             target = tables[cur_table].required if mode == "required" else tables[cur_table].optional
-            target.add(field_name)
+            target[field_name] = _normalize_doc_type(field.group(2))
 
     return tables
+
+
+def _live_field_matches(item: dict[str, Any], accepted: frozenset[str]) -> bool:
+    if not accepted:
+        return True
+    try:
+        type_id = int(item.get("type"))
+    except (TypeError, ValueError):
+        return False
+    ui_type = str(item.get("ui_type") or "").strip().lower()
+    for family in accepted:
+        if type_id not in FIELD_TYPE_IDS.get(family, set()):
+            continue
+        if family == "datetime" and ui_type != "datetime":
+            continue
+        return True
+    return False
+
+
+def _list_live_fields(client: FeishuClient, app_token: str, table_id: str) -> list[dict[str, Any]]:
+    endpoint = f"/bitable/v1/apps/{app_token}/tables/{table_id}/fields"
+    items: list[dict[str, Any]] = []
+    page_token: str | None = None
+    seen_tokens: set[str] = set()
+    while True:
+        params: dict[str, Any] = {"page_size": 200}
+        if page_token:
+            params["page_token"] = page_token
+        data = client._request("GET", endpoint, params=params)
+        page_items = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(page_items, list):
+            raise ValueError(f"invalid fields response: items={page_items!r}")
+        items.extend(item for item in page_items if isinstance(item, dict))
+        if not data.get("has_more"):
+            return items
+        next_token = str(data.get("page_token") or "").strip()
+        if not next_token or next_token in seen_tokens:
+            raise ValueError("invalid fields pagination: has_more without a new page_token")
+        seen_tokens.add(next_token)
+        page_token = next_token
 
 
 def run_schema_check(strict: bool = False) -> dict[str, Any]:
@@ -157,14 +226,37 @@ def run_schema_check(strict: bool = False) -> dict[str, Any]:
                 report["ok"] = False
             continue
 
-        endpoint = f"/bitable/v1/apps/{app_token}/tables/{table_id}/fields"
-        data = client._request("GET", endpoint, params={"page_size": 200})
-        items = data.get("items", [])
-        live_fields = {item.get("field_name") for item in items if item.get("field_name")}
+        items = _list_live_fields(client, app_token, table_id)
+        live_by_name = {
+            str(item.get("field_name")): item
+            for item in items
+            if item.get("field_name")
+        }
+        live_fields = set(live_by_name)
 
-        missing_required = sorted(spec.required - live_fields)
-        extra_fields = sorted(live_fields - (spec.required | spec.optional))
-        ok = len(missing_required) == 0
+        missing_required = sorted(set(spec.required) - live_fields)
+        extra_fields = sorted(live_fields - (set(spec.required) | set(spec.optional)))
+        required_type_mismatches = [
+            {
+                "field_name": field_name,
+                "expected": sorted(accepted),
+                "live_type": live_by_name[field_name].get("type"),
+                "live_ui_type": live_by_name[field_name].get("ui_type"),
+            }
+            for field_name, accepted in sorted(spec.required.items())
+            if field_name in live_by_name and not _live_field_matches(live_by_name[field_name], accepted)
+        ]
+        optional_type_mismatches = [
+            {
+                "field_name": field_name,
+                "expected": sorted(accepted),
+                "live_type": live_by_name[field_name].get("type"),
+                "live_ui_type": live_by_name[field_name].get("ui_type"),
+            }
+            for field_name, accepted in sorted(spec.optional.items())
+            if field_name in live_by_name and not _live_field_matches(live_by_name[field_name], accepted)
+        ]
+        ok = not missing_required and (not strict or not required_type_mismatches)
 
         report["tables"][table_name] = {
             "app_token": app_token,
@@ -176,6 +268,8 @@ def run_schema_check(strict: bool = False) -> dict[str, Any]:
             "live_fields": sorted(live_fields),
             "missing_required": missing_required,
             "extra_fields": extra_fields,
+            "required_type_mismatches": required_type_mismatches,
+            "optional_type_mismatches": optional_type_mismatches,
             "ok": ok,
         }
 

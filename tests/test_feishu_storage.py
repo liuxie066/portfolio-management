@@ -431,6 +431,19 @@ class TestFeishuStorageHoldingOperations:
 
         self.mock_client.delete_record.assert_called_once_with('holdings', 'rec_123')
 
+    def test_delete_holding_failure_keeps_cached_record(self):
+        self.mock_client.list_records.return_value = [{
+            'record_id': 'rec_123',
+            'fields': {'quantity': '0', 'currency': 'CNY'}
+        }]
+        self.mock_client.delete_record.side_effect = RuntimeError('delete timeout')
+
+        with pytest.raises(RuntimeError, match='delete timeout'):
+            self.storage.delete_holding_if_zero('000001', '测试账户')
+
+        cache_key = self.storage._get_holding_cache_key('000001', '测试账户', None)
+        assert self.storage._holding_fields_cache[cache_key]['record_id'] == 'rec_123'
+
     def test_delete_holding_by_record_id(self):
         """测试通过记录ID删除持仓"""
         self.mock_client.delete_record.return_value = True
@@ -938,7 +951,7 @@ class TestFeishuStorageCashFlowOperations:
                 },
             }
         ]
-        self.mock_client.batch_update_records.return_value = []
+        self.mock_client.batch_update_records.return_value = [{'record_id': 'cf_1', 'fields': {}}]
         self.storage._cash_flow_agg_loaded_accounts.add('测试账户')
         self.storage._cash_flow_agg_mem_cache['测试账户'] = {'cumulative': 1.0}
         self.storage._local_cash_flow_agg_cache.set_account('测试账户', {'cumulative': 1.0}, _flush=True)

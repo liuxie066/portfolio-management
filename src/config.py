@@ -45,6 +45,8 @@ ENV_MAP = {
     "feishu.app_id": "FEISHU_APP_ID",
     "feishu.app_secret": "FEISHU_APP_SECRET",
     "feishu.user_token": "FEISHU_USER_TOKEN",
+    "feishu.connect_timeout": "FEISHU_CONNECT_TIMEOUT",
+    "feishu.read_timeout": "FEISHU_READ_TIMEOUT",
     "feishu.receipt.app_id": "FEISHU_RECEIPT_APP_ID",
     "feishu.receipt.app_secret": "FEISHU_RECEIPT_APP_SECRET",
     "feishu.receipt.open_id": "FEISHU_RECEIPT_OPEN_ID",
@@ -84,6 +86,8 @@ OPERATOR_CONFIG_KEYS = (
     "feishu.app_id",
     "feishu.app_secret",
     "feishu.app_token",
+    "feishu.connect_timeout",
+    "feishu.read_timeout",
     "feishu.receipt.app_id",
     "feishu.receipt.app_secret",
     "feishu.receipt.open_id",
@@ -129,6 +133,8 @@ OPERATOR_DEFAULTS: Dict[str, Any] = {
     "futu.trd_env": "REAL",
     "futu.trd_market": "HK",
     "futu.cash_currency": "CNH",
+    "feishu.connect_timeout": 5.0,
+    "feishu.read_timeout": 30.0,
 }
 
 
@@ -344,6 +350,20 @@ def get_int(key: str, default: Optional[int] = None) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def get_float(key: str, default: Optional[float] = None) -> Optional[float]:
+    """获取浮点配置值；缺失、非有限或非正数时返回 default。"""
+    value = get(key)
+    if value is None:
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed <= 0 or parsed != parsed or parsed in (float("inf"), float("-inf")):
+        return default
+    return parsed
 
 
 # ========== 常用配置的便捷访问 ==========

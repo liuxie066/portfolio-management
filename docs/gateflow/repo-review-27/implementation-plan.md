@@ -9,7 +9,7 @@
 - Artifact path: `docs/gateflow/repo-review-27/implementation-plan.md`
 - Status: `accepted`
 - Current gate: `accepted slice commit`
-- Next entry point: `S6 implementation`
+- Next entry point: `S7 implementation`
 
 
 ## Plan review decision
@@ -427,6 +427,7 @@ PLANNED -> APPLYING -> COMPLETED
 - Completion signal: Feishu protocol ambiguity cannot be reported as full success and strict schema proves names, types, and pagination.
 - Residual risk classification: undocumented Feishu protocol evolution is `covered by strict failure and later deployment canary`.
 - Commit: `gateflow: accept repo-review-27 S6-feishu-boundary`
+- Completion: `complete`; implementation `docs/gateflow/repo-review-27/S6-implementation.md`, review `docs/reviews/code-review-20260719-191407.md`; validation `134 focused / 650 full`, compile and diff-check passed.
 
 ### S7 — Service timeout replay and ASGI loopback safety
 

@@ -469,9 +469,12 @@ class HoldingsRepository:
                 create_payloads.append({'fields': feishu_fields})
                 create_targets.append(new_holding)
 
+        updated_records: List[Dict[str, any]] = []
+        created_records: List[Dict[str, any]] = []
+
         if update_payloads:
             try:
-                self.client.batch_update_records('holdings', update_payloads)
+                updated_records = self.client.batch_update_records('holdings', update_payloads)
             except Exception:
                 for h in update_targets:
                     self._invalidate_holding_cache(h.asset_id, h.account, h.broker)
@@ -482,19 +485,17 @@ class HoldingsRepository:
 
         if create_payloads:
             created_records = self.client.batch_create_records('holdings', create_payloads)
-            for idx, h in enumerate(create_targets):
-                rec = created_records[idx] if idx < len(created_records) else {}
-                h.record_id = rec.get('record_id') or (rec.get('record') or {}).get('record_id')
-                if h.record_id:
-                    self._put_holding_cache(h)
+            for rec, h in zip(created_records, create_targets):
+                h.record_id = rec['record_id']
+                self._put_holding_cache(h)
 
         if update_payloads or create_payloads:
             self._flush_persistent_holdings_index()
 
         return {
             'mode': mode,
-            'updated': len(update_payloads),
-            'created': len(create_payloads),
+            'updated': len(updated_records),
+            'created': len(created_records),
             'preloaded_accounts': preloaded_accounts,
         }
 
@@ -534,7 +535,8 @@ class HoldingsRepository:
         """如果持仓为0则删除（容忍极小浮点残值）"""
         holding = self.get_holding(asset_id, account, broker)
         if holding and holding.record_id and abs(holding.quantity) <= 1e-8:
-            self.client.delete_record('holdings', holding.record_id)
+            if not self.client.delete_record('holdings', holding.record_id):
+                raise RuntimeError(f"Feishu holding delete was not confirmed: record_id={holding.record_id}")
             self._invalidate_holding_cache(asset_id, account, broker, flush_persistent=True)
 
     def delete_holding_by_record_id(self, record_id: str) -> bool:

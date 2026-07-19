@@ -408,8 +408,8 @@ class CashFlowRepository:
 
         updated_count = 0
         if not dry_run and update_payloads:
-            self.client.batch_update_records('cash_flow', update_payloads)
-            updated_count = len(update_payloads)
+            updated_records = self.client.batch_update_records('cash_flow', update_payloads)
+            updated_count = len(updated_records)
             self._invalidate_cash_flow_agg_cache(affected_accounts)
 
         return {

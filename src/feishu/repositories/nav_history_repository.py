@@ -532,12 +532,14 @@ class NavHistoryRepository:
                                 previews.append({'account': account, 'date': ds, 'existing': False, 'fields': feishu_fields})
 
                     if not dry_run:
+                        updated_records: List[Dict[str, Any]] = []
+                        created_records: List[Dict[str, Any]] = []
                         if update_payloads:
                             try:
-                                self.client.batch_update_records('nav_history', update_payloads)
+                                updated_records = self.client.batch_update_records('nav_history', update_payloads)
                             except Exception as e:
                                 msg = str(e)
-                                if 'FieldNameNotFound' not in msg:
+                                if 'FieldNameNotFound' not in msg or getattr(e, 'confirmed_results', None):
                                     raise
                                 fallback_updates = []
                                 fallback_rows = []
@@ -548,32 +550,29 @@ class NavHistoryRepository:
                                     r = dict(row)
                                     r['updated_at'] = f.get('updated_at')
                                     fallback_rows.append(r)
-                                self.client.batch_update_records('nav_history', fallback_updates)
+                                updated_records = self.client.batch_update_records('nav_history', fallback_updates)
                                 update_rows_for_cache = fallback_rows
 
                         if create_payloads:
                             try:
-                                created = self.client.batch_create_records('nav_history', create_payloads)
+                                created_records = self.client.batch_create_records('nav_history', create_payloads)
                             except Exception as e:
                                 msg = str(e)
-                                if 'FieldNameNotFound' not in msg:
+                                if 'FieldNameNotFound' not in msg or getattr(e, 'confirmed_results', None):
                                     raise
                                 fallback_creates = []
                                 for p in create_payloads:
                                     f = dict((p.get('fields') or {}))
                                     f.pop('details', None)
                                     fallback_creates.append({'fields': f})
-                                created = self.client.batch_create_records('nav_history', fallback_creates)
+                                created_records = self.client.batch_create_records('nav_history', fallback_creates)
                                 for i, p in enumerate(fallback_creates):
                                     if i < len(create_rows_for_cache):
                                         create_rows_for_cache[i]['updated_at'] = (p.get('fields') or {}).get('updated_at')
 
-                            for i, nav in enumerate(created_navs):
-                                rec = created[i] if i < len(created) else {}
-                                rid = rec.get('record_id') or ((rec.get('record') or {}).get('record_id') if isinstance(rec, dict) else None)
-                                nav.record_id = rid
-                                if i < len(create_rows_for_cache):
-                                    create_rows_for_cache[i]['record_id'] = rid
+                            for rec, nav, cache_row in zip(created_records, created_navs, create_rows_for_cache):
+                                nav.record_id = rec['record_id']
+                                cache_row['record_id'] = rec['record_id']
 
                         all_rows = []
                         all_rows.extend(update_rows_for_cache)
@@ -581,8 +580,11 @@ class NavHistoryRepository:
                         if all_rows:
                             self._apply_nav_rows_to_local_cache(account, all_rows)
 
-                    updated_n = len(update_payloads)
-                    created_n = len(create_payloads)
+                        updated_n = len(updated_records)
+                        created_n = len(created_records)
+                    else:
+                        updated_n = len(update_payloads)
+                        created_n = len(create_payloads)
                 else:
                     account_rows_for_cache: List[Dict[str, Any]] = []
                     updated_n = 0
