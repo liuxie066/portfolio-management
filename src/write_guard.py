@@ -27,9 +27,10 @@ def _d(x) -> Optional[Decimal]:
     if x is None:
         return None
     try:
-        return Decimal(str(x))
+        value = Decimal(str(x))
     except Exception:
         return None
+    return value if value.is_finite() else None
 
 
 def validate_and_normalize_trade_input(
@@ -57,11 +58,13 @@ def validate_and_normalize_trade_input(
         errors.append(ValidationError('price', 'must be > 0'))
 
     f = _d(fee)
-    if f is None:
+    if fee is None:
         if allow_fee_default_zero:
             f = Decimal('0')
         else:
             errors.append(ValidationError('fee', 'required'))
+    elif f is None:
+        errors.append(ValidationError('fee', 'must be finite'))
     elif f < 0:
         errors.append(ValidationError('fee', 'must be >= 0'))
 
@@ -84,6 +87,42 @@ def validate_and_normalize_trade_input(
             'fee': float(f),
             'amount': float(amount),
         }
+    }
+
+
+def validate_and_normalize_cash_flow_input(
+    *,
+    amount,
+    cny_amount=None,
+    exchange_rate=None,
+) -> Dict[str, Any]:
+    """Validate a caller-facing positive cash-flow amount and optional FX fields."""
+    errors: List[ValidationError] = []
+    normalized: Dict[str, Optional[Decimal]] = {}
+
+    for field, raw, required_positive in (
+        ("amount", amount, True),
+        ("cny_amount", cny_amount, False),
+        ("exchange_rate", exchange_rate, False),
+    ):
+        value = _d(raw)
+        if raw is None and not required_positive:
+            normalized[field] = None
+            continue
+        if value is None:
+            errors.append(ValidationError(field, "must be finite"))
+        elif value <= 0:
+            errors.append(ValidationError(field, "must be > 0"))
+        else:
+            normalized[field] = value
+
+    if errors:
+        return {"ok": False, "errors": [e.__dict__ for e in errors], "normalized": None}
+
+    return {
+        "ok": True,
+        "errors": [],
+        "normalized": {key: (float(value) if value is not None else None) for key, value in normalized.items()},
     }
 
 

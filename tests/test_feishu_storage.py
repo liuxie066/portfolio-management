@@ -431,6 +431,19 @@ class TestFeishuStorageHoldingOperations:
 
         self.mock_client.delete_record.assert_called_once_with('holdings', 'rec_123')
 
+    def test_delete_holding_failure_keeps_cached_record(self):
+        self.mock_client.list_records.return_value = [{
+            'record_id': 'rec_123',
+            'fields': {'quantity': '0', 'currency': 'CNY'}
+        }]
+        self.mock_client.delete_record.side_effect = RuntimeError('delete timeout')
+
+        with pytest.raises(RuntimeError, match='delete timeout'):
+            self.storage.delete_holding_if_zero('000001', '测试账户')
+
+        cache_key = self.storage._get_holding_cache_key('000001', '测试账户', None)
+        assert self.storage._holding_fields_cache[cache_key]['record_id'] == 'rec_123'
+
     def test_delete_holding_by_record_id(self):
         """测试通过记录ID删除持仓"""
         self.mock_client.delete_record.return_value = True
@@ -476,7 +489,16 @@ class TestFeishuStorageTransactionOperations:
         # 模拟已存在相同request_id的记录
         self.mock_client.list_records.return_value = [{
             'record_id': 'existing_tx',
-            'fields': {'request_id': 'req_123', 'asset_id': '000001'}
+            'fields': {
+                'request_id': 'req_123',
+                'tx_date': '2025-03-14',
+                'tx_type': 'BUY',
+                'asset_id': '000001',
+                'account': '测试账户',
+                'quantity': 1000,
+                'price': 10.5,
+                'currency': 'CNY',
+            }
         }]
 
         tx = Transaction(
@@ -494,6 +516,67 @@ class TestFeishuStorageTransactionOperations:
 
         assert result.record_id == 'existing_tx'
         self.mock_client.create_record.assert_not_called()
+
+    def test_add_transaction_fails_closed_when_request_id_lookup_errors(self):
+        tx = Transaction(
+            tx_date=date(2025, 3, 14),
+            tx_type=TransactionType.BUY,
+            asset_id='000001',
+            account='测试账户',
+            quantity=1000,
+            price=10.5,
+            currency='CNY',
+            request_id='req_123'
+        )
+        self.mock_client.list_records.side_effect = RuntimeError('temporary Feishu failure')
+
+        with pytest.raises(RuntimeError, match='idempotency lookup failed'):
+            self.storage.add_transaction(tx)
+
+        self.mock_client.create_record.assert_not_called()
+
+    def test_default_content_dedup_replays_but_distinct_request_ids_create_split_trades(self):
+        self.mock_client.list_records.return_value = []
+        self.mock_client.create_record.side_effect = [
+            {'record_id': 'tx-1', 'fields': {}},
+            {'record_id': 'tx-2', 'fields': {}},
+            {'record_id': 'tx-3', 'fields': {}},
+        ]
+        self.mock_client.get_record_strict.return_value = {
+            'record_id': 'tx-1',
+            'fields': {
+                'tx_date': '2025-03-14',
+                'tx_type': 'BUY',
+                'asset_id': '000001',
+                'account': '测试账户',
+                'quantity': 1000,
+                'price': 10.5,
+                'currency': 'CNY',
+            },
+        }
+
+        def transaction(request_id=None):
+            return Transaction(
+                tx_date=date(2025, 3, 14),
+                tx_type=TransactionType.BUY,
+                asset_id='000001',
+                account='测试账户',
+                quantity=1000,
+                price=10.5,
+                currency='CNY',
+                request_id=request_id,
+            )
+
+        first = self.storage.add_transaction(transaction())
+        replay = self.storage.add_transaction(transaction())
+        split_one = self.storage.add_transaction(transaction('split-1'))
+        split_two = self.storage.add_transaction(transaction('split-2'))
+
+        assert first.record_id == 'tx-1'
+        assert replay.record_id == 'tx-1'
+        assert replay.was_replayed is True
+        assert {split_one.record_id, split_two.record_id} == {'tx-2', 'tx-3'}
+        assert self.mock_client.create_record.call_count == 3
 
     def test_add_transaction_raises_when_idempotency_fields_missing(self):
         tx = Transaction(
@@ -868,7 +951,7 @@ class TestFeishuStorageCashFlowOperations:
                 },
             }
         ]
-        self.mock_client.batch_update_records.return_value = []
+        self.mock_client.batch_update_records.return_value = [{'record_id': 'cf_1', 'fields': {}}]
         self.storage._cash_flow_agg_loaded_accounts.add('测试账户')
         self.storage._cash_flow_agg_mem_cache['测试账户'] = {'cumulative': 1.0}
         self.storage._local_cash_flow_agg_cache.set_account('测试账户', {'cumulative': 1.0}, _flush=True)
@@ -1140,3 +1223,119 @@ class TestFeishuStoragePriceOperations:
 
         assert len(prices) == 1
         assert prices[0].asset_id == '000001'
+
+
+def test_transaction_replay_marker_is_runtime_only():
+    client = Mock()
+    storage = FeishuStorage(client=client)
+    client.list_records.return_value = [{
+        "record_id": "tx-existing",
+        "fields": {
+            "request_id": "req-1",
+            "dedup_key": "dedup-1",
+            "tx_date": "2025-03-14",
+            "tx_type": "BUY",
+            "asset_id": "000001",
+            "account": "a",
+            "quantity": 1,
+            "price": 10,
+            "currency": "CNY",
+        },
+    }]
+    tx = Transaction(
+        tx_date=date(2025, 3, 14),
+        tx_type=TransactionType.BUY,
+        asset_id="000001",
+        account="a",
+        quantity=99,
+        price=10,
+        currency="CNY",
+        request_id="req-1",
+    )
+
+    result = storage.add_transaction(tx)
+
+    assert result.was_replayed is True
+    assert result.quantity == 1
+    assert "was_replayed" not in result.model_dump()
+    assert "_was_replayed" not in result.model_dump()
+    client.create_record.assert_not_called()
+
+
+def test_cash_flow_replay_marker_is_runtime_only():
+    client = Mock()
+    storage = FeishuStorage(client=client)
+    client.list_records.return_value = [{"record_id": "cf-existing", "fields": {}}]
+    client.get_record_strict.return_value = {
+        "record_id": "cf-existing",
+        "fields": {
+            "flow_date": "2025-03-14",
+            "account": "a",
+            "amount": 100,
+            "currency": "CNY",
+            "cny_amount": 100,
+            "flow_type": "DEPOSIT",
+        },
+    }
+    cf = CashFlow(
+        flow_date=date(2025, 3, 14),
+        account="a",
+        amount=100,
+        currency="CNY",
+        cny_amount=100,
+        flow_type="DEPOSIT",
+    )
+
+    result = storage.add_cash_flow(cf)
+
+    assert result.was_replayed is True
+    assert "was_replayed" not in result.model_dump()
+    assert "_was_replayed" not in result.model_dump()
+    client.create_record.assert_not_called()
+
+
+def test_transaction_same_host_concurrent_check_create_is_serialized():
+    from concurrent.futures import ThreadPoolExecutor
+    import time
+
+    client = Mock()
+    storage = FeishuStorage(client=client)
+    client.list_records.return_value = []
+    client.get_record_strict.return_value = {
+        "record_id": "tx-created",
+        "fields": {
+            "request_id": "same-request",
+            "dedup_key": "same-dedup",
+            "tx_date": "2025-03-14",
+            "tx_type": "BUY",
+            "asset_id": "000001",
+            "account": "a",
+            "quantity": 1,
+            "price": 10,
+            "currency": "CNY",
+        },
+    }
+
+    def create(_table, _fields):
+        time.sleep(0.05)
+        return {"record_id": "tx-created", "fields": {}}
+
+    client.create_record.side_effect = create
+
+    def submit():
+        return storage.add_transaction(Transaction(
+            tx_date=date(2025, 3, 14),
+            tx_type=TransactionType.BUY,
+            asset_id="000001",
+            account="a",
+            quantity=1,
+            price=10,
+            currency="CNY",
+            request_id="same-request",
+        ))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: submit(), range(2)))
+
+    assert client.create_record.call_count == 1
+    assert sorted(result.was_replayed for result in results) == [False, True]

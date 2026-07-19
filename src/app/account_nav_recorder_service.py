@@ -24,13 +24,17 @@ def _coerce_date(value: Any) -> date:
 
 def _snapshot_failure(nav_record: Any) -> Optional[Dict[str, Any]]:
     details = getattr(nav_record, "details", None) or {}
-    snapshot_error = details.get("snapshot_error")
-    if not snapshot_error:
+    failed = details.get("snapshot_persisted") is False or details.get("snapshot_status") == "failed"
+    if not failed:
         return None
+    snapshot_error = details.get("snapshot_error") or "holdings_snapshot recovery required"
     return {
         "snapshot_status": details.get("snapshot_status") or "failed",
-        "snapshot_persisted": bool(details.get("snapshot_persisted")),
+        "snapshot_persisted": False,
         "snapshot_error": snapshot_error,
+        "error": snapshot_error,
+        "task_id": details.get("snapshot_task_id"),
+        "retry_command": details.get("snapshot_retry_command"),
     }
 
 

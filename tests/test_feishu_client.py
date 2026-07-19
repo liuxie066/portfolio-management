@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch, MagicMock
 import json
 import os
 
-from src.feishu_client import FeishuClient
+from src.feishu_client import FeishuBatchWriteError, FeishuClient
 
 
 class TestFeishuClientInitialization:
@@ -87,6 +87,7 @@ class TestFeishuClientToken:
 
         assert token == 'test_token_123'
         assert client._tenant_token == 'test_token_123'
+        assert mock_post.call_args.kwargs['timeout'] == (5.0, 30.0)
 
     @patch('src.feishu_client.requests.post')
     def test_get_tenant_token_failure(self, mock_post):
@@ -175,6 +176,35 @@ class TestFeishuClientRequest:
         result = client._request('POST', '/test/endpoint', json={'test': 'data'})
 
         assert result == {'records': [{'record_id': 'rec123'}]}
+        assert mock_request.call_args.kwargs['timeout'] == (5.0, 30.0)
+
+    @patch('src.feishu_client.requests.Session.request')
+    @patch('src.feishu_client.FeishuClient._get_headers')
+    def test_request_preserves_smaller_caller_timeout(self, mock_headers, mock_request):
+        mock_headers.return_value = {'Authorization': 'Bearer token'}
+        response = Mock(status_code=200)
+        response.raise_for_status = Mock()
+        response.json.return_value = {'code': 0, 'data': {}}
+        mock_request.return_value = response
+
+        client = FeishuClient(app_id='test', app_secret='test')
+        client._request('GET', '/test/endpoint', timeout=(1.0, 2.0))
+
+        assert mock_request.call_args.kwargs['timeout'] == (1.0, 2.0)
+
+    @patch('src.feishu_client.requests.Session.request')
+    @patch('src.feishu_client.FeishuClient._get_headers')
+    def test_request_clamps_larger_caller_timeout(self, mock_headers, mock_request):
+        mock_headers.return_value = {'Authorization': 'Bearer token'}
+        response = Mock(status_code=200)
+        response.raise_for_status = Mock()
+        response.json.return_value = {'code': 0, 'data': {}}
+        mock_request.return_value = response
+
+        client = FeishuClient(app_id='test', app_secret='test')
+        client._request('GET', '/test/endpoint', timeout=(60.0, 60.0))
+
+        assert mock_request.call_args.kwargs['timeout'] == (5.0, 30.0)
 
     @patch('src.feishu_client.requests.Session.request')
     @patch('src.feishu_client.FeishuClient._get_headers')
@@ -396,9 +426,8 @@ class TestFeishuClientRecords:
         mock_request.side_effect = Exception('Record not found')
 
         client = FeishuClient(app_id='test', app_secret='test')
-        result = client.delete_record('holdings', 'invalid_rec')
-
-        assert result == False
+        with pytest.raises(Exception, match='Record not found'):
+            client.delete_record('holdings', 'invalid_rec')
 
     @patch('src.feishu_client.FeishuClient._request')
     @patch('src.feishu_client.FeishuClient._get_table_config')
@@ -485,17 +514,87 @@ class TestFeishuClientBatchOperations:
 
     @patch('src.feishu_client.FeishuClient._request')
     @patch('src.feishu_client.FeishuClient._get_table_config')
+    def test_batch_update_maps_response_by_record_id(self, mock_config, mock_request):
+        mock_config.return_value = ('app_token', 'table_id')
+        mock_request.return_value = {
+            'records': [
+                {'record_id': 'rec2', 'fields': {'quantity': 300}},
+                {'record_id': 'rec1', 'fields': {'quantity': 200}},
+            ]
+        }
+        client = FeishuClient(app_id='test', app_secret='test')
+
+        results = client.batch_update_records('holdings', [
+            {'record_id': 'rec1', 'fields': {'quantity': 200}},
+            {'record_id': 'rec2', 'fields': {'quantity': 300}},
+        ])
+
+        assert [record['record_id'] for record in results] == ['rec1', 'rec2']
+
+    @patch('src.feishu_client.FeishuClient._request')
+    @patch('src.feishu_client.FeishuClient._get_table_config')
+    def test_batch_update_rejects_duplicate_ids_before_request(self, mock_config, mock_request):
+        mock_config.return_value = ('app_token', 'table_id')
+        client = FeishuClient(app_id='test', app_secret='test')
+
+        with pytest.raises(ValueError, match='unique non-empty'):
+            client.batch_update_records('holdings', [
+                {'record_id': 'rec1', 'fields': {'quantity': 1}},
+                {'record_id': 'rec1', 'fields': {'quantity': 2}},
+            ])
+
+        mock_request.assert_not_called()
+
+    @pytest.mark.parametrize('data', [
+        {},
+        {'records': []},
+        {'records': [{'fields': {}}]},
+        {'records': [{'record_id': 'rec1'}, {'record_id': 'rec2'}]},
+    ])
+    @patch('src.feishu_client.FeishuClient._request')
+    @patch('src.feishu_client.FeishuClient._get_table_config')
+    def test_batch_create_rejects_malformed_response(self, mock_config, mock_request, data):
+        mock_config.return_value = ('app_token', 'table_id')
+        mock_request.return_value = data
+        client = FeishuClient(app_id='test', app_secret='test')
+
+        with pytest.raises(FeishuBatchWriteError) as exc_info:
+            client.batch_create_records('holdings', [{'fields': {'asset_id': '000001'}}])
+
+        assert exc_info.value.operation == 'create'
+        assert exc_info.value.table_name == 'holdings'
+        assert exc_info.value.chunk_offset == 0
+        assert exc_info.value.confirmed_results == []
+
+    @patch('src.feishu_client.FeishuClient._request')
+    @patch('src.feishu_client.FeishuClient._get_table_config')
+    def test_batch_create_reports_confirmed_prior_chunks(self, mock_config, mock_request):
+        mock_config.return_value = ('app_token', 'table_id')
+        first_chunk = {'records': [{'record_id': f'rec_{i}'} for i in range(500)]}
+        mock_request.side_effect = [first_chunk, TimeoutError('read timeout')]
+        client = FeishuClient(app_id='test', app_secret='test')
+        records = [{'fields': {'asset_id': str(i)}} for i in range(501)]
+
+        with pytest.raises(FeishuBatchWriteError) as exc_info:
+            client.batch_create_records('holdings', records)
+
+        assert exc_info.value.chunk_offset == 500
+        assert len(exc_info.value.confirmed_results) == 500
+        assert 'read timeout' in str(exc_info.value)
+
+    @patch('src.feishu_client.FeishuClient._request')
+    @patch('src.feishu_client.FeishuClient._get_table_config')
     def test_batch_delete_records(self, mock_config, mock_request):
         """测试批量删除记录"""
         mock_config.return_value = ('app_token', 'table_id')
         mock_request.return_value = {
-            'records': ['rec1', 'rec2']
+            'records': ['rec1', 'rec2', 'rec3']
         }
 
         client = FeishuClient(app_id='test', app_secret='test')
         deleted_count = client.batch_delete_records('holdings', ['rec1', 'rec2', 'rec3'])
 
-        assert deleted_count == 2
+        assert deleted_count == 3
 
     @patch('src.feishu_client.FeishuClient._request')
     @patch('src.feishu_client.FeishuClient._get_table_config')
@@ -506,6 +605,16 @@ class TestFeishuClientBatchOperations:
 
         assert deleted_count == 0
         mock_request.assert_not_called()
+
+    @patch('src.feishu_client.FeishuClient._request')
+    @patch('src.feishu_client.FeishuClient._get_table_config')
+    def test_batch_delete_rejects_wrong_record_mapping(self, mock_config, mock_request):
+        mock_config.return_value = ('app_token', 'table_id')
+        mock_request.return_value = {'records': ['rec1', 'wrong']}
+        client = FeishuClient(app_id='test', app_secret='test')
+
+        with pytest.raises(FeishuBatchWriteError, match='do not match request IDs'):
+            client.batch_delete_records('holdings', ['rec1', 'rec2'])
 
 
 class TestFeishuClientRateLimit:

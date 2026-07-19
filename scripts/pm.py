@@ -255,9 +255,13 @@ def _print_daily_job(payload):
         print(f"  - {account}: {status}{suffix}")
 
 
-def _service_or_fallback(args, service_call, fallback_call):
+def _service_or_fallback(args, service_call, fallback_call, *, allow_fallback):
     if not bool(getattr(args, "no_service", False)):
-        from src.service.client import PortfolioServiceClient, PortfolioServiceUnavailable
+        from src.service.client import (
+            PortfolioServiceClient,
+            PortfolioServiceOutcomeUnknown,
+            PortfolioServiceUnavailable,
+        )
 
         try:
             client = PortfolioServiceClient(
@@ -265,10 +269,15 @@ def _service_or_fallback(args, service_call, fallback_call):
                 timeout=float(getattr(args, "service_timeout", 0.5)),
             )
             return _call_backend(args, lambda: service_call(client))
-        except PortfolioServiceUnavailable:
+        except PortfolioServiceUnavailable as exc:
+            if not allow_fallback:
+                raise PortfolioServiceOutcomeUnknown(
+                    "local service write outcome is unknown: the request may already have executed; "
+                    "direct fallback was not attempted. Do not blindly retry; inspect state first, "
+                    "or use --no-service only when intentionally bypassing the service."
+                ) from exc
             if bool(getattr(args, "require_service", False)):
                 raise SystemExit("local service is unavailable and --require-service was set")
-            pass
     return _call_backend(args, fallback_call)
 
 
@@ -323,7 +332,7 @@ def cmd_holdings(args):
 
         return PortfolioService().get_holdings(include_price=bool(args.include_price), account=args.account)
 
-    res = _service_or_fallback(args, via_service, direct)
+    res = _service_or_fallback(args, via_service, direct, allow_fallback=True)
     _dump(res, args.json)
     return res
 
@@ -337,7 +346,7 @@ def cmd_cash(args):
 
         return PortfolioService().get_cash(account=args.account)
 
-    res = _service_or_fallback(args, via_service, direct)
+    res = _service_or_fallback(args, via_service, direct, allow_fallback=True)
     _dump(res, args.json)
     return res
 
@@ -363,7 +372,7 @@ def cmd_futu_sync(args):
 
         return PortfolioService().sync_futu_holdings(**kwargs)
 
-    result = _service_or_fallback(args, via_service, direct)
+    result = _service_or_fallback(args, via_service, direct, allow_fallback=False)
     _dump(result, args.json)
     return result
 
@@ -386,6 +395,28 @@ def cmd_cash_flow_reconcile(args):
     return res
 
 
+def cmd_compensation_list(args):
+    from src.app.compensation_service import CompensationService
+
+    tasks = CompensationService().list_tasks(include_resolved=bool(args.include_resolved))
+    result = {"success": True, "count": len(tasks), "tasks": tasks}
+    _dump(result, args.json)
+    return result
+
+
+def cmd_compensation_retry(args):
+    if not bool(args.confirm):
+        raise SystemExit("compensation retry requires --confirm")
+    from src.service.application import PortfolioService
+
+    result = _call_backend(
+        args,
+        lambda: PortfolioService().portfolio.compensation.retry(args.task_id, confirm=True),
+    )
+    _dump(result, args.json)
+    return result
+
+
 def cmd_accounts(args):
     def via_service(client):
         return client.list_accounts(include_default=not bool(args.exclude_default))
@@ -395,7 +426,7 @@ def cmd_accounts(args):
 
         return PortfolioService().list_accounts(include_default=not bool(args.exclude_default))
 
-    res = _service_or_fallback(args, via_service, direct)
+    res = _service_or_fallback(args, via_service, direct, allow_fallback=True)
     _dump(res, args.json)
     return res
 
@@ -417,7 +448,7 @@ def cmd_overview(args):
             include_details=bool(args.details),
         )
 
-    res = _service_or_fallback(args, via_service, direct)
+    res = _service_or_fallback(args, via_service, direct, allow_fallback=True)
     _dump(res, args.json)
     return res
 
@@ -431,7 +462,7 @@ def cmd_nav(args):
 
         return PortfolioService().get_nav(account=args.account, days=int(getattr(args, "days", 30)))
 
-    res = _service_or_fallback(args, via_service, direct)
+    res = _service_or_fallback(args, via_service, direct, allow_fallback=True)
     _dump(res, args.json)
     return res
 
@@ -472,7 +503,7 @@ def cmd_nav_record(args):
             kwargs["run_id"] = args.run_id
         return PortfolioService().record_nav(**kwargs)
 
-    res = _service_or_fallback(args, via_service, direct)
+    res = _service_or_fallback(args, via_service, direct, allow_fallback=False)
     _dump(res, args.json)
     return res
 
@@ -511,7 +542,7 @@ def cmd_positions_distribution(args):
             kwargs["account"] = args.account
         return PortfolioService().get_distribution(**kwargs)
 
-    res = _service_or_fallback(args, via_service, direct)
+    res = _service_or_fallback(args, via_service, direct, allow_fallback=True)
     _emit_distribution(res, args.json)
     return res
 
@@ -556,7 +587,9 @@ def cmd_daily(args):
             bundle_kwargs["run_id"] = args.run_id
         return _daily_parts_from_bundle(PortfolioService().daily_report_bundle(**bundle_kwargs))
 
-    nav_result, distribution_result = _service_or_fallback(args, via_service, direct)
+    nav_result, distribution_result = _service_or_fallback(
+        args, via_service, direct, allow_fallback=False
+    )
     success = bool(nav_result.get("success")) and bool(distribution_result.get("success"))
     payload = {
         "success": success,
@@ -606,7 +639,7 @@ def cmd_daily_job(args):
 
         return PortfolioService().daily_nav_job(**job_kwargs())
 
-    res = _service_or_fallback(args, via_service, direct)
+    res = _service_or_fallback(args, via_service, direct, allow_fallback=False)
     if args.json:
         _dump(res, True)
     else:
@@ -623,7 +656,7 @@ def cmd_nav_duplicates(args):
 
         return PortfolioService().audit_nav_history_duplicates(account=getattr(args, "account", None))
 
-    res = _service_or_fallback(args, via_service, direct)
+    res = _service_or_fallback(args, via_service, direct, allow_fallback=True)
     _dump(res, args.json)
     return res
 
@@ -670,7 +703,7 @@ def cmd_report(args):
             price_timeout=args.timeout,
         )
 
-    res = _service_or_fallback(args, via_service, direct)
+    res = _service_or_fallback(args, via_service, direct, allow_fallback=True)
     if isinstance(res, dict):
         res.setdefault("preview_only", True)
         res.setdefault("canonical_entrypoint", "scripts/publish_daily_report.py")
@@ -704,7 +737,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true", help="output JSON")
     p.add_argument("--account", default=None, help="account to operate on; defaults to config/PORTFOLIO_ACCOUNT")
     p.add_argument("--service-url", default=None, help="local service URL; defaults to config/PORTFOLIO_SERVICE_URL")
-    p.add_argument("--service-timeout", type=float, default=0.5, help="local service timeout seconds before fallback")
+    p.add_argument("--service-timeout", type=float, default=0.5, help="local service timeout seconds before read fallback or write failure")
     p.add_argument("--no-service", action="store_true", help="bypass local service and call the direct local fallback")
     p.add_argument("--require-service", action="store_true", help="fail instead of falling back when local service is unavailable")
     p.add_argument("--debug-internal", action="store_true", help="Do not suppress internal stdout prints (debug only).")
@@ -716,7 +749,7 @@ def build_parser() -> argparse.ArgumentParser:
     # to each subparser.
     def add_service_args(subparser):
         subparser.add_argument("--service-url", default=argparse.SUPPRESS, help="local service URL")
-        subparser.add_argument("--service-timeout", type=float, default=argparse.SUPPRESS, help="local service timeout seconds before fallback")
+        subparser.add_argument("--service-timeout", type=float, default=argparse.SUPPRESS, help="local service timeout seconds before read fallback or write failure")
         subparser.add_argument("--no-service", action="store_true", default=argparse.SUPPRESS, help="bypass local service and call the direct local fallback")
         subparser.add_argument("--require-service", action="store_true", default=argparse.SUPPRESS, help="fail instead of falling back when local service is unavailable")
 
@@ -808,6 +841,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_cash_flow_reconcile.add_argument("--confirm", action="store_true", help="required with --apply")
     p_cash_flow_reconcile.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
     p_cash_flow_reconcile.set_defaults(func=cmd_cash_flow_reconcile)
+
+    p_compensation = sp.add_parser("compensation", help="inspect and retry durable compensation tasks")
+    compensation_sub = p_compensation.add_subparsers(dest="compensation_cmd", required=True)
+    p_compensation_list = compensation_sub.add_parser("list", help="list unresolved compensation tasks")
+    p_compensation_list.add_argument("--include-resolved", action="store_true", help="include resolved tasks")
+    p_compensation_list.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
+    p_compensation_list.set_defaults(func=cmd_compensation_list)
+    p_compensation_retry = compensation_sub.add_parser("retry", help="retry one supported compensation task")
+    p_compensation_retry.add_argument("--task-id", required=True, help="compensation task id")
+    p_compensation_retry.add_argument("--confirm", action="store_true", help="required to apply target writes")
+    p_compensation_retry.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
+    p_compensation_retry.set_defaults(func=cmd_compensation_retry)
 
     p_accounts = sp.add_parser("accounts", help="list discovered accounts")
     p_accounts.add_argument("--exclude-default", action="store_true", help="do not include the configured default account when it has no data")

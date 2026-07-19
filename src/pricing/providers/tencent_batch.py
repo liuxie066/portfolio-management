@@ -7,6 +7,7 @@ from src.asset_utils import detect_market_type
 from src.tencent_batch import fetch_batch as tencent_fetch_batch
 
 from ..cache import market_type_from_asset_type
+from ..payload import remaining_timeout
 
 
 def fetch_tencent_quotes_batch(
@@ -14,6 +15,7 @@ def fetch_tencent_quotes_batch(
     codes: List[str],
     name_map: Dict[str, str] | None = None,
     asset_type_map: Dict[str, Any] | None = None,
+    deadline: float | None = None,
 ) -> Tuple[Dict[str, Dict], List[str]]:
     """Fetch Tencent quotes in batch for cn/hk/fund(jj)."""
     name_map = name_map or {}
@@ -58,13 +60,26 @@ def fetch_tencent_quotes_batch(
     if not query_codes:
         return results, leftover
 
-    parts_map, meta = tencent_fetch_batch(fetcher.session, query_codes, timeout=8, chunk_size=50)
+    request_timeout = remaining_timeout(deadline, 8)
+    if deadline is not None:
+        request_count = max(1, (len(query_codes) + 49) // 50)
+        request_timeout = max(0.001, request_timeout / request_count)
+    parts_map, meta = tencent_fetch_batch(
+        fetcher.session, query_codes, timeout=request_timeout, chunk_size=50
+    )
     fetcher._last_tencent_batch_meta = meta
 
-    try:
-        hkd_cny = fetcher._fetch_exchange_rates()["HKDCNY"]
-    except Exception:
-        hkd_cny = None
+    hkd_cny = None
+    if hk_query:
+        try:
+            rates = (
+                fetcher._fetch_exchange_rates()
+                if deadline is None
+                else fetcher._fetch_exchange_rates(deadline=deadline)
+            )
+            hkd_cny = rates["HKDCNY"]
+        except Exception:
+            hkd_cny = None
 
     def build_by_orig(orig: str, query: str, kind: str) -> Optional[Dict]:
         data = parts_map.get(query)
@@ -101,7 +116,7 @@ def fetch_tencent_quotes_batch(
                     }
                 )
             else:
-                payload.update({"currency": "HKD", "market_type": "hk"})
+                return None
             return fetcher._normalize_price_payload(payload)
 
         if kind == "fund":
@@ -127,25 +142,15 @@ def fetch_tencent_quotes_batch(
 
         return None
 
-    for orig, query in cn_query:
-        result = build_by_orig(orig, query, "cn")
-        if result:
-            results[orig] = result
-        else:
-            leftover.append(orig)
-
-    for orig, query in hk_query:
-        result = build_by_orig(orig, query, "hk")
-        if result:
-            results[orig] = result
-        else:
-            leftover.append(orig)
-
-    for orig, query in fund_query:
-        result = build_by_orig(orig, query, "fund")
-        if result:
-            results[orig] = result
-        else:
-            leftover.append(orig)
+    for pairs, kind in ((cn_query, "cn"), (hk_query, "hk"), (fund_query, "fund")):
+        for orig, query in pairs:
+            try:
+                result = build_by_orig(orig, query, kind)
+            except (TypeError, ValueError):
+                result = None
+            if result:
+                results[orig] = result
+            else:
+                leftover.append(orig)
 
     return results, leftover

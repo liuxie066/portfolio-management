@@ -91,6 +91,7 @@ adapter that delegates inward.
 python scripts/migrate_schema.py check-live
 python scripts/diagnose_pricing.py --account lx --json
 python scripts/nav_history_repair.py backfill --account lx --from 2025-01-01 --to 2025-01-31 --dry-run
+python scripts/nav_history_repair.py patch --account lx --patch-file audit/nav_patch.json --dry-run
 ```
 
 ## Validation

@@ -102,12 +102,40 @@ class DailyNavJobService:
         existing = get_nav_on_date(account, nav_date)
         if not existing:
             return None
+        record_id = getattr(existing, "record_id", None)
+        details = dict(getattr(existing, "details", None) or {})
+        task = None
+        compensation = getattr(self.portfolio, "compensation", None)
+        finder = getattr(compensation, "find_unresolved_by_related_record", None)
+        if callable(finder) and record_id:
+            task = finder(record_id)
+        failed_snapshot = details.get("snapshot_persisted") is False or details.get("snapshot_status") == "failed"
+        if failed_snapshot or task:
+            task_id = details.get("snapshot_task_id") or (task or {}).get("task_id")
+            retry_command = details.get("snapshot_retry_command")
+            snapshot_error = details.get("snapshot_error") or (task or {}).get("error") or "holdings_snapshot recovery required"
+            if not retry_command and task_id:
+                retry_command = f"pm compensation retry --task-id {task_id} --confirm"
+            return {
+                "status": "recovery_required",
+                "success": False,
+                "account": account,
+                "date": nav_date.isoformat(),
+                "record_id": record_id,
+                "nav": getattr(existing, "nav", None),
+                "total_value": getattr(existing, "total_value", None),
+                "snapshot_persisted": False,
+                "snapshot_error": snapshot_error,
+                "error": snapshot_error,
+                "task_id": task_id,
+                "retry_command": retry_command,
+            }
         return {
             "status": "skipped_existing_nav",
             "success": True,
             "account": account,
             "date": nav_date.isoformat(),
-            "record_id": getattr(existing, "record_id", None),
+            "record_id": record_id,
             "nav": getattr(existing, "nav", None),
             "total_value": getattr(existing, "total_value", None),
         }
@@ -273,7 +301,10 @@ class DailyNavJobService:
             )
             result.setdefault("account", target_account)
             result.setdefault("date", resolved_nav_date.isoformat())
-            result["status"] = "dry_run" if dry_run and result.get("success") else ("written" if result.get("success") else "failed")
+            result.setdefault(
+                "status",
+                "dry_run" if dry_run and result.get("success") else ("written" if result.get("success") else "failed"),
+            )
             items.append(result)
 
         summary = self._summarize(items)
@@ -283,9 +314,15 @@ class DailyNavJobService:
             "cash_flow_error",
             "cash_flow_pending",
             "nav_history_duplicate",
+            "recovery_required",
         }
         has_blocker = any(str(item.get("status")) in blocking_statuses or item.get("success") is False for item in items)
-        status = "completed" if not has_blocker else ("failed" if len(items) == 1 else "partial")
+        if not has_blocker:
+            status = "completed"
+        elif len(items) == 1 and items[0].get("status") in {"partial", "recovery_required"}:
+            status = str(items[0]["status"])
+        else:
+            status = "failed" if len(items) == 1 else "partial"
 
         return {
             "success": not has_blocker,

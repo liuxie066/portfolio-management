@@ -37,11 +37,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     patch = sub.add_parser("patch", help="apply validated nav_history patch file")
     patch.add_argument("--account", default=None)
-    patch.add_argument("--patch-file", required=True)
+    patch.add_argument("--patch-file")
     patch.add_argument("--mode", choices=["strong-consistency-gap"], default="strong-consistency-gap")
-    patch_write = patch.add_mutually_exclusive_group()
+    patch_write = patch.add_mutually_exclusive_group(required=True)
     patch_write.add_argument("--dry-run", action="store_true")
     patch_write.add_argument("--apply", action="store_true")
+    patch_write.add_argument("--resume-journal")
+    patch_write.add_argument("--rollback-journal")
     patch.add_argument("--backup-file", default=None)
     patch.add_argument("--no-validate", action="store_true")
     patch.add_argument("--validate-level", choices=["basic", "full"], default="basic")
@@ -63,8 +65,8 @@ def main(argv=None) -> int:
     if args.command == "patch":
         from src.maintenance.nav_history_repair import patch
 
-        patch.run(args)
-        return 0
+        result = patch.run(args)
+        return 0 if not isinstance(result, dict) or result.get("success") else 1
 
     parser.error(f"unsupported command: {args.command}")
     return 2

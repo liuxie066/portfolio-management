@@ -4,6 +4,7 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 from ...models import CashFlow, make_cf_dedup_key, DATETIME_FORMAT
+from ...process_lock import process_lock
 
 
 class CashFlowRepository:
@@ -27,45 +28,45 @@ class CashFlowRepository:
     ]
 
     def add_cash_flow(self, cf: CashFlow) -> CashFlow:
-        """添加出入金记录（自动防重）"""
+        """Add one cash-flow row with same-host atomic content deduplication."""
         if not cf.dedup_key:
             cf.dedup_key = make_cf_dedup_key(cf)
 
-        if cf.dedup_key:
-            existing = self._find_by_dedup_key('cash_flow', cf.dedup_key)
-            if existing:
+        lock_key = f"cash_flow:{cf.account}:{cf.dedup_key}"
+        with process_lock(lock_key):
+            existing_record_id = self._find_by_dedup_key('cash_flow', cf.dedup_key)
+            if existing_record_id:
                 print(f"[防重保护] 发现相同内容出入金(dedup_key={cf.dedup_key})，跳过创建")
-                cf.record_id = existing
-                return cf
+                existing = self.get_cash_flow(existing_record_id)
+                if existing is None:
+                    raise RuntimeError(f"replayed cash flow could not be loaded: record_id={existing_record_id}")
+                existing.mark_replayed()
+                return existing
 
-        fields = self._cash_flow_to_dict(cf)
-        feishu_fields = self._to_feishu_fields(fields, 'cash_flow')
-
-        try:
-            result = self.client.create_record('cash_flow', feishu_fields)
-        except Exception as e:
-            if self._is_missing_field_error(e):
-                raise ValueError("Feishu cash_flow 表缺少 dedup_key 等防重字段，已拒绝降级写入；请先补齐表字段") from e
-            raise
-        cf.record_id = result['record_id']
-
-        if cf.dedup_key:
+            fields = self._cash_flow_to_dict(cf)
+            feishu_fields = self._to_feishu_fields(fields, 'cash_flow')
+            try:
+                result = self.client.create_record('cash_flow', feishu_fields)
+            except Exception as exc:
+                if self._is_missing_field_error(exc):
+                    raise ValueError("Feishu cash_flow 表缺少 dedup_key 等防重字段，已拒绝降级写入；请先补齐表字段") from exc
+                raise
+            cf.record_id = result['record_id']
             self._dedup_key_cache[f"cash_flow:{cf.dedup_key}"] = cf.record_id
 
-        # 增量更新本地 cash_flow 聚合缓存
-        if cf.account in self._cash_flow_agg_loaded_accounts and cf.flow_date:
-            from ...time_utils import bj_now_naive
-            cny_amount = cf.cny_amount if cf.cny_amount is not None else cf.amount
-            self._local_cash_flow_agg_cache.append_flow(
-                cf.account,
-                cf.flow_date,
-                float(cny_amount or 0.0),
-                cf.record_id,
-                bj_now_naive().strftime(DATETIME_FORMAT),
-            )
-            self._cash_flow_agg_mem_cache[cf.account] = self._local_cash_flow_agg_cache.get_account(cf.account)
+            if cf.account in self._cash_flow_agg_loaded_accounts and cf.flow_date:
+                from ...time_utils import bj_now_naive
+                cny_amount = cf.cny_amount if cf.cny_amount is not None else cf.amount
+                self._local_cash_flow_agg_cache.append_flow(
+                    cf.account,
+                    cf.flow_date,
+                    float(cny_amount or 0.0),
+                    cf.record_id,
+                    bj_now_naive().strftime(DATETIME_FORMAT),
+                )
+                self._cash_flow_agg_mem_cache[cf.account] = self._local_cash_flow_agg_cache.get_account(cf.account)
 
-        return cf
+            return cf
 
     def get_cash_flow(self, record_id: str) -> Optional[CashFlow]:
         """获取单条出入金记录"""
@@ -407,8 +408,8 @@ class CashFlowRepository:
 
         updated_count = 0
         if not dry_run and update_payloads:
-            self.client.batch_update_records('cash_flow', update_payloads)
-            updated_count = len(update_payloads)
+            updated_records = self.client.batch_update_records('cash_flow', update_payloads)
+            updated_count = len(updated_records)
             self._invalidate_cash_flow_agg_cache(affected_accounts)
 
         return {

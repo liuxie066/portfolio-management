@@ -29,8 +29,9 @@ def test_buy_creates_quantized_transaction_and_holding(mock_get_name):
     storage = Mock()
     fetcher = Mock()
     manager = PortfolioManager(storage=storage, price_fetcher=fetcher)
+    storage.get_holding.return_value = None
     storage.add_transaction.side_effect = lambda tx: tx
-    storage.upsert_holding.side_effect = lambda holding: holding
+    storage.replace_holding.side_effect = lambda holding: holding
 
     manager.buy(
         tx_date=date(2025, 3, 14),
@@ -46,7 +47,7 @@ def test_buy_creates_quantized_transaction_and_holding(mock_get_name):
     )
 
     tx = storage.add_transaction.call_args[0][0]
-    holding = storage.upsert_holding.call_args[0][0]
+    holding = storage.replace_holding.call_args[0][0]
     assert tx.price == 1.01
     assert tx.fee == 0.01
     assert tx.amount == 1.02
@@ -59,7 +60,7 @@ def test_deposit_creates_quantized_cashflow_and_cash_holding():
     manager = PortfolioManager(storage=storage, price_fetcher=fetcher)
     storage.add_cash_flow.side_effect = lambda cf: cf
     storage.get_holding.return_value = None
-    storage.upsert_holding.side_effect = lambda holding: holding
+    storage.replace_holding.side_effect = lambda holding: holding
 
     manager.deposit(
         flow_date=date(2025, 3, 14),
@@ -70,7 +71,7 @@ def test_deposit_creates_quantized_cashflow_and_cash_holding():
     )
 
     cf = storage.add_cash_flow.call_args[0][0]
-    holding = storage.upsert_holding.call_args[0][0]
+    holding = storage.replace_holding.call_args[0][0]
     assert cf.amount == 1.01
     assert cf.cny_amount == 1.01
     assert holding.quantity == 1.01
@@ -114,7 +115,7 @@ def test_sell_creates_quantized_transaction_boundary():
         price=1.005,
         currency='CNY',
         fee=0.005,
-        auto_add_cash=True,
+        auto_add_cash=False,
     )
 
     tx = storage.add_transaction.call_args[0][0]

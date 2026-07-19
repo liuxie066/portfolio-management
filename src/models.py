@@ -14,7 +14,7 @@ import uuid
 from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 from enum import Enum
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 from typing import Optional, Dict, List, Any
 
 
@@ -170,6 +170,7 @@ class Transaction(BaseModel):
     防重机制: request_id（调用方控制）+ dedup_key（内容指纹自动生成）
     """
     record_id: Optional[str] = None
+    _was_replayed: bool = PrivateAttr(default=False)
     dedup_key: Optional[str] = Field(None, description="内容指纹，自动生成")
     request_id: Optional[str] = Field(None, description="调用方幂等键")
 
@@ -217,6 +218,13 @@ class Transaction(BaseModel):
             self.amount = _quantize_decimal(Decimal(str(self.quantity)) * Decimal(str(self.price)), MONEY_QUANT)
         return self
 
+    @property
+    def was_replayed(self) -> bool:
+        return self._was_replayed
+
+    def mark_replayed(self) -> None:
+        self._was_replayed = True
+
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -226,6 +234,7 @@ class CashFlow(BaseModel):
     防重机制: dedup_key（内容指纹自动生成）
     """
     record_id: Optional[str] = None
+    _was_replayed: bool = PrivateAttr(default=False)
     dedup_key: Optional[str] = Field(None, description="内容指纹，自动生成")
 
     # 核心字段
@@ -243,6 +252,13 @@ class CashFlow(BaseModel):
     @classmethod
     def quantize_money_fields(cls, v):
         return _quantize_decimal(v, MONEY_QUANT)
+
+    @property
+    def was_replayed(self) -> bool:
+        return self._was_replayed
+
+    def mark_replayed(self) -> None:
+        self._was_replayed = True
 
 
 class PriceCache(BaseModel):

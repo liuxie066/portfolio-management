@@ -4,9 +4,11 @@ from __future__ import annotations
 from typing import Any, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from .application import PortfolioService
+from .bind import allow_remote_from_env, is_loopback_client
 
 
 REPORT_TYPES = {"daily", "monthly", "yearly"}
@@ -67,13 +69,24 @@ def _payload_dict(payload: BaseModel) -> dict:
     return payload.model_dump(exclude_none=True)
 
 
-def create_app(service: Optional[PortfolioService] = None) -> FastAPI:
+def create_app(service: Optional[PortfolioService] = None, allow_remote: Optional[bool] = None) -> FastAPI:
     app = FastAPI(
         title="Portfolio Management Service",
         version="0.1.1",
         description="Service-first API for portfolio accounts, holdings, NAV, and reports.",
     )
     app.state.portfolio_service = service or PortfolioService()
+    app.state.allow_remote = allow_remote_from_env() if allow_remote is None else bool(allow_remote)
+
+    @app.middleware("http")
+    async def enforce_loopback_client(request: Request, call_next):
+        client_host = request.client.host if request.client is not None else ""
+        if not app.state.allow_remote and not is_loopback_client(client_host):
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "portfolio service accepts loopback clients only"},
+            )
+        return await call_next(request)
 
     @app.get("/health", tags=["system"])
     def health(request: Request):

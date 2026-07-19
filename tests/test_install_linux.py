@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import subprocess
 from pathlib import Path
 
@@ -168,27 +169,97 @@ def test_install_linux_apply_imports_only_three_options_monitor_feishu_values(tm
     assert "receipt_secret" not in str(payload)
 
 
-def test_install_linux_rejects_partial_options_monitor_feishu_config_before_writes(tmp_path, monkeypatch):
+def test_install_linux_partial_source_updates_only_explicit_receipt_values(tmp_path, monkeypatch):
     source = tmp_path / "options-monitor.env"
     source.write_text(
-        "OM_FEISHU_BOT_APP_ID=cli_liukanshan\n"
-        "OM_FEISHU_BOT_APP_SECRET=receipt_secret\n",
+        "OM_FEISHU_BOT_APP_ID=cli_new\n"
+        "OM_FEISHU_BOT_APP_SECRET=secret_new\n",
         encoding="utf-8",
     )
     args = _args(tmp_path, "--apply")
     paths = install_linux.build_paths(args)
     paths.env_file.parent.mkdir(parents=True)
-    paths.env_file.write_text("KEEP_EXISTING=1\n", encoding="utf-8")
+    paths.env_file.write_text(
+        "# keep this comment\n"
+        "KEEP_EXISTING=1\n"
+        "OM_FEISHU_BOT_APP_ID=cli_old\n"
+        "OM_FEISHU_BOT_APP_SECRET=secret_old\n"
+        "OM_FEISHU_BOT_USER_OPEN_ID=ou_keep\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(install_linux.subprocess, "run", lambda command, check: None)
+
+    payload = install_linux.apply_install(args)
+    rendered = paths.env_file.read_text(encoding="utf-8")
+
+    assert payload["feishu_receipt_env"]["status"] == "imported"
+    assert "# keep this comment\nKEEP_EXISTING=1\n" in rendered
+    assert "OM_FEISHU_BOT_APP_ID=cli_new" in rendered
+    assert "OM_FEISHU_BOT_APP_SECRET=secret_new" in rendered
+    assert "OM_FEISHU_BOT_USER_OPEN_ID=ou_keep" in rendered
+
+
+def test_install_linux_missing_source_preserves_target_env_byte_for_byte(tmp_path, monkeypatch):
+    args = _args(tmp_path, "--apply")
+    paths = install_linux.build_paths(args)
+    paths.env_file.parent.mkdir(parents=True)
+    original = (
+        "# production-only values\n"
+        "KEEP_EXISTING=1\n"
+        "OM_FEISHU_BOT_APP_ID=cli_keep\n"
+        "OM_FEISHU_BOT_APP_SECRET=secret_keep\n"
+        "OM_FEISHU_BOT_USER_OPEN_ID=ou_keep\n"
+    )
+    paths.env_file.write_text(original, encoding="utf-8")
+    before_digest = hashlib.sha256(original.encode()).hexdigest()
+    monkeypatch.setattr(install_linux.subprocess, "run", lambda command, check: None)
+
+    payload = install_linux.apply_install(args)
+    rendered = paths.env_file.read_text(encoding="utf-8")
+
+    assert payload["feishu_receipt_env"]["status"] == "source_missing"
+    assert hashlib.sha256(rendered.encode()).hexdigest() == before_digest
+    assert rendered == original
+
+
+def test_install_linux_rejects_duplicate_target_env_before_other_writes(tmp_path, monkeypatch):
+    args = _args(tmp_path, "--apply")
+    paths = install_linux.build_paths(args)
+    paths.env_file.parent.mkdir(parents=True)
+    paths.env_file.write_text("DUP=1\nDUP=2\n", encoding="utf-8")
     monkeypatch.setattr(install_linux.subprocess, "run", lambda command, check: None)
 
     try:
         install_linux.apply_install(args)
     except ValueError as exc:
-        assert "OM_FEISHU_BOT_USER_OPEN_ID" in str(exc)
+        assert "duplicate target env key: DUP" in str(exc)
     else:
-        raise AssertionError("expected partial options-monitor receipt config to fail")
+        raise AssertionError("expected duplicate target env to fail")
 
-    assert paths.env_file.read_text(encoding="utf-8") == "KEEP_EXISTING=1\n"
+    assert not paths.config_file.exists()
+    assert paths.env_file.read_text(encoding="utf-8") == "DUP=1\nDUP=2\n"
+
+
+def test_install_linux_rejects_duplicate_source_env_before_other_writes(tmp_path, monkeypatch):
+    source = tmp_path / "options-monitor.env"
+    source.write_text(
+        "OM_FEISHU_BOT_APP_ID=first\n"
+        "OM_FEISHU_BOT_APP_ID=second\n",
+        encoding="utf-8",
+    )
+    args = _args(tmp_path, "--apply")
+    paths = install_linux.build_paths(args)
+    monkeypatch.setattr(install_linux.subprocess, "run", lambda command, check: None)
+
+    try:
+        install_linux.apply_install(args)
+    except ValueError as exc:
+        assert "duplicate options-monitor env key: OM_FEISHU_BOT_APP_ID" in str(exc)
+    else:
+        raise AssertionError("expected duplicate source env to fail")
+
+    assert not paths.config_file.exists()
+    assert not paths.env_file.exists()
 
 
 def test_install_linux_service_units_use_versioned_wrapper_and_shared_lock(tmp_path):

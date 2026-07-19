@@ -53,18 +53,16 @@ class PortfolioManager:
         self.reporting_service = ReportingService(manager=self, storage=storage)
         self.nav_calculator = NavCalculator()
 
-    def _record_compensation(self, *, operation_type: str, account: str, payload: Dict[str, Any], error: Union[Exception, str], related_record_id: Optional[str] = None):
-        """Best-effort repair task recording for partial multi-table writes."""
-        try:
-            self.compensation.record(
-                operation_type=operation_type,
-                account=account,
-                payload=payload,
-                error=error,
-                related_record_id=related_record_id,
-            )
-        except Exception as comp_error:
-            print(f"[警告] 补偿任务记录失败: {comp_error}")
+    def _record_compensation(self, *, operation_type: str, account: str, payload: Dict[str, Any], error: Union[Exception, str], related_record_id: Optional[str] = None, task_id: Optional[str] = None):
+        """Persist and return authoritative local recovery evidence."""
+        return self.compensation.record(
+            operation_type=operation_type,
+            account=account,
+            payload=payload,
+            error=error,
+            related_record_id=related_record_id,
+            task_id=task_id,
+        )
 
     @staticmethod
     def _to_decimal(value: Any) -> Decimal:

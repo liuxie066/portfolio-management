@@ -34,7 +34,12 @@ from src.domain.nav.performance import (
     calc_year_return,
 )
 from src.service.application import PortfolioService
-from src.write_guard import validate_and_normalize_trade_input, validate_and_normalize_nav_input
+from src.write_guard import (
+    validate_and_normalize_cash_flow_input,
+    validate_and_normalize_trade_input,
+    validate_and_normalize_nav_input,
+)
+from src.process_lock import account_lock_key, process_lock
 from src import config
 
 
@@ -177,6 +182,7 @@ class PortfolioSkill:
                     "fee": tx.fee,
                     "total_cost": tx.quantity * tx.price + tx.fee
                 },
+                "replayed": tx.was_replayed,
                 "message": f"买入记录已保存: {saved_name} {quantity}股 @ ¥{price}"
             }
         except Exception as e:
@@ -267,6 +273,7 @@ class PortfolioSkill:
                     "currency": cf.currency,
                     "remark": remark
                 },
+                "replayed": cf.was_replayed,
                 "message": f"入金记录已保存: ¥{amount:,.2f}"
             }
         except Exception as e:
@@ -293,6 +300,7 @@ class PortfolioSkill:
                     "currency": cf.currency,
                     "remark": remark
                 },
+                "replayed": cf.was_replayed,
                 "message": f"出金记录已保存: ¥{amount:,.2f}"
             }
         except Exception as e:
@@ -584,48 +592,50 @@ class PortfolioSkill:
             return {"success": False, "error": str(e)}
 
     def add_cash(self, amount: float, asset: str = "CNY-CASH") -> Dict[str, Any]:
-        """增加现金"""
+        """Increase an existing cash holding under the account write lock."""
         try:
-            holding = self.storage.get_holding(asset, self.account)
-            if holding:
+            check = validate_and_normalize_cash_flow_input(amount=amount)
+            if not check["ok"]:
+                raise ValueError(check["errors"])
+            with process_lock(account_lock_key(self.account)):
+                holding = self.storage.get_holding(asset, self.account)
+                if not holding:
+                    return {"success": False, "error": f"未找到 {asset}，需要先创建"}
                 new_qty = holding.quantity + amount
-                self.storage.update_holding_quantity(asset, self.account, amount, getattr(holding, 'broker', None))
+                self.storage.update_holding_quantity(asset, self.account, amount, getattr(holding, "broker", None))
                 return {
                     "success": True,
                     "asset": asset,
                     "amount": amount,
                     "balance": new_qty,
-                    "message": f"{asset} 增加 ¥{amount:,.2f}，当前余额: ¥{new_qty:,.2f}"
+                    "message": f"{asset} 增加 ¥{amount:,.2f}，当前余额: ¥{new_qty:,.2f}",
                 }
-            else:
-                return {"success": False, "error": f"未找到 {asset}，需要先创建"}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
 
     def sub_cash(self, amount: float, asset: str = "CNY-CASH") -> Dict[str, Any]:
-        """减少现金"""
+        """Decrease an existing cash holding under the account write lock."""
         try:
-            holding = self.storage.get_holding(asset, self.account)
-            if not holding:
-                return {"success": False, "error": f"未找到 {asset}"}
-
-            if holding.quantity < amount:
+            check = validate_and_normalize_cash_flow_input(amount=amount)
+            if not check["ok"]:
+                raise ValueError(check["errors"])
+            with process_lock(account_lock_key(self.account)):
+                holding = self.storage.get_holding(asset, self.account)
+                if not holding:
+                    return {"success": False, "error": f"未找到 {asset}"}
+                if holding.quantity < amount:
+                    return {"success": False, "error": f"余额不足，当前: ¥{holding.quantity:,.2f}"}
+                new_qty = holding.quantity - amount
+                self.storage.update_holding_quantity(asset, self.account, -amount, getattr(holding, "broker", None))
                 return {
-                    "success": False,
-                    "error": f"余额不足，当前: ¥{holding.quantity:,.2f}"
+                    "success": True,
+                    "asset": asset,
+                    "amount": amount,
+                    "balance": new_qty,
+                    "message": f"{asset} 减少 ¥{amount:,.2f}，当前余额: ¥{new_qty:,.2f}",
                 }
-
-            new_qty = holding.quantity - amount
-            self.storage.update_holding_quantity(asset, self.account, -amount, getattr(holding, 'broker', None))
-            return {
-                "success": True,
-                "asset": asset,
-                "amount": amount,
-                "balance": new_qty,
-                "message": f"{asset} 减少 ¥{amount:,.2f}，当前余额: ¥{new_qty:,.2f}"
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
 
     def sync_futu_cash_mmf(
         self,

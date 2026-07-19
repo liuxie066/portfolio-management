@@ -129,14 +129,31 @@ def render_config_yaml(paths: InstallPaths) -> str:
     return header + yaml.safe_dump(payload, allow_unicode=True, sort_keys=False)
 
 
+def _env_assignments(content: str, *, label: str) -> dict[str, int]:
+    positions: dict[str, int] = {}
+    for index, line in enumerate(content.splitlines(keepends=True)):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if not key:
+            continue
+        if key in positions:
+            raise ValueError(f"duplicate {label} env key: {key}")
+        positions[key] = index
+    return positions
+
+
 def read_options_monitor_feishu_env(path: str | Path) -> dict[str, str]:
-    """Read only the three Feishu receipt values from options-monitor."""
+    """Read explicitly provided Feishu receipt values from options-monitor."""
     source = _as_path(path)
     if not source.exists():
         return {}
 
+    content = source.read_text(encoding="utf-8")
+    _env_assignments(content, label="options-monitor")
     selected: dict[str, str] = {}
-    for line in source.read_text(encoding="utf-8").splitlines():
+    for line in content.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#") or "=" not in stripped:
             continue
@@ -144,29 +161,48 @@ def read_options_monitor_feishu_env(path: str | Path) -> dict[str, str]:
         key = key.strip()
         if key not in OPTIONS_MONITOR_FEISHU_KEYS:
             continue
-        if key in selected:
-            raise ValueError(f"duplicate options-monitor env key: {key}")
         value = value.strip()
-        if value not in {"", "''", '\"\"'}:
+        if value not in {"", "''", '""'}:
             selected[key] = value
-
-    missing = [key for key in OPTIONS_MONITOR_FEISHU_KEYS if key not in selected]
-    if missing:
-        raise ValueError(f"missing options-monitor Feishu env keys: {', '.join(missing)}")
     return selected
 
 
-def render_env_file(paths: InstallPaths, *, receipt_env: dict[str, str] | None = None) -> str:
-    lines = [
-        f"PORTFOLIO_CONFIG_FILE={paths.config_file}",
-        f"PM_DATA_DIR={paths.data_dir}",
-        f"PM_REPORTS_DIR={paths.reports_dir}",
-        f"PORTFOLIO_PM_BIN={paths.launcher_path}",
-        "PYTHONUNBUFFERED=1",
-    ]
+def render_env_file(
+    paths: InstallPaths,
+    *,
+    receipt_env: dict[str, str] | None = None,
+    existing_content: str | None = None,
+) -> str:
     receipt_env = receipt_env or {}
-    lines.extend(f"{key}={receipt_env[key]}" for key in OPTIONS_MONITOR_FEISHU_KEYS if key in receipt_env)
-    return "\n".join([*lines, ""])
+    if existing_content is None:
+        existing_content = "\n".join([
+            f"PORTFOLIO_CONFIG_FILE={paths.config_file}",
+            f"PM_DATA_DIR={paths.data_dir}",
+            f"PM_REPORTS_DIR={paths.reports_dir}",
+            f"PORTFOLIO_PM_BIN={paths.launcher_path}",
+            "PYTHONUNBUFFERED=1",
+            "",
+        ])
+
+    positions = _env_assignments(existing_content, label="target")
+    if not receipt_env:
+        return existing_content
+
+    lines = existing_content.splitlines(keepends=True)
+    for key in OPTIONS_MONITOR_FEISHU_KEYS:
+        if key not in receipt_env:
+            continue
+        value = receipt_env[key]
+        if key in positions:
+            index = positions[key]
+            newline = "\n" if lines[index].endswith("\n") else ""
+            lines[index] = f"{key}={value}{newline}"
+            continue
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        positions[key] = len(lines)
+        lines.append(f"{key}={value}\n")
+    return "".join(lines)
 
 
 def render_launcher(paths: InstallPaths) -> str:
@@ -341,6 +377,8 @@ def apply_install(args) -> dict:
     paths = build_paths(args)
     units = _unit_paths(paths)
     receipt_env = read_options_monitor_feishu_env(args.options_monitor_env_file)
+    existing_env = paths.env_file.read_text(encoding="utf-8") if paths.env_file.exists() else None
+    rendered_env = render_env_file(paths, receipt_env=receipt_env, existing_content=existing_env)
     _mkdirs([paths.config_dir, paths.data_dir, paths.reports_dir, paths.systemd_dir, paths.launcher_path.parent])
 
     writes = {
@@ -352,7 +390,7 @@ def apply_install(args) -> dict:
         ),
         str(paths.env_file): _write_text(
             paths.env_file,
-            render_env_file(paths, receipt_env=receipt_env),
+            rendered_env,
             mode=0o600,
             overwrite=True,
         ),

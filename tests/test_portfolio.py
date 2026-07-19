@@ -51,6 +51,9 @@ class TestPortfolioManagerBuy:
             storage=self.mock_storage,
             price_fetcher=self.mock_fetcher
         )
+        self.mock_storage.get_holding.return_value = None
+        self.mock_storage.add_transaction.side_effect = lambda tx: tx
+        self.mock_storage.replace_holding.side_effect = lambda holding: holding
 
     @patch.object(PortfolioManager, '_get_asset_name')
     def test_buy_success(self, mock_get_name):
@@ -92,17 +95,13 @@ class TestPortfolioManagerBuy:
         assert result.asset_id == '000001'
         assert result.quantity == 1000
         self.mock_storage.add_transaction.assert_called_once()
-        self.mock_storage.upsert_holding.assert_called_once()
+        self.mock_storage.replace_holding.assert_called_once()
 
     @patch.object(PortfolioManager, '_get_asset_name')
     def test_buy_with_cash_deduction(self, mock_get_name):
         """测试买入自动扣减现金"""
         mock_get_name.return_value = '平安银行'
-        self.manager.cash_service.has_sufficient_cash = Mock(return_value=True)
-        self.manager.cash_service.deduct_cash = Mock(return_value=True)
-
-        self.mock_storage.add_transaction.return_value = Mock()
-        self.mock_storage.upsert_holding.return_value = Mock()
+        self.manager.cash_service.plan_deduct_cash_targets = Mock(return_value=[])
 
         result = self.manager.buy(
             tx_date=date(2025, 3, 14),
@@ -117,15 +116,13 @@ class TestPortfolioManagerBuy:
             auto_deduct_cash=True
         )
 
-        self.manager.cash_service.has_sufficient_cash.assert_called_once_with('测试账户', 10505.0)  # 1000 * 10.5 + 5
-        self.manager.cash_service.deduct_cash.assert_called_once()
-        # 扣减金额 = 1000 * 10.5 + 5 = 10505
+        self.manager.cash_service.plan_deduct_cash_targets.assert_called_once_with('测试账户', 10505.0)
 
     @patch.object(PortfolioManager, '_get_asset_name')
     def test_buy_insufficient_cash(self, mock_get_name):
         """测试买入现金不足"""
         mock_get_name.return_value = '平安银行'
-        self.manager.cash_service.has_sufficient_cash = Mock(return_value=False)
+        self.manager.cash_service.plan_deduct_cash_targets = Mock(side_effect=ValueError('现金不足'))
 
         with pytest.raises(ValueError) as exc_info:
             self.manager.buy(
@@ -146,6 +143,7 @@ class TestPortfolioManagerBuy:
     def test_buy_non_cny_no_cash_deduction(self, mock_get_name):
         """测试非人民币买入不扣减现金"""
         mock_get_name.return_value = 'Apple Inc'
+        self.manager.cash_service.plan_deduct_cash_targets = Mock(return_value=[])
         self.mock_storage.add_transaction.return_value = Mock()
         self.mock_storage.upsert_holding.return_value = Mock()
 
@@ -161,7 +159,7 @@ class TestPortfolioManagerBuy:
             auto_deduct_cash=True  # 即使设为True，非CNY也不扣减
         )
 
-        # 不应该调用扣减现金
+        self.manager.cash_service.plan_deduct_cash_targets.assert_not_called()
 
     @patch.object(PortfolioManager, '_get_asset_name')
     def test_buy_with_asset_class_and_industry(self, mock_get_name):
@@ -184,7 +182,7 @@ class TestPortfolioManagerBuy:
             auto_deduct_cash=False
         )
 
-        call_args = self.mock_storage.upsert_holding.call_args
+        call_args = self.mock_storage.replace_holding.call_args
         assert call_args[0][0].asset_class == AssetClass.CN_ASSET
         assert call_args[0][0].industry == Industry.FINANCE
 
@@ -199,6 +197,8 @@ class TestPortfolioManagerSell:
             storage=self.mock_storage,
             price_fetcher=self.mock_fetcher
         )
+        self.mock_storage.add_transaction.side_effect = lambda tx: tx
+        self.mock_storage.replace_holding.side_effect = lambda holding: holding
 
     def test_sell_success(self):
         """测试卖出成功"""
@@ -233,11 +233,14 @@ class TestPortfolioManagerSell:
 
         assert result is not None
         assert result.quantity == -500
-        self.mock_storage.update_holding_quantity.assert_called_once_with('000001', '测试账户', -500, None)
+        target = self.mock_storage.replace_holding.call_args[0][0]
+        assert target.asset_id == '000001'
+        assert target.quantity == 500
 
     def test_sell_with_cash_addition(self):
         """测试卖出自动增加现金"""
-        self.mock_storage.get_holding.return_value = Holding(
+        stock_holding = Holding(
+            record_id='holding-1',
             asset_id='000001',
             asset_name='平安银行',
             asset_type=AssetType.A_STOCK,
@@ -245,8 +248,14 @@ class TestPortfolioManagerSell:
             quantity=1000,
             currency='CNY'
         )
-        self.mock_storage.add_transaction.return_value = Mock()
-        self.manager.cash_service.add_cash = Mock()
+        self.mock_storage.get_holding.side_effect = (
+            lambda asset_id, account, broker=None: stock_holding if asset_id == '000001' else None
+        )
+        cash_target = Holding(
+            asset_id='CNY-CASH', asset_name='人民币现金', asset_type=AssetType.CASH,
+            account='测试账户', quantity=5495, currency='CNY'
+        )
+        self.manager.cash_service.plan_add_cash_target = Mock(return_value=(None, cash_target))
 
         result = self.manager.sell(
             tx_date=date(2025, 3, 14),
@@ -259,8 +268,8 @@ class TestPortfolioManagerSell:
             auto_add_cash=True
         )
 
-        self.manager.cash_service.add_cash.assert_called_once()
-        # 增加金额 = 500 * 11 - 5 = 5495
+        self.manager.cash_service.plan_add_cash_target.assert_called_once_with('测试账户', 5495.0)
+        assert self.mock_storage.replace_holding.call_count == 2
 
     def test_sell_no_holding(self):
         """测试卖出没有持仓的资产"""
@@ -268,20 +277,22 @@ class TestPortfolioManagerSell:
         self.mock_fetcher.fetch.return_value = {'name': '未知资产'}
         self.mock_storage.add_transaction.return_value = Mock()
 
-        result = self.manager.sell(
-            tx_date=date(2025, 3, 14),
-            asset_id='UNKNOWN',
-            account='测试账户',
-            quantity=100,
-            price=10.0,
-            currency='CNY'
-        )
+        with pytest.raises(ValueError, match='未找到持仓'):
+            self.manager.sell(
+                tx_date=date(2025, 3, 14),
+                asset_id='UNKNOWN',
+                account='测试账户',
+                quantity=100,
+                price=10.0,
+                currency='CNY'
+            )
 
-        assert result is not None
+        self.mock_storage.add_transaction.assert_not_called()
 
     def test_sell_delete_zero_holding(self):
         """测试卖出后持仓为0时删除"""
         self.mock_storage.get_holding.return_value = Holding(
+            record_id='holding-1',
             asset_id='000001',
             asset_name='平安银行',
             asset_type=AssetType.A_STOCK,
@@ -300,7 +311,7 @@ class TestPortfolioManagerSell:
             currency='CNY'
         )
 
-        self.mock_storage.delete_holding_if_zero.assert_called_once_with('000001', '测试账户', None)
+        self.mock_storage.delete_holding_by_record_id.assert_called_once()
 
 
 class TestPortfolioManagerDepositWithdraw:

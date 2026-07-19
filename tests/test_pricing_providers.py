@@ -241,3 +241,127 @@ def test_yahoo_chart_empty_quote_does_not_fetch_exchange_rate():
     fetcher._fetch_exchange_rates = lambda: (_ for _ in ()).throw(AssertionError("rates should not be fetched"))
 
     assert USStockProvider(fetcher).fetch_yahoo_chart("AAPL") is None
+
+
+def test_realtime_pricing_strips_supported_suffixes_but_preserves_internal_dot(monkeypatch):
+    fetcher = PriceFetcher()
+    seen = []
+
+    def fake_us(self, code):
+        seen.append(code)
+        return {"code": code, "price": 100.0, "currency": "USD", "cny_price": 700.0}
+
+    monkeypatch.setattr(USStockProvider, "fetch_us_stock", fake_us)
+
+    assert fetcher._fetch_realtime("FUTU.US", "Futu")["code"] == "FUTU"
+    assert fetcher._fetch_realtime("BRK.B", "Berkshire")["code"] == "BRK.B"
+    assert seen == ["FUTU", "BRK.B"]
+
+
+def test_batch_pricing_maps_canonical_provider_result_back_to_caller_code(monkeypatch):
+    fetcher = PriceFetcher(storage=None, use_cache=False)
+
+    monkeypatch.setattr(
+        "src.pricing.batch.fetch_us_batch",
+        lambda *_args, **_kwargs: {
+            "FUTU": {"code": "FUTU", "price": 100, "currency": "USD", "cny_price": 700}
+        },
+    )
+
+    result = fetcher.fetch_batch(["FUTU.US"])
+
+    assert list(result) == ["FUTU.US"]
+    assert result["FUTU.US"]["code"] == "FUTU.US"
+
+
+def test_tencent_batch_splits_remaining_deadline_across_http_chunks(monkeypatch):
+    import time
+
+    fetcher = PriceFetcher()
+    captured = {}
+
+    def fake_batch(session, query_codes, timeout=8, chunk_size=50):
+        captured.update(timeout=timeout, chunk_size=chunk_size, count=len(query_codes))
+        return {}, {"requests": 0}
+
+    monkeypatch.setattr("src.pricing.providers.tencent_batch.tencent_fetch_batch", fake_batch)
+    codes = [f"600{i:03d}" for i in range(51)]
+    _, leftover = fetch_tencent_quotes_batch(
+        fetcher,
+        codes,
+        deadline=time.monotonic() + 2,
+    )
+
+    assert len(leftover) == 51
+    assert captured["count"] == 51
+    assert captured["chunk_size"] == 50
+    assert 0 < captured["timeout"] <= 1
+
+
+def test_explicit_sh_suffix_overrides_fund_heuristic(monkeypatch):
+    fetcher = PriceFetcher(storage=None, use_cache=False)
+
+    def fail_fund(self, code):
+        raise AssertionError("explicit .SH stock must not use fund provider")
+
+    def fake_cn(self, code):
+        return {"code": code, "price": 10.0, "currency": "CNY", "cny_price": 10.0}
+
+    monkeypatch.setattr(FundProvider, "fetch_fund", fail_fund)
+    monkeypatch.setattr(CNStockProvider, "fetch_a_stock", fake_cn)
+
+    result = fetcher.fetch("004001.SH", force_refresh=True)
+
+    assert result["provider"] == "cn-stock"
+    assert result["code"] == "004001.SH"
+
+
+def test_explicit_us_suffix_overrides_numeric_etf_and_hk_heuristics(monkeypatch):
+    fetcher = PriceFetcher(storage=None, use_cache=False)
+
+    def fail_etf(self, code):
+        raise AssertionError("explicit .US stock must not use ETF provider")
+
+    def fail_hk(self, code):
+        raise AssertionError("explicit .US stock must not use HK provider")
+
+    def fake_us(self, code):
+        return {"code": code, "price": 20.0, "currency": "USD", "cny_price": 140.0}
+
+    monkeypatch.setattr(ETFProvider, "fetch_etf", fail_etf)
+    monkeypatch.setattr(HKStockProvider, "fetch_hk_stock", fail_hk)
+    monkeypatch.setattr(USStockProvider, "fetch_us_stock", fake_us)
+
+    result = fetcher.fetch("510300.US", force_refresh=True)
+
+    assert result["provider"] == "us-stock"
+    assert result["code"] == "510300.US"
+
+
+def test_batch_routing_keeps_explicit_us_market_before_canonicalization(monkeypatch):
+    fetcher = PriceFetcher(storage=None, use_cache=False)
+    seen = []
+
+    def fake_us_batch(_fetcher, codes, *_args, **_kwargs):
+        seen.extend(codes)
+        return {
+            "510300": {
+                "code": "510300",
+                "price": 20.0,
+                "currency": "USD",
+                "cny_price": 140.0,
+            }
+        }
+
+    monkeypatch.setattr("src.pricing.batch.fetch_us_batch", fake_us_batch)
+    monkeypatch.setattr(
+        "src.pricing.batch.fetch_tencent_quotes_batch",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("explicit .US must not enter Tencent batch")
+        ),
+    )
+
+    result = fetcher.fetch_batch(["510300.US"])
+
+    assert seen == ["510300"]
+    assert result["510300.US"]["code"] == "510300.US"

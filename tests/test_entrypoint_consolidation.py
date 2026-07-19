@@ -45,6 +45,30 @@ def test_nav_history_repair_runs_patch_module(monkeypatch):
     assert captured["args"].validate_scope == "changed"
 
 
+def test_nav_history_repair_allows_rollback_without_patch_file(monkeypatch):
+    captured = {}
+
+    def fake_run(args):
+        captured["args"] = args
+        return {"success": True, "status": "rolled_back"}
+
+    from src.maintenance.nav_history_repair import patch
+
+    monkeypatch.setattr(patch, "run", fake_run)
+
+    assert nav_history_repair.main(["patch", "--rollback-journal", "/tmp/repair.jsonl"]) == 0
+    assert captured["args"].patch_file is None
+    assert captured["args"].rollback_journal == "/tmp/repair.jsonl"
+
+
+def test_nav_history_repair_returns_nonzero_for_partial_result(monkeypatch):
+    from src.maintenance.nav_history_repair import patch
+
+    monkeypatch.setattr(patch, "run", lambda _args: {"success": False, "status": "partial"})
+
+    assert nav_history_repair.main(["patch", "--patch-file", "audit/x.json", "--apply"]) == 1
+
+
 def test_nav_history_repair_rejects_unknown_args():
     with pytest.raises(SystemExit) as exc:
         nav_history_repair.main(["patch", "--patch-file", "audit/x.json", "--apply", "--unknown-flag"])

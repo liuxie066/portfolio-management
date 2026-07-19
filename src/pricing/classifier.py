@@ -7,14 +7,21 @@ from __future__ import annotations
 
 from typing import Dict
 
+from src.asset_utils import normalize_code
+
 
 STOCK_KEYWORDS = ["股份", "银行", "证券", "保险", "科技", "控股", "集团", "stock"]
 FUND_KEYWORDS = ["基金", "混合", "债券", "货币", "指数", "ETF", "etf", "fund"]
 CASH_KEYWORDS = ["现金", "货币", "mmf", "cash", "余额宝"]
 
 
+def canonicalize_pricing_code(code: str) -> str:
+    """Strip only supported terminal market suffixes and normalize HK digits."""
+    return normalize_code((code or "").upper().strip())
+
+
 def normalize_code_with_name(code: str, name: str = "") -> str:
-    code = (code or "").upper().strip()
+    code = canonicalize_pricing_code(code)
     if code.startswith(("SH", "SZ")):
         return code
 

@@ -6,6 +6,7 @@ from datetime import date
 from typing import Any, Dict, List, Optional
 
 from src.feishu_storage import FeishuStorage
+from src.feishu_client import FeishuBatchWriteError
 from src.models import NAVHistory
 
 
@@ -224,6 +225,41 @@ def test_nav_bulk_upsert_uses_single_preload_and_batch_ops_for_n_le_500():
 
     assert result['updated'] == 1
     assert result['created'] == 1
+
+
+def test_nav_batch_fallback_does_not_replay_confirmed_partial_chunk():
+    class PartialClient(StubNavBulkClient):
+        def batch_update_records(self, table_name: str, records: List[Dict]):
+            self.batch_update_records_calls.append(records)
+            raise FeishuBatchWriteError(
+                operation='update',
+                table_name=table_name,
+                chunk_offset=500,
+                reason='FieldNameNotFound',
+                confirmed_results=[{'record_id': records[0]['record_id']}],
+            )
+
+    client = PartialClient(initial_records=[{
+        'record_id': 'rec_nav_1',
+        'fields': {
+            'date': '2026-03-01',
+            'account': 'lx',
+            'total_value': 1000,
+            'shares': 1000,
+            'nav': 1.0,
+        },
+    }])
+    storage = FeishuStorage(client=client, local_nav_index_cache=StubLocalNavIndexCache())
+
+    try:
+        storage.write_nav_records([
+            NAVHistory(date=date(2026, 3, 1), account='lx', total_value=1100, shares=1000, nav=1.1)
+        ], mode='replace', dry_run=False)
+        assert False, 'expected FeishuBatchWriteError'
+    except FeishuBatchWriteError as exc:
+        assert len(exc.confirmed_results) == 1
+
+    assert len(client.batch_update_records_calls) == 1
 
 
 def test_nav_bulk_upsert_upsert_mode_keeps_existing_cache_values_for_none_fields():

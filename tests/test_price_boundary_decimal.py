@@ -49,3 +49,34 @@ def test_local_price_cache_save_revalidates_price_payload(tmp_path: Path):
     assert loaded is not None
     assert loaded.price == 123.46
     assert loaded.cny_price == 888.89
+
+
+def test_price_payload_rejects_non_positive_or_non_finite_quote_fields():
+    import pytest
+
+    fetcher = PriceFetcher(storage=None, use_cache=False)
+    invalid_payloads = [
+        {"price": 0, "currency": "CNY", "cny_price": 1},
+        {"price": -1, "currency": "CNY", "cny_price": 1},
+        {"price": float("nan"), "currency": "CNY", "cny_price": 1},
+        {"price": 1, "currency": "USD", "cny_price": float("inf")},
+        {"price": 1, "currency": "USD", "cny_price": 7, "exchange_rate": 0},
+    ]
+
+    for payload in invalid_payloads:
+        with pytest.raises(ValueError, match="positive finite"):
+            fetcher._normalize_price_payload(payload)
+
+
+def test_foreign_price_payload_requires_cny_price():
+    import pytest
+
+    with pytest.raises(ValueError, match="requires cny_price"):
+        PriceFetcher._normalize_price_payload({"price": 10, "currency": "USD"})
+
+
+def test_price_payload_requires_price_field():
+    import pytest
+
+    with pytest.raises(ValueError, match="price must be"):
+        PriceFetcher._normalize_price_payload({"currency": "CNY", "cny_price": 1})

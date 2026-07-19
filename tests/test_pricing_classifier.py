@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from src.pricing.classifier import (
+    canonicalize_pricing_code,
     get_exchange_prefix,
     get_type_hints_from_name,
     is_etf,
@@ -27,3 +28,11 @@ def test_pricing_classifier_keeps_ambiguous_a_stock_codes_out_of_funds():
     assert is_otc_fund("300750") is False
     assert is_otc_fund("004001") is True
     assert is_etf("510300") is True
+
+
+def test_pricing_code_canonicalization_strips_only_known_terminal_suffixes():
+    assert canonicalize_pricing_code("FUTU.US") == "FUTU"
+    assert canonicalize_pricing_code("0700.HK") == "00700"
+    assert canonicalize_pricing_code("600519.SH") == "600519"
+    assert canonicalize_pricing_code("000001.SZ") == "000001"
+    assert canonicalize_pricing_code("BRK.B") == "BRK.B"

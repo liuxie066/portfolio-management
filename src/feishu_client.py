@@ -3,6 +3,7 @@
 支持读写核心表 holdings/cash_flow/nav_history/holdings_snapshot，以及可选 transactions/repair/schema 表。
 """
 import json
+import math
 import time
 import requests
 import requests.adapters
@@ -11,6 +12,28 @@ from typing import Dict, List, Optional, Any, Union
 from datetime import datetime
 
 from src import config
+
+
+class FeishuBatchWriteError(RuntimeError):
+    """A batch chunk was not fully confirmed by Feishu."""
+
+    def __init__(
+        self,
+        *,
+        operation: str,
+        table_name: str,
+        chunk_offset: int,
+        reason: str,
+        confirmed_results: Optional[List[Any]] = None,
+    ):
+        self.operation = operation
+        self.table_name = table_name
+        self.chunk_offset = chunk_offset
+        self.confirmed_results = list(confirmed_results or [])
+        super().__init__(
+            f"Feishu batch {operation} failed: table={table_name}, "
+            f"chunk_offset={chunk_offset}, confirmed={len(self.confirmed_results)}: {reason}"
+        )
 
 
 class FeishuClient:
@@ -30,6 +53,10 @@ class FeishuClient:
         self.app_id = app_id or config.get("feishu.app_id")
         self.app_secret = app_secret or config.get("feishu.app_secret")
         self.user_token = user_token or config.get("feishu.user_token")
+        self.timeout = (
+            config.get_float("feishu.connect_timeout", 5.0) or 5.0,
+            config.get_float("feishu.read_timeout", 30.0) or 30.0,
+        )
 
         # 应用级 token 缓存（带线程安全锁）
         self._tenant_token = None
@@ -112,7 +139,7 @@ class FeishuClient:
             response = requests.post(url, json={
                 'app_id': self.app_id,
                 'app_secret': self.app_secret
-            })
+            }, timeout=self.timeout)
             response.raise_for_status()
             data = response.json()
 
@@ -132,6 +159,17 @@ class FeishuClient:
                 time.sleep(self._min_interval - elapsed)
             self._last_request_time = time.time()
 
+    def _effective_timeout(self, requested: Any = None) -> tuple[float, float]:
+        if requested is None:
+            return self.timeout
+        if isinstance(requested, (tuple, list)) and len(requested) == 2:
+            connect, read = float(requested[0]), float(requested[1])
+        else:
+            connect = read = float(requested)
+        if not math.isfinite(connect) or not math.isfinite(read) or connect <= 0 or read <= 0:
+            raise ValueError("timeout values must be positive")
+        return min(connect, self.timeout[0]), min(read, self.timeout[1])
+
     def _request(self, method: str, endpoint: str, _retry_count: int = 0, **kwargs) -> Dict:
         """发送请求（带限流和错误处理）"""
         self._rate_limit()
@@ -139,6 +177,7 @@ class FeishuClient:
         url = f"{self.BASE_URL}{endpoint}"
         headers = self._get_headers()
 
+        kwargs['timeout'] = self._effective_timeout(kwargs.get('timeout'))
         response = self.session.request(method, url, headers=headers, **kwargs)
 
         # 处理限流错误（最多重试3次）
@@ -313,18 +352,111 @@ class FeishuClient:
 
     def delete_record(self, table_name: str, record_id: str) -> bool:
         """删除记录"""
-        try:
-            app_token, table_id = self._get_table_config(table_name)
-        except ValueError:
-            return False
+        app_token, table_id = self._get_table_config(table_name)
 
         endpoint = f"/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}"
+        self._request('DELETE', endpoint)
+        return True
 
+    @staticmethod
+    def _normalize_batch_record(record: Any) -> Dict[str, Any]:
+        if not isinstance(record, dict):
+            raise ValueError(f"record is not an object: {record!r}")
+        nested = record.get('record')
+        if isinstance(nested, dict):
+            record = nested
+        record_id = str(record.get('record_id') or '').strip()
+        if not record_id:
+            raise ValueError(f"record_id missing: {record!r}")
+        normalized = dict(record)
+        normalized['record_id'] = record_id
+        normalized['fields'] = dict(record.get('fields') or {})
+        return normalized
+
+    def _validate_batch_records(
+        self,
+        *,
+        operation: str,
+        table_name: str,
+        requested: List[Dict[str, Any]],
+        data: Dict[str, Any],
+        chunk_offset: int,
+        confirmed_results: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        raw_records = data.get('records') if isinstance(data, dict) else None
+        if not isinstance(raw_records, list):
+            raise FeishuBatchWriteError(
+                operation=operation,
+                table_name=table_name,
+                chunk_offset=chunk_offset,
+                reason="response records is missing or not a list",
+                confirmed_results=confirmed_results,
+            )
+        if len(raw_records) != len(requested):
+            raise FeishuBatchWriteError(
+                operation=operation,
+                table_name=table_name,
+                chunk_offset=chunk_offset,
+                reason=f"response cardinality {len(raw_records)} != request cardinality {len(requested)}",
+                confirmed_results=confirmed_results,
+            )
         try:
-            self._request('DELETE', endpoint)
-            return True
-        except Exception:
-            return False
+            normalized = [self._normalize_batch_record(record) for record in raw_records]
+        except ValueError as exc:
+            raise FeishuBatchWriteError(
+                operation=operation,
+                table_name=table_name,
+                chunk_offset=chunk_offset,
+                reason=str(exc),
+                confirmed_results=confirmed_results,
+            ) from exc
+
+        if operation == 'update':
+            expected_ids = [str(record.get('record_id') or '').strip() for record in requested]
+            if any(not record_id for record_id in expected_ids) or len(set(expected_ids)) != len(expected_ids):
+                raise ValueError("batch update requires unique non-empty record_id values")
+            by_id = {record['record_id']: record for record in normalized}
+            if len(by_id) != len(normalized) or set(by_id) != set(expected_ids):
+                raise FeishuBatchWriteError(
+                    operation=operation,
+                    table_name=table_name,
+                    chunk_offset=chunk_offset,
+                    reason=f"response record IDs do not match request IDs: expected={expected_ids}, actual={list(by_id)}",
+                    confirmed_results=confirmed_results,
+                )
+            normalized = [by_id[record_id] for record_id in expected_ids]
+        return normalized
+
+    def _request_batch_chunk(
+        self,
+        *,
+        operation: str,
+        table_name: str,
+        endpoint: str,
+        batch: List[Dict[str, Any]],
+        chunk_offset: int,
+        confirmed_results: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        try:
+            data = self._request('POST', endpoint, json={'records': batch})
+        except FeishuBatchWriteError:
+            raise
+        except Exception as exc:
+            raise FeishuBatchWriteError(
+                operation=operation,
+                table_name=table_name,
+                chunk_offset=chunk_offset,
+                reason=str(exc),
+                confirmed_results=confirmed_results,
+            ) from exc
+        return self._validate_batch_records(
+            operation=operation,
+            table_name=table_name,
+            requested=batch,
+            data=data,
+            chunk_offset=chunk_offset,
+            confirmed_results=confirmed_results,
+        )
 
     def batch_create_records(self, table_name: str, records: List[Dict[str, Any]]) -> List[Dict]:
         """
@@ -347,8 +479,14 @@ class FeishuClient:
 
         for i in range(0, len(records), batch_size):
             batch = records[i:i + batch_size]
-            data = self._request('POST', endpoint, json={'records': batch})
-            results.extend(data.get('records', []))
+            results.extend(self._request_batch_chunk(
+                operation='create',
+                table_name=table_name,
+                endpoint=endpoint,
+                batch=batch,
+                chunk_offset=i,
+                confirmed_results=results,
+            ))
 
         return results
 
@@ -362,6 +500,9 @@ class FeishuClient:
         """
         if not records:
             return []
+        record_ids = [str(record.get('record_id') or '').strip() for record in records]
+        if any(not record_id for record_id in record_ids) or len(set(record_ids)) != len(record_ids):
+            raise ValueError("batch update requires unique non-empty record_id values")
 
         app_token, table_id = self._get_table_config(table_name)
 
@@ -372,8 +513,14 @@ class FeishuClient:
 
         for i in range(0, len(records), batch_size):
             batch = records[i:i + batch_size]
-            data = self._request('POST', endpoint, json={'records': batch})
-            results.extend(data.get('records', []))
+            results.extend(self._request_batch_chunk(
+                operation='update',
+                table_name=table_name,
+                endpoint=endpoint,
+                batch=batch,
+                chunk_offset=i,
+                confirmed_results=results,
+            ))
 
         return results
 
@@ -400,7 +547,38 @@ class FeishuClient:
 
         for i in range(0, len(record_ids), batch_size):
             batch = record_ids[i:i + batch_size]
-            data = self._request('POST', endpoint, json={'records': batch})
-            deleted_count += len(data.get('records', []))
+            try:
+                data = self._request('POST', endpoint, json={'records': batch})
+            except Exception as exc:
+                raise FeishuBatchWriteError(
+                    operation='delete',
+                    table_name=table_name,
+                    chunk_offset=i,
+                    reason=str(exc),
+                    confirmed_results=record_ids[:deleted_count],
+                ) from exc
+            raw_records = data.get('records') if isinstance(data, dict) else None
+            if not isinstance(raw_records, list) or len(raw_records) != len(batch):
+                actual = len(raw_records) if isinstance(raw_records, list) else 'missing'
+                raise FeishuBatchWriteError(
+                    operation='delete',
+                    table_name=table_name,
+                    chunk_offset=i,
+                    reason=f"response cardinality {actual} != request cardinality {len(batch)}",
+                    confirmed_results=record_ids[:deleted_count],
+                )
+            actual_ids = [
+                str(record.get('record_id') if isinstance(record, dict) else record).strip()
+                for record in raw_records
+            ]
+            if set(actual_ids) != set(batch) or len(set(actual_ids)) != len(batch):
+                raise FeishuBatchWriteError(
+                    operation='delete',
+                    table_name=table_name,
+                    chunk_offset=i,
+                    reason=f"response record IDs do not match request IDs: expected={batch}, actual={actual_ids}",
+                    confirmed_results=record_ids[:deleted_count],
+                )
+            deleted_count += len(raw_records)
 
         return deleted_count

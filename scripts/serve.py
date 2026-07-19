@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -26,18 +27,28 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
 
-    from src.service.bind import validate_bind_host
+    from src.service.bind import ALLOW_REMOTE_ENV, validate_bind_host
 
     validate_bind_host(args.host, allow_remote=bool(args.allow_remote))
+    previous_allow_remote = os.environ.get(ALLOW_REMOTE_ENV)
+    if args.allow_remote:
+        os.environ[ALLOW_REMOTE_ENV] = "1"
 
-    import uvicorn
+    try:
+        import uvicorn
 
-    uvicorn.run(
-        "src.service.http:app",
-        host=args.host,
-        port=args.port,
-        reload=bool(args.reload),
-    )
+        uvicorn.run(
+            "src.service.http:app",
+            host=args.host,
+            port=args.port,
+            reload=bool(args.reload),
+        )
+    finally:
+        if args.allow_remote:
+            if previous_allow_remote is None:
+                os.environ.pop(ALLOW_REMOTE_ENV, None)
+            else:
+                os.environ[ALLOW_REMOTE_ENV] = previous_allow_remote
     return 0
 
 

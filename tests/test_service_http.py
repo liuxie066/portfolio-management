@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from src.service.http import create_app
+from src.service.http import app as module_app, create_app
+
+
+def _client(app, host="127.0.0.1"):
+    return TestClient(app, client=(host, 50000))
 
 
 class FakePortfolioService:
@@ -70,9 +74,42 @@ class FakePortfolioService:
         return {"success": True, "status": "completed", "dry_run": kwargs["dry_run"]}
 
 
+def test_module_app_rejects_remote_clients_by_default():
+    response = _client(module_app, "203.0.113.5").get(
+        "/health",
+        headers={"host": "127.0.0.1", "x-forwarded-for": "127.0.0.1"},
+    )
+
+    assert response.status_code == 403
+    assert "loopback clients only" in response.json()["detail"]
+
+
+def test_http_service_allows_only_actual_loopback_clients():
+    service = FakePortfolioService()
+    app = create_app(service=service)
+
+    assert _client(app, "127.0.0.1").get("/health").status_code == 200
+    assert _client(app, "::1").get("/health").status_code == 200
+
+    response = _client(app, "203.0.113.5").get(
+        "/health",
+        headers={"host": "localhost", "x-forwarded-for": "127.0.0.1"},
+    )
+    assert response.status_code == 403
+    assert service.calls == [("health", {}), ("health", {})]
+
+
+def test_http_service_explicit_remote_override_and_env(monkeypatch):
+    service = FakePortfolioService()
+    assert _client(create_app(service=service, allow_remote=True), "203.0.113.5").get("/health").status_code == 200
+
+    monkeypatch.setenv("PORTFOLIO_SERVICE_ALLOW_REMOTE", "true")
+    assert _client(create_app(service=service), "203.0.113.5").get("/health").status_code == 200
+
+
 def test_http_service_routes_delegate_to_portfolio_service():
     service = FakePortfolioService()
-    client = TestClient(create_app(service=service))
+    client = _client(create_app(service=service))
 
     assert client.get("/health").json()["status"] == "ok"
     assert client.get("/accounts", params={"include_default": False}).json()["accounts"] == ["alice"]
@@ -110,7 +147,7 @@ def test_http_service_routes_delegate_to_portfolio_service():
 
 
 def test_http_capital_facts_validates_period_and_month():
-    client = TestClient(create_app(service=FakePortfolioService()))
+    client = _client(create_app(service=FakePortfolioService()))
 
     assert client.get(
         "/analysis/capital-facts",
@@ -126,7 +163,7 @@ def test_http_capital_facts_validates_period_and_month():
     ).status_code == 422
 
 def test_http_service_rejects_unknown_report_type():
-    response = TestClient(create_app(service=FakePortfolioService())).get(
+    response = _client(create_app(service=FakePortfolioService())).get(
         "/report/weekly", params={"account": "alice"}
     )
 
@@ -141,7 +178,7 @@ def test_http_futu_holdings_sync_routes_delegate_to_service():
             return {"success": True, **kwargs}
 
     service = FutuService()
-    client = TestClient(create_app(service=service))
+    client = _client(create_app(service=service))
 
     query = client.post("/futu/holdings/sync", json={
         "account": "lx",

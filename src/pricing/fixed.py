@@ -63,20 +63,31 @@ def get_cash_price(code: str, fetch_exchange_rates: Callable[[], Dict[str, float
     return get_cash_price_with_rates(code, rates)
 
 
-def get_mmf_price(code: str) -> Dict:
-    """Build a fixed money-market-fund quote."""
-    currency = _currency_from_code(code)
-    return normalize_price_payload(
+def get_mmf_price_with_rates(code: str, rates: Dict[str, float]) -> Dict:
+    """Build a fixed money-market-fund quote using validated FX rates."""
+    payload = get_cash_price_with_rates(code, rates)
+    payload.update(
         {
-            "code": code,
-            "name": f"{currency}货币基金",
-            "price": 1.0,
-            "currency": currency,
-            "cny_price": 1.0,
+            "name": f"{payload['currency']}货币基金",
             "market_type": "mmf",
-            "source": "fixed",
         }
     )
+    return normalize_price_payload(payload)
+
+
+def get_mmf_price(
+    code: str,
+    fetch_exchange_rates: Callable[[], Dict[str, float]] | None = None,
+) -> Dict:
+    """Build a fixed MMF quote, fetching FX only for non-CNY currencies."""
+    currency = _currency_from_code(code)
+    if currency == "CNY":
+        rates = {"CNYCNY": 1.0}
+    else:
+        if fetch_exchange_rates is None:
+            raise KeyError(f"rates missing {currency}CNY")
+        rates = fetch_exchange_rates()
+    return get_mmf_price_with_rates(code, rates)
 
 
 def get_crypto_value_price_with_rates(code: str, rates: Dict[str, float]) -> Dict:

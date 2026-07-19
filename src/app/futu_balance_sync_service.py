@@ -14,6 +14,8 @@ from src.models import (
     MMF_ASSET_ID,
     Holding,
 )
+from src.process_lock import account_lock_key, process_lock
+
 from .cash_service import CashService
 
 
@@ -311,11 +313,13 @@ class FutuOpenApiBalanceProvider:
 class FutuBalanceSyncService:
     MONEY_QUANT = Decimal("0.01")
     ELIGIBLE_SECURITY_TYPES = {"STOCK", "ETF"}
-    ELIGIBLE_EXISTING_TYPES = {
+    STOCK_SYNC_ASSET_TYPES = {
         AssetType.A_STOCK,
         AssetType.HK_STOCK,
         AssetType.US_STOCK,
         AssetType.EXCHANGE_FUND,
+    }
+    LEGACY_ETF_ASSET_TYPES = {
         AssetType.CN_FUND,
         AssetType.HK_FUND,
         AssetType.US_FUND,
@@ -345,12 +349,13 @@ class FutuBalanceSyncService:
             else self._fetch_balances()
         )
 
-        return self._sync_cash_snapshot(
-            snapshot,
-            account=account,
-            broker=broker,
-            dry_run=dry_run,
-        )
+        with process_lock(account_lock_key(account)):
+            return self._sync_cash_snapshot(
+                snapshot,
+                account=account,
+                broker=broker,
+                dry_run=dry_run,
+            )
 
     def sync_portfolio(
         self,
@@ -368,63 +373,66 @@ class FutuBalanceSyncService:
 
         try:
             snapshot = self._fetch_portfolio()
-            items, replacements = self._build_position_diff(
-                snapshot.positions,
-                account=account,
-                broker=broker,
-                allow_empty_stock_snapshot=allow_empty_stock_snapshot,
-            )
         except Exception as exc:
             return self._failure(account, broker, dry_run, str(exc))
 
-        summary = {
-            "created": sum(item.action == "create" for item in items),
-            "updated": sum(item.action == "update" for item in items),
-            "zeroed": sum(item.action == "zero" for item in items),
-            "unchanged": sum(item.action == "unchanged" for item in items),
-            "quantity_changed": sum(item.quantity_changed for item in items),
-            "cost_changed": sum(item.cost_changed for item in items),
-        }
-        write_stage = "positions"
-        positions_written = False
-        try:
-            if not dry_run and replacements:
-                self.storage.upsert_holdings_bulk(replacements, mode="replace")
-                positions_written = True
+        with process_lock(account_lock_key(account)):
+            try:
+                items, replacements = self._build_position_diff(
+                    snapshot.positions,
+                    account=account,
+                    broker=broker,
+                    allow_empty_stock_snapshot=allow_empty_stock_snapshot,
+                )
+            except Exception as exc:
+                return self._failure(account, broker, dry_run, str(exc))
 
-            write_stage = "cash_mmf"
-            cash_result = self._sync_cash_snapshot(
-                FutuBalanceSnapshot(
-                    cash=snapshot.cash,
-                    mmf=snapshot.mmf,
-                    currency=snapshot.currency,
-                    source=snapshot.source,
-                ),
-                account=account,
-                broker=broker,
-                dry_run=dry_run,
-            )
-        except Exception as exc:
-            failure = self._failure(account, broker, dry_run, str(exc))
-            failure.update({
-                "write_stage": write_stage,
-                "partial_write_possible": not dry_run,
+            summary = {
+                "created": sum(item.action == "create" for item in items),
+                "updated": sum(item.action == "update" for item in items),
+                "zeroed": sum(item.action == "zero" for item in items),
+                "unchanged": sum(item.action == "unchanged" for item in items),
+                "quantity_changed": sum(item.quantity_changed for item in items),
+                "cost_changed": sum(item.cost_changed for item in items),
+            }
+            write_stage = "positions"
+            try:
+                if not dry_run and replacements:
+                    self.storage.upsert_holdings_bulk(replacements, mode="replace")
+
+                write_stage = "cash_mmf"
+                cash_result = self._sync_cash_snapshot(
+                    FutuBalanceSnapshot(
+                        cash=snapshot.cash,
+                        mmf=snapshot.mmf,
+                        currency=snapshot.currency,
+                        source=snapshot.source,
+                    ),
+                    account=account,
+                    broker=broker,
+                    dry_run=dry_run,
+                )
+            except Exception as exc:
+                failure = self._failure(account, broker, dry_run, str(exc))
+                failure.update({
+                    "write_stage": write_stage,
+                    "partial_write_possible": not dry_run,
+                    "positions": [item.__dict__ for item in items],
+                    "summary": summary,
+                })
+                return failure
+
+            return {
+                "success": bool(cash_result.get("success")),
+                "status": "dry_run" if dry_run else "written",
+                "account": account,
+                "broker": broker,
+                "dry_run": dry_run,
+                "source": snapshot.source,
+                "cash_mmf": cash_result,
                 "positions": [item.__dict__ for item in items],
                 "summary": summary,
-            })
-            return failure
-
-        return {
-            "success": bool(cash_result.get("success")),
-            "status": "dry_run" if dry_run else "written",
-            "account": account,
-            "broker": broker,
-            "dry_run": dry_run,
-            "source": snapshot.source,
-            "cash_mmf": cash_result,
-            "positions": [item.__dict__ for item in items],
-            "summary": summary,
-        }
+            }
 
     def _sync_cash_snapshot(
         self,
@@ -481,22 +489,34 @@ class FutuBalanceSyncService:
             if position.quantity == 0:
                 continue
             if position.position_side != "LONG":
-                raise ValueError(f"unknown position side blocks sync: {position.raw_code or position.asset_id}={position.position_side}")
+                raise ValueError(
+                    f"unknown position side blocks sync: {position.raw_code or position.asset_id}={position.position_side}"
+                )
             if not position.asset_id:
                 raise ValueError(f"empty normalized Futu code: {position.raw_code}")
             if position.asset_id in eligible:
                 raise ValueError(f"duplicate normalized Futu position: {position.asset_id}")
             if position.average_cost is None or not isfinite(position.average_cost) or position.average_cost < 0:
-                raise ValueError(f"valid Futu average_cost required for non-zero position: {position.raw_code or position.asset_id}")
+                raise ValueError(
+                    f"valid Futu average_cost required for non-zero position: {position.raw_code or position.asset_id}"
+                )
             eligible[position.asset_id] = position
 
-        existing_rows = [
-            holding for holding in self.storage.get_holdings(account=account, include_empty=True)
-            if (holding.broker or "") == broker and holding.asset_type in self.ELIGIBLE_EXISTING_TYPES
+        matchable_types = self.STOCK_SYNC_ASSET_TYPES | self.LEGACY_ETF_ASSET_TYPES
+        existing: dict[str, Holding] = {}
+        for holding in self.storage.get_holdings(account=account, include_empty=True):
+            if (holding.broker or "") != broker or holding.asset_type not in matchable_types:
+                continue
+            if holding.asset_id in existing:
+                raise ValueError(f"duplicate existing Futu holding: {holding.asset_id}")
+            existing[holding.asset_id] = holding
+
+        canonical_nonzero = [
+            holding.asset_id
+            for holding in existing.values()
+            if holding.asset_type in self.STOCK_SYNC_ASSET_TYPES and holding.quantity != 0
         ]
-        existing = {holding.asset_id: holding for holding in existing_rows}
-        existing_nonzero = [holding.asset_id for holding in existing_rows if holding.quantity != 0]
-        if not eligible and existing_nonzero and not allow_empty_stock_snapshot:
+        if not eligible and canonical_nonzero and not allow_empty_stock_snapshot:
             raise ValueError(
                 "empty eligible Futu stock snapshot would zero existing positions; "
                 "re-run with allow_empty_stock_snapshot=True and confirm=True after manual verification"
@@ -504,9 +524,8 @@ class FutuBalanceSyncService:
 
         items: list[FutuHoldingSyncItem] = []
         replacements: list[Holding] = []
-        for asset_id in sorted(set(existing) | set(eligible)):
-            current = existing.get(asset_id)
-            target = eligible.get(asset_id)
+
+        def append_item(asset_id: str, current: Optional[Holding], target: Optional[FutuPositionSnapshot]) -> None:
             current_quantity = float(current.quantity if current else 0)
             target_quantity = float(target.quantity if target else 0)
             current_cost = current.avg_cost if current else None
@@ -535,7 +554,7 @@ class FutuBalanceSyncService:
                 currency = current.currency
                 asset_class = current.asset_class
                 asset_name = current.asset_name
-                security_type = "STOCK" if current.asset_type != AssetType.EXCHANGE_FUND else "ETF"
+                security_type = "ETF" if current.asset_type == AssetType.EXCHANGE_FUND else "STOCK"
 
             items.append(FutuHoldingSyncItem(
                 asset_id=asset_id,
@@ -568,6 +587,18 @@ class FutuBalanceSyncService:
                     created_at=current.created_at if current else None,
                     updated_at=current.updated_at if current else None,
                 ))
+
+        matched: set[str] = set()
+        for asset_id in sorted(eligible):
+            current = existing.get(asset_id)
+            if current is not None:
+                matched.add(asset_id)
+            append_item(asset_id, current, eligible[asset_id])
+
+        for asset_id in sorted(set(existing) - matched):
+            current = existing[asset_id]
+            if current.asset_type in self.STOCK_SYNC_ASSET_TYPES:
+                append_item(asset_id, current, None)
 
         return items, replacements
 

@@ -74,14 +74,20 @@ class DailyAccountNavService:
         except Exception as e:
             return {
                 "success": False,
+                "status": "failed" if dry_run else "partial",
                 "error": str(e),
                 "account": self.account,
                 "date": record_result["date"],
                 "run_id": record_result["run_id"],
                 "dry_run": dry_run,
                 "confirm": confirm,
+                "nav_persisted": not dry_run,
+                "nav_result": record_result.get("nav_result"),
             }
         if not payload_result.get("success"):
+            payload_result.setdefault("status", "failed" if dry_run else "partial")
+            payload_result.setdefault("nav_persisted", not dry_run)
+            payload_result.setdefault("nav_result", record_result.get("nav_result"))
             payload_result.setdefault("account", self.account)
             payload_result.setdefault("date", record_result["date"])
             payload_result.setdefault("dry_run", dry_run)

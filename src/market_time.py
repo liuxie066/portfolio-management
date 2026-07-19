@@ -16,6 +16,7 @@ class MarketTimeUtil:
     # 时区定义
     TZ_SHANGHAI = ZoneInfo('Asia/Shanghai')
     TZ_NEW_YORK = ZoneInfo('America/New_York')
+    TZ_UTC = ZoneInfo('UTC')
 
     @classmethod
     def is_cn_market_open(cls, dt: datetime = None) -> bool:
@@ -52,87 +53,35 @@ class MarketTimeUtil:
         return (930 <= time_val <= 1200) or (1300 <= time_val <= 1600)
 
     @classmethod
-    def is_dst_in_new_york(cls, dt: datetime = None) -> bool:
-        """判断纽约是否处于夏令时
-
-        美国夏令时规则:
-        - 开始: 3月第二个周日 02:00 (变为03:00)
-        - 结束: 11月第一个周日 02:00 (变为01:00)
-        """
+    def _as_aware(cls, dt: datetime | None, default_tz: ZoneInfo) -> datetime:
         if dt is None:
-            dt = datetime.now(cls.TZ_NEW_YORK)
-        else:
-            # 转换到纽约时间
-            dt = dt.astimezone(cls.TZ_NEW_YORK)
+            return datetime.now(default_tz)
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=default_tz)
+        return dt
 
-        year = dt.year
-
-        # 计算3月第二个周日
-        march_first = datetime(year, 3, 1, tzinfo=cls.TZ_NEW_YORK)
-        march_second_sunday = march_first + timedelta(days=(6 - march_first.weekday() + 7) % 7 + 7)
-        dst_start = march_second_sunday.replace(hour=2, minute=0)
-
-        # 计算11月第一个周日
-        november_first = datetime(year, 11, 1, tzinfo=cls.TZ_NEW_YORK)
-        november_first_sunday = november_first + timedelta(days=(6 - november_first.weekday()) % 7)
-        dst_end = november_first_sunday.replace(hour=2, minute=0)
-
-        return dst_start <= dt < dst_end
+    @classmethod
+    def is_dst_in_new_york(cls, dt: datetime = None) -> bool:
+        """Return whether the supplied instant is in New York daylight time."""
+        instant = cls._as_aware(dt, cls.TZ_NEW_YORK)
+        return bool(instant.astimezone(cls.TZ_NEW_YORK).dst())
 
     @classmethod
     def is_us_market_open(cls, dt: datetime = None) -> bool:
-        """判断美股市场是否开盘 (北京时间)
+        """Evaluate the supplied instant in New York local market time.
 
-        夏令时(DST): 北京时间 21:30-04:00
-        冬令时(非DST): 北京时间 22:30-05:00
+        Trading hours are Monday-Friday 09:30-16:00. Exchange holidays remain
+        outside the current calendar contract.
         """
-        if dt is None:
-            dt = datetime.now(cls.TZ_SHANGHAI)
-
-        # 判断是否为夏令时
-        is_dst = cls.is_dst_in_new_york(dt)
-
-        weekday = dt.weekday()
-        hour, minute = dt.hour, dt.minute
-        time_val = hour * 100 + minute
-
-        if is_dst:
-            # 夏令时: 21:30-04:00
-            # 周一到周五的凌晨(00:00-04:00)
-            if weekday < 5 and time_val < 400:
-                return True
-            # 周一到周四晚上 (21:30-24:00)
-            if weekday < 4 and time_val >= 2130:
-                return True
-            # 周日晚上 (21:30-24:00) -> 周一凌晨开盘
-            if weekday == 6 and time_val >= 2130:
-                return True
-        else:
-            # 冬令时: 22:30-05:00
-            # 周一到周五的凌晨(00:00-05:00)
-            if weekday < 5 and time_val < 500:
-                return True
-            # 周一到周四晚上 (22:30-24:00)
-            if weekday < 4 and time_val >= 2230:
-                return True
-            # 周日晚上 (22:30-24:00) -> 周一凌晨开盘
-            if weekday == 6 and time_val >= 2230:
-                return True
-
-        return False
+        instant = cls._as_aware(dt, cls.TZ_SHANGHAI)
+        local = instant.astimezone(cls.TZ_NEW_YORK)
+        time_value = local.hour * 100 + local.minute
+        return local.weekday() < 5 and 930 <= time_value < 1600
 
     @classmethod
     def get_us_market_hours(cls, dt: datetime = None) -> tuple:
-        """获取美股交易时段 (北京时间)
-
-        Returns:
-            (开始时间HHMM, 结束时间HHMM) 注意结束时间是次日凌晨
-        """
-        is_dst = cls.is_dst_in_new_york(dt)
-        if is_dst:
-            return 2130, 400  # 夏令时 21:30-04:00
-        else:
-            return 2230, 500  # 冬令时 22:30-05:00
+        """Return regular-session hours in Beijing time for compatibility."""
+        return (2130, 400) if cls.is_dst_in_new_york(dt) else (2230, 500)
 
     @classmethod
     def _seconds_until_next_cn_open(cls, now: datetime) -> int:
@@ -203,43 +152,32 @@ class MarketTimeUtil:
 
     @classmethod
     def _seconds_until_next_us_open(cls, now: datetime) -> int:
-        """计算到美股下次开盘的秒数（北京时间）"""
-        is_dst = cls.is_dst_in_new_york(now)
-        us_open_hour = 21 if is_dst else 22
+        """Calculate elapsed seconds to the next New York-local regular open."""
+        instant = cls._as_aware(now, cls.TZ_SHANGHAI)
+        local = instant.astimezone(cls.TZ_NEW_YORK)
+        time_value = local.hour * 100 + local.minute
 
-        current_weekday = now.weekday()
-        hour, minute = now.hour, now.minute
+        if local.weekday() < 5 and 930 <= time_value < 1600:
+            return 600
 
-        if current_weekday == 5:  # 周六
-            next_open = now + timedelta(days=2)
-            next_open = next_open.replace(hour=us_open_hour, minute=30, second=0, microsecond=0)
-            return int((next_open - now).total_seconds())
+        if local.weekday() < 5 and time_value < 930:
+            next_open_local = local.replace(hour=9, minute=30, second=0, microsecond=0)
+        else:
+            next_open_local = (local + timedelta(days=1)).replace(
+                hour=9, minute=30, second=0, microsecond=0
+            )
+            while next_open_local.weekday() >= 5:
+                next_open_local += timedelta(days=1)
 
-        if current_weekday == 6:  # 周日
-            next_open = now + timedelta(days=1)
-            next_open = next_open.replace(hour=us_open_hour, minute=30, second=0, microsecond=0)
-            return int((next_open - now).total_seconds())
-
-        # 周五晚上收盘后
-        if current_weekday == 4:
-            if hour >= 5:
-                next_open = now + timedelta(days=3)
-                next_open = next_open.replace(hour=us_open_hour, minute=30, second=0, microsecond=0)
-                return int((next_open - now).total_seconds())
-
-        # 周一至周四晚上收盘后
-        if hour >= 5:
-            next_open = now + timedelta(days=1)
-            next_open = next_open.replace(hour=us_open_hour, minute=30, second=0, microsecond=0)
-            return int((next_open - now).total_seconds())
-
-        # 开盘前
-        if hour < us_open_hour or (hour == us_open_hour and minute < 30):
-            next_open = now.replace(hour=us_open_hour, minute=30, second=0, microsecond=0)
-            return int((next_open - now).total_seconds())
-
-        # 交易时间内，返回10分钟
-        return 600
+        return max(
+            0,
+            int(
+                (
+                    next_open_local.astimezone(cls.TZ_UTC)
+                    - instant.astimezone(cls.TZ_UTC)
+                ).total_seconds()
+            ),
+        )
 
     @classmethod
     def _seconds_until_next_fund_update(cls, now: datetime) -> int:

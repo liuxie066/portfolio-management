@@ -77,10 +77,8 @@ class SnapshotsRepository:
         created = 0
         updated = 0
         if creates:
-            self.client.batch_create_records('holdings_snapshot', creates)
-            created = len(creates)
+            created = len(self.client.batch_create_records('holdings_snapshot', creates))
         if updates:
-            self.client.batch_update_records('holdings_snapshot', updates)
-            updated = len(updates)
+            updated = len(self.client.batch_update_records('holdings_snapshot', updates))
 
         return {'dry_run': False, 'created': created, 'updated': updated, 'existing_count': len(existing_records)}

@@ -4,6 +4,7 @@ from unittest.mock import Mock
 import pytest
 
 from skill_api import PortfolioSkill
+from src.app.compensation_service import PartialWriteError
 from src.app.nav_record_service import NavRecordService
 from src.models import NAVHistory, PortfolioValuation
 from src.portfolio import PortfolioManager
@@ -28,12 +29,20 @@ def _storage():
     storage = Mock()
     storage.get_nav_index.return_value = {"_nav_objects": []}
     storage.get_cash_flow_aggs.return_value = {"daily": {}, "monthly": {}, "yearly": {}}
+
+    def write_nav(nav, **_kwargs):
+        nav.record_id = nav.record_id or "nav-1"
+        return nav
+
+    storage.write_nav_record.side_effect = write_nav
+    storage.write_nav_records.side_effect = lambda navs, **_kwargs: [write_nav(nav) for nav in navs]
     return storage
 
 
 def _manager(storage):
     manager = PortfolioManager(storage=storage, price_fetcher=Mock())
     manager.snapshot_service = Mock()
+    manager.snapshot_service.build_holdings_snapshots.return_value = []
     manager._record_compensation = Mock()
     manager._print_nav_summary = Mock()
     return manager
@@ -173,8 +182,32 @@ def test_nav_record_service_logs_snapshot_failure_after_nav_write(caplog):
     assert result.details["snapshot_status"] == "failed"
     assert result.details["snapshot_error"] == "snapshot boom"
     manager._record_compensation.assert_called_once()
-    assert manager._record_compensation.call_args.kwargs["operation_type"] == "NAV_HOLDINGS_SNAPSHOT_FAILED"
+    call = manager._record_compensation.call_args.kwargs
+    assert call["operation_type"] == "NAV_HOLDINGS_SNAPSHOT_FAILED"
+    assert call["task_id"] == result.details["snapshot_task_id"]
+    assert call["payload"]["targets"][0]["type"] == "HOLDINGS_SNAPSHOT_TARGET_SET"
+    storage.nav_history.patch_nav_details.assert_called_once_with("nav-1", result.details, dry_run=False)
     assert "holdings_snapshot write failed for 2026-03-19 (a): snapshot boom" in caplog.text
+
+
+def test_nav_record_service_raises_partial_when_recovery_evidence_cannot_persist():
+    storage = _storage()
+    manager = _manager(storage)
+    manager.snapshot_service.persist_holdings_snapshot.side_effect = RuntimeError("snapshot boom")
+    manager._record_compensation.side_effect = OSError("disk full")
+    service = NavRecordService(manager=manager, storage=storage)
+
+    with pytest.raises(PartialWriteError) as captured:
+        service.record_nav(
+            account="a",
+            valuation=_valuation(),
+            nav_date=date(2026, 3, 19),
+            persist=True,
+        )
+
+    assert captured.value.operation == "NAV_RECORD"
+    assert captured.value.compensation_persisted is False
+    assert storage.write_nav_record.called
 
 
 def test_portfolio_skill_record_nav_surfaces_snapshot_partial_failure():

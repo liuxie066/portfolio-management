@@ -4,6 +4,10 @@ Schema version: `0004_manual_editable_fields`
 
 This doc defines the canonical Feishu Bitable field names expected by the code.
 Field names must match exactly: they are case-sensitive and underscore-sensitive.
+The parenthesized type family on every required/optional field is also part of
+the strict live-schema contract. Slash-separated values are accepted
+alternatives (`text/select`, `date/text`, `text/datetime`). `text/json` means
+JSON serialized into a text field, not a separate Feishu JSON field type.
 
 Manual editing policy:
 - Manual fields are safe to edit directly in Feishu.
@@ -209,7 +213,9 @@ Optional fields:
 
 Role: optional
 
-Purpose: repair queue for partial multi-table write failures. This is a system-only table.
+Purpose: optional Feishu mirror for partial multi-table write failures. The same-host source of truth is the append-only `${PM_DATA_DIR}/compensation_tasks.jsonl` event log; every append is process-locked, flushed, and fsync'd before the mirror is attempted. Events fold by `task_id` through `PENDING`, `RUNNING`, `FAILED`, and `RESOLVED`.
+
+Automatic retry only accepts absolute compare-and-set targets of type `HOLDING_TARGET_SET`, `HOLDING_ZERO_DELETE`, `CASH_TARGET_SET`, or `HOLDINGS_SNAPSHOT_TARGET_SET`. Legacy delta payloads remain inspectable with `supported=false` but must not be replayed automatically.
 
 Required fields:
 - `task_id` (text) - system
