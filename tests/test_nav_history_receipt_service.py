@@ -185,6 +185,30 @@ def test_nav_receipt_formats_snapshot_recovery_error():
     assert "unknown error" not in text
 
 
+def test_nav_receipt_formats_existing_nav_not_final_as_blocker():
+    text = NavHistoryReceiptService.build_message(
+        {
+            "success": False,
+            "status": "failed",
+            "dry_run": False,
+            "date": "2026-07-20",
+            "items": [
+                {
+                    "success": False,
+                    "status": "existing_nav_not_final",
+                    "account": "lx",
+                    "error": "existing row requires classification",
+                }
+            ],
+        },
+        executed_at=datetime(2026, 7, 21, 8, 11),
+    )
+
+    assert "【NAV History 记录回执｜失败】" in text
+    assert "结果：写入 0，跳过 0，失败 1" in text
+    assert "❌ lx｜existing_nav_not_final｜existing row requires classification" in text
+
+
 def test_nav_receipt_compacts_healthy_price_summaries_across_accounts():
     text = NavHistoryReceiptService.build_message(
         {

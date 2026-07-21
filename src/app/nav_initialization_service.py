@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
+from src.app.nav_finality import NavWriteContext
 from src.asset_utils import parse_date
 from src.time_utils import bj_today
 
@@ -85,6 +86,13 @@ class NavInitializationService:
                 overwrite_existing=False,
                 dry_run=dry_run,
                 use_bulk_persist=use_bulk_persist,
+                nav_write_context=NavWriteContext(
+                    status="initial",
+                    writer="init-nav",
+                    write_reason="nav_history_initialization",
+                    nav_date=nav_date,
+                    valuation_as_of=snapshot.get("snapshot_time"),
+                ),
             )
 
             result = {

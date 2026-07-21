@@ -24,6 +24,7 @@ from .app import (
     TradeService,
     ValuationService,
 )
+from .app.nav_finality import NavWriteContext
 from .domain import NavCalculator, NavHistoryIndex, PayloadNormalizer
 from . import config
 
@@ -222,7 +223,8 @@ class PortfolioManager:
     def record_nav(self, account: str, valuation: Optional[PortfolioValuation] = None,
                    nav_date: Optional[date] = None, persist: bool = True,
                    overwrite_existing: bool = True, dry_run: bool = False,
-                   use_bulk_persist: bool = False, run_id: Optional[str] = None) -> NAVHistory:
+                   use_bulk_persist: bool = False, run_id: Optional[str] = None,
+                   nav_write_context: Optional[NavWriteContext] = None) -> NAVHistory:
         """
         记录每日净值（按Excel账户净值sheet逻辑）
         计算字段：股票市值、现金结余、账户净值、占比、份额变动、涨幅、资产升值
@@ -240,6 +242,7 @@ class PortfolioManager:
             dry_run=dry_run,
             use_bulk_persist=use_bulk_persist,
             run_id=run_id,
+            nav_write_context=nav_write_context,
         )
 
     @classmethod

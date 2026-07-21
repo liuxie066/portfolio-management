@@ -26,6 +26,7 @@ from src.asset_utils import (
 )
 from src.broker_message_parser import parse_futu_fill_message
 from src.app import AccountNavRecorderService, FutuBalanceSyncService, PortfolioReadService, ReportGenerationService, ReportQueryService
+from src.app.nav_finality import NavWriteContext
 from src.app.account_service import AccountService, normalize_accounts
 from src.app.audit_service import AuditService
 from src.domain.nav.performance import (
@@ -818,7 +819,7 @@ class PortfolioSkill:
         约定：
         - shares 固定写 0
         - nav 固定写 1.0
-        - details 写入 {"status":"CLOSED"}
+        - details 写入 CLOSED 状态和非最终日结的 finality provenance
         - 允许 total_value > 0（残余现金等），但建议同时提供 cash_value/stock_value 以保持拆分自洽。
 
         安全约束：默认 dry_run=True；真正写入必须 confirm=True 且 dry_run=False。
@@ -868,7 +869,15 @@ class PortfolioSkill:
                 stock_value=round(float(stock_value), 2) if stock_value is not None else None,
                 shares=0.0,
                 nav=1.0,
-                details={"status": "CLOSED"},
+                details={
+                    "status": "CLOSED",
+                    "finality": NavWriteContext(
+                        status="closed",
+                        writer="close-nav",
+                        write_reason="account_closed",
+                        nav_date=nav_date,
+                    ).to_details(),
+                },
             )
 
             storage_preview = self.storage.write_nav_record(nav_record, overwrite_existing=overwrite_existing, dry_run=True)

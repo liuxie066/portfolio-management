@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, Optional
 
 from src.app.account_service import AccountService, normalize_accounts
 from src.app.business_calendar_service import BusinessCalendarService
+from src.app.nav_finality import NavWriteContext, evaluate_nav_finality
 
 
 def _coerce_date(value: Any) -> date:
@@ -130,14 +131,32 @@ class DailyNavJobService:
                 "task_id": task_id,
                 "retry_command": retry_command,
             }
+        finality = evaluate_nav_finality(details, target_date=nav_date)
+        if finality.eligible:
+            return {
+                "status": "skipped_existing_nav",
+                "success": True,
+                "account": account,
+                "date": nav_date.isoformat(),
+                "record_id": record_id,
+                "nav": getattr(existing, "nav", None),
+                "total_value": getattr(existing, "total_value", None),
+                "finality": finality.finality,
+            }
         return {
-            "status": "skipped_existing_nav",
-            "success": True,
+            "status": "existing_nav_not_final",
+            "success": False,
             "account": account,
             "date": nav_date.isoformat(),
             "record_id": record_id,
             "nav": getattr(existing, "nav", None),
             "total_value": getattr(existing, "total_value", None),
+            "finality": finality.finality,
+            "finality_reason": finality.reason,
+            "error": (
+                "existing nav_history row is not finalized for the target date; "
+                "classify or repair it before rerunning daily NAV"
+            ),
         }
 
     def _cash_flow_blocker(self, account: str, *, dry_run: bool) -> Optional[Dict[str, Any]]:
@@ -288,6 +307,13 @@ class DailyNavJobService:
                     continue
 
             item_run_id = f"{resolved_run_id}:{target_account}"
+            write_context = NavWriteContext(
+                status="final",
+                writer="daily-nav-job",
+                write_reason="canonical_daily_nav_job",
+                nav_date=resolved_nav_date,
+                run_id=item_run_id,
+            )
             result = self._account_runner(target_account).run(
                 nav_date=resolved_nav_date,
                 price_timeout=price_timeout,
@@ -298,6 +324,7 @@ class DailyNavJobService:
                 sync_futu_cash_mmf=sync_futu_cash_mmf,
                 sync_futu_dry_run=resolved_sync_futu_dry_run,
                 run_id=item_run_id,
+                nav_write_context=write_context,
             )
             result.setdefault("account", target_account)
             result.setdefault("date", resolved_nav_date.isoformat())
@@ -315,6 +342,7 @@ class DailyNavJobService:
             "cash_flow_pending",
             "nav_history_duplicate",
             "recovery_required",
+            "existing_nav_not_final",
         }
         has_blocker = any(str(item.get("status")) in blocking_statuses or item.get("success") is False for item in items)
         if not has_blocker:
