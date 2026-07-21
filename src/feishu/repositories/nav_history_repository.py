@@ -3,6 +3,7 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 from ...models import NAVHistory
+from ...process_lock import nav_history_lock_key, process_lock
 
 
 class NavHistoryRepository:
@@ -637,7 +638,7 @@ class NavHistoryRepository:
             'previews': previews,
         }
 
-    def _write_one_nav_record(self, nav: NAVHistory, overwrite_existing: bool = True, dry_run: bool = False):
+    def _write_one_nav_record(self, nav: NAVHistory, overwrite_existing: bool = False, dry_run: bool = False):
         preview_result = self._write_nav_full_records(
             [nav],
             mode='replace',
@@ -659,9 +660,14 @@ class NavHistoryRepository:
         self._apply_nav_rows_to_local_cache(nav.account, [outcome['cache_row']])
         return
 
-    def write_nav_record(self, nav: NAVHistory, overwrite_existing: bool = True, dry_run: bool = False):
-        """Public entrypoint for writing one full nav record."""
-        return self._write_one_nav_record(nav, overwrite_existing=overwrite_existing, dry_run=dry_run)
+    def write_nav_record(self, nav: NAVHistory, overwrite_existing: bool = False, dry_run: bool = False):
+        """Write one full NAV row while serializing preview and mutation."""
+        with process_lock(nav_history_lock_key()):
+            return self._write_one_nav_record(
+                nav,
+                overwrite_existing=overwrite_existing,
+                dry_run=dry_run,
+            )
 
     def write_nav_records(
         self,
@@ -670,18 +676,19 @@ class NavHistoryRepository:
         allow_partial: bool = False,
         dry_run: bool = False,
     ) -> Dict[str, any]:
-        """Public entrypoint for writing full nav records in bulk."""
-        result = self._write_nav_full_records(
-            nav_list,
-            mode=mode,
-            allow_partial=allow_partial,
-            dry_run=dry_run,
-            use_batch_api=not dry_run,
-        )
-        if not dry_run:
-            result.pop('previews', None)
-            result.pop('dry_run', None)
-        return result
+        """Write full NAV rows in bulk under the repository mutation lock."""
+        with process_lock(nav_history_lock_key()):
+            result = self._write_nav_full_records(
+                nav_list,
+                mode=mode,
+                allow_partial=allow_partial,
+                dry_run=dry_run,
+                use_batch_api=not dry_run,
+            )
+            if not dry_run:
+                result.pop('previews', None)
+                result.pop('dry_run', None)
+            return result
 
     def get_nav_history(self, account: str, days: int = 365) -> List[NAVHistory]:
         """获取净值历史（优先本地预加载索引）。"""
@@ -751,22 +758,24 @@ class NavHistoryRepository:
         return {"record_id": record_id, "fields": feishu_fields}
 
     def patch_nav_derived_fields(self, record_id: str, fields: Dict[str, any], dry_run: bool = False):
-        """Patch only derived nav fields with an explicit allowlist."""
-        return self._patch_nav_fields(
-            record_id,
-            fields,
-            dry_run=dry_run,
-            allowed_fields=self.NAV_DERIVED_PATCH_FIELDS,
-        )
+        """Patch only derived NAV fields under the repository mutation lock."""
+        with process_lock(nav_history_lock_key()):
+            return self._patch_nav_fields(
+                record_id,
+                fields,
+                dry_run=dry_run,
+                allowed_fields=self.NAV_DERIVED_PATCH_FIELDS,
+            )
 
     def patch_nav_details(self, record_id: str, details: Dict[str, any], dry_run: bool = False):
-        """Patch only the recovery/status details object on one NAV row."""
-        return self._patch_nav_fields(
-            record_id,
-            {"details": dict(details or {})},
-            dry_run=dry_run,
-            allowed_fields={"details"},
-        )
+        """Patch only the recovery/status details object under the mutation lock."""
+        with process_lock(nav_history_lock_key()):
+            return self._patch_nav_fields(
+                record_id,
+                {"details": dict(details or {})},
+                dry_run=dry_run,
+                allowed_fields={"details"},
+            )
 
     def get_latest_nav_before(self, account: str, before_date: date) -> Optional[NAVHistory]:
         """获取指定日期之前的最新净值记录（优先索引）。"""
@@ -846,9 +855,10 @@ class NavHistoryRepository:
         )
 
     def delete_nav_by_record_id(self, record_id: str) -> bool:
-        """通过记录ID删除净值记录"""
-        ok = self.client.delete_record('nav_history', record_id)
-        if ok:
-            self._nav_index_loaded_accounts.clear()
-            self._nav_index_mem_cache.clear()
-        return ok
+        """Delete one NAV row under the repository mutation lock."""
+        with process_lock(nav_history_lock_key()):
+            ok = self.client.delete_record('nav_history', record_id)
+            if ok:
+                self._nav_index_loaded_accounts.clear()
+                self._nav_index_mem_cache.clear()
+            return ok

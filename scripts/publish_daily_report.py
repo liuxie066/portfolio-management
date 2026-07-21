@@ -50,7 +50,20 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--price-timeout", type=int, default=30, help="Price fetch timeout in seconds.")
     parser.add_argument("--nav-date", default=None, help="NAV date to record (YYYY-MM-DD). Defaults to Beijing today.")
-    parser.add_argument("--dry-run", action="store_true", help="Do not persist NAV writes.")
+    nav_write_group = parser.add_mutually_exclusive_group()
+    nav_write_group.add_argument(
+        "--write-nav",
+        dest="write_nav",
+        action="store_true",
+        help="Persist the report NAV row; requires --confirm.",
+    )
+    nav_write_group.add_argument(
+        "--dry-run",
+        dest="write_nav",
+        action="store_false",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument("--confirm", action="store_true", help="Required with --write-nav.")
     parser.add_argument("--use-bulk-nav-upsert", action="store_true", help="Persist NAV through FeishuStorage.write_nav_records (single-row bulk mode).")
     parser.add_argument("--no-html", action="store_true", help="Do not render HTML; only record NAV + generate JSON bundle.")
     parser.add_argument("--no-publish", action="store_true", help="Do not write HTML files into reports/publish dirs.")
@@ -86,10 +99,14 @@ def parse_args() -> argparse.Namespace:
         help="Actually write Futu cash/MMF holdings when --sync-futu-cash-mmf is set.",
     )
     parser.set_defaults(
+        write_nav=False,
         sync_futu_cash_mmf=app_config.get_bool("report.sync_futu_cash_mmf", False),
         sync_futu_dry_run=app_config.get_bool("report.sync_futu_dry_run", True),
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.write_nav and not args.confirm:
+        parser.error("--write-nav requires --confirm")
+    return args
 
 
 @contextlib.contextmanager
@@ -114,7 +131,8 @@ def build_config(args: argparse.Namespace) -> PublishConfig:
 
 def build_report_data(
     price_timeout: int,
-    dry_run: bool = False,
+    dry_run: bool = True,
+    confirm: bool = False,
     use_bulk_nav_upsert: bool = False,
     sync_futu_cash_mmf: bool = False,
     sync_futu_dry_run: bool = True,
@@ -134,6 +152,9 @@ def build_report_data(
     """
     from src.run_id import new_run_id
 
+    if not dry_run and not confirm:
+        raise ValueError("NAV persistence requires confirm=True")
+
     resolved_run_id = run_id or new_run_id("daily-report", account)
 
     if not no_service:
@@ -141,6 +162,7 @@ def build_report_data(
             bundle = _build_report_data_via_service(
                 price_timeout=price_timeout,
                 dry_run=dry_run,
+                confirm=confirm,
                 use_bulk_nav_upsert=use_bulk_nav_upsert,
                 sync_futu_cash_mmf=sync_futu_cash_mmf,
                 sync_futu_dry_run=sync_futu_dry_run,
@@ -166,6 +188,7 @@ def build_report_data(
     return _build_report_data_direct(
         price_timeout=price_timeout,
         dry_run=dry_run,
+        confirm=confirm,
         use_bulk_nav_upsert=use_bulk_nav_upsert,
         sync_futu_cash_mmf=sync_futu_cash_mmf,
         sync_futu_dry_run=sync_futu_dry_run,
@@ -179,6 +202,7 @@ def _build_report_data_via_service(
     *,
     price_timeout: int,
     dry_run: bool,
+    confirm: bool,
     use_bulk_nav_upsert: bool,
     sync_futu_cash_mmf: bool,
     sync_futu_dry_run: bool,
@@ -195,7 +219,8 @@ def _build_report_data_via_service(
         "account": account,
         "price_timeout": price_timeout,
         "dry_run": dry_run,
-        "confirm": not dry_run,
+        "confirm": confirm,
+        "overwrite_existing": True if dry_run else False,
         "use_bulk_persist": use_bulk_nav_upsert,
         "sync_futu_cash_mmf": sync_futu_cash_mmf,
         "sync_futu_dry_run": sync_futu_dry_run,
@@ -209,7 +234,8 @@ def _build_report_data_via_service(
 def _build_report_data_direct(
     *,
     price_timeout: int,
-    dry_run: bool = False,
+    dry_run: bool = True,
+    confirm: bool = False,
     use_bulk_nav_upsert: bool = False,
     sync_futu_cash_mmf: bool = False,
     sync_futu_dry_run: bool = True,
@@ -223,7 +249,8 @@ def _build_report_data_direct(
         "account": account,
         "price_timeout": price_timeout,
         "dry_run": dry_run,
-        "confirm": not dry_run,
+        "confirm": confirm,
+        "overwrite_existing": True if dry_run else False,
         "use_bulk_persist": use_bulk_nav_upsert,
         "sync_futu_cash_mmf": sync_futu_cash_mmf,
         "sync_futu_dry_run": sync_futu_dry_run,
@@ -307,7 +334,8 @@ def main() -> None:
     with _suppress_internal_stdout(enabled=(not bool(args.debug_internal))):
         report_bundle = build_report_data(
             price_timeout=args.price_timeout,
-            dry_run=args.dry_run,
+            dry_run=not bool(args.write_nav),
+            confirm=bool(args.confirm),
             use_bulk_nav_upsert=bool(args.use_bulk_nav_upsert),
             sync_futu_cash_mmf=bool(args.sync_futu_cash_mmf),
             sync_futu_dry_run=bool(args.sync_futu_dry_run),

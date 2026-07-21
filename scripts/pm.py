@@ -477,7 +477,7 @@ def cmd_nav_record(args):
             "price_timeout": args.timeout,
             "dry_run": bool(args.dry_run),
             "confirm": bool(args.confirm),
-            "overwrite_existing": not bool(args.no_overwrite),
+            "overwrite_existing": bool(args.overwrite),
             "use_bulk_persist": bool(args.use_bulk_persist),
         }
         if getattr(args, "nav_date", None):
@@ -494,7 +494,7 @@ def cmd_nav_record(args):
             "price_timeout": args.timeout,
             "dry_run": bool(args.dry_run),
             "confirm": bool(args.confirm),
-            "overwrite_existing": not bool(args.no_overwrite),
+            "overwrite_existing": bool(args.overwrite),
             "use_bulk_persist": bool(args.use_bulk_persist),
         }
         if getattr(args, "nav_date", None):
@@ -561,7 +561,7 @@ def cmd_daily(args):
             "price_timeout": args.timeout,
             "dry_run": bool(args.dry_run),
             "confirm": bool(args.confirm),
-            "overwrite_existing": not bool(args.no_overwrite),
+            "overwrite_existing": bool(args.overwrite),
             "use_bulk_persist": bool(args.use_bulk_persist),
         }
         if getattr(args, "nav_date", None):
@@ -578,7 +578,7 @@ def cmd_daily(args):
             "price_timeout": args.timeout,
             "dry_run": bool(args.dry_run),
             "confirm": bool(args.confirm),
-            "overwrite_existing": not bool(args.no_overwrite),
+            "overwrite_existing": bool(args.overwrite),
             "use_bulk_persist": bool(args.use_bulk_persist),
         }
         if getattr(args, "nav_date", None):
@@ -759,7 +759,19 @@ def build_parser() -> argparse.ArgumentParser:
         subparser.add_argument("--dry-run", action="store_true", default=True, help="preview only (default)")
         subparser.add_argument("--write", dest="dry_run", action="store_false", help="actually write nav_history")
         subparser.add_argument("--confirm", action="store_true", help="required with --write")
-        subparser.add_argument("--no-overwrite", action="store_true", help="refuse to overwrite an existing row for the same date")
+        overwrite_group = subparser.add_mutually_exclusive_group()
+        overwrite_group.add_argument(
+            "--overwrite",
+            action="store_true",
+            default=False,
+            help="overwrite an existing NAV row for the same date",
+        )
+        overwrite_group.add_argument(
+            "--no-overwrite",
+            dest="overwrite",
+            action="store_false",
+            help=argparse.SUPPRESS,
+        )
         subparser.add_argument("--use-bulk-persist", action="store_true", help="use nav_history bulk upsert path")
         subparser.add_argument("--run-id", default=None, help="operator-supplied run id for tracing")
         subparser.add_argument("--account", default=argparse.SUPPRESS, help="account to operate on; defaults to config/PORTFOLIO_ACCOUNT")

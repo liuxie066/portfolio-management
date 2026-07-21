@@ -70,7 +70,7 @@ def test_nav_record_service_records_nav_through_manager_helpers():
     assert result.total_value == 1200.0
     manager._find_latest_nav_before.assert_called_once()
     manager.snapshot_service.persist_holdings_snapshot.assert_called_once()
-    storage.write_nav_record.assert_called_once_with(result, overwrite_existing=True, dry_run=True)
+    storage.write_nav_record.assert_called_once_with(result, overwrite_existing=False, dry_run=True)
     storage.write_nav_records.assert_not_called()
     manager._print_nav_summary.assert_not_called()
 
@@ -99,7 +99,7 @@ def test_nav_record_service_persists_run_id_in_details():
         "write_reason": "direct_nav_record",
         "run_id": "run-nav-1",
     }
-    storage.write_nav_record.assert_called_once_with(result, overwrite_existing=True, dry_run=True)
+    storage.write_nav_record.assert_called_once_with(result, overwrite_existing=False, dry_run=True)
 
 
 def test_nav_record_service_persists_explicit_daily_job_finality():

@@ -2,12 +2,22 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import date
+from threading import Event, Lock, Thread
+
+import pytest
 from typing import Any, Dict, List, Optional
 
+from src import config
 from src.feishu_storage import FeishuStorage
 from src.feishu_client import FeishuBatchWriteError
 from src.models import NAVHistory
+
+
+@pytest.fixture(autouse=True)
+def _use_temporary_nav_lock_dir(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "get_data_dir", lambda: tmp_path)
 
 
 class StubLocalNavIndexCache:
@@ -121,6 +131,7 @@ class StubNavSingleWriteClient:
         self.list_records_calls: List[Dict[str, Any]] = []
         self.update_record_calls: List[Dict[str, Any]] = []
         self.create_record_calls: List[Dict[str, Any]] = []
+        self.delete_record_calls: List[str] = []
 
     def list_records(self, table_name: str, filter_str: str = None, field_names: List[str] = None, page_size: int = 500):
         assert table_name == 'nav_history'
@@ -159,6 +170,12 @@ class StubNavSingleWriteClient:
         record_id = f"rec_nav_new_{len(self._records) + 1}"
         self._records.append({'record_id': record_id, 'fields': dict(fields)})
         return {'record_id': record_id, 'fields': dict(fields)}
+
+    def delete_record(self, table_name: str, record_id: str):
+        assert table_name == 'nav_history'
+        self.delete_record_calls.append(record_id)
+        self._records = [row for row in self._records if row.get('record_id') != record_id]
+        return True
 
 
 def test_nav_bulk_upsert_uses_single_preload_and_batch_ops_for_n_le_500():
@@ -348,7 +365,7 @@ def test_write_nav_record_refreshes_remote_once_before_create_to_avoid_same_day_
         nav=1.1,
     )
 
-    storage.write_nav_record(nav)
+    storage.write_nav_record(nav, overwrite_existing=True)
 
     assert len(client.list_records_calls) == 1
     assert len(client.update_record_calls) == 1
@@ -382,7 +399,7 @@ def test_write_nav_record_respects_overwrite_existing_false_before_write():
     )
 
     try:
-        storage.write_nav_record(nav, overwrite_existing=False)
+        storage.write_nav_record(nav)
         assert False, "expected ValueError"
     except ValueError as exc:
         assert "已存在同日记录" in str(exc)
@@ -560,3 +577,120 @@ def test_patch_nav_derived_fields_rejects_non_derived_fields():
         assert False, "expected ValueError"
     except ValueError as exc:
         assert "illegal field" in str(exc)
+
+
+
+def test_nav_repository_public_mutations_share_one_lock_key(monkeypatch):
+    import src.feishu.repositories.nav_history_repository as repository_module
+
+    lock_keys = []
+    active_depth = 0
+    max_depth = 0
+
+    @contextmanager
+    def fake_process_lock(key):
+        nonlocal active_depth, max_depth
+        lock_keys.append(key)
+        active_depth += 1
+        max_depth = max(max_depth, active_depth)
+        try:
+            yield
+        finally:
+            active_depth -= 1
+
+    monkeypatch.setattr(repository_module, 'process_lock', fake_process_lock)
+    client = StubNavSingleWriteClient()
+    storage = FeishuStorage(client=client, local_nav_index_cache=StubLocalNavIndexCache())
+    nav = NAVHistory(date=date(2026, 3, 4), account='lx', total_value=1000.0, shares=1000.0, nav=1.0)
+
+    storage.write_nav_record(nav, dry_run=True)
+    storage.write_nav_records([nav], dry_run=True)
+    storage.patch_nav_derived_fields('rec_nav_1', {'pnl': 1.0}, dry_run=True)
+    storage.patch_nav_details('rec_nav_1', {'snapshot_status': 'failed'}, dry_run=True)
+    storage.delete_nav_by_record_id('rec_nav_1')
+
+    assert lock_keys == ['nav-history-write'] * 5
+    assert max_depth == 1
+
+
+def test_single_nav_existence_check_and_create_are_inside_one_lock(monkeypatch):
+    import src.feishu.repositories.nav_history_repository as repository_module
+
+    active = False
+
+    @contextmanager
+    def fake_process_lock(key):
+        nonlocal active
+        assert key == 'nav-history-write'
+        assert active is False
+        active = True
+        try:
+            yield
+        finally:
+            active = False
+
+    class LockCheckingClient(StubNavSingleWriteClient):
+        def list_records(self, *args, **kwargs):
+            assert active is True
+            return super().list_records(*args, **kwargs)
+
+        def create_record(self, *args, **kwargs):
+            assert active is True
+            return super().create_record(*args, **kwargs)
+
+    monkeypatch.setattr(repository_module, 'process_lock', fake_process_lock)
+    client = LockCheckingClient()
+    storage = FeishuStorage(client=client, local_nav_index_cache=StubLocalNavIndexCache())
+    nav = NAVHistory(date=date(2026, 3, 5), account='lx', total_value=1000.0, shares=1000.0, nav=1.0)
+
+    storage.write_nav_record(nav)
+
+    assert active is False
+    assert len(client.list_records_calls) == 1
+    assert len(client.create_record_calls) == 1
+
+
+def test_concurrent_same_date_single_writes_create_only_once(monkeypatch):
+    import src.feishu.repositories.nav_history_repository as repository_module
+
+    mutex = Lock()
+
+    @contextmanager
+    def fake_process_lock(key):
+        assert key == 'nav-history-write'
+        with mutex:
+            yield
+
+    monkeypatch.setattr(repository_module, 'process_lock', fake_process_lock)
+    client = StubNavSingleWriteClient()
+    storage = FeishuStorage(client=client, local_nav_index_cache=StubLocalNavIndexCache())
+    start = Event()
+    outcomes = []
+
+    def write_once(value):
+        nav = NAVHistory(
+            date=date(2026, 3, 6),
+            account='lx',
+            total_value=value,
+            shares=1000.0,
+            nav=value / 1000.0,
+        )
+        start.wait()
+        try:
+            storage.write_nav_record(nav)
+            outcomes.append('created')
+        except ValueError as exc:
+            assert '已存在同日记录' in str(exc)
+            outcomes.append('blocked')
+
+    threads = [Thread(target=write_once, args=(1000.0,)), Thread(target=write_once, args=(1100.0,))]
+    for thread in threads:
+        thread.start()
+    start.set()
+    for thread in threads:
+        thread.join(timeout=2)
+        assert thread.is_alive() is False
+
+    assert sorted(outcomes) == ['blocked', 'created']
+    assert len(client.create_record_calls) == 1
+    assert len(client.update_record_calls) == 0

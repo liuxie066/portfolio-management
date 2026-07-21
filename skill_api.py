@@ -718,7 +718,7 @@ class PortfolioSkill:
         price_timeout: int = 30,
         dry_run: bool = True,
         confirm: bool = False,
-        overwrite_existing: bool = True,
+        overwrite_existing: bool = False,
         use_bulk_persist: bool = False,
         sync_futu_cash_mmf: bool = False,
         sync_futu_dry_run: Optional[bool] = None,
@@ -807,7 +807,7 @@ class PortfolioSkill:
                   total_value: float = None,
                   cash_value: float = None,
                   stock_value: float = 0.0,
-                  overwrite_existing: bool = True,
+                  overwrite_existing: bool = False,
                   dry_run: bool = True,
                   confirm: bool = False) -> Dict[str, Any]:
         """显式记录“清仓/关闭”状态的净值点（shares=0）。
@@ -908,7 +908,7 @@ class PortfolioSkill:
             return {"success": False, "error": str(e)}
 
     def record_nav(self, price_timeout: int = 30, snapshot: Optional[Dict[str, Any]] = None,
-                   overwrite_existing: bool = True, dry_run: bool = True,
+                   overwrite_existing: bool = False, dry_run: bool = True,
                    confirm: bool = False, use_bulk_persist: bool = False,
                    run_id: Optional[str] = None, nav_date: Optional[Any] = None) -> Dict[str, Any]:
         """记录今日净值（兼容入口，委托 AccountNavRecorderService）
@@ -1248,7 +1248,7 @@ def multi_account_overview(accounts: Any = None, price_timeout: int = 30,
         return {"success": False, "error": str(e)}
 
 def record_nav(price_timeout: int = 30, dry_run: bool = True, confirm: bool = False,
-               overwrite_existing: bool = True, use_bulk_persist: bool = False,
+               overwrite_existing: bool = False, use_bulk_persist: bool = False,
                account: str = None, run_id: Optional[str] = None,
                nav_date: Optional[Any] = None) -> Dict:
     """记录今日净值
@@ -1273,7 +1273,7 @@ def daily_report_bundle(
     price_timeout: int = 30,
     dry_run: bool = True,
     confirm: bool = False,
-    overwrite_existing: bool = True,
+    overwrite_existing: bool = False,
     use_bulk_persist: bool = False,
     sync_futu_cash_mmf: bool = False,
     sync_futu_dry_run: Optional[bool] = None,
@@ -1347,7 +1347,7 @@ def close_nav(date_str: str = None,
               total_value: float = None,
               cash_value: float = None,
               stock_value: float = 0.0,
-              overwrite_existing: bool = True,
+              overwrite_existing: bool = False,
               dry_run: bool = True,
               confirm: bool = False,
               account: str = None) -> Dict:

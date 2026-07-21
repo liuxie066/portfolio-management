@@ -222,7 +222,7 @@ class PortfolioManager:
 
     def record_nav(self, account: str, valuation: Optional[PortfolioValuation] = None,
                    nav_date: Optional[date] = None, persist: bool = True,
-                   overwrite_existing: bool = True, dry_run: bool = False,
+                   overwrite_existing: bool = False, dry_run: bool = False,
                    use_bulk_persist: bool = False, run_id: Optional[str] = None,
                    nav_write_context: Optional[NavWriteContext] = None) -> NAVHistory:
         """

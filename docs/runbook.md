@@ -46,6 +46,17 @@ existing options-monitor variables `OM_FEISHU_BOT_APP_ID`,
 `pm report` is preview-only. Formal daily report generation uses
 `scripts/publish_daily_report.py`.
 
+## Manual NAV Writes
+
+Manual `pm nav record` and `pm daily` writes refuse same-day replacement by
+default. Use `--overwrite` only for a deliberate operator correction:
+
+```bash
+./pm nav record --account lx --write --confirm --json
+./pm daily --account lx --write --confirm --json
+./pm nav record --account lx --write --confirm --overwrite --json
+```
+
 ## Daily NAV Job
 
 Dry-run:
@@ -77,14 +88,18 @@ Rules:
   dates.
 - Duplicate `nav_history` account/date records block writes.
 - Pending generated fields in manual `cash_flow` rows block writes.
-- Existing same-day NAV is skipped unless `--overwrite` is explicit.
+- An existing row is skipped only when `details.finality` is supported, explicitly final, and matches the NAV date. Legacy, manual, malformed, or date-mismatched rows block with `existing_nav_not_final`; snapshot recovery state returns `recovery_required`.
 - Real writes require `--write --confirm`.
 
 ## Daily Report
 
 ```bash
+# Default: NAV dry-run, but HTML artifacts are still written.
 python scripts/publish_daily_report.py --account lx
 python scripts/publish_daily_report.py --account lx --run-id manual-YYYYMMDD
+
+# Explicit NAV persistence; same-day overwrite remains disabled.
+python scripts/publish_daily_report.py --account lx --write-nav --confirm
 ```
 
 Service controls:

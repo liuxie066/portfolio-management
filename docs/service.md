@@ -127,13 +127,13 @@ Request:
   "price_timeout": 30,
   "dry_run": true,
   "confirm": false,
-  "overwrite_existing": true,
+  "overwrite_existing": false,
   "use_bulk_persist": false,
   "run_id": "optional-operator-run-id"
 }
 ```
 
-Use this for a single account NAV write. For scheduled production work prefer `daily-nav-job`. A real multi-account job adds one best-effort Feishu `receipt` object to the response; dry-run returns `receipt.status=skipped`.
+Use this for a single account NAV write. `overwrite_existing` defaults to `false` across HTTP, client, application, skill compatibility, portfolio, storage, and CLI layers; set it to `true` only for a deliberate correction. For scheduled production work prefer `daily-nav-job`. A real multi-account job adds one best-effort Feishu `receipt` object to the response; dry-run returns `receipt.status=skipped`.
 
 ## Daily NAV Job
 
@@ -163,8 +163,9 @@ Behavior:
    `force_non_business_day=true`.
 3. Resolve accounts from the request or current holdings.
 4. Block duplicate `nav_history` account/date records.
-5. Block pending generated-field reconciliation in manual `cash_flow` rows.
-6. Build one priced snapshot per account and write NAV. The embedded Futu cash/MMF fields remain a legacy compatibility path; full holdings sync is a separate endpoint.
+5. For one existing row, return `recovery_required` when snapshot recovery is unresolved; return `skipped_existing_nav` only for a supported, explicit finality contract matching the NAV date; otherwise block with `existing_nav_not_final`.
+6. Block pending generated-field reconciliation in manual `cash_flow` rows.
+7. Build one priced snapshot per account and write NAV. The embedded Futu cash/MMF fields remain a legacy compatibility path; full holdings sync is a separate endpoint.
 
 Top-level response includes:
 
@@ -210,7 +211,9 @@ Internal boundaries:
 - `DailyAccountNavService`: response-shape orchestrator for the two services.
 
 `daily_report_bundle` is also dry-run by default and requires `dry_run=false`
-plus `confirm=true` for real NAV writes.
+plus `confirm=true` for real NAV writes. Its overwrite default is `false`. The HTML
+publisher remains artifact-writing by default while sending `dry_run=true`,
+`confirm=false`; only `--write-nav --confirm` enables NAV persistence.
 
 ## Service Facade Map
 
@@ -226,6 +229,14 @@ plus `confirm=true` for real NAV writes.
 - `PortfolioService.generate_report()` -> `ReportGenerationService.generate_report()`
 - `PortfolioService.daily_report_bundle()` -> `DailyAccountNavService.run()`
 - `PortfolioService.daily_nav_job()` -> `DailyNavJobService.run()`
+
+## NAV Mutation Serialization
+
+All public `nav_history` mutation methods use one same-host repository lock: single
+and bulk full-row writes, derived/details patches, and delete. For a single write,
+the remote existence check and create/update decision remain inside the same lock.
+This prevents same-host TOCTOU duplicate creates; cross-host uniqueness still
+requires an infrastructure-level constraint.
 
 ## Client Rules
 
