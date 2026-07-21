@@ -113,6 +113,7 @@ def test_publish_daily_report_build_report_data_passes_account():
             "price_timeout": 5,
             "dry_run": True,
             "confirm": False,
+            "overwrite_existing": True,
             "use_bulk_persist": False,
             "sync_futu_cash_mmf": False,
             "sync_futu_dry_run": True,
@@ -155,6 +156,7 @@ def test_publish_daily_report_futu_sync_defaults_to_dry_run():
         "price_timeout": 5,
         "dry_run": True,
         "confirm": False,
+        "overwrite_existing": True,
         "use_bulk_persist": False,
         "sync_futu_cash_mmf": True,
         "sync_futu_dry_run": True,
@@ -190,6 +192,7 @@ def test_publish_daily_report_prefers_service_bundle():
         bundle = publish_daily_report.build_report_data(
             price_timeout=5,
             dry_run=False,
+            confirm=True,
             use_bulk_nav_upsert=True,
             sync_futu_cash_mmf=True,
             sync_futu_dry_run=False,
@@ -210,6 +213,7 @@ def test_publish_daily_report_prefers_service_bundle():
             "price_timeout": 5,
             "dry_run": False,
             "confirm": True,
+            "overwrite_existing": False,
             "use_bulk_persist": True,
             "sync_futu_cash_mmf": True,
             "sync_futu_dry_run": False,
@@ -367,3 +371,114 @@ def test_publish_report_returns_local_artifact_without_public_url():
         assert result["public_url"] is None
         assert result["public_url_status"] == "disabled"
         assert (root / "published" / "investment-daily-2026-05-24" / "index.html").exists()
+
+
+
+def test_publish_daily_report_defaults_to_nav_dry_run_and_still_writes_html_artifacts():
+    calls = []
+
+    def fake_build_report_data(**kwargs):
+        calls.append(kwargs)
+        return {
+            'account': kwargs['account'],
+            'run_id': kwargs['run_id'],
+            'nav_result': {'success': True},
+            'report': {'success': True, 'date': '2026-07-21'},
+            'nav_snapshot': {'success': True},
+            'snapshot': {},
+            'stage_timings': {},
+            'futu_sync_result': None,
+        }
+
+    patch = MonkeyPatch()
+    try:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            patch.setattr(publish_daily_report, 'build_report_data', fake_build_report_data)
+            patch.setattr(publish_daily_report, 'render_daily_report_html', lambda *_args: ('2026-07-21', '<html>ok</html>'))
+            patch.setattr(sys, 'argv', [
+                'publish_daily_report.py',
+                '--account', 'alice',
+                '--reports-dir', str(root / 'reports'),
+                '--publish-root', str(root / 'published'),
+                '--run-id', 'run-default-safe',
+                '--quiet',
+            ])
+
+            publish_daily_report.main()
+
+            assert (root / 'reports' / 'investment-daily-2026-07-21.html').exists()
+            assert (root / 'reports' / 'latest.html').exists()
+            assert (root / 'published' / 'investment-daily-2026-07-21' / 'index.html').exists()
+    finally:
+        patch.undo()
+
+    assert calls[0]['dry_run'] is True
+    assert calls[0]['confirm'] is False
+
+
+def test_publish_daily_report_rejects_write_nav_without_confirm():
+    patch = MonkeyPatch()
+    try:
+        patch.setattr(sys, 'argv', ['publish_daily_report.py', '--write-nav'])
+        try:
+            publish_daily_report.parse_args()
+            assert False, 'expected SystemExit'
+        except SystemExit as exc:
+            assert exc.code == 2
+    finally:
+        patch.undo()
+
+
+def test_publish_daily_report_write_nav_requires_and_propagates_confirmation():
+    calls = []
+
+    def fake_build_report_data(**kwargs):
+        calls.append(kwargs)
+        return {
+            'account': kwargs['account'],
+            'run_id': kwargs['run_id'],
+            'nav_result': {'success': True},
+            'report': {'success': True, 'date': '2026-07-21'},
+            'nav_snapshot': {'success': True},
+            'stage_timings': {},
+            'futu_sync_result': None,
+        }
+
+    patch = MonkeyPatch()
+    try:
+        patch.setattr(publish_daily_report, 'build_report_data', fake_build_report_data)
+        patch.setattr(sys, 'argv', [
+            'publish_daily_report.py',
+            '--account', 'alice',
+            '--write-nav',
+            '--confirm',
+            '--no-html',
+            '--quiet',
+            '--run-id', 'run-explicit-write',
+        ])
+        publish_daily_report.main()
+    finally:
+        patch.undo()
+
+    assert calls[0]['dry_run'] is False
+    assert calls[0]['confirm'] is True
+
+
+
+def test_publish_daily_report_rejects_conflicting_dry_run_and_write_nav_flags():
+    patch = MonkeyPatch()
+    try:
+        patch.setattr(sys, 'argv', [
+            'publish_daily_report.py',
+            '--dry-run',
+            '--write-nav',
+            '--confirm',
+        ])
+        try:
+            publish_daily_report.parse_args()
+            assert False, 'expected SystemExit'
+        except SystemExit as exc:
+            assert exc.code == 2
+    finally:
+        patch.undo()

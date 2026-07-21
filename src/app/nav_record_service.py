@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Optional
 
 from src import config
 from src.app.compensation_service import PartialWriteError
+from src.app.nav_finality import NavWriteContext
 from src.app.snapshot_service import snapshot_digest
 from src.models import NAVHistory, PortfolioValuation
 from src.time_utils import bj_today
@@ -72,17 +73,19 @@ class NavRecordService:
         valuation: Optional[PortfolioValuation] = None,
         nav_date: Optional[date] = None,
         persist: bool = True,
-        overwrite_existing: bool = True,
+        overwrite_existing: bool = False,
         dry_run: bool = False,
         use_bulk_persist: bool = False,
         run_id: Optional[str] = None,
+        nav_write_context: Optional[NavWriteContext] = None,
     ) -> NAVHistory:
         if valuation is None:
             valuation = self.manager.calculate_valuation(account)
         if persist and not dry_run:
             self._assert_valuation_reliable_for_write(valuation)
 
-        today = nav_date or bj_today()
+        today_value = nav_date or bj_today()
+        today = today_value.date() if isinstance(today_value, datetime) else today_value
         current_year = today.strftime("%Y")
         start_year = config.get_start_year()
 
@@ -161,10 +164,23 @@ class NavRecordService:
             start_year=start_year,
             **calc,
         )
-        if run_id:
-            details = dict(nav_record.details or {})
-            details["run_id"] = run_id
-            nav_record.details = details
+        resolved_context = nav_write_context or NavWriteContext(
+            status="manual",
+            writer="nav-record",
+            write_reason="direct_nav_record",
+            nav_date=today,
+            run_id=run_id,
+        )
+        if resolved_context.nav_date != today:
+            raise ValueError(
+                f"NAV finality nav_date {resolved_context.nav_date} does not match record date {today}"
+            )
+        resolved_context = resolved_context.with_runtime(run_id=run_id)
+        details = dict(nav_record.details or {})
+        details["finality"] = resolved_context.to_details()
+        if resolved_context.run_id:
+            details["run_id"] = resolved_context.run_id
+        nav_record.details = details
 
         if not config.get_bool("nav.disable_runtime_validation", False):
             self.manager._validate_nav_record(

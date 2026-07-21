@@ -26,6 +26,7 @@ from src.asset_utils import (
 )
 from src.broker_message_parser import parse_futu_fill_message
 from src.app import AccountNavRecorderService, FutuBalanceSyncService, PortfolioReadService, ReportGenerationService, ReportQueryService
+from src.app.nav_finality import NavWriteContext
 from src.app.account_service import AccountService, normalize_accounts
 from src.app.audit_service import AuditService
 from src.domain.nav.performance import (
@@ -717,7 +718,7 @@ class PortfolioSkill:
         price_timeout: int = 30,
         dry_run: bool = True,
         confirm: bool = False,
-        overwrite_existing: bool = True,
+        overwrite_existing: bool = False,
         use_bulk_persist: bool = False,
         sync_futu_cash_mmf: bool = False,
         sync_futu_dry_run: Optional[bool] = None,
@@ -806,7 +807,7 @@ class PortfolioSkill:
                   total_value: float = None,
                   cash_value: float = None,
                   stock_value: float = 0.0,
-                  overwrite_existing: bool = True,
+                  overwrite_existing: bool = False,
                   dry_run: bool = True,
                   confirm: bool = False) -> Dict[str, Any]:
         """显式记录“清仓/关闭”状态的净值点（shares=0）。
@@ -818,7 +819,7 @@ class PortfolioSkill:
         约定：
         - shares 固定写 0
         - nav 固定写 1.0
-        - details 写入 {"status":"CLOSED"}
+        - details 写入 CLOSED 状态和非最终日结的 finality provenance
         - 允许 total_value > 0（残余现金等），但建议同时提供 cash_value/stock_value 以保持拆分自洽。
 
         安全约束：默认 dry_run=True；真正写入必须 confirm=True 且 dry_run=False。
@@ -868,7 +869,15 @@ class PortfolioSkill:
                 stock_value=round(float(stock_value), 2) if stock_value is not None else None,
                 shares=0.0,
                 nav=1.0,
-                details={"status": "CLOSED"},
+                details={
+                    "status": "CLOSED",
+                    "finality": NavWriteContext(
+                        status="closed",
+                        writer="close-nav",
+                        write_reason="account_closed",
+                        nav_date=nav_date,
+                    ).to_details(),
+                },
             )
 
             storage_preview = self.storage.write_nav_record(nav_record, overwrite_existing=overwrite_existing, dry_run=True)
@@ -899,7 +908,7 @@ class PortfolioSkill:
             return {"success": False, "error": str(e)}
 
     def record_nav(self, price_timeout: int = 30, snapshot: Optional[Dict[str, Any]] = None,
-                   overwrite_existing: bool = True, dry_run: bool = True,
+                   overwrite_existing: bool = False, dry_run: bool = True,
                    confirm: bool = False, use_bulk_persist: bool = False,
                    run_id: Optional[str] = None, nav_date: Optional[Any] = None) -> Dict[str, Any]:
         """记录今日净值（兼容入口，委托 AccountNavRecorderService）
@@ -1239,7 +1248,7 @@ def multi_account_overview(accounts: Any = None, price_timeout: int = 30,
         return {"success": False, "error": str(e)}
 
 def record_nav(price_timeout: int = 30, dry_run: bool = True, confirm: bool = False,
-               overwrite_existing: bool = True, use_bulk_persist: bool = False,
+               overwrite_existing: bool = False, use_bulk_persist: bool = False,
                account: str = None, run_id: Optional[str] = None,
                nav_date: Optional[Any] = None) -> Dict:
     """记录今日净值
@@ -1264,7 +1273,7 @@ def daily_report_bundle(
     price_timeout: int = 30,
     dry_run: bool = True,
     confirm: bool = False,
-    overwrite_existing: bool = True,
+    overwrite_existing: bool = False,
     use_bulk_persist: bool = False,
     sync_futu_cash_mmf: bool = False,
     sync_futu_dry_run: Optional[bool] = None,
@@ -1338,7 +1347,7 @@ def close_nav(date_str: str = None,
               total_value: float = None,
               cash_value: float = None,
               stock_value: float = 0.0,
-              overwrite_existing: bool = True,
+              overwrite_existing: bool = False,
               dry_run: bool = True,
               confirm: bool = False,
               account: str = None) -> Dict:

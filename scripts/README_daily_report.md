@@ -5,8 +5,9 @@ the HTML report, and writes local static artifacts. It is the only entry point
 that may collect daily-report data for HTML publishing.
 
 Scheduled multi-account NAV recording should use `./pm daily-job`. The
-publisher is for report artifact generation; it may record that account's NAV
-as part of the report bundle unless `--dry-run` is passed.
+publisher is for report artifact generation: it writes HTML artifacts by default
+while keeping NAV persistence in dry-run. Recording that account's NAV requires
+explicit `--write-nav --confirm`, and same-day overwrite remains disabled.
 
 `generate_daily_report_html.py` is renderer-only and must receive a prepared
 JSON bundle.
@@ -29,7 +30,8 @@ cd /opt/portfolio-management/current
 . .venv/bin/activate  # if using a virtualenv
 python scripts/publish_daily_report.py
 python scripts/publish_daily_report.py --account alice
-python scripts/publish_daily_report.py --account alice --dry-run
+python scripts/publish_daily_report.py --account alice --dry-run  # legacy no-op; already safe by default
+python scripts/publish_daily_report.py --account alice --write-nav --confirm
 ```
 
 ## Useful options
@@ -52,6 +54,8 @@ python scripts/publish_daily_report.py --nav-date 2026-05-22
 
 ## Notes
 
+- Default execution sends `dry_run=true`, `confirm=false` to the NAV bundle while still rendering and publishing HTML files.
+- `--write-nav` without `--confirm` is rejected; `--write-nav --confirm` sends `dry_run=false`, `confirm=true`.
 - `--account-label` is display-only.
 - `--account` controls which portfolio account is loaded; if omitted, the script uses `PORTFOLIO_ACCOUNT` / `config.yaml` default.
 - `--service-url` overrides the local service endpoint.

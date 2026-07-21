@@ -1,12 +1,15 @@
-from datetime import date
+from datetime import date, datetime
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
 from skill_api import PortfolioSkill
 from src.app.compensation_service import PartialWriteError
+from src.app.nav_finality import NavWriteContext
 from src.app.nav_record_service import NavRecordService
 from src.models import NAVHistory, PortfolioValuation
+from src.maintenance.nav_history_repair import backfill
 from src.portfolio import PortfolioManager
 
 
@@ -67,7 +70,7 @@ def test_nav_record_service_records_nav_through_manager_helpers():
     assert result.total_value == 1200.0
     manager._find_latest_nav_before.assert_called_once()
     manager.snapshot_service.persist_holdings_snapshot.assert_called_once()
-    storage.write_nav_record.assert_called_once_with(result, overwrite_existing=True, dry_run=True)
+    storage.write_nav_record.assert_called_once_with(result, overwrite_existing=False, dry_run=True)
     storage.write_nav_records.assert_not_called()
     manager._print_nav_summary.assert_not_called()
 
@@ -87,7 +90,107 @@ def test_nav_record_service_persists_run_id_in_details():
     )
 
     assert result.details["run_id"] == "run-nav-1"
-    storage.write_nav_record.assert_called_once_with(result, overwrite_existing=True, dry_run=True)
+    assert result.details["finality"] == {
+        "version": 1,
+        "status": "manual",
+        "nav_date": "2026-03-19",
+        "valuation_as_of": None,
+        "writer": "nav-record",
+        "write_reason": "direct_nav_record",
+        "run_id": "run-nav-1",
+    }
+    storage.write_nav_record.assert_called_once_with(result, overwrite_existing=False, dry_run=True)
+
+
+def test_nav_record_service_persists_explicit_daily_job_finality():
+    storage = _storage()
+    manager = _manager(storage)
+    service = NavRecordService(manager=manager, storage=storage)
+
+    result = service.record_nav(
+        account="a",
+        valuation=_valuation(),
+        nav_date=date(2026, 3, 19),
+        persist=True,
+        dry_run=True,
+        nav_write_context=NavWriteContext(
+            status="final",
+            writer="daily-nav-job",
+            write_reason="canonical_daily_nav_job",
+            nav_date=date(2026, 3, 19),
+            valuation_as_of="2026-03-19T18:00:00",
+            run_id="daily-1:a",
+        ),
+    )
+
+    assert result.details["finality"]["status"] == "final"
+    assert result.details["finality"]["writer"] == "daily-nav-job"
+    assert result.details["finality"]["valuation_as_of"] == "2026-03-19T18:00:00"
+    assert result.details["run_id"] == "daily-1:a"
+
+
+def test_nav_record_service_rejects_context_date_mismatch():
+    storage = _storage()
+    manager = _manager(storage)
+    service = NavRecordService(manager=manager, storage=storage)
+
+    with pytest.raises(ValueError, match="does not match record date"):
+        service.record_nav(
+            account="a",
+            valuation=_valuation(),
+            nav_date=date(2026, 3, 19),
+            persist=False,
+            dry_run=True,
+            nav_write_context=NavWriteContext(
+                status="maintenance",
+                writer="nav-repair",
+                write_reason="nav_history_backfill",
+                nav_date=date(2026, 3, 18),
+            ),
+        )
+
+
+def test_nav_write_context_rejects_invalid_writer_status_combination():
+    with pytest.raises(ValueError, match="invalid for writer close-nav"):
+        NavWriteContext(
+            status="final",
+            writer="close-nav",
+            write_reason="invalid",
+            nav_date=date(2026, 3, 19),
+        )
+
+
+def test_nav_write_context_rejects_runtime_fact_conflicts():
+    context = NavWriteContext(
+        status="final",
+        writer="daily-nav-job",
+        write_reason="canonical_daily_nav_job",
+        nav_date=date(2026, 3, 19),
+        valuation_as_of="2026-03-19T18:00:00",
+        run_id="run-a",
+    )
+
+    with pytest.raises(ValueError, match="run_id conflicts"):
+        context.with_runtime(run_id="run-b")
+    with pytest.raises(ValueError, match="valuation_as_of conflicts"):
+        context.with_runtime(valuation_as_of="2026-03-19T18:01:00")
+
+
+def test_nav_record_service_normalizes_datetime_nav_date():
+    storage = _storage()
+    manager = _manager(storage)
+    service = NavRecordService(manager=manager, storage=storage)
+
+    result = service.record_nav(
+        account="a",
+        valuation=_valuation(),
+        nav_date=datetime(2026, 3, 19, 8, 30),
+        persist=False,
+        dry_run=True,
+    )
+
+    assert result.date == date(2026, 3, 19)
+    assert result.details["finality"]["nav_date"] == "2026-03-19"
 
 
 def test_nav_record_service_falls_back_to_current_period_start_for_nav_change():
@@ -280,3 +383,76 @@ def test_portfolio_manager_record_nav_delegates_to_service():
     assert manager.nav_record_service.record_nav.call_args.kwargs["account"] == "a"
     assert manager.nav_record_service.record_nav.call_args.kwargs["persist"] is False
     assert manager.nav_record_service.record_nav.call_args.kwargs["run_id"] == "run-nav-1"
+
+
+def test_portfolio_skill_close_nav_persists_closed_finality():
+    skill = PortfolioSkill.__new__(PortfolioSkill)
+    skill.account = "a"
+    skill.storage = Mock()
+    skill.storage.write_nav_record.return_value = {"fields": {}, "existing": None}
+
+    result = skill.close_nav(
+        date_str="2026-03-19",
+        total_value=100.0,
+        cash_value=100.0,
+        stock_value=0.0,
+        dry_run=False,
+        confirm=True,
+    )
+
+    assert result["success"] is True
+    written = skill.storage.write_nav_record.call_args_list[-1].args[0]
+    assert written.details["status"] == "CLOSED"
+    assert written.details["finality"]["status"] == "closed"
+    assert written.details["finality"]["writer"] == "close-nav"
+
+
+def test_nav_history_backfill_classifies_recomputed_rows_as_maintenance(monkeypatch, capsys):
+    contexts = []
+
+    class FakePortfolio:
+        def record_nav(self, account, **kwargs):
+            contexts.append(kwargs["nav_write_context"])
+            return NAVHistory(
+                date=kwargs["nav_date"],
+                account=account,
+                total_value=1200.0,
+                cash_value=200.0,
+                stock_value=1000.0,
+                shares=1000.0,
+                nav=1.2,
+            )
+
+    storage = Mock()
+    storage._nav_index_mem_cache = {"a": {}}
+    storage.get_nav_index.return_value = {"_nav_objects": []}
+    context = SimpleNamespace(account="a", storage=storage, portfolio=FakePortfolio())
+    point = backfill.BaseNavPoint(
+        d=date(2026, 3, 19),
+        total_value=1200.0,
+        cash_value=200.0,
+        stock_value=1000.0,
+    )
+    monkeypatch.setattr(backfill, "create_nav_repair_context", lambda account=None: context)
+    monkeypatch.setattr(backfill, "_existing_points_from_range", lambda *_args: [point])
+    monkeypatch.setattr(backfill, "_build_valuation", lambda *_args: _valuation())
+
+    backfill.run(
+        SimpleNamespace(
+            account="a",
+            apply=False,
+            dry_run=True,
+            input=None,
+            d_from="2026-03-19",
+            d_to="2026-03-19",
+            limit=None,
+            mode="replace",
+            allow_partial=False,
+        )
+    )
+
+    assert capsys.readouterr().out
+    assert len(contexts) == 1
+    assert contexts[0].status == "maintenance"
+    assert contexts[0].writer == "nav-repair"
+    assert contexts[0].write_reason == "nav_history_backfill"

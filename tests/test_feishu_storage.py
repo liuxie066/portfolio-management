@@ -1019,7 +1019,7 @@ class TestFeishuStorageNAVOperations:
             nav=1.0
         )
 
-        self.storage.write_nav_record(nav)
+        self.storage.write_nav_record(nav, overwrite_existing=True)
 
         assert nav.record_id == 'existing_nav'
         self.mock_client.update_record.assert_called_once()

@@ -140,7 +140,7 @@ def test_http_service_routes_delegate_to_portfolio_service():
         ("audit_nav_history_duplicates", {"account": "alice/bob"}),
         ("distribution", {"account": "alice/bob", "accounts": None, "by_asset": False, "include_value": True}),
         ("full_report", {"account": "alice/bob", "price_timeout": 9}),
-        ("daily_report_bundle", {"account": "alice/bob", "price_timeout": 10, "dry_run": False, "confirm": True, "overwrite_existing": True, "use_bulk_persist": True, "sync_futu_cash_mmf": True, "sync_futu_dry_run": False, "run_id": "run-report-1"}),
+        ("daily_report_bundle", {"account": "alice/bob", "price_timeout": 10, "dry_run": False, "confirm": True, "overwrite_existing": False, "use_bulk_persist": True, "sync_futu_cash_mmf": True, "sync_futu_dry_run": False, "run_id": "run-report-1"}),
         ("daily_nav_job", {"accounts": ["alice", "bob"], "nav_date": "2026-05-22", "price_timeout": 12, "dry_run": True, "confirm": False, "overwrite_existing": False, "use_bulk_persist": False, "sync_futu_cash_mmf": False, "force_non_business_day": False}),
         ("generate_report", {"account": "alice/bob", "report_type": "monthly", "price_timeout": 11}),
     ]

@@ -1,8 +1,10 @@
 """Repository for the Feishu nav_history table."""
+import json
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 from ...models import NAVHistory
+from ...process_lock import nav_history_lock_key, process_lock
 
 
 class NavHistoryRepository:
@@ -56,6 +58,7 @@ class NavHistoryRepository:
                 'ytd_nav_change': nav.ytd_nav_change,
                 'mtd_pnl': nav.mtd_pnl,
                 'ytd_pnl': nav.ytd_pnl,
+                'details': nav.details,
                 'updated_at': self._extract_updated_at_str(raw_fields),
             })
 
@@ -151,6 +154,14 @@ class NavHistoryRepository:
         suffix = "" if len(duplicates) <= len(sample) else f"; ... +{len(duplicates) - len(sample)} more"
         return "nav_history duplicate account/date records exist; repair before NAV write: " + "; ".join(parts) + suffix
 
+    def _store_nav_index_payload(self, account: str, payload: Dict[str, Any]) -> None:
+        """Publish one freshly built NAV index to memory and the local cache."""
+        self._nav_index_mem_cache[account] = payload
+        self._nav_index_loaded_accounts.add(account)
+        persist_payload = dict(payload)
+        persist_payload.pop('_nav_objects', None)
+        self._local_nav_index_cache.set_account(account, persist_payload)
+
     def audit_nav_history_duplicates(self, account: Optional[str] = None) -> Dict[str, Any]:
         """Read-only audit for duplicate nav_history rows by business key."""
         filter_str = None
@@ -175,6 +186,11 @@ class NavHistoryRepository:
                 raise
 
         duplicates = self._nav_duplicate_groups_from_rows(records, default_account=account)
+        if account:
+            self._store_nav_index_payload(
+                account,
+                self._build_nav_index_payload(account, records),
+            )
         return {
             'success': True,
             'account': account,
@@ -228,12 +244,7 @@ class NavHistoryRepository:
                 if old_fp != new_fp:
                     invalidated = True
 
-        self._nav_index_mem_cache[account] = payload
-        self._nav_index_loaded_accounts.add(account)
-
-        persist_payload = dict(payload)
-        persist_payload.pop('_nav_objects', None)
-        self._local_nav_index_cache.set_account(account, persist_payload)
+        self._store_nav_index_payload(account, payload)
 
         return {
             'account': account,
@@ -270,6 +281,7 @@ class NavHistoryRepository:
                     ytd_nav_change=float(row['ytd_nav_change']) if row.get('ytd_nav_change') is not None else None,
                     mtd_pnl=float(row['mtd_pnl']) if row.get('mtd_pnl') is not None else None,
                     ytd_pnl=float(row['ytd_pnl']) if row.get('ytd_pnl') is not None else None,
+                    details=row.get('details'),
                 ))
 
             payload = dict(cached_local)
@@ -318,6 +330,7 @@ class NavHistoryRepository:
             'ytd_nav_change': nav.ytd_nav_change,
             'mtd_pnl': nav.mtd_pnl,
             'ytd_pnl': nav.ytd_pnl,
+            'details': nav.details,
             'updated_at': updated_at,
         }
 
@@ -382,6 +395,32 @@ class NavHistoryRepository:
         except Exception:
             raise ValueError('nav_history write validation failed: nav must be a number')
 
+    @staticmethod
+    def _fields_contain_finality(fields: Dict[str, Any]) -> bool:
+        """Return whether dropping the details field would lose finality provenance."""
+        details = (fields or {}).get('details')
+        if isinstance(details, str):
+            try:
+                details = json.loads(details)
+            except (TypeError, ValueError):
+                return False
+        return isinstance(details, dict) and 'finality' in details
+
+    def _fail_closed_if_finality_would_be_dropped(
+        self,
+        payloads: List[Dict[str, Any]],
+        *,
+        operation: str,
+        cause: Exception,
+    ) -> None:
+        fields_list = [(payload or {}).get('fields') or {} for payload in payloads]
+        if not any(self._fields_contain_finality(fields) for fields in fields_list):
+            return
+        raise RuntimeError(
+            'nav_history authoritative write failed closed: Feishu returned FieldNameNotFound; '
+            f'refusing {operation} retry without required details.finality'
+        ) from cause
+
     def _execute_single_nav_write(self, nav: NAVHistory, existing_row: Optional[Dict[str, Any]], preserve_none_for_update: bool, dry_run: bool = False) -> Dict[str, Any]:
         """Execute one full nav write with the same semantics as bulk replace/upsert."""
         existing_record_id = (existing_row or {}).get('record_id')
@@ -412,6 +451,13 @@ class NavHistoryRepository:
             msg = str(e)
             if 'FieldNameNotFound' not in msg:
                 raise
+
+            operation = 'update' if existing_record_id else 'create'
+            self._fail_closed_if_finality_would_be_dropped(
+                [{'record_id': existing_record_id, 'fields': feishu_fields}],
+                operation=operation,
+                cause=e,
+            )
 
             fallback_fields = dict(feishu_fields)
             fallback_fields.pop('details', None)
@@ -541,6 +587,11 @@ class NavHistoryRepository:
                                 msg = str(e)
                                 if 'FieldNameNotFound' not in msg or getattr(e, 'confirmed_results', None):
                                     raise
+                                self._fail_closed_if_finality_would_be_dropped(
+                                    update_payloads,
+                                    operation='batch update',
+                                    cause=e,
+                                )
                                 fallback_updates = []
                                 fallback_rows = []
                                 for p, row in zip(update_payloads, update_rows_for_cache):
@@ -560,6 +611,11 @@ class NavHistoryRepository:
                                 msg = str(e)
                                 if 'FieldNameNotFound' not in msg or getattr(e, 'confirmed_results', None):
                                     raise
+                                self._fail_closed_if_finality_would_be_dropped(
+                                    create_payloads,
+                                    operation='batch create',
+                                    cause=e,
+                                )
                                 fallback_creates = []
                                 for p in create_payloads:
                                     f = dict((p.get('fields') or {}))
@@ -637,7 +693,7 @@ class NavHistoryRepository:
             'previews': previews,
         }
 
-    def _write_one_nav_record(self, nav: NAVHistory, overwrite_existing: bool = True, dry_run: bool = False):
+    def _write_one_nav_record(self, nav: NAVHistory, overwrite_existing: bool = False, dry_run: bool = False):
         preview_result = self._write_nav_full_records(
             [nav],
             mode='replace',
@@ -659,9 +715,14 @@ class NavHistoryRepository:
         self._apply_nav_rows_to_local_cache(nav.account, [outcome['cache_row']])
         return
 
-    def write_nav_record(self, nav: NAVHistory, overwrite_existing: bool = True, dry_run: bool = False):
-        """Public entrypoint for writing one full nav record."""
-        return self._write_one_nav_record(nav, overwrite_existing=overwrite_existing, dry_run=dry_run)
+    def write_nav_record(self, nav: NAVHistory, overwrite_existing: bool = False, dry_run: bool = False):
+        """Write one full NAV row while serializing preview and mutation."""
+        with process_lock(nav_history_lock_key()):
+            return self._write_one_nav_record(
+                nav,
+                overwrite_existing=overwrite_existing,
+                dry_run=dry_run,
+            )
 
     def write_nav_records(
         self,
@@ -670,18 +731,19 @@ class NavHistoryRepository:
         allow_partial: bool = False,
         dry_run: bool = False,
     ) -> Dict[str, any]:
-        """Public entrypoint for writing full nav records in bulk."""
-        result = self._write_nav_full_records(
-            nav_list,
-            mode=mode,
-            allow_partial=allow_partial,
-            dry_run=dry_run,
-            use_batch_api=not dry_run,
-        )
-        if not dry_run:
-            result.pop('previews', None)
-            result.pop('dry_run', None)
-        return result
+        """Write full NAV rows in bulk under the repository mutation lock."""
+        with process_lock(nav_history_lock_key()):
+            result = self._write_nav_full_records(
+                nav_list,
+                mode=mode,
+                allow_partial=allow_partial,
+                dry_run=dry_run,
+                use_batch_api=not dry_run,
+            )
+            if not dry_run:
+                result.pop('previews', None)
+                result.pop('dry_run', None)
+            return result
 
     def get_nav_history(self, account: str, days: int = 365) -> List[NAVHistory]:
         """获取净值历史（优先本地预加载索引）。"""
@@ -751,22 +813,24 @@ class NavHistoryRepository:
         return {"record_id": record_id, "fields": feishu_fields}
 
     def patch_nav_derived_fields(self, record_id: str, fields: Dict[str, any], dry_run: bool = False):
-        """Patch only derived nav fields with an explicit allowlist."""
-        return self._patch_nav_fields(
-            record_id,
-            fields,
-            dry_run=dry_run,
-            allowed_fields=self.NAV_DERIVED_PATCH_FIELDS,
-        )
+        """Patch only derived NAV fields under the repository mutation lock."""
+        with process_lock(nav_history_lock_key()):
+            return self._patch_nav_fields(
+                record_id,
+                fields,
+                dry_run=dry_run,
+                allowed_fields=self.NAV_DERIVED_PATCH_FIELDS,
+            )
 
     def patch_nav_details(self, record_id: str, details: Dict[str, any], dry_run: bool = False):
-        """Patch only the recovery/status details object on one NAV row."""
-        return self._patch_nav_fields(
-            record_id,
-            {"details": dict(details or {})},
-            dry_run=dry_run,
-            allowed_fields={"details"},
-        )
+        """Patch only the recovery/status details object under the mutation lock."""
+        with process_lock(nav_history_lock_key()):
+            return self._patch_nav_fields(
+                record_id,
+                {"details": dict(details or {})},
+                dry_run=dry_run,
+                allowed_fields={"details"},
+            )
 
     def get_latest_nav_before(self, account: str, before_date: date) -> Optional[NAVHistory]:
         """获取指定日期之前的最新净值记录（优先索引）。"""
@@ -846,9 +910,10 @@ class NavHistoryRepository:
         )
 
     def delete_nav_by_record_id(self, record_id: str) -> bool:
-        """通过记录ID删除净值记录"""
-        ok = self.client.delete_record('nav_history', record_id)
-        if ok:
-            self._nav_index_loaded_accounts.clear()
-            self._nav_index_mem_cache.clear()
-        return ok
+        """Delete one NAV row under the repository mutation lock."""
+        with process_lock(nav_history_lock_key()):
+            ok = self.client.delete_record('nav_history', record_id)
+            if ok:
+                self._nav_index_loaded_accounts.clear()
+                self._nav_index_mem_cache.clear()
+            return ok

@@ -176,7 +176,7 @@ def test_service_client_posts_daily_report_bundle_payload():
             "price_timeout": 9,
             "dry_run": False,
             "confirm": True,
-            "overwrite_existing": True,
+            "overwrite_existing": False,
             "use_bulk_persist": True,
             "sync_futu_cash_mmf": True,
             "sync_futu_dry_run": False,

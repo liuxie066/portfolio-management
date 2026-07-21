@@ -222,7 +222,7 @@ class PortfolioServiceClient:
         price_timeout: int = 30,
         dry_run: bool = True,
         confirm: bool = False,
-        overwrite_existing: bool = True,
+        overwrite_existing: bool = False,
         use_bulk_persist: bool = False,
         run_id: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -280,7 +280,7 @@ class PortfolioServiceClient:
         price_timeout: int = 30,
         dry_run: bool = True,
         confirm: bool = False,
-        overwrite_existing: bool = True,
+        overwrite_existing: bool = False,
         use_bulk_persist: bool = False,
         sync_futu_cash_mmf: bool = False,
         sync_futu_dry_run: Optional[bool] = None,

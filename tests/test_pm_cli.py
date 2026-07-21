@@ -448,7 +448,7 @@ def test_pm_daily_runs_nav_record_and_distribution():
             "price_timeout": 8,
             "dry_run": True,
             "confirm": False,
-            "overwrite_existing": True,
+            "overwrite_existing": False,
             "use_bulk_persist": False,
         }),
     ]
@@ -681,7 +681,7 @@ def test_pm_daily_prefers_service_for_nav_and_distribution():
             "price_timeout": 8,
             "dry_run": True,
             "confirm": False,
-            "overwrite_existing": True,
+            "overwrite_existing": False,
             "use_bulk_persist": False,
             "run_id": "run-daily-1",
         }),
@@ -891,3 +891,20 @@ def test_pm_compensation_retry_calls_local_recovery_service():
 
     out = json.loads(stdout.getvalue())
     assert out == {"success": True, "task_id": "repair-1", "status": "RESOLVED", "confirm": True}
+
+
+
+def test_pm_manual_nav_commands_default_to_no_overwrite_and_require_explicit_opt_in():
+    parser = pm.build_parser()
+
+    nav_default = parser.parse_args(['nav', 'record'])
+    daily_default = parser.parse_args(['daily'])
+    nav_overwrite = parser.parse_args(['nav', 'record', '--overwrite'])
+    daily_overwrite = parser.parse_args(['daily', '--overwrite'])
+    legacy_no_overwrite = parser.parse_args(['nav', 'record', '--no-overwrite'])
+
+    assert nav_default.overwrite is False
+    assert daily_default.overwrite is False
+    assert nav_overwrite.overwrite is True
+    assert daily_overwrite.overwrite is True
+    assert legacy_no_overwrite.overwrite is False

@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, Dict, Optional
 
+from src.app.nav_finality import NavWriteContext
 from src.app.nav_payload import format_nav_payload
 from src.time_utils import bj_today
 
@@ -68,11 +69,12 @@ class AccountNavRecorderService:
         snapshot: Optional[Dict[str, Any]] = None,
         dry_run: bool = True,
         confirm: bool = False,
-        overwrite_existing: bool = True,
+        overwrite_existing: bool = False,
         use_bulk_persist: bool = False,
         sync_futu_cash_mmf: bool = False,
         sync_futu_dry_run: Optional[bool] = None,
         run_id: Optional[str] = None,
+        nav_write_context: Optional[NavWriteContext] = None,
     ) -> Dict[str, Any]:
         from src.app import FutuBalanceSyncService
         from src.run_id import new_run_id
@@ -113,6 +115,17 @@ class AccountNavRecorderService:
             else:
                 snapshot_ms = 0
             snapshot["run_id"] = resolved_run_id
+            resolved_context = nav_write_context or NavWriteContext(
+                status="manual",
+                writer="nav-record",
+                write_reason="manual_nav_record",
+                nav_date=today,
+                run_id=resolved_run_id,
+            )
+            resolved_context = resolved_context.with_runtime(
+                valuation_as_of=snapshot.get("snapshot_time"),
+                run_id=resolved_run_id,
+            )
 
             t_record_nav = _now_ms()
             nav_record = self.portfolio.record_nav(
@@ -124,6 +137,7 @@ class AccountNavRecorderService:
                 dry_run=dry_run,
                 use_bulk_persist=use_bulk_persist,
                 run_id=resolved_run_id,
+                nav_write_context=resolved_context,
             )
             nav_payload = format_nav_payload(nav_record)
             nav_result = {

@@ -11,6 +11,22 @@ from src.app.daily_report_payload_service import DailyReportPayloadService
 from src.app.nav_initialization_service import NavInitializationService
 
 
+def _finality(
+    *,
+    status: str = "final",
+    writer: str = "daily-nav-job",
+    nav_date: str = "2026-05-22",
+):
+    return {
+        "version": 1,
+        "status": status,
+        "nav_date": nav_date,
+        "valuation_as_of": None,
+        "writer": writer,
+        "write_reason": "test",
+    }
+
+
 def _nav_record(account: str = "alice", nav_date: date = date(2026, 5, 22)):
     return SimpleNamespace(
         record_id="rec_nav_1",
@@ -112,6 +128,12 @@ def test_daily_account_nav_service_reuses_one_snapshot_and_respects_nav_date():
     assert record_call[2]["nav_date"] == date(2026, 5, 22)
     assert record_call[2]["dry_run"] is False
     assert record_call[2]["overwrite_existing"] is False
+    context = record_call[2]["nav_write_context"]
+    assert context.status == "manual"
+    assert context.writer == "daily-report"
+    assert context.nav_date == date(2026, 5, 22)
+    assert context.valuation_as_of == "2026-05-22T18:00:00"
+    assert context.run_id == "run-daily-1"
     assert ("get_distribution", True) in calls
     assert result["report"]["date"] == "2026-05-22"
 
@@ -167,6 +189,11 @@ def test_account_nav_recorder_records_nav_without_report_reads():
     assert record_call[2]["dry_run"] is False
     assert record_call[2]["overwrite_existing"] is False
     assert record_call[2]["use_bulk_persist"] is True
+    context = record_call[2]["nav_write_context"]
+    assert context.status == "manual"
+    assert context.writer == "nav-record"
+    assert context.valuation_as_of == "2026-05-22T18:00:00"
+    assert context.run_id == "run-recorder-1"
     assert result["stage_timings"].keys() == {"snapshot_ms", "record_nav_ms"}
 
 
@@ -226,6 +253,11 @@ def test_nav_initialization_service_initializes_empty_account():
     assert calls[2][2]["nav_date"] == date(2026, 5, 22)
     assert calls[2][2]["dry_run"] is False
     assert calls[2][2]["use_bulk_persist"] is True
+    context = calls[2][2]["nav_write_context"]
+    assert context.status == "initial"
+    assert context.writer == "init-nav"
+    assert context.nav_date == date(2026, 5, 22)
+    assert context.valuation_as_of == "2026-05-22T18:00:00"
 
 
 def test_daily_report_payload_service_uses_existing_snapshot_and_nav_record():
@@ -402,6 +434,11 @@ def test_daily_nav_job_auto_date_uses_previous_business_day():
         "date": "2026-05-22",
     }
     assert calls[0]["nav_date"] == date(2026, 5, 22)
+    context = calls[0]["nav_write_context"]
+    assert context.status == "final"
+    assert context.writer == "daily-nav-job"
+    assert context.nav_date == date(2026, 5, 22)
+    assert context.run_id == "run-job-auto-date:alice"
 
 
 def test_daily_nav_job_skips_existing_nav_when_no_overwrite():
@@ -413,7 +450,12 @@ def test_daily_nav_job_skips_existing_nav_when_no_overwrite():
 
         def get_nav_on_date(self, account, nav_date):
             calls.append(("get_nav_on_date", account, nav_date))
-            return SimpleNamespace(record_id="rec_nav_1", nav=1.23, total_value=123.0)
+            return SimpleNamespace(
+                record_id="rec_nav_1",
+                nav=1.23,
+                total_value=123.0,
+                details={"finality": _finality()},
+            )
 
         def reconcile_cash_flows(self, **kwargs):
             calls.append(("reconcile_cash_flows", kwargs["account"]))
@@ -429,9 +471,104 @@ def test_daily_nav_job_skips_existing_nav_when_no_overwrite():
     assert result["success"] is True
     assert result["summary"] == {"skipped_existing_nav": 1}
     assert result["items"][0]["record_id"] == "rec_nav_1"
+    assert result["items"][0]["finality"]["status"] == "final"
     assert calls == [
         ("reconcile_cash_flows", "alice"),
         ("get_nav_on_date", "alice", date(2026, 5, 22)),
+    ]
+
+
+def test_daily_nav_job_skips_validated_repair_finality():
+    class FakeStorage:
+        def audit_nav_history_duplicates(self, account=None):
+            return {"success": True, "duplicate_group_count": 0}
+
+        def get_nav_on_date(self, account, nav_date):
+            return SimpleNamespace(
+                record_id="rec_nav_repair",
+                nav=1.23,
+                total_value=123.0,
+                details={"finality": _finality(writer="nav-repair")},
+            )
+
+        def reconcile_cash_flows(self, **_kwargs):
+            return {"success": True, "change_count": 0, "error_count": 0}
+
+    result = DailyNavJobService(
+        storage=FakeStorage(),
+        portfolio=SimpleNamespace(reporting_service=object()),
+        calendar=BusinessCalendarService(),
+        account_runner_factory=lambda _account: (_ for _ in ()).throw(AssertionError("runner should not run")),
+    ).run(nav_date="2026-05-22", account="alice")
+
+    assert result["success"] is True
+    assert result["items"][0]["status"] == "skipped_existing_nav"
+    assert result["items"][0]["finality"]["writer"] == "nav-repair"
+
+
+def test_daily_nav_job_blocks_legacy_existing_nav_without_finality():
+    class FakeStorage:
+        def audit_nav_history_duplicates(self, account=None):
+            return {"success": True, "duplicate_group_count": 0}
+
+        def get_nav_on_date(self, account, nav_date):
+            return SimpleNamespace(record_id="legacy", nav=1.23, total_value=123.0, details={})
+
+        def reconcile_cash_flows(self, **_kwargs):
+            return {"success": True, "change_count": 0, "error_count": 0}
+
+    result = DailyNavJobService(
+        storage=FakeStorage(),
+        portfolio=SimpleNamespace(reporting_service=object()),
+        calendar=BusinessCalendarService(),
+        account_runner_factory=lambda _account: (_ for _ in ()).throw(AssertionError("runner should not run")),
+    ).run(nav_date="2026-05-22", account="alice")
+
+    assert result["success"] is False
+    assert result["status"] == "failed"
+    assert result["summary"] == {"existing_nav_not_final": 1}
+    assert result["items"][0]["finality_reason"] == "missing_finality"
+    assert "classify or repair" in result["items"][0]["error"]
+
+
+def test_daily_nav_job_blocks_manual_or_mismatched_finality():
+    details_by_account = {
+        "manual": {"finality": _finality(status="manual", writer="nav-record")},
+        "mismatch": {"finality": _finality(nav_date="2026-05-21")},
+        "unknown-writer": {"finality": _finality(writer="typo")},
+        "writer-mismatch": {"finality": _finality(writer="close-nav")},
+        "bad-time": {"finality": {**_finality(), "valuation_as_of": "not-a-time"}},
+        "missing-time": {"finality": {key: value for key, value in _finality().items() if key != "valuation_as_of"}},
+    }
+
+    class FakeStorage:
+        def audit_nav_history_duplicates(self, account=None):
+            return {"success": True, "duplicate_group_count": 0}
+
+        def get_nav_on_date(self, account, nav_date):
+            return SimpleNamespace(record_id=account, nav=1.23, total_value=123.0, details=details_by_account[account])
+
+        def reconcile_cash_flows(self, **_kwargs):
+            return {"success": True, "change_count": 0, "error_count": 0}
+
+    result = DailyNavJobService(
+        storage=FakeStorage(),
+        portfolio=SimpleNamespace(reporting_service=object()),
+        calendar=BusinessCalendarService(),
+        account_runner_factory=lambda _account: (_ for _ in ()).throw(AssertionError("runner should not run")),
+    ).run(
+        nav_date="2026-05-22",
+        accounts=["manual", "mismatch", "unknown-writer", "writer-mismatch", "bad-time", "missing-time"],
+    )
+
+    assert result["success"] is False
+    assert [item["finality_reason"] for item in result["items"]] == [
+        "status_not_final",
+        "nav_date_mismatch",
+        "unsupported_writer",
+        "writer_status_mismatch",
+        "invalid_valuation_as_of",
+        "missing_valuation_as_of",
     ]
 
 
@@ -446,6 +583,7 @@ def test_daily_nav_job_reports_existing_nav_snapshot_recovery_required():
                 nav=1.23,
                 total_value=123.0,
                 details={
+                    "finality": _finality(),
                     "snapshot_status": "failed",
                     "snapshot_task_id": "repair_snapshot_1",
                     "snapshot_error": "snapshot write failed",
@@ -486,7 +624,12 @@ def test_daily_nav_job_reports_unresolved_local_snapshot_recovery_required():
             return {"success": True, "duplicate_group_count": 0}
 
         def get_nav_on_date(self, account, nav_date):
-            return SimpleNamespace(record_id="rec_nav_1", nav=1.23, total_value=123.0, details={})
+            return SimpleNamespace(
+                record_id="rec_nav_1",
+                nav=1.23,
+                total_value=123.0,
+                details={"finality": _finality()},
+            )
 
         def reconcile_cash_flows(self, **_kwargs):
             return {"success": True, "change_count": 0, "error_count": 0}

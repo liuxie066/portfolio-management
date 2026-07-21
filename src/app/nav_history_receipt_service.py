@@ -18,6 +18,8 @@ _BLOCKING_STATUSES = {
     "cash_flow_error",
     "cash_flow_pending",
     "nav_history_duplicate",
+    "recovery_required",
+    "existing_nav_not_final",
 }
 _PRICE_SUMMARY_RE = re.compile(
     r"^\[价格汇总\]\s*"

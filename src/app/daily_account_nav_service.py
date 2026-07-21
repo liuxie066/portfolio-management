@@ -3,8 +3,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from src.app.account_nav_recorder_service import AccountNavRecorderService, _set_run_id
+from src.app.account_nav_recorder_service import AccountNavRecorderService, _coerce_date, _set_run_id
 from src.app.daily_report_payload_service import DailyReportPayloadService
+from src.app.nav_finality import NavWriteContext
+from src.time_utils import bj_today
 
 
 class DailyAccountNavService:
@@ -30,12 +32,21 @@ class DailyAccountNavService:
         price_timeout: int = 30,
         dry_run: bool = True,
         confirm: bool = False,
-        overwrite_existing: bool = True,
+        overwrite_existing: bool = False,
         use_bulk_persist: bool = False,
         sync_futu_cash_mmf: bool = False,
         sync_futu_dry_run: Optional[bool] = None,
         run_id: Optional[str] = None,
+        nav_write_context: Optional[NavWriteContext] = None,
     ) -> Dict[str, Any]:
+        resolved_date = _coerce_date(nav_date) if nav_date is not None else bj_today()
+        resolved_context = nav_write_context or NavWriteContext(
+            status="manual",
+            writer="daily-report",
+            write_reason="daily_report_bundle",
+            nav_date=resolved_date,
+            run_id=run_id,
+        )
         record_result = AccountNavRecorderService(
             account=self.account,
             storage=self.storage,
@@ -51,6 +62,7 @@ class DailyAccountNavService:
             sync_futu_cash_mmf=sync_futu_cash_mmf,
             sync_futu_dry_run=sync_futu_dry_run,
             run_id=run_id,
+            nav_write_context=resolved_context,
         )
         if not record_result.get("success"):
             nav_result = record_result.get("nav_result")

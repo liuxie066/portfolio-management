@@ -26,6 +26,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from src.app.nav_finality import NavWriteContext
 from src.maintenance.nav_history_repair.context import NavRepairContext, create_nav_repair_context
 from src.models import NAVHistory, PortfolioValuation
 
@@ -232,6 +233,12 @@ def run(args: argparse.Namespace) -> None:
             persist=False,
             overwrite_existing=True,
             dry_run=True,
+            nav_write_context=NavWriteContext(
+                status="maintenance",
+                writer="nav-repair",
+                write_reason="nav_history_backfill",
+                nav_date=p.d,
+            ),
         )
 
         # Keep market-value decomposition from input/existing base where available.

@@ -32,7 +32,7 @@ class NavMixin:
     def write_nav_record(
         self,
         nav: NAVHistory,
-        overwrite_existing: bool = True,
+        overwrite_existing: bool = False,
         dry_run: bool = False,
     ):
         return self.nav_history.write_nav_record(
@@ -73,6 +73,18 @@ class NavMixin:
         return self.nav_history.patch_nav_derived_fields(
             record_id,
             fields,
+            dry_run=dry_run,
+        )
+
+    def patch_nav_details(
+        self,
+        record_id: str,
+        details: Dict[str, Any],
+        dry_run: bool = False,
+    ):
+        return self.nav_history.patch_nav_details(
+            record_id,
+            details,
             dry_run=dry_run,
         )
 
