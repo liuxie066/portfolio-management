@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.19 - 2026-07-21
+
+- Added versioned NAV finality provenance so the canonical daily job skips only trustworthy final rows and fails closed on legacy or mismatched records.
+- Made NAV overwrite behavior opt-in across public CLI, service, publisher, initialization, close, and maintenance write paths.
+- Preserved finality through local NAV index refresh and restart reconstruction, using fresh remote duplicate-audit facts for existing-row decisions.
+- Refused Feishu `FieldNameNotFound` compatibility retries that would drop authoritative `details.finality` from single or batch NAV writes.
+
 ## 0.1.18 - 2026-07-19
 
 - Hardened financial writes with decimal-safe validation, idempotency, oversell prevention, durable compensation, and truthful partial-write reporting.
