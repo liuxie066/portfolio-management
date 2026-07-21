@@ -1,4 +1,5 @@
 """Repository for the Feishu nav_history table."""
+import json
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
@@ -57,6 +58,7 @@ class NavHistoryRepository:
                 'ytd_nav_change': nav.ytd_nav_change,
                 'mtd_pnl': nav.mtd_pnl,
                 'ytd_pnl': nav.ytd_pnl,
+                'details': nav.details,
                 'updated_at': self._extract_updated_at_str(raw_fields),
             })
 
@@ -152,6 +154,14 @@ class NavHistoryRepository:
         suffix = "" if len(duplicates) <= len(sample) else f"; ... +{len(duplicates) - len(sample)} more"
         return "nav_history duplicate account/date records exist; repair before NAV write: " + "; ".join(parts) + suffix
 
+    def _store_nav_index_payload(self, account: str, payload: Dict[str, Any]) -> None:
+        """Publish one freshly built NAV index to memory and the local cache."""
+        self._nav_index_mem_cache[account] = payload
+        self._nav_index_loaded_accounts.add(account)
+        persist_payload = dict(payload)
+        persist_payload.pop('_nav_objects', None)
+        self._local_nav_index_cache.set_account(account, persist_payload)
+
     def audit_nav_history_duplicates(self, account: Optional[str] = None) -> Dict[str, Any]:
         """Read-only audit for duplicate nav_history rows by business key."""
         filter_str = None
@@ -176,6 +186,11 @@ class NavHistoryRepository:
                 raise
 
         duplicates = self._nav_duplicate_groups_from_rows(records, default_account=account)
+        if account:
+            self._store_nav_index_payload(
+                account,
+                self._build_nav_index_payload(account, records),
+            )
         return {
             'success': True,
             'account': account,
@@ -229,12 +244,7 @@ class NavHistoryRepository:
                 if old_fp != new_fp:
                     invalidated = True
 
-        self._nav_index_mem_cache[account] = payload
-        self._nav_index_loaded_accounts.add(account)
-
-        persist_payload = dict(payload)
-        persist_payload.pop('_nav_objects', None)
-        self._local_nav_index_cache.set_account(account, persist_payload)
+        self._store_nav_index_payload(account, payload)
 
         return {
             'account': account,
@@ -271,6 +281,7 @@ class NavHistoryRepository:
                     ytd_nav_change=float(row['ytd_nav_change']) if row.get('ytd_nav_change') is not None else None,
                     mtd_pnl=float(row['mtd_pnl']) if row.get('mtd_pnl') is not None else None,
                     ytd_pnl=float(row['ytd_pnl']) if row.get('ytd_pnl') is not None else None,
+                    details=row.get('details'),
                 ))
 
             payload = dict(cached_local)
@@ -319,6 +330,7 @@ class NavHistoryRepository:
             'ytd_nav_change': nav.ytd_nav_change,
             'mtd_pnl': nav.mtd_pnl,
             'ytd_pnl': nav.ytd_pnl,
+            'details': nav.details,
             'updated_at': updated_at,
         }
 
@@ -383,6 +395,32 @@ class NavHistoryRepository:
         except Exception:
             raise ValueError('nav_history write validation failed: nav must be a number')
 
+    @staticmethod
+    def _fields_contain_finality(fields: Dict[str, Any]) -> bool:
+        """Return whether dropping the details field would lose finality provenance."""
+        details = (fields or {}).get('details')
+        if isinstance(details, str):
+            try:
+                details = json.loads(details)
+            except (TypeError, ValueError):
+                return False
+        return isinstance(details, dict) and 'finality' in details
+
+    def _fail_closed_if_finality_would_be_dropped(
+        self,
+        payloads: List[Dict[str, Any]],
+        *,
+        operation: str,
+        cause: Exception,
+    ) -> None:
+        fields_list = [(payload or {}).get('fields') or {} for payload in payloads]
+        if not any(self._fields_contain_finality(fields) for fields in fields_list):
+            return
+        raise RuntimeError(
+            'nav_history authoritative write failed closed: Feishu returned FieldNameNotFound; '
+            f'refusing {operation} retry without required details.finality'
+        ) from cause
+
     def _execute_single_nav_write(self, nav: NAVHistory, existing_row: Optional[Dict[str, Any]], preserve_none_for_update: bool, dry_run: bool = False) -> Dict[str, Any]:
         """Execute one full nav write with the same semantics as bulk replace/upsert."""
         existing_record_id = (existing_row or {}).get('record_id')
@@ -413,6 +451,13 @@ class NavHistoryRepository:
             msg = str(e)
             if 'FieldNameNotFound' not in msg:
                 raise
+
+            operation = 'update' if existing_record_id else 'create'
+            self._fail_closed_if_finality_would_be_dropped(
+                [{'record_id': existing_record_id, 'fields': feishu_fields}],
+                operation=operation,
+                cause=e,
+            )
 
             fallback_fields = dict(feishu_fields)
             fallback_fields.pop('details', None)
@@ -542,6 +587,11 @@ class NavHistoryRepository:
                                 msg = str(e)
                                 if 'FieldNameNotFound' not in msg or getattr(e, 'confirmed_results', None):
                                     raise
+                                self._fail_closed_if_finality_would_be_dropped(
+                                    update_payloads,
+                                    operation='batch update',
+                                    cause=e,
+                                )
                                 fallback_updates = []
                                 fallback_rows = []
                                 for p, row in zip(update_payloads, update_rows_for_cache):
@@ -561,6 +611,11 @@ class NavHistoryRepository:
                                 msg = str(e)
                                 if 'FieldNameNotFound' not in msg or getattr(e, 'confirmed_results', None):
                                     raise
+                                self._fail_closed_if_finality_would_be_dropped(
+                                    create_payloads,
+                                    operation='batch create',
+                                    cause=e,
+                                )
                                 fallback_creates = []
                                 for p in create_payloads:
                                     f = dict((p.get('fields') or {}))

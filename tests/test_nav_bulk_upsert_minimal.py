@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 from src import config
 from src.feishu_storage import FeishuStorage
 from src.feishu_client import FeishuBatchWriteError
+from src.app.nav_finality import evaluate_nav_finality
 from src.models import NAVHistory
 
 
@@ -277,6 +278,183 @@ def test_nav_batch_fallback_does_not_replay_confirmed_partial_chunk():
         assert len(exc.confirmed_results) == 1
 
     assert len(client.batch_update_records_calls) == 1
+
+
+def _finality_details(nav_date: str) -> Dict[str, Any]:
+    return {
+        'finality': {
+            'version': 1,
+            'status': 'final',
+            'nav_date': nav_date,
+            'valuation_as_of': f'{nav_date}T08:00:00+08:00',
+            'writer': 'daily-nav-job',
+            'write_reason': 'canonical_daily_nav_job',
+            'run_id': f'run-{nav_date}',
+        }
+    }
+
+
+def test_single_nav_create_fails_closed_when_feishu_rejects_required_finality_details():
+    class MissingDetailsClient(StubNavSingleWriteClient):
+        def create_record(self, table_name: str, fields: Dict[str, Any]):
+            assert table_name == 'nav_history'
+            self.create_record_calls.append({'fields': dict(fields)})
+            raise Exception('FieldNameNotFound: details')
+
+    client = MissingDetailsClient()
+    local_cache = StubLocalNavIndexCache()
+    storage = FeishuStorage(client=client, local_nav_index_cache=local_cache)
+    nav = NAVHistory(
+        date=date(2026, 3, 9),
+        account='lx',
+        total_value=1000.0,
+        shares=1000.0,
+        nav=1.0,
+        details=_finality_details('2026-03-09'),
+    )
+
+    with pytest.raises(RuntimeError, match=r'refusing create retry without required details\.finality'):
+        storage.write_nav_record(nav)
+
+    assert len(client.create_record_calls) == 1
+    assert 'details' in client.create_record_calls[0]['fields']
+    assert nav.record_id is None
+    assert local_cache.upsert_calls == 0
+
+
+def test_single_legacy_nav_create_still_retries_without_optional_details():
+    class MissingDetailsOnceClient(StubNavSingleWriteClient):
+        def create_record(self, table_name: str, fields: Dict[str, Any]):
+            assert table_name == 'nav_history'
+            self.create_record_calls.append({'fields': dict(fields)})
+            if len(self.create_record_calls) == 1:
+                raise Exception('FieldNameNotFound: details')
+            record_id = 'rec_nav_new_legacy'
+            self._records.append({'record_id': record_id, 'fields': dict(fields)})
+            return {'record_id': record_id, 'fields': dict(fields)}
+
+    client = MissingDetailsOnceClient()
+    local_cache = StubLocalNavIndexCache()
+    storage = FeishuStorage(client=client, local_nav_index_cache=local_cache)
+    nav = NAVHistory(
+        date=date(2026, 3, 9),
+        account='lx',
+        total_value=1000.0,
+        shares=1000.0,
+        nav=1.0,
+        details={'source': 'legacy-low-level-writer'},
+    )
+
+    storage.write_nav_record(nav)
+
+    assert len(client.create_record_calls) == 2
+    assert 'details' in client.create_record_calls[0]['fields']
+    assert 'details' not in client.create_record_calls[1]['fields']
+    assert nav.record_id == 'rec_nav_new_legacy'
+    assert local_cache.upsert_calls == 1
+
+
+def test_single_nav_update_fails_closed_when_feishu_rejects_required_finality_details():
+    class MissingDetailsClient(StubNavSingleWriteClient):
+        def update_record(self, table_name: str, record_id: str, fields: Dict[str, Any]):
+            assert table_name == 'nav_history'
+            self.update_record_calls.append({'record_id': record_id, 'fields': dict(fields)})
+            raise Exception('FieldNameNotFound: details')
+
+    initial_fields = {
+        'date': '2026-03-09',
+        'account': 'lx',
+        'total_value': 900.0,
+        'shares': 1000.0,
+        'nav': 0.9,
+    }
+    client = MissingDetailsClient(initial_records=[{'record_id': 'rec_nav_1', 'fields': initial_fields}])
+    local_cache = StubLocalNavIndexCache()
+    storage = FeishuStorage(client=client, local_nav_index_cache=local_cache)
+    nav = NAVHistory(
+        date=date(2026, 3, 9),
+        account='lx',
+        total_value=1000.0,
+        shares=1000.0,
+        nav=1.0,
+        details=_finality_details('2026-03-09'),
+    )
+
+    with pytest.raises(RuntimeError, match=r'refusing update retry without required details\.finality'):
+        storage.write_nav_record(nav, overwrite_existing=True)
+
+    assert len(client.update_record_calls) == 1
+    assert 'details' in client.update_record_calls[0]['fields']
+    assert client._records[0]['fields'] == initial_fields
+    assert local_cache.upsert_calls == 0
+
+
+def test_bulk_nav_create_fails_closed_when_feishu_rejects_required_finality_details():
+    class MissingDetailsClient(StubNavBulkClient):
+        def batch_create_records(self, table_name: str, records: List[Dict[str, Any]]):
+            assert table_name == 'nav_history'
+            self.batch_create_records_calls.append([
+                {'fields': dict((record.get('fields') or {}))} for record in records
+            ])
+            raise Exception('FieldNameNotFound: details')
+
+    client = MissingDetailsClient()
+    local_cache = StubLocalNavIndexCache()
+    storage = FeishuStorage(client=client, local_nav_index_cache=local_cache)
+    nav = NAVHistory(
+        date=date(2026, 3, 10),
+        account='lx',
+        total_value=1000.0,
+        shares=1000.0,
+        nav=1.0,
+        details=_finality_details('2026-03-10'),
+    )
+
+    with pytest.raises(RuntimeError, match=r'refusing batch create retry without required details\.finality'):
+        storage.write_nav_records([nav], mode='replace')
+
+    assert len(client.batch_create_records_calls) == 1
+    assert 'details' in client.batch_create_records_calls[0][0]['fields']
+    assert nav.record_id is None
+    assert local_cache.upsert_calls == 0
+
+
+def test_bulk_nav_update_fails_closed_when_feishu_rejects_required_finality_details():
+    class MissingDetailsClient(StubNavBulkClient):
+        def batch_update_records(self, table_name: str, records: List[Dict[str, Any]]):
+            assert table_name == 'nav_history'
+            self.batch_update_records_calls.append([
+                {'record_id': record['record_id'], 'fields': dict(record['fields'])}
+                for record in records
+            ])
+            raise Exception('FieldNameNotFound: details')
+
+    initial_fields = {
+        'date': '2026-03-10',
+        'account': 'lx',
+        'total_value': 900.0,
+        'shares': 1000.0,
+        'nav': 0.9,
+    }
+    client = MissingDetailsClient(initial_records=[{'record_id': 'rec_nav_1', 'fields': initial_fields}])
+    local_cache = StubLocalNavIndexCache()
+    storage = FeishuStorage(client=client, local_nav_index_cache=local_cache)
+    nav = NAVHistory(
+        date=date(2026, 3, 10),
+        account='lx',
+        total_value=1000.0,
+        shares=1000.0,
+        nav=1.0,
+        details=_finality_details('2026-03-10'),
+    )
+
+    with pytest.raises(RuntimeError, match=r'refusing batch update retry without required details\.finality'):
+        storage.write_nav_records([nav], mode='replace')
+
+    assert len(client.batch_update_records_calls) == 1
+    assert 'details' in client.batch_update_records_calls[0][0]['fields']
+    assert client._records[0]['fields'] == initial_fields
+    assert local_cache.upsert_calls == 0
 
 
 def test_nav_bulk_upsert_upsert_mode_keeps_existing_cache_values_for_none_fields():
@@ -694,3 +872,83 @@ def test_concurrent_same_date_single_writes_create_only_once(monkeypatch):
     assert sorted(outcomes) == ['blocked', 'created']
     assert len(client.create_record_calls) == 1
     assert len(client.update_record_calls) == 0
+
+
+
+def test_account_duplicate_audit_refreshes_finality_from_remote_into_local_index():
+    finality = {
+        'version': 1,
+        'status': 'final',
+        'nav_date': '2026-03-07',
+        'valuation_as_of': '2026-03-07T08:00:00+08:00',
+        'writer': 'daily-nav-job',
+        'write_reason': 'canonical_daily_nav_job',
+        'run_id': 'run-final-1',
+    }
+    client = StubNavSingleWriteClient(initial_records=[{
+        'record_id': 'rec_nav_final',
+        'fields': {
+            'date': '2026-03-07',
+            'account': 'lx',
+            'total_value': 1000.0,
+            'shares': 1000.0,
+            'nav': 1.0,
+            'details': {'finality': finality},
+        },
+    }])
+    local_cache = StubLocalNavIndexCache()
+    local_cache.set_account('lx', {
+        'account': 'lx',
+        'nav_history': [{
+            'date': '2026-03-07',
+            'record_id': 'rec_nav_final',
+            'total_value': 1000.0,
+            'shares': 1000.0,
+            'nav': 1.0,
+        }],
+        'record_count': 1,
+        'month_end_base': {'2026-03': {'date': '2026-03-07'}},
+        'year_end_base': {'2026': {'date': '2026-03-07'}},
+        'inception_base': {'date': '2026-03-07'},
+        'last_record': {'date': '2026-03-07'},
+    })
+    storage = FeishuStorage(client=client, local_nav_index_cache=local_cache)
+
+    audit = storage.audit_nav_history_duplicates(account='lx')
+    existing = storage.get_nav_on_date('lx', date(2026, 3, 7))
+    decision = evaluate_nav_finality(existing.details, target_date=date(2026, 3, 7))
+
+    assert audit['duplicate_group_count'] == 0
+    assert existing.details == {'finality': finality}
+    assert decision.eligible is True
+    assert local_cache.get_account('lx')['nav_history'][0]['details'] == {'finality': finality}
+
+
+def test_incremental_nav_cache_roundtrip_preserves_details():
+    client = StubNavSingleWriteClient()
+    local_cache = StubLocalNavIndexCache()
+    storage = FeishuStorage(client=client, local_nav_index_cache=local_cache)
+    details = {
+        'finality': {
+            'version': 1,
+            'status': 'manual',
+            'nav_date': '2026-03-08',
+            'valuation_as_of': None,
+            'writer': 'nav-record',
+            'write_reason': 'direct_nav_record',
+        }
+    }
+    nav = NAVHistory(
+        date=date(2026, 3, 8),
+        account='lx',
+        total_value=1000.0,
+        shares=1000.0,
+        nav=1.0,
+        details=details,
+    )
+
+    storage.write_nav_record(nav)
+    restarted_storage = FeishuStorage(client=client, local_nav_index_cache=local_cache)
+    existing = restarted_storage.get_nav_on_date('lx', date(2026, 3, 8))
+
+    assert existing.details == details
