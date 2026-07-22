@@ -211,7 +211,7 @@ class TestPriceFetcher:
             "change": 2.5,
             "change_pct": 0.0145,
             "currency": "USD",
-            "source": "yahoo_chart"
+            "source": "sina_us"
         }
 
         fetcher = PriceFetcher()
@@ -220,7 +220,7 @@ class TestPriceFetcher:
         assert result is not None
         assert result["price"] == 175.0
         assert result["currency"] == "USD"
-        assert result["source"] == "yahoo_chart"
+        assert result["source"] == "sina_us"
 
     def test_get_cash_price(self):
         """测试获取现金价格"""

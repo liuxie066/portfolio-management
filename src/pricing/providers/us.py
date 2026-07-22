@@ -8,7 +8,7 @@ from src import config as _config
 
 from ..payload import normalize_price_payload, remaining_timeout
 from ..types import PriceRequest, ProviderResult
-from .yahoo_chart import fetch_yahoo_chart_quote
+from .sina_us import fetch_sina_us_quotes
 
 
 class USStockProvider:
@@ -45,7 +45,7 @@ class USStockProvider:
 
         try:
             result = self.fetcher._retry_with_backoff(
-                lambda: self.fetch_yahoo_chart(quote_code, deadline=deadline),
+                lambda: self.fetch_sina(code, deadline=deadline),
                 max_retries=2,
                 base_delay=1.0,
                 deadline=deadline,
@@ -53,7 +53,7 @@ class USStockProvider:
             if result:
                 return result
         except Exception as exc:
-            errors.append(f"Yahoo Chart: {exc}")
+            errors.append(f"Sina US: {exc}")
 
         print(f"获取美股价格失败 {code}: {'; '.join(errors)}")
         return None
@@ -100,5 +100,5 @@ class USStockProvider:
             }
         )
 
-    def fetch_yahoo_chart(self, code: str, *, deadline: float | None = None) -> Optional[dict]:
-        return fetch_yahoo_chart_quote(self.fetcher, code, timeout=15, deadline=deadline)
+    def fetch_sina(self, code: str, *, deadline: float | None = None) -> Optional[dict]:
+        return fetch_sina_us_quotes(self.fetcher, [code], timeout=15, deadline=deadline).get(code)

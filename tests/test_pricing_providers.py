@@ -10,47 +10,28 @@ from src.pricing.providers.us import USStockProvider
 from src.pricing.providers.us_batch import fetch_us_batch
 
 
-class FakeYahooResponse:
+class FakeSinaResponse:
     status_code = 200
 
-    def __init__(self, payload):
-        self.payload = payload
+    def __init__(self, text: str):
+        self.content = text.encode("gbk", errors="replace")
 
     def raise_for_status(self):
         return None
 
-    def json(self):
-        return self.payload
 
-
-def _yahoo_chart_payload():
-    return {
-        "chart": {
-            "result": [
-                {
-                    "meta": {
-                        "symbol": "AAPL",
-                        "shortName": "Apple Inc",
-                        "currency": "USD",
-                        "previousClose": 190.0,
-                    },
-                    "timestamp": [1, 2],
-                    "indicators": {
-                        "quote": [
-                            {
-                                "close": [190.0, 193.0],
-                                "open": [189.0, 191.0],
-                                "high": [194.0, 195.0],
-                                "low": [188.0, 190.0],
-                                "volume": [100, 200],
-                            }
-                        ]
-                    },
-                }
-            ],
-            "error": None,
-        }
-    }
+def _sina_us_line(code: str) -> str:
+    fields = [""] * 36
+    fields[0] = "Apple Inc"
+    fields[1] = "193.00"
+    fields[2] = "1.58"
+    fields[4] = "3.00"
+    fields[5] = "191.00"
+    fields[6] = "195.00"
+    fields[7] = "190.00"
+    fields[10] = "200"
+    fields[26] = "190.00"
+    return f'var hq_str_gb_{code.lower()}="' + ",".join(fields) + '";'
 
 
 def test_fetch_realtime_routes_cn_stock_through_provider(monkeypatch):
@@ -195,12 +176,12 @@ def test_us_batch_provider_falls_back_to_stale_cache():
     assert result["AAPL"]["is_from_cache"] is True
 
 
-def test_yahoo_chart_single_and_batch_share_normalized_payload():
+def test_sina_us_single_and_batch_share_normalized_payload():
     fetcher = PriceFetcher()
     fetcher._fetch_exchange_rates = lambda: {"USDCNY": 7.1}
-    fetcher.session.get = lambda *args, **kwargs: FakeYahooResponse(_yahoo_chart_payload())
+    fetcher.session.get = lambda *args, **kwargs: FakeSinaResponse(_sina_us_line("aapl"))
 
-    single = USStockProvider(fetcher).fetch_yahoo_chart("AAPL")
+    single = USStockProvider(fetcher).fetch_sina("AAPL")
     with patch("src.pricing.providers.us_batch._config.get", return_value=None):
         batch = fetch_us_batch(fetcher, ["AAPL"], name_map={}, expired_cache={}, _nested=True)["AAPL"]
 
@@ -217,30 +198,84 @@ def test_yahoo_chart_single_and_batch_share_normalized_payload():
         "cny_price": 1370.3,
         "exchange_rate": 7.1,
         "market_type": "us",
-        "source": "yahoo_chart",
+        "source": "sina_us",
     }
     for key, value in expected.items():
         assert single[key] == value
         assert batch[key] == value
 
 
-def test_yahoo_chart_empty_quote_does_not_fetch_exchange_rate():
+def test_sina_us_empty_quote_does_not_fetch_exchange_rate():
     fetcher = PriceFetcher()
-    fetcher.session.get = lambda *args, **kwargs: FakeYahooResponse({
-        "chart": {
-            "result": [
-                {
-                    "meta": {"symbol": "AAPL", "currency": "USD"},
-                    "timestamp": [],
-                    "indicators": {"quote": [{"close": []}]},
-                }
-            ],
-            "error": None,
-        }
-    })
+    fetcher.session.get = lambda *args, **kwargs: FakeSinaResponse('var hq_str_gb_aapl="";')
     fetcher._fetch_exchange_rates = lambda: (_ for _ in ()).throw(AssertionError("rates should not be fetched"))
 
-    assert USStockProvider(fetcher).fetch_yahoo_chart("AAPL") is None
+    assert USStockProvider(fetcher).fetch_sina("AAPL") is None
+
+
+def test_us_batch_merges_finnhub_failures_into_one_sina_request(monkeypatch):
+    fetcher = PriceFetcher()
+    fetcher._fetch_exchange_rates = lambda: {"USDCNY": 7.1}
+    requests = []
+
+    def fake_get(url, **kwargs):
+        requests.append(url)
+        return FakeSinaResponse("\n".join([_sina_us_line("futu"), _sina_us_line("baba")]))
+
+    fetcher.session.get = fake_get
+    monkeypatch.setattr("src.pricing.providers.us_batch._config.get", lambda key, default=None: "key")
+    monkeypatch.setattr(
+        USStockProvider, "fetch_finnhub", lambda self, code, key, **kw: (_ for _ in ()).throw(RuntimeError("timeout"))
+    )
+
+    result = fetch_us_batch(fetcher, ["FUTU", "BABA"], name_map={}, expired_cache={}, _nested=True)
+
+    assert len(requests) == 1
+    assert "gb_futu,gb_baba" in requests[0]
+    assert result["FUTU"]["source"] == "sina_us"
+    assert result["BABA"]["source"] == "sina_us"
+
+
+def test_us_batch_break_path_merges_skipped_codes_into_sina_request(monkeypatch):
+    fetcher = PriceFetcher()
+    fetcher._fetch_exchange_rates = lambda: {"USDCNY": 7.1}
+    codes = ["FUTU", "BABA", "GOOGL", "PDD", "TCOM"]
+    requests = []
+
+    def fake_get(url, **kwargs):
+        requests.append(url)
+        return FakeSinaResponse("\n".join(_sina_us_line(c) for c in codes))
+
+    fetcher.session.get = fake_get
+    monkeypatch.setattr("src.pricing.providers.us_batch._config.get", lambda key, default=None: "key")
+    monkeypatch.setattr(
+        USStockProvider, "fetch_finnhub", lambda self, code, key, **kw: (_ for _ in ()).throw(RuntimeError("timeout"))
+    )
+
+    result = fetch_us_batch(fetcher, codes, name_map={}, expired_cache={}, _nested=True)
+
+    assert len(requests) == 1
+    for code in codes:
+        assert "gb_" + code.lower() in requests[0]
+        assert result[code]["source"] == "sina_us"
+
+
+def test_sina_us_dotted_symbol_maps_to_dollar_query_code():
+    fetcher = PriceFetcher()
+    fetcher._fetch_exchange_rates = lambda: {"USDCNY": 7.1}
+    requests = []
+
+    def fake_get(url, **kwargs):
+        requests.append(url)
+        return FakeSinaResponse(_sina_us_line("brk$b"))
+
+    fetcher.session.get = fake_get
+
+    result = USStockProvider(fetcher).fetch_sina("BRK.B")
+
+    assert "gb_brk$b" in requests[0]
+    assert result is not None
+    assert result["code"] == "BRK.B"
 
 
 def test_realtime_pricing_strips_supported_suffixes_but_preserves_internal_dot(monkeypatch):

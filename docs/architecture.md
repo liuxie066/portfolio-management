@@ -63,7 +63,7 @@ flowchart TB
 
     subgraph External["External"]
         Feishu["Feishu Bitable"]
-        Quotes["Tencent / Finnhub / Yahoo Chart / East Money / FX"]
+        Quotes["Tencent / Finnhub / Sina US / East Money / FX"]
         Reports["reports/ + publish_root"]
     end
 

@@ -229,7 +229,7 @@ python scripts/diagnose_pricing.py --account lx --json
 ```
 
 Check realtime/cache/stale/missing counts and provider errors. US quotes use
-Finnhub/Yahoo Chart paths; A/H quotes use Tencent paths.
+Finnhub/Sina US paths; A/H quotes use Tencent paths.
 
 ### Feishu Field Missing
 

@@ -6,8 +6,8 @@ from typing import Dict, List
 from src import config as _config
 
 from ..payload import remaining_timeout
+from .sina_us import fetch_sina_us_quotes
 from .us import USStockProvider
-from .yahoo_chart import fetch_yahoo_chart_quote
 
 
 def fetch_us_batch(
@@ -25,6 +25,7 @@ def fetch_us_batch(
     consecutive_failures = 0
     finnhub_key = _config.get("finnhub_api_key")
     us_provider = USStockProvider(fetcher)
+    leftover: List[str] = []
 
     def use_expired_cache(code: str) -> None:
         if code in expired_cache:
@@ -32,26 +33,19 @@ def fetch_us_batch(
             payload["source"] = "cache_fallback"
             results[code] = payload
 
-    for index, code in enumerate(codes):
+    skipped: List[str] = []
+    if not finnhub_key:
+        leftover.extend(codes)
+    for index, code in enumerate(codes if finnhub_key else ()):
         remaining_timeout(deadline, 10)
         quote_code = code.replace(".", "-")
         result = None
-        if finnhub_key:
-            try:
-                result = us_provider.fetch_finnhub(quote_code, finnhub_key, deadline=deadline)
-            except Exception:
-                result = None
-        if result is None:
-            try:
-                result = fetch_yahoo_chart_quote(
-                    fetcher,
-                    quote_code,
-                    code=code,
-                    timeout=5,
-                    deadline=deadline,
-                )
-            except Exception:
-                result = None
+        finnhub_error = None
+        try:
+            result = us_provider.fetch_finnhub(quote_code, finnhub_key, deadline=deadline)
+        except Exception as exc:
+            finnhub_error = exc
+            result = None
 
         if result:
             result["code"] = code
@@ -59,12 +53,29 @@ def fetch_us_batch(
             consecutive_failures = 0
         else:
             consecutive_failures += 1
-            use_expired_cache(code)
+            leftover.append(code)
+            if finnhub_error is not None:
+                print(f"[美股价格] {code}: Finnhub 获取失败: {finnhub_error}")
 
         if consecutive_failures >= 3:
-            print(f"[美股价格] 连续 {consecutive_failures} 次获取失败，跳过剩余美股查询")
-            for remaining_code in codes[index + 1 :]:
-                use_expired_cache(remaining_code)
+            skipped = codes[index + 1 :]
+            print(f"[美股价格] 连续 {consecutive_failures} 次获取失败，剩余 {len(skipped)} 只并入新浪批量查询")
+            leftover.extend(skipped)
             break
+
+    if leftover:
+        try:
+            sina_results = fetch_sina_us_quotes(fetcher, leftover, timeout=5, deadline=deadline)
+        except Exception as exc:
+            sina_results = {}
+            print(f"[美股价格] 新浪批量查询失败: {exc}")
+        for code in leftover:
+            payload = sina_results.get(code)
+            if payload:
+                payload["code"] = code
+                results[code] = payload
+            else:
+                print(f"[美股价格] {code}: 新浪未命中，尝试过期缓存")
+                use_expired_cache(code)
 
     return results

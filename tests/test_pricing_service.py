@@ -144,7 +144,7 @@ def test_fetch_quote_saves_realtime_payload_and_returns_market_type():
             "currency": "USD",
             "cny_price": 1350.456,
             "exchange_rate": 7.1023,
-            "source": "yahoo_chart",
+            "source": "sina_us",
         },
     )
     service = PriceService([], fetcher_context=fetcher)
@@ -158,7 +158,7 @@ def test_fetch_quote_saves_realtime_payload_and_returns_market_type():
     assert payload["cache_status"] == "realtime"
     assert storage.saved.asset_id == "AAPL"
     assert storage.saved.asset_type == AssetType.US_STOCK
-    assert storage.saved.data_source == "yahoo_chart"
+    assert storage.saved.data_source == "sina_us"
 
 
 def test_fetch_quote_returns_structured_failure_without_cache_or_realtime():
