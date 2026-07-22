@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.20 - 2026-07-22
+
+- Aligned the NAV History and Futu sync Feishu receipts with the options-monitor flat-markdown shell: `# PM · 回执 · ...` header, `标签｜值` fields, emoji status, and `##` sections with empty sections omitted.
+- Flattened per-account NAV receipt details into single rows and dropped the redundant `告警：无` footer when no warnings exist.
+- Added a shared `render_receipt` shell module with regression coverage for field flattening, empty-section omission, and placeholder values.
+
 ## 0.1.19 - 2026-07-21
 
 - Added versioned NAV finality provenance so the canonical daily job skips only trustworthy final rows and fails closed on legacy or mismatched records.

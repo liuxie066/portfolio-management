@@ -60,7 +60,9 @@ def test_futu_sync_receipt_sends_write_summary_from_liukanshan():
     }
     assert calls[0] == ("init", "cli_liukanshan", "secret")
     assert calls[1][0:2] == ("send", "ou_user")
-    assert "账户：lx" in calls[1][2]
+    assert "# PM · 回执 · lx" in calls[1][2]
+    assert "类型｜持仓同步" in calls[1][2]
+    assert "状态｜✅ 成功" in calls[1][2]
     assert "成本 127.52→116.68" in calls[1][2]
 
 

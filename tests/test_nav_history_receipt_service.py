@@ -88,24 +88,26 @@ def test_nav_receipt_sends_one_consolidated_success_message():
     assert calls[0] == ("init", {"app_id": "cli_app", "app_secret": "secret"})
     text = calls[1][1]["text"]
     assert calls[1][1]["open_id"] == "ou_user"
-    assert "【NAV History 记录回执｜成功】" in text
-    assert "执行时间：2026-07-18 08:11 北京时间" in text
-    assert "NAV 日期：2026-07-17" in text
-    assert "结果：写入 3，跳过 0，失败 0" in text
+    assert "# PM · 回执 · NAV History" in text
+    assert "类型｜NAV 记录" in text
+    assert "状态｜✅ 成功" in text
+    assert "时间｜2026-07-18 08:11 北京时间" in text
+    assert "NAV 日期｜2026-07-17" in text
+    assert "结果｜写入 3，跳过 0，失败 0" in text
     assert "✅ lx｜NAV 0.957931｜总资产 ¥3,893,292.82｜当期盈亏 +¥65,375.44" in text
     assert "✅ hb｜NAV 1.023482｜总资产 ¥1,286,450.20｜当期盈亏 -¥3,421.18" in text
     assert "YTD NAV +5.00%｜股票 70.00%｜基金 10.00%｜现金 20.00%" in text
     assert "资金变动 +¥5,000.00" in text
-    assert "告警：无" in text
-    assert "Run ID：daily-nav-job-multi-1" in text
+    assert "## 告警" not in text
+    assert "Run ID｜daily-nav-job-multi-1" in text
 
 
 def test_nav_receipt_formats_negative_and_missing_ytd_nav_change():
-    negative = NavHistoryReceiptService._item_lines(_written("lx", ytd_nav_change=-0.0123))
-    missing = NavHistoryReceiptService._item_lines(_written("hb", ytd_nav_change=None))
+    negative = NavHistoryReceiptService._item_row(_written("lx", ytd_nav_change=-0.0123))
+    missing = NavHistoryReceiptService._item_row(_written("hb", ytd_nav_change=None))
 
-    assert "YTD NAV -1.23%" in negative[2]
-    assert "YTD NAV -｜" in missing[2]
+    assert "YTD NAV -1.23%" in negative
+    assert "YTD NAV -｜" in missing
 
 
 def test_nav_receipt_formats_existing_nav_skip():
@@ -128,8 +130,8 @@ def test_nav_receipt_formats_existing_nav_skip():
         executed_at=datetime(2026, 7, 20, 8, 11),
     )
 
-    assert "【NAV History 记录回执｜无需写入】" in text
-    assert "结果：写入 0，跳过 1，失败 0" in text
+    assert "状态｜⏭ 无需写入" in text
+    assert "结果｜写入 0，跳过 1，失败 0" in text
     assert "⏭ lx｜NAV 已存在｜NAV 0.957931｜总资产 ¥3,893,292.82" in text
 
 
@@ -153,11 +155,11 @@ def test_nav_receipt_formats_partial_failure_and_price_warning():
         executed_at=datetime(2026, 7, 18, 8, 11),
     )
 
-    assert "【NAV History 记录回执｜部分失败】" in text
-    assert "结果：写入 1，跳过 0，失败 1" in text
+    assert "状态｜⚠️ 部分失败" in text
+    assert "结果｜写入 1，跳过 0，失败 1" in text
     assert "❌ hb｜cash_flow_error｜cash_flow has invalid manual rows" in text
     assert "价格：" not in text
-    assert "告警：\n- lx: FUTU price unavailable" in text
+    assert "## 告警\nlx: FUTU price unavailable" in text
 
 
 def test_nav_receipt_formats_snapshot_recovery_error():
@@ -204,8 +206,8 @@ def test_nav_receipt_formats_existing_nav_not_final_as_blocker():
         executed_at=datetime(2026, 7, 21, 8, 11),
     )
 
-    assert "【NAV History 记录回执｜失败】" in text
-    assert "结果：写入 0，跳过 0，失败 1" in text
+    assert "状态｜❌ 失败" in text
+    assert "结果｜写入 0，跳过 0，失败 1" in text
     assert "❌ lx｜existing_nav_not_final｜existing row requires classification" in text
 
 
@@ -246,7 +248,7 @@ def test_nav_receipt_compacts_healthy_price_summaries_across_accounts():
     assert "价格：正常｜实时 59" in text
     assert "tencent_batch" not in text
     assert "elapsed_ms" not in text
-    assert "告警：无" in text
+    assert "告警：无" not in text
 
 
 def test_nav_receipt_highlights_only_problematic_price_accounts():
@@ -271,7 +273,7 @@ def test_nav_receipt_highlights_only_problematic_price_accounts():
     )
 
     assert "价格：异常｜实时 41｜过期回退 1｜缺失 1（lx 过期回退 1；hb 缺失 1）" in text
-    assert "告警：无" in text
+    assert "告警：无" not in text
 
 
 def test_nav_receipt_missing_config_and_send_failure_are_reported():
@@ -317,6 +319,6 @@ def test_nav_receipt_formats_top_level_skip_without_account_items():
         executed_at=datetime(2026, 7, 19, 8, 10),
     )
 
-    assert "【NAV History 记录回执｜无需写入】" in text
-    assert "结果：写入 0，跳过 1，失败 0" in text
-    assert "Run ID：run-skip" in text
+    assert "状态｜⏭ 无需写入" in text
+    assert "结果｜写入 0，跳过 1，失败 0" in text
+    assert "Run ID｜run-skip" in text

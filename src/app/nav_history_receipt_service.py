@@ -7,6 +7,7 @@ from typing import Any, Callable, Optional
 from zoneinfo import ZoneInfo
 
 from src import config
+from src.app.notification_shells import render_receipt
 from src.feishu_client import FeishuClient
 
 
@@ -28,6 +29,12 @@ _PRICE_SUMMARY_RE = re.compile(
     r"stale_fallback=(?P<stale>\d+),\s*"
     r"missing=(?P<missing>\d+)"
 )
+_STATUS_EMOJI = {
+    "成功": "✅ 成功",
+    "部分失败": "⚠️ 部分失败",
+    "失败": "❌ 失败",
+    "无需写入": "⏭ 无需写入",
+}
 
 
 class NavHistoryReceiptService:
@@ -116,31 +123,29 @@ class NavHistoryReceiptService:
         else:
             now = now.astimezone(_BEIJING)
 
-        lines = [
-            f"【NAV History 记录回执｜{title}】",
-            f"执行时间：{now.strftime('%Y-%m-%d %H:%M')} 北京时间",
-            f"NAV 日期：{job_result.get('date') or '-'}",
-            f"结果：写入 {written}，跳过 {skipped}，失败 {failed}",
+        fields: list[tuple[str, Any]] = [
+            ("时间", f"{now.strftime('%Y-%m-%d %H:%M')} 北京时间"),
+            ("NAV 日期", job_result.get("date")),
+            ("结果", f"写入 {written}，跳过 {skipped}，失败 {failed}"),
         ]
-
-        for item in items:
-            lines.extend(cls._item_lines(item))
-
         if not items and job_result.get("error"):
-            lines.extend(["", f"错误：{job_result.get('error')}"])
+            fields.append(("错误", job_result.get("error")))
+        if job_result.get("run_id"):
+            fields.append(("Run ID", job_result["run_id"]))
 
         price_summary, warnings = cls._warning_summary(items)
-        lines.append("")
-        if price_summary:
-            lines.append(price_summary)
-        if warnings:
-            lines.append("告警：")
-            lines.extend(f"- {warning}" for warning in warnings)
-        else:
-            lines.append("告警：无")
-        if job_result.get("run_id"):
-            lines.append(f"Run ID：{job_result['run_id']}")
-        return "\n".join(lines)
+        warning_rows = ([price_summary] if price_summary else []) + list(warnings)
+
+        return render_receipt(
+            title="NAV History",
+            receipt_type="NAV 记录",
+            status=_STATUS_EMOJI.get(title, title),
+            fields=fields,
+            sections=[
+                ("账户明细", [cls._item_row(item) for item in items]),
+                ("告警", warning_rows),
+            ],
+        )
 
     @staticmethod
     def _counts(job_result: dict[str, Any], items: list[dict[str, Any]]) -> tuple[int, int, int]:
@@ -176,27 +181,25 @@ class NavHistoryReceiptService:
         return "成功"
 
     @classmethod
-    def _item_lines(cls, item: dict[str, Any]) -> list[str]:
+    def _item_row(cls, item: dict[str, Any]) -> str:
         account = item.get("account") or "-"
         status = str(item.get("status") or "")
         if status == "written":
             report = item.get("report") or {}
             overview = report.get("overview") or {}
-            line = (
+            row = (
                 f"✅ {account}｜NAV {_format_nav(report.get('nav'))}"
                 f"｜总资产 {_format_money(report.get('total_value'))}"
                 f"｜当期盈亏 {_format_signed_money(report.get('pnl'))}"
-            )
-            detail = (
-                f"   YTD NAV {_format_signed_pct(report.get('ytd_nav_change'))}"
+                f"｜YTD NAV {_format_signed_pct(report.get('ytd_nav_change'))}"
                 f"｜股票 {_format_pct(overview.get('stock_ratio'))}"
                 f"｜基金 {_format_pct(overview.get('fund_ratio'))}"
                 f"｜现金 {_format_pct(overview.get('cash_ratio'))}"
             )
             cash_flow = _as_float(report.get("cash_flow"))
             if cash_flow not in (None, 0.0):
-                detail += f"｜资金变动 {_format_signed_money(cash_flow)}"
-            return ["", line, detail]
+                row += f"｜资金变动 {_format_signed_money(cash_flow)}"
+            return row
 
         if status.startswith("skipped_"):
             label = "NAV 已存在" if status == "skipped_existing_nav" else status
@@ -206,10 +209,10 @@ class NavHistoryReceiptService:
             if item.get("total_value") is not None:
                 details.append(f"总资产 {_format_money(item.get('total_value'))}")
             suffix = f"｜{'｜'.join(details)}" if details else ""
-            return ["", f"⏭ {account}｜{label}{suffix}"]
+            return f"⏭ {account}｜{label}{suffix}"
 
         error = item.get("error") or "unknown error"
-        return ["", f"❌ {account}｜{status or 'failed'}｜{error}"]
+        return f"❌ {account}｜{status or 'failed'}｜{error}"
 
     @staticmethod
     def _warning_summary(items: list[dict[str, Any]]) -> tuple[Optional[str], list[str]]:

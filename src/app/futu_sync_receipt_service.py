@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any, Callable, Optional
 
 from src import config
+from src.app.notification_shells import render_receipt
 from src.feishu_client import FeishuClient
 
 
@@ -80,29 +81,34 @@ class FutuSyncReceiptService:
         success = bool(sync_result.get("success"))
         summary = sync_result.get("summary") or {}
         cash_mmf = sync_result.get("cash_mmf") or {}
-        lines = [
-            "【Futu 持仓同步回执】",
-            f"账户：{sync_result.get('account') or '-'}",
-            f"结果：{'成功' if success else '失败'}",
-        ]
+        fields: list[tuple[str, Any]] = []
         if summary:
-            lines.append(
-                "股票/ETF："
+            fields.append((
+                "股票/ETF",
                 f"新增 {summary.get('created', 0)}，"
                 f"更新 {summary.get('updated', 0)}，"
                 f"清零 {summary.get('zeroed', 0)}，"
                 f"数量变化 {summary.get('quantity_changed', 0)}，"
-                f"成本变化 {summary.get('cost_changed', 0)}"
-            )
+                f"成本变化 {summary.get('cost_changed', 0)}",
+            ))
         if cash_mmf:
-            lines.append(
-                f"现金/MMF：新增 {cash_mmf.get('created', 0)}，更新 {cash_mmf.get('updated', 0)}"
-            )
+            fields.append((
+                "现金/MMF",
+                f"新增 {cash_mmf.get('created', 0)}，更新 {cash_mmf.get('updated', 0)}",
+            ))
+        if not success:
+            fields.append(("错误", sync_result.get("error") or "unknown error"))
+        if sync_result.get("partial_write_possible"):
+            fields.append((
+                "警告",
+                f"{sync_result.get('write_stage') or 'unknown'} 阶段可能已部分写入，请先 dry-run 复核",
+            ))
 
         changed = [
             item for item in (sync_result.get("positions") or [])
             if item.get("action") != "unchanged"
         ]
+        change_rows: list[str] = []
         for item in changed[:8]:
             details = []
             if item.get("quantity_changed"):
@@ -113,14 +119,17 @@ class FutuSyncReceiptService:
                 details.append(
                     f"成本 {_format_cost(item.get('current_avg_cost'))}→{_format_cost(item.get('target_avg_cost'))}"
                 )
-            lines.append(f"- {item.get('asset_id')}: {', '.join(details) or item.get('action')}")
+            change_rows.append(f"{item.get('asset_id')}: {', '.join(details) or item.get('action')}")
         if len(changed) > 8:
-            lines.append(f"- 另有 {len(changed) - 8} 项变化")
-        if not success:
-            lines.append(f"错误：{sync_result.get('error') or 'unknown error'}")
-        if sync_result.get("partial_write_possible"):
-            lines.append(f"警告：{sync_result.get('write_stage') or 'unknown'} 阶段可能已部分写入，请先 dry-run 复核")
-        return "\n".join(lines)
+            change_rows.append(f"另有 {len(changed) - 8} 项变化")
+
+        return render_receipt(
+            title=sync_result.get("account") or "-",
+            receipt_type="持仓同步",
+            status="✅ 成功" if success else "❌ 失败",
+            fields=fields,
+            sections=[("持仓变化", change_rows)],
+        )
 
 
 def _format_number(value: Any) -> str:
