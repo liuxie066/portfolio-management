@@ -13,6 +13,12 @@
 - If cache expired: try realtime.
   - If realtime succeeds: update cache.
   - If realtime fails: may fallback to stale cache, but MUST set `is_stale=true`.
+- Stale acceptance has two contracts (`PriceCachePolicy.get`):
+  - explicit window: caller passes `max_stale_after_expiry_sec > 0`, accepted within the window;
+  - semantic (default when caller only sets `accept_stale_when_closed=True`): accepted only when
+    the quote's market has NOT traded since expiry (`MarketTimeUtil.has_market_session_between`).
+    A closed market cannot move the price, so the expired quote is still correct; if the market
+    has traded since, the stale quote is rejected (fail closed). fund/unknown markets always reject.
 
 Runtime ownership is now split as:
 

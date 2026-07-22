@@ -116,7 +116,8 @@ class PriceFetcher:
 
         约定：
         - 未过期缓存：直接返回（不触发 realtime 请求）
-        - 过期缓存：默认不返回；若 accept_stale_when_closed=True，则在 max_stale_after_expiry_sec 窗口内可作为 fallback
+        - 过期缓存：默认不返回；accept_stale_when_closed=True 时，显式窗口（max_stale_after_expiry_sec>0）
+          内可作为 fallback；窗口=0 时走语义判定——仅当该市场自缓存过期后未开市交易过才接受（fail closed）
         - use_cache_only=True：仅使用缓存（包括允许窗口内的过期缓存），不触发 realtime
 
         Args:
@@ -126,7 +127,7 @@ class PriceFetcher:
             asset_type_map: 可选 {code -> AssetType}，用于更准确的 market_type/TTL 计算
             market_closed_ttl_multiplier: TTL 乘数（如非交易时段延长）
             accept_stale_when_closed: 是否允许在缓存过期后仍读取（通常用于市场关闭时的“稳定优先”）
-            max_stale_after_expiry_sec: 允许过期后最多多少秒仍可返回
+            max_stale_after_expiry_sec: 允许过期后最多多少秒仍可返回（>0 时按显式窗口契约；=0 时按市场是否开市过的语义判定）
             use_cache_only: 仅使用缓存，不请求实时价格（用于超时 fallback）
         """
         return self.price_service.fetch(

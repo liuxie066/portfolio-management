@@ -202,6 +202,46 @@ class MarketTimeUtil:
         return int((next_update - now).total_seconds())
 
     @classmethod
+    def has_market_session_between(cls, market_type, start: datetime, end: datetime) -> bool:
+        """判断 (start, end] 窗口内该市场是否有过开市交易。
+
+        用于过期缓存兜底判定：休市中价格不会动，缓存过期只是 TTL 产物；
+        一旦开市过，旧价就可能失效。未知/fund 类型保守返回 True（视为已交易，
+        即拒绝 stale，fail-closed）。节假日不在日历契约内，误判方向为"以为
+        开市过→拒绝 stale"，同样是 fail-closed。
+        """
+        if start is None or end is None:
+            return True  # 无法锚定窗口：fail-closed（视为已交易）
+        key = market_type.value if isinstance(market_type, MarketType) else str(market_type or "")
+        probes = {
+            "cn": (cls.is_cn_market_open, cls.TZ_SHANGHAI, [(9, 30), (13, 0)]),
+            "hk": (cls.is_hk_market_open, cls.TZ_SHANGHAI, [(9, 30), (13, 0)]),
+            "us": (cls.is_us_market_open, cls.TZ_NEW_YORK, [(9, 30)]),
+        }
+        probe = probes.get(key)
+        if probe is None:
+            return True
+        is_open, tz, open_times = probe
+
+        start_aware = cls._as_aware(start, cls.TZ_SHANGHAI)
+        end_aware = cls._as_aware(end, cls.TZ_SHANGHAI)
+        if end_aware <= start_aware:
+            return False
+        if is_open(start_aware):
+            return True
+
+        day = start_aware.astimezone(tz).date()
+        for _ in range(45):
+            for hour, minute in open_times:
+                probe_dt = datetime(day.year, day.month, day.day, hour, minute, tzinfo=tz)
+                if probe_dt > end_aware:
+                    return False
+                if probe_dt > start_aware and is_open(probe_dt):
+                    return True
+            day += timedelta(days=1)
+        return True  # 扫描上限耗尽：fail-closed
+
+    @classmethod
     def get_cache_ttl(cls, market_type) -> int:
         """根据市场类型和当前时间获取缓存有效期(秒)
 

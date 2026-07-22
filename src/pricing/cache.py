@@ -39,10 +39,21 @@ def _parse_expires_at(value: Any) -> Optional[datetime]:
     if not value:
         return None
     if isinstance(value, datetime):
-        return value
-    if isinstance(value, str):
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    return None
+        parsed = value
+    elif isinstance(value, str):
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    else:
+        return None
+    # Normalize to naive Beijing wall time: local_cache stores naive strings and
+    # callers compare against bj_now_naive(); mixing aware/naive raises TypeError.
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(MarketTimeUtil.TZ_SHANGHAI).replace(tzinfo=None)
+    return parsed
+
+
+# Scan window used only to *retrieve* an expired entry for the semantic stale
+# check; acceptance itself is decided by has_market_session_between.
+STALE_RETRIEVAL_WINDOW_SEC = 40 * 86400
 
 
 def price_cache_to_payload(cached: PriceCache, *, is_stale: bool | None = None) -> dict:
@@ -79,18 +90,31 @@ class PriceCachePolicy:
         accept_stale: bool = False,
         max_stale_after_expiry_sec: int = 0,
     ) -> Optional[PriceQuote]:
+        """Return a cached quote, optionally accepting an expired one.
+
+        Two stale-acceptance contracts:
+        - explicit window (max_stale_after_expiry_sec > 0): accept within the
+          window after expiry (legacy callers/tests);
+        - semantic (accept_stale=True, window=0): accept only when the quote's
+          market has NOT traded since expiry — a closed market cannot move the
+          price, so the stale quote is still the correct one. If the market
+          has traded since, reject (fail closed).
+        """
         if not self.enabled:
             return None
 
+        semantic_stale = accept_stale and max_stale_after_expiry_sec <= 0
+        storage_window = STALE_RETRIEVAL_WINDOW_SEC if semantic_stale else max_stale_after_expiry_sec
         cached = self.storage.get_price(
             code,
             allow_expired=accept_stale,
-            max_stale_after_expiry_sec=max_stale_after_expiry_sec,
+            max_stale_after_expiry_sec=storage_window,
         )
         if not cached:
             return None
 
         is_expired = False
+        expire_dt = None
         if getattr(cached, "expires_at", None):
             try:
                 expire_dt = _parse_expires_at(cached.expires_at)
@@ -103,10 +127,23 @@ class PriceCachePolicy:
         if is_expired:
             if not accept_stale:
                 return None
+            if semantic_stale and self._market_has_traded_since(code, expire_dt):
+                return None
             payload["source"] = "cache_fallback"
             return PriceQuote.from_payload(payload, code=code, cache_status="stale_fallback", stale=True)
 
         return PriceQuote.from_payload(payload, code=code, cache_status="hit")
+
+    @staticmethod
+    def _market_has_traded_since(code: str, expire_dt: Optional[datetime]) -> bool:
+        """Whether the quote's market traded after expire_dt (fail closed on doubt)."""
+        if expire_dt is None:
+            return True
+        try:
+            market_type = detect_market_type(code)
+            return MarketTimeUtil.has_market_session_between(market_type, expire_dt, bj_now_naive())
+        except Exception:
+            return True
 
     def save(
         self,
