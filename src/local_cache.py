@@ -270,23 +270,6 @@ class LocalPriceCache:
 
             return results
 
-    def clear_expired(self):
-        """清理所有过期缓存 - 线程安全"""
-        with self._lock:
-            now = bj_now_naive().strftime(DATETIME_FORMAT)
-            expired_ids = [
-                asset_id for asset_id, data in self._cache.items()
-                if data.get('expires_at') and data['expires_at'] < now
-            ]
-            for asset_id in expired_ids:
-                self._cache.pop(asset_id, None)
-            if expired_ids:
-                self._dirty_count += len(expired_ids)
-                self._dirty_flag = True
-                self._save_unlocked()
-                print(f"[本地缓存] 清理 {len(expired_ids)} 条过期价格缓存")
-
-
 # 默认持仓索引缓存文件路径
 HOLDINGS_INDEX_FILE = _cache_file('holdings_index.json')
 
@@ -429,9 +412,7 @@ class LocalNavIndexCache:
     - month_end_base / year_end_base / inception_base
     - last_record
 
-    说明：
-    - append_nav_record 仅适合“新增日期”场景；
-    - upsert_nav_record(s) 支持按 date 替换或新增（用于批量回填/修复）。
+    upsert_nav_records 支持按 date 替换或新增（用于批量回填/修复）。
     """
 
     VERSION = 1
@@ -538,19 +519,6 @@ class LocalNavIndexCache:
             else:
                 self._schedule_flush()
 
-    def update_account(self, account: str, patch: Dict[str, Any], *, _flush: bool = False):
-        with self._lock:
-            base = self._cache.get(account) if isinstance(self._cache.get(account), dict) else {}
-            base = dict(base)
-            base.update(json.loads(json.dumps(patch)))
-            self._cache[account] = base
-            self._dirty_count += 1
-            self._dirty_flag = True
-            if _flush or self._dirty_count >= FLUSH_MAX_DIRTY_COUNT:
-                self._save_unlocked()
-            else:
-                self._schedule_flush()
-
     @classmethod
     def _rebuild_nav_account_payload(cls, base: Dict[str, Any], navs: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Rebuild derived account payload from nav_history rows."""
@@ -591,32 +559,6 @@ class LocalNavIndexCache:
             self._save_unlocked()
         else:
             self._schedule_flush()
-
-    def append_nav_record(self, account: str, record: Dict[str, Any], *, _flush: bool = False):
-        with self._lock:
-            base = self._cache.get(account) if isinstance(self._cache.get(account), dict) else {}
-            navs = list(base.get('nav_history') or [])
-            navs.append(dict(record))
-            self._save_account_navs_unlocked(account, navs, _flush=_flush)
-
-    def upsert_nav_record(self, account: str, record: Dict[str, Any], *, _flush: bool = False):
-        """按 date upsert 单条 nav 记录（存在则替换，不存在则新增）。"""
-        with self._lock:
-            base = self._cache.get(account) if isinstance(self._cache.get(account), dict) else {}
-            navs = list(base.get('nav_history') or [])
-            ds = str((record or {}).get('date') or '')
-            if not ds:
-                return
-
-            replaced = False
-            for i, r in enumerate(navs):
-                if str((r or {}).get('date') or '') == ds:
-                    navs[i] = dict(record)
-                    replaced = True
-                    break
-            if not replaced:
-                navs.append(dict(record))
-            self._save_account_navs_unlocked(account, navs, _flush=_flush)
 
     def upsert_nav_records(self, account: str, records: List[Dict[str, Any]], *, _flush: bool = False):
         """按 date 批量 upsert nav 记录（用于批量回填后增量刷新索引）。"""

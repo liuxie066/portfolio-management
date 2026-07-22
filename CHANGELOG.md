@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.21 - 2026-07-23
+
+- Removed twelve unused internal report, cash, NAV-performance, configuration, and local-cache methods.
+- Kept the cleanup deletion-first by using the existing direct calculation and batch cache paths instead of retaining redundant wrappers.
+- Preserved compatibility and test-only APIs, with the full 711-test suite still passing.
+
 ## 0.1.20 - 2026-07-22
 
 - Aligned the NAV History and Futu sync Feishu receipts with the options-monitor flat-markdown shell: `# PM · 回执 · ...` header, `标签｜值` fields, emoji status, and `##` sections with empty sections omitted.

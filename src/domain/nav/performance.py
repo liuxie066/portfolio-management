@@ -148,6 +148,3 @@ class NavPerformanceCalculator:
 
     def since_inception_return(self, *, navs: Iterable[Any]) -> Dict[str, Any]:
         return calc_since_inception_return(navs=navs, start_year=self.start_year)
-
-    def risk_metrics(self, navs: Iterable[Any]) -> Tuple[float, float]:
-        return calc_risk_metrics(navs)

@@ -130,20 +130,3 @@ class ReportQueryService:
     def _latest_nav_on(navs: list, target_date: date):
         matches = [nav for nav in navs if nav.date == target_date]
         return matches[-1] if matches else None
-
-    @staticmethod
-    def calc_risk_metrics(navs: list) -> tuple:
-        return calc_risk_metrics(navs)
-
-    def _calc_month_return(self, month: str, *, navs: list) -> Dict[str, Any]:
-        return calc_month_return(month, navs=navs)
-
-    def _calc_year_return(self, year: str, *, navs: list) -> Dict[str, Any]:
-        return calc_year_return(year, navs=navs)
-
-    def _calc_since_inception_return(self, *, navs: list) -> Dict[str, Any]:
-        return calc_since_inception_return(navs=navs, start_year=config.get_start_year())
-
-    @staticmethod
-    def merge_daily_top_holdings(holdings: list, total_value: float, top_n: int = 10) -> list:
-        return merge_top_holdings(holdings=holdings, total_value=total_value, top_n=top_n)

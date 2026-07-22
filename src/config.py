@@ -384,11 +384,6 @@ def get_start_year() -> int:
     return get_int("start_year", 2024) or 2024
 
 
-def get_project_root() -> Path:
-    """获取项目根目录"""
-    return _PROJECT_ROOT
-
-
 def get_data_dir() -> Path:
     """获取数据目录（.data/）"""
     configured = get("data.dir")

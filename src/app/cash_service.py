@@ -227,18 +227,6 @@ class CashService:
             remaining -= deduction
         return targets
 
-    def has_sufficient_cash(self, account: str, amount: float) -> bool:
-        if amount <= 0:
-            return True
-
-        cash_holding, mmf_holding = self.get_cash_like_holdings(account)
-        total_cash = Decimal("0")
-        if cash_holding and cash_holding.quantity > 0:
-            total_cash += self.to_decimal(cash_holding.quantity)
-        if mmf_holding and mmf_holding.quantity > 0:
-            total_cash += self.to_decimal(mmf_holding.quantity)
-        return total_cash >= self.to_decimal(amount)
-
     def deduct_cash(self, account: str, amount: float) -> bool:
         if amount <= 0:
             return True
