@@ -178,7 +178,7 @@ def test_us_batch_provider_falls_back_to_stale_cache():
 
 def test_sina_us_single_and_batch_share_normalized_payload():
     fetcher = PriceFetcher()
-    fetcher._fetch_exchange_rates = lambda: {"USDCNY": 7.1}
+    fetcher._fetch_exchange_rates = lambda **kw: {"USDCNY": 7.1}
     fetcher.session.get = lambda *args, **kwargs: FakeSinaResponse(_sina_us_line("aapl"))
 
     single = USStockProvider(fetcher).fetch_sina("AAPL")
@@ -215,7 +215,7 @@ def test_sina_us_empty_quote_does_not_fetch_exchange_rate():
 
 def test_us_batch_merges_finnhub_failures_into_one_sina_request(monkeypatch):
     fetcher = PriceFetcher()
-    fetcher._fetch_exchange_rates = lambda: {"USDCNY": 7.1}
+    fetcher._fetch_exchange_rates = lambda **kw: {"USDCNY": 7.1}
     requests = []
 
     def fake_get(url, **kwargs):
@@ -238,7 +238,7 @@ def test_us_batch_merges_finnhub_failures_into_one_sina_request(monkeypatch):
 
 def test_us_batch_break_path_merges_skipped_codes_into_sina_request(monkeypatch):
     fetcher = PriceFetcher()
-    fetcher._fetch_exchange_rates = lambda: {"USDCNY": 7.1}
+    fetcher._fetch_exchange_rates = lambda **kw: {"USDCNY": 7.1}
     codes = ["FUTU", "BABA", "GOOGL", "PDD", "TCOM"]
     requests = []
 
@@ -264,7 +264,7 @@ def test_us_batch_deadline_exhausted_still_reaches_fallbacks(monkeypatch):
     import time as _time
 
     fetcher = PriceFetcher()
-    fetcher._fetch_exchange_rates = lambda: {"USDCNY": 7.1}
+    fetcher._fetch_exchange_rates = lambda **kw: {"USDCNY": 7.1}
 
     # deadline already past: must not raise; codes fall back to expired cache
     monkeypatch.setattr("src.pricing.providers.us_batch._config.get", lambda key, default=None: "key")
@@ -307,9 +307,77 @@ def test_us_batch_deadline_exhausted_still_reaches_fallbacks(monkeypatch):
     assert result["BABA"]["source"] == "sina_us"
 
 
+def test_us_batch_reserves_deadline_for_sina(monkeypatch):
+    import time as _time
+
+    fetcher = PriceFetcher()
+    fetcher._fetch_exchange_rates = lambda **kw: {"USDCNY": 7.1}
+    fetcher.session.get = lambda url, **kwargs: FakeSinaResponse(
+        "\n".join([_sina_us_line("futu"), _sina_us_line("baba")])
+    )
+    monkeypatch.setattr("src.pricing.providers.us_batch._config.get", lambda key, default=None: "key")
+
+    finnhub_deadlines = []
+    monkeypatch.setattr(
+        USStockProvider,
+        "fetch_finnhub",
+        lambda self, code, key, **kw: (
+            finnhub_deadlines.append(kw.get("deadline")),
+            (_ for _ in ()).throw(RuntimeError("timeout")),
+        )[1],
+    )
+
+    deadline = _time.monotonic() + 25
+    result = fetch_us_batch(fetcher, ["FUTU", "BABA"], name_map={}, expired_cache={}, _nested=True, deadline=deadline)
+
+    # Finnhub attempts run against a sub-deadline that reserves SINA_DEADLINE_RESERVE_SEC
+    assert finnhub_deadlines
+    for d in finnhub_deadlines:
+        assert abs(d - (deadline - 6.0)) < 0.001
+    assert result["FUTU"]["source"] == "sina_us"
+    assert result["BABA"]["source"] == "sina_us"
+
+
+def test_us_batch_skips_finnhub_when_its_budget_already_spent(monkeypatch):
+    import time as _time
+
+    fetcher = PriceFetcher()
+    fetcher._fetch_exchange_rates = lambda **kw: {"USDCNY": 7.1}
+    requests = []
+
+    def fake_get(url, **kwargs):
+        requests.append(url)
+        return FakeSinaResponse("\n".join([_sina_us_line("futu"), _sina_us_line("baba")]))
+
+    fetcher.session.get = fake_get
+    monkeypatch.setattr("src.pricing.providers.us_batch._config.get", lambda key, default=None: "key")
+
+    calls = {"n": 0}
+
+    def counting_finnhub(self, code, key, **kw):
+        calls["n"] += 1
+        raise RuntimeError("should not be called")
+
+    monkeypatch.setattr(USStockProvider, "fetch_finnhub", counting_finnhub)
+
+    # Only 3s left overall: the 6s reserve leaves no Finnhub budget at all
+    result = fetch_us_batch(
+        fetcher,
+        ["FUTU", "BABA"],
+        name_map={},
+        expired_cache={},
+        _nested=True,
+        deadline=_time.monotonic() + 3,
+    )
+    assert calls["n"] == 0
+    assert len(requests) == 1
+    assert result["FUTU"]["source"] == "sina_us"
+    assert result["BABA"]["source"] == "sina_us"
+
+
 def test_sina_us_dotted_symbol_maps_to_dollar_query_code():
     fetcher = PriceFetcher()
-    fetcher._fetch_exchange_rates = lambda: {"USDCNY": 7.1}
+    fetcher._fetch_exchange_rates = lambda **kw: {"USDCNY": 7.1}
     requests = []
 
     def fake_get(url, **kwargs):

@@ -9,6 +9,10 @@ from ..payload import remaining_timeout
 from .sina_us import fetch_sina_us_quotes
 from .us import USStockProvider
 
+# Seconds reserved for the Sina batch fallback so slow/hung Finnhub attempts
+# cannot consume the whole caller deadline before the fallback runs.
+SINA_DEADLINE_RESERVE_SEC = 6.0
+
 
 def fetch_us_batch(
     fetcher,
@@ -36,21 +40,22 @@ def fetch_us_batch(
     skipped: List[str] = []
     if not finnhub_key:
         leftover.extend(codes)
+    finnhub_deadline = deadline - SINA_DEADLINE_RESERVE_SEC if deadline is not None else None
     for index, code in enumerate(codes if finnhub_key else ()):
         try:
-            remaining_timeout(deadline, 10)
+            remaining_timeout(finnhub_deadline, 10)
         except TimeoutError:
-            # Deadline exhausted mid-loop: stop Finnhub attempts but still let
-            # the Sina batch below try whatever time is left for all leftovers.
+            # Finnhub budget exhausted: stop Finnhub attempts and let the Sina
+            # batch below use the reserved time for all leftover codes.
             skipped = codes[index:]
             leftover.extend(skipped)
-            print(f"[美股价格] 取价时限耗尽，剩余 {len(skipped)} 只并入新浪批量查询")
+            print(f"[美股价格] Finnhub 时限预算耗尽，剩余 {len(skipped)} 只并入新浪批量查询")
             break
         quote_code = code.replace(".", "-")
         result = None
         finnhub_error = None
         try:
-            result = us_provider.fetch_finnhub(quote_code, finnhub_key, deadline=deadline)
+            result = us_provider.fetch_finnhub(quote_code, finnhub_key, deadline=finnhub_deadline)
         except Exception as exc:
             finnhub_error = exc
             result = None
