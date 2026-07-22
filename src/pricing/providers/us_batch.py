@@ -37,7 +37,15 @@ def fetch_us_batch(
     if not finnhub_key:
         leftover.extend(codes)
     for index, code in enumerate(codes if finnhub_key else ()):
-        remaining_timeout(deadline, 10)
+        try:
+            remaining_timeout(deadline, 10)
+        except TimeoutError:
+            # Deadline exhausted mid-loop: stop Finnhub attempts but still let
+            # the Sina batch below try whatever time is left for all leftovers.
+            skipped = codes[index:]
+            leftover.extend(skipped)
+            print(f"[美股价格] 取价时限耗尽，剩余 {len(skipped)} 只并入新浪批量查询")
+            break
         quote_code = code.replace(".", "-")
         result = None
         finnhub_error = None

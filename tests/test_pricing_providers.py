@@ -260,6 +260,53 @@ def test_us_batch_break_path_merges_skipped_codes_into_sina_request(monkeypatch)
         assert result[code]["source"] == "sina_us"
 
 
+def test_us_batch_deadline_exhausted_still_reaches_fallbacks(monkeypatch):
+    import time as _time
+
+    fetcher = PriceFetcher()
+    fetcher._fetch_exchange_rates = lambda: {"USDCNY": 7.1}
+
+    # deadline already past: must not raise; codes fall back to expired cache
+    monkeypatch.setattr("src.pricing.providers.us_batch._config.get", lambda key, default=None: "key")
+    monkeypatch.setattr(
+        USStockProvider, "fetch_finnhub", lambda self, code, key, **kw: (_ for _ in ()).throw(RuntimeError("timeout"))
+    )
+    result = fetch_us_batch(
+        fetcher,
+        ["FUTU", "BABA"],
+        name_map={},
+        expired_cache={"BABA": {"code": "BABA", "source": "old", "is_from_cache": True}},
+        _nested=True,
+        deadline=_time.monotonic() - 1,
+    )
+    assert result["BABA"]["source"] == "cache_fallback"
+
+    # TimeoutError at the loop top must not skip the Sina merge for leftovers
+    requests = []
+
+    def fake_get(url, **kwargs):
+        requests.append(url)
+        return FakeSinaResponse("\n".join([_sina_us_line("futu"), _sina_us_line("baba")]))
+
+    fetcher.session.get = fake_get
+    real_remaining = getattr(__import__("src.pricing.providers.us_batch", fromlist=["remaining_timeout"]), "remaining_timeout")
+    state = {"tripped": False}
+
+    def trip_once(deadline, default):
+        if not state["tripped"]:
+            state["tripped"] = True
+            raise TimeoutError("pricing deadline exceeded")
+        return real_remaining(deadline, default)
+
+    monkeypatch.setattr("src.pricing.providers.us_batch.remaining_timeout", trip_once)
+
+    result = fetch_us_batch(fetcher, ["FUTU", "BABA"], name_map={}, expired_cache={}, _nested=True)
+    assert len(requests) == 1
+    assert "gb_futu,gb_baba" in requests[0]
+    assert result["FUTU"]["source"] == "sina_us"
+    assert result["BABA"]["source"] == "sina_us"
+
+
 def test_sina_us_dotted_symbol_maps_to_dollar_query_code():
     fetcher = PriceFetcher()
     fetcher._fetch_exchange_rates = lambda: {"USDCNY": 7.1}
