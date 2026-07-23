@@ -38,6 +38,7 @@ class DailyAccountNavService:
         sync_futu_dry_run: Optional[bool] = None,
         run_id: Optional[str] = None,
         nav_write_context: Optional[NavWriteContext] = None,
+        run_quote_pool: Any = None,
     ) -> Dict[str, Any]:
         resolved_date = _coerce_date(nav_date) if nav_date is not None else bj_today()
         resolved_context = nav_write_context or NavWriteContext(
@@ -63,6 +64,7 @@ class DailyAccountNavService:
             sync_futu_dry_run=sync_futu_dry_run,
             run_id=run_id,
             nav_write_context=resolved_context,
+            run_quote_pool=run_quote_pool,
         )
         if not record_result.get("success"):
             nav_result = record_result.get("nav_result")

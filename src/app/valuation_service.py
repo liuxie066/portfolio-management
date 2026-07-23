@@ -30,6 +30,7 @@ class ValuationService:
         price_timeout_seconds: int = 25,
         allow_stale_price_fallback: bool = True,
         price_market_closed_ttl_multiplier: float = 1.0,
+        run_quote_pool: Any = None,
     ) -> PortfolioValuation:
         holdings = self.storage.get_holdings(account=account)
         if not holdings:
@@ -64,16 +65,24 @@ class ValuationService:
 
             deadline = time.monotonic() + max(0.0, float(price_timeout_seconds))
             try:
-                prices = self.price_fetcher.fetch_batch(
-                    [h.asset_id for h in holdings],
-                    name_map=name_map,
-                    asset_type_map=asset_type_map,
-                    market_closed_ttl_multiplier=market_closed_ttl_multiplier,
-                    accept_stale_when_closed=accept_stale_when_closed,
-                    use_concurrent=True,
-                    skip_us=False,
-                    deadline=deadline,
-                )
+                fetch_kwargs = {
+                    "name_map": name_map,
+                    "asset_type_map": asset_type_map,
+                    "market_closed_ttl_multiplier": market_closed_ttl_multiplier,
+                    "accept_stale_when_closed": accept_stale_when_closed,
+                    "use_concurrent": True,
+                    "skip_us": False,
+                    "deadline": deadline,
+                }
+                codes = [h.asset_id for h in holdings]
+                if run_quote_pool is None:
+                    prices = self.price_fetcher.fetch_batch(codes, **fetch_kwargs)
+                else:
+                    prices = run_quote_pool.fetch_batch(
+                        codes,
+                        fetch_batch=self.price_fetcher.fetch_batch,
+                        **fetch_kwargs,
+                    )
             except TimeoutError:
                 price_errors.append(f"价格获取超时（{price_timeout_seconds}秒）")
             except Exception as exc:
@@ -98,7 +107,13 @@ class ValuationService:
         cn_asset_value = Decimal("0")
         us_asset_value = Decimal("0")
         hk_asset_value = Decimal("0")
-        price_meta = {"from_cache": 0, "from_realtime": 0, "stale_fallback": 0, "missing": 0}
+        price_meta = {
+            "from_cache": 0,
+            "from_realtime": 0,
+            "stale_fallback": 0,
+            "missing": 0,
+            "run_reused": 0,
+        }
 
         for holding in holdings:
             holding_code = str(holding.asset_id).strip()
@@ -146,6 +161,8 @@ class ValuationService:
                     price.get("source") == "cache_fallback" or price.get("is_stale")
                 ):
                     price_meta["stale_fallback"] += 1
+                if isinstance(price, dict) and price.get("is_from_run_pool"):
+                    price_meta["run_reused"] += 1
 
                 holding.current_price = float(price_dec)
                 holding.cny_price = float(cny_price_dec)
@@ -207,7 +224,8 @@ class ValuationService:
             )
         warnings.append(
             f"[价格汇总] realtime={price_meta['from_realtime']}, cache={price_meta['from_cache']}, "
-            f"stale_fallback={price_meta['stale_fallback']}, missing={price_meta['missing']}" + extra
+            f"stale_fallback={price_meta['stale_fallback']}, missing={price_meta['missing']}, "
+            f"run_reused={price_meta['run_reused']}" + extra
         )
 
         return PortfolioValuation(

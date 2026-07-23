@@ -75,6 +75,7 @@ class AccountNavRecorderService:
         sync_futu_dry_run: Optional[bool] = None,
         run_id: Optional[str] = None,
         nav_write_context: Optional[NavWriteContext] = None,
+        run_quote_pool: Any = None,
     ) -> Dict[str, Any]:
         from src.app import FutuBalanceSyncService
         from src.run_id import new_run_id
@@ -110,7 +111,10 @@ class AccountNavRecorderService:
 
             if snapshot is None:
                 t_snapshot = _now_ms()
-                snapshot = self.read_service.build_snapshot(price_timeout_seconds=price_timeout)
+                snapshot_kwargs = {"price_timeout_seconds": price_timeout}
+                if run_quote_pool is not None:
+                    snapshot_kwargs["run_quote_pool"] = run_quote_pool
+                snapshot = self.read_service.build_snapshot(**snapshot_kwargs)
                 snapshot_ms = _now_ms() - t_snapshot
             else:
                 snapshot_ms = 0

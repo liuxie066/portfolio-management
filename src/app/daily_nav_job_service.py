@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, Optional
 from src.app.account_service import AccountService, normalize_accounts
 from src.app.business_calendar_service import BusinessCalendarService
 from src.app.nav_finality import NavWriteContext, evaluate_nav_finality
+from src.app.run_quote_pool import RunQuotePool
 
 
 def _coerce_date(value: Any) -> date:
@@ -276,6 +277,7 @@ class DailyNavJobService:
             }
 
         items: list[Dict[str, Any]] = []
+        run_quote_pool = RunQuotePool()
         resolved_sync_futu_dry_run = (
             True
             if dry_run
@@ -325,6 +327,7 @@ class DailyNavJobService:
                 sync_futu_dry_run=resolved_sync_futu_dry_run,
                 run_id=item_run_id,
                 nav_write_context=write_context,
+                run_quote_pool=run_quote_pool,
             )
             result.setdefault("account", target_account)
             result.setdefault("date", resolved_nav_date.isoformat())
@@ -364,4 +367,5 @@ class DailyNavJobService:
             "accounts": target_accounts,
             "items": items,
             "summary": summary,
+            "pricing_summary": run_quote_pool.summary(),
         }

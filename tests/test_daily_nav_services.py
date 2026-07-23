@@ -9,6 +9,7 @@ from src.app.daily_account_nav_service import DailyAccountNavService
 from src.app.daily_nav_job_service import DailyNavJobService
 from src.app.daily_report_payload_service import DailyReportPayloadService
 from src.app.nav_initialization_service import NavInitializationService
+from src.models import AssetType
 
 
 def _finality(
@@ -78,6 +79,7 @@ def test_business_calendar_weekend_timer_run_records_friday():
 
 def test_daily_account_nav_service_reuses_one_snapshot_and_respects_nav_date():
     calls = []
+    run_pool = object()
     valuation = SimpleNamespace(warnings=[])
     snapshot = {"valuation": valuation, "snapshot_time": "2026-05-22T18:00:00"}
     nav_record = _nav_record()
@@ -116,12 +118,16 @@ def test_daily_account_nav_service_reuses_one_snapshot_and_respects_nav_date():
         overwrite_existing=False,
         use_bulk_persist=True,
         run_id="run-daily-1",
+        run_quote_pool=run_pool,
     )
 
     assert result["success"] is True
     assert result["date"] == "2026-05-22"
     assert result["nav_result"]["nav"] == 1.2345
-    assert calls[0] == ("build_snapshot", {"price_timeout_seconds": 7})
+    assert calls[0] == (
+        "build_snapshot",
+        {"price_timeout_seconds": 7, "run_quote_pool": run_pool},
+    )
     record_call = next(call for call in calls if call[0] == "record_nav")
     assert record_call[1] == ("alice",)
     assert record_call[2]["valuation"] is valuation
@@ -195,6 +201,48 @@ def test_account_nav_recorder_records_nav_without_report_reads():
     assert context.valuation_as_of == "2026-05-22T18:00:00"
     assert context.run_id == "run-recorder-1"
     assert result["stage_timings"].keys() == {"snapshot_ms", "record_nav_ms"}
+
+
+def test_account_nav_recorder_syncs_futu_before_snapshot_and_passes_run_pool(monkeypatch):
+    calls = []
+    run_pool = object()
+    snapshot = {"valuation": SimpleNamespace(warnings=[]), "snapshot_time": "2026-05-22T18:00:00"}
+
+    class FakeSyncService:
+        def __init__(self, _storage):
+            pass
+
+        def sync_cash_and_mmf(self, **kwargs):
+            calls.append(("futu_sync", kwargs))
+            return {"success": True}
+
+    class FakeReadService:
+        def build_snapshot(self, **kwargs):
+            calls.append(("build_snapshot", kwargs))
+            return snapshot
+
+    class FakePortfolio:
+        def record_nav(self, *_args, **_kwargs):
+            return _nav_record()
+
+    monkeypatch.setattr("src.app.FutuBalanceSyncService", FakeSyncService)
+    result = AccountNavRecorderService(
+        account="lx",
+        storage=SimpleNamespace(),
+        portfolio=FakePortfolio(),
+        read_service=FakeReadService(),
+    ).record(
+        nav_date="2026-05-22",
+        dry_run=True,
+        sync_futu_cash_mmf=True,
+        run_quote_pool=run_pool,
+    )
+
+    assert result["success"] is True
+    assert calls == [
+        ("futu_sync", {"account": "lx", "dry_run": True}),
+        ("build_snapshot", {"price_timeout_seconds": 30, "run_quote_pool": run_pool}),
+    ]
 
 
 def test_nav_initialization_service_initializes_empty_account():
@@ -851,6 +899,120 @@ def test_daily_nav_job_runs_each_account_through_account_runner():
     assert calls[0][1]["dry_run"] is False
     assert calls[0][1]["overwrite_existing"] is True
     assert calls[0][1]["run_id"] == "run-job-1:alice"
+    assert calls[0][1]["run_quote_pool"] is calls[1][1]["run_quote_pool"]
+    assert result["pricing_summary"] == {
+        "unique_requested": 0,
+        "fetch_attempted": 0,
+        "fetcher_resolved": 0,
+        "run_reused": 0,
+        "retried": 0,
+        "failed_unique": 0,
+    }
+
+
+def test_daily_nav_job_shares_quotes_incrementally_across_accounts():
+    fetch_calls = []
+
+    class FakeStorage:
+        def audit_nav_history_duplicates(self, account=None):
+            return {"success": True, "duplicate_group_count": 0}
+
+        def get_nav_on_date(self, account, nav_date):
+            return None
+
+        def reconcile_cash_flows(self, **_kwargs):
+            return {"success": True, "change_count": 0, "error_count": 0}
+
+    def fetch_batch(codes, **_kwargs):
+        fetch_calls.append(list(codes))
+        return {
+            code: {"price": 100, "currency": "USD", "cny_price": 700, "source": "test"}
+            for code in codes
+        }
+
+    class FakeRunner:
+        def __init__(self, account):
+            self.account = account
+
+        def run(self, **kwargs):
+            codes = ["FUTU", "PDD", "TCOM"] if self.account == "lx" else ["FUTU", "PDD", "TCOM", "SPY", "BABA"]
+            prices = kwargs["run_quote_pool"].fetch_batch(
+                codes,
+                fetch_batch=fetch_batch,
+                asset_type_map={code: AssetType.US_STOCK for code in codes},
+            )
+            assert set(prices) == set(codes)
+            return {"success": True, "account": self.account}
+
+    result = DailyNavJobService(
+        storage=FakeStorage(),
+        portfolio=SimpleNamespace(reporting_service=object()),
+        calendar=BusinessCalendarService(),
+        account_runner_factory=FakeRunner,
+    ).run(
+        nav_date="2026-05-22",
+        accounts=["lx", "sy"],
+        dry_run=False,
+        confirm=True,
+    )
+
+    assert result["success"] is True
+    assert fetch_calls == [["FUTU", "PDD", "TCOM"], ["SPY", "BABA"]]
+    assert result["pricing_summary"] == {
+        "unique_requested": 5,
+        "fetch_attempted": 5,
+        "fetcher_resolved": 5,
+        "run_reused": 3,
+        "retried": 0,
+        "failed_unique": 0,
+    }
+
+
+def test_daily_nav_job_keeps_unique_quote_failure_isolated_to_later_account():
+    class FakeStorage:
+        def audit_nav_history_duplicates(self, account=None):
+            return {"success": True, "duplicate_group_count": 0}
+
+        def get_nav_on_date(self, account, nav_date):
+            return None
+
+        def reconcile_cash_flows(self, **_kwargs):
+            return {"success": True, "change_count": 0, "error_count": 0}
+
+    def fetch_batch(codes, **_kwargs):
+        return {
+            code: {"price": 100, "currency": "USD", "cny_price": 700}
+            for code in codes
+            if code != "SPY"
+        }
+
+    class FakeRunner:
+        def __init__(self, account):
+            self.account = account
+
+        def run(self, **kwargs):
+            codes = ["FUTU"] if self.account == "lx" else ["FUTU", "SPY"]
+            prices = kwargs["run_quote_pool"].fetch_batch(
+                codes,
+                fetch_batch=fetch_batch,
+                asset_type_map={code: AssetType.US_STOCK for code in codes},
+            )
+            if "SPY" not in prices and self.account == "sy":
+                return {"success": False, "status": "failed", "account": self.account, "error": "SPY missing"}
+            return {"success": True, "account": self.account}
+
+    result = DailyNavJobService(
+        storage=FakeStorage(),
+        portfolio=SimpleNamespace(reporting_service=object()),
+        calendar=BusinessCalendarService(),
+        account_runner_factory=FakeRunner,
+    ).run(nav_date="2026-05-22", accounts=["lx", "sy"])
+
+    assert result["status"] == "partial"
+    assert result["items"][0]["success"] is True
+    assert result["items"][1]["error"] == "SPY missing"
+    assert result["pricing_summary"]["run_reused"] == 1
+    assert result["pricing_summary"]["failed_unique"] == 1
 
 
 def test_daily_nav_job_defaults_futu_sync_write_mode_to_job_mode():
