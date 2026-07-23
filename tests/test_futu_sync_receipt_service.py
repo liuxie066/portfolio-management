@@ -7,8 +7,8 @@ class FakeClient:
         self.calls = calls
         self.error = error
 
-    def send_text_message(self, *, open_id, text):
-        self.calls.append(("send", open_id, text))
+    def send_post_message(self, *, open_id, markdown):
+        self.calls.append(("send_post", open_id, markdown))
         if self.error:
             raise RuntimeError(self.error)
         return {"success": True, "message_id": "om_123"}
@@ -17,7 +17,7 @@ class FakeClient:
 def _write_result():
     return {
         "success": True,
-        "account": "lx",
+        "account": "sy",
         "dry_run": False,
         "cash_mmf": {"created": 0, "updated": 1},
         "summary": {
@@ -59,8 +59,8 @@ def test_futu_sync_receipt_sends_write_summary_from_liukanshan():
         "message_id": "om_123",
     }
     assert calls[0] == ("init", "cli_liukanshan", "secret")
-    assert calls[1][0:2] == ("send", "ou_user")
-    assert "# PM · 回执 · lx" in calls[1][2]
+    assert calls[1][0:2] == ("send_post", "ou_user")
+    assert "# PM · 回执 · sy" in calls[1][2]
     assert "类型｜持仓同步" in calls[1][2]
     assert "状态｜✅ 成功" in calls[1][2]
     assert "成本 127.52→116.68" in calls[1][2]

@@ -52,8 +52,8 @@ def test_nav_receipt_sends_one_consolidated_success_message():
         def __init__(self, **kwargs):
             calls.append(("init", kwargs))
 
-        def send_text_message(self, **kwargs):
-            calls.append(("send", kwargs))
+        def send_post_message(self, *, open_id, markdown):
+            calls.append(("send_post", open_id, markdown))
             return {"message_id": "om_nav"}
 
     service = NavHistoryReceiptService(
@@ -86,8 +86,8 @@ def test_nav_receipt_sends_one_consolidated_success_message():
         "message_id": "om_nav",
     }
     assert calls[0] == ("init", {"app_id": "cli_app", "app_secret": "secret"})
-    text = calls[1][1]["text"]
-    assert calls[1][1]["open_id"] == "ou_user"
+    assert calls[1][0:2] == ("send_post", "ou_user")
+    text = calls[1][2]
     assert "# PM · 回执 · NAV History" in text
     assert "类型｜NAV 记录" in text
     assert "状态｜✅ 成功" in text
@@ -320,7 +320,8 @@ def test_nav_receipt_missing_config_and_send_failure_are_reported():
         def __init__(self, **_kwargs):
             pass
 
-        def send_text_message(self, **_kwargs):
+        def send_post_message(self, *, open_id, markdown):
+            del open_id, markdown
             raise RuntimeError("send failed")
 
     failed = NavHistoryReceiptService(

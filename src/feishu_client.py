@@ -236,6 +236,70 @@ class FeishuClient:
             'receive_id_type': 'open_id',
         }
 
+    def send_post_message(self, *, open_id: str, markdown: str) -> Dict[str, Any]:
+        """Send a receipt shell as a Feishu post with a native title."""
+        open_id_value = str(open_id or '').strip()
+        markdown_value = str(markdown or '').strip()
+        if not open_id_value:
+            raise ValueError("open_id is required")
+        if not markdown_value:
+            raise ValueError("markdown is required")
+
+        lines = markdown_value.splitlines()
+        title_line = lines[0]
+        if not title_line.startswith("# "):
+            raise ValueError("markdown must start with '# <title>'")
+        title = title_line[2:].strip()
+        if not title:
+            raise ValueError("markdown title is required")
+
+        paragraphs: List[List[Dict[str, Any]]] = []
+        spacer_pending = False
+        for line in lines[1:]:
+            if not line.strip():
+                spacer_pending = bool(paragraphs)
+                continue
+            if spacer_pending:
+                paragraphs.append([{'tag': 'text', 'text': '\u00a0'}])
+                spacer_pending = False
+            if line.startswith("## "):
+                section_title = line[3:].strip()
+                if not section_title:
+                    raise ValueError("post section title is required")
+                paragraphs.append([{
+                    'tag': 'text',
+                    'text': section_title,
+                    'style': ['bold'],
+                }])
+            else:
+                paragraphs.append([{'tag': 'text', 'text': line}])
+        if not paragraphs:
+            raise ValueError("markdown body is required")
+
+        data = self._request(
+            'POST',
+            '/im/v1/messages',
+            params={'receive_id_type': 'open_id'},
+            json={
+                'receive_id': open_id_value,
+                'msg_type': 'post',
+                'content': json.dumps(
+                    {
+                        'zh_cn': {
+                            'title': title,
+                            'content': paragraphs,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        )
+        return {
+            'success': True,
+            'message_id': data.get('message_id'),
+            'receive_id_type': 'open_id',
+        }
+
     def list_records(self, table_name: str, filter_str: str = None,
                      field_names: List[str] = None, page_size: int = 500) -> List[Dict]:
         """

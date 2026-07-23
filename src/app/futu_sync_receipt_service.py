@@ -56,9 +56,9 @@ class FutuSyncReceiptService:
             sent = self.client_factory(
                 app_id=str(self.app_id),
                 app_secret=str(self.app_secret),
-            ).send_text_message(
+            ).send_post_message(
                 open_id=str(self.open_id),
-                text=self.build_message(sync_result),
+                markdown=self.build_message(sync_result),
             )
             return {
                 "success": True,
