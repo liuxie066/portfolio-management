@@ -88,9 +88,9 @@ class NavHistoryReceiptService:
             sent = self.client_factory(
                 app_id=str(self.app_id),
                 app_secret=str(self.app_secret),
-            ).send_text_message(
+            ).send_post_message(
                 open_id=str(self.open_id),
-                text=self.build_message(job_result, executed_at=self.now_factory()),
+                markdown=self.build_message(job_result, executed_at=self.now_factory()),
             )
             return {
                 "success": True,

@@ -666,3 +666,83 @@ def test_send_text_message_uses_open_id_endpoint_and_text_payload():
             "content": json.dumps({"text": "同步完成"}, ensure_ascii=False),
         },
     )
+
+
+def test_send_post_message_uses_native_title_and_rich_text_payload():
+    client = FeishuClient(app_id="cli_liukanshan", app_secret="secret")
+    client._request = Mock(return_value={"message_id": "om_post"})
+    markdown = """# PM · 回执 · sy
+
+类型｜持仓同步
+状态｜✅ 成功
+
+## 持仓变化
+US.AAPL: 数量 1→2
+"""
+    expected_post = {
+        "zh_cn": {
+            "title": "PM · 回执 · sy",
+            "content": [
+                [{"tag": "text", "text": "类型｜持仓同步"}],
+                [{"tag": "text", "text": "状态｜✅ 成功"}],
+                [{"tag": "text", "text": "\u00a0"}],
+                [{"tag": "text", "text": "持仓变化", "style": ["bold"]}],
+                [{"tag": "text", "text": "US.AAPL: 数量 1→2"}],
+            ],
+        },
+    }
+
+    result = client.send_post_message(open_id="  ou_user  ", markdown=markdown)
+
+    assert result == {
+        "success": True,
+        "message_id": "om_post",
+        "receive_id_type": "open_id",
+    }
+    client._request.assert_called_once_with(
+        "POST",
+        "/im/v1/messages",
+        params={"receive_id_type": "open_id"},
+        json={
+            "receive_id": "ou_user",
+            "msg_type": "post",
+            "content": json.dumps(expected_post, ensure_ascii=False),
+        },
+    )
+    request_body = client._request.call_args.kwargs["json"]
+    decoded_content = json.loads(request_body["content"])
+    body_texts = [
+        element["text"]
+        for paragraph in decoded_content["zh_cn"]["content"]
+        for element in paragraph
+    ]
+    assert decoded_content == expected_post
+    assert all(not text.startswith("#") for text in body_texts)
+
+
+@pytest.mark.parametrize(
+    ("open_id", "markdown", "error"),
+    [
+        ("", "# PM · 回执 · sy\n\n类型｜持仓同步", "open_id is required"),
+        ("ou_user", "", "markdown is required"),
+        (
+            "ou_user",
+            "PM · 回执 · sy\n\n类型｜持仓同步",
+            r"markdown must start with '# <title>'",
+        ),
+        ("ou_user", "# \n\n类型｜持仓同步", "markdown title is required"),
+        ("ou_user", "# PM · 回执 · sy", "markdown body is required"),
+    ],
+)
+def test_send_post_message_rejects_invalid_input_before_request(
+    open_id,
+    markdown,
+    error,
+):
+    client = FeishuClient(app_id="cli_liukanshan", app_secret="secret")
+    client._request = Mock()
+
+    with pytest.raises(ValueError, match=error):
+        client.send_post_message(open_id=open_id, markdown=markdown)
+
+    client._request.assert_not_called()
