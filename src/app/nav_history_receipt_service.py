@@ -28,6 +28,7 @@ _PRICE_SUMMARY_RE = re.compile(
     r"cache=(?P<cache>\d+),\s*"
     r"stale_fallback=(?P<stale>\d+),\s*"
     r"missing=(?P<missing>\d+)"
+    r"(?:,\s*run_reused=(?P<run_reused>\d+))?"
 )
 _STATUS_EMOJI = {
     "成功": "✅ 成功",
@@ -217,7 +218,7 @@ class NavHistoryReceiptService:
     @staticmethod
     def _warning_summary(items: list[dict[str, Any]]) -> tuple[Optional[str], list[str]]:
         warnings: list[str] = []
-        price_totals = {"realtime": 0, "cache": 0, "stale": 0, "missing": 0}
+        price_totals = {"realtime": 0, "cache": 0, "stale": 0, "missing": 0, "run_reused": 0}
         price_accounts: list[str] = []
         for item in items:
             account = item.get("account") or "-"
@@ -225,7 +226,7 @@ class NavHistoryReceiptService:
             for warning in report.get("warnings") or []:
                 match = _PRICE_SUMMARY_RE.match(str(warning))
                 if match:
-                    counts = {key: int(value) for key, value in match.groupdict().items()}
+                    counts = {key: int(value or 0) for key, value in match.groupdict().items()}
                     for key, value in counts.items():
                         price_totals[key] += value
                     account_issues = []
@@ -249,11 +250,15 @@ class NavHistoryReceiptService:
                 parts.append(f"过期回退 {price_totals['stale']}")
             if price_totals["missing"]:
                 parts.append(f"缺失 {price_totals['missing']}")
+            if price_totals["run_reused"]:
+                parts.append(f"同轮复用 {price_totals['run_reused']}")
             price_summary = "｜".join(parts)
         else:
             price_summary = f"价格：正常｜实时 {price_totals['realtime']}"
             if price_totals["cache"]:
                 price_summary += f"｜缓存 {price_totals['cache']}"
+            if price_totals["run_reused"]:
+                price_summary += f"｜同轮复用 {price_totals['run_reused']}"
 
         if price_summary and price_accounts:
             price_summary += f"（{'；'.join(price_accounts)}）"

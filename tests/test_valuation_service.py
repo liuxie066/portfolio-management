@@ -1,6 +1,9 @@
 from unittest.mock import Mock
 
+import pytest
+
 from src.app.valuation_service import ValuationService
+from src.app.run_quote_pool import RunQuotePool
 from src.models import AssetClass, AssetType, Holding
 from src.portfolio import PortfolioManager
 
@@ -117,3 +120,118 @@ def test_valuation_service_warns_for_missing_foreign_cash_fx():
 
     assert result.total_value_cny == 0.0
     assert any("无法获取汇率" in warning for warning in result.warnings)
+
+
+def test_valuation_service_preserves_origin_and_counts_run_reuse_independently():
+    storage = Mock()
+    fetcher = Mock()
+
+    def holdings(account):
+        return [
+            Holding(
+                asset_id="BABA",
+                asset_name="阿里巴巴",
+                asset_type=AssetType.US_STOCK,
+                account=account,
+                quantity=1,
+                currency="USD",
+                asset_class=AssetClass.US_ASSET,
+            )
+        ]
+
+    storage.get_holdings.side_effect = holdings
+    storage.get_total_shares.return_value = 1000
+    fetcher.fetch_batch.return_value = {
+        "BABA": {
+            "price": 80,
+            "currency": "USD",
+            "cny_price": 580,
+            "source": "cache_fallback",
+            "is_from_cache": True,
+            "is_stale": True,
+        }
+    }
+    manager = _manager(storage, fetcher)
+    service = ValuationService(manager=manager, storage=storage, price_fetcher=fetcher)
+    pool = RunQuotePool()
+
+    first = service.calculate_valuation("lx", run_quote_pool=pool)
+    second = service.calculate_valuation("sy", run_quote_pool=pool)
+
+    fetcher.fetch_batch.assert_called_once()
+    assert "cache=1, stale_fallback=1, missing=0, run_reused=0" in first.warnings[-1]
+    assert "cache=1, stale_fallback=1, missing=0, run_reused=1" in second.warnings[-1]
+
+
+def test_valuation_service_revalidates_payload_returned_by_pool():
+    storage = Mock()
+    fetcher = Mock()
+    storage.get_holdings.return_value = [
+        Holding(
+            asset_id="SPY",
+            asset_name="SPDR S&P 500 ETF",
+            asset_type=AssetType.US_FUND,
+            account="sy",
+            quantity=1,
+            currency="USD",
+            asset_class=AssetClass.US_ASSET,
+        )
+    ]
+    storage.get_total_shares.return_value = 1000
+
+    class InvalidPool:
+        def fetch_batch(self, *_args, **_kwargs):
+            return {
+                "SPY": {
+                    "price": 0,
+                    "currency": "USD",
+                    "cny_price": 0,
+                    "is_from_run_pool": True,
+                }
+            }
+
+    manager = _manager(storage, fetcher)
+    service = ValuationService(manager=manager, storage=storage, price_fetcher=fetcher)
+    result = service.calculate_valuation("sy", run_quote_pool=InvalidPool())
+
+    assert result.total_value_cny == 0
+    assert any("SPDR S&P 500 ETF(SPY): 价格缺失" in warning for warning in result.warnings)
+    assert "missing=1, run_reused=0" in result.warnings[-1]
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_warning"),
+    [
+        (TimeoutError("deadline"), "价格获取超时（25秒）"),
+        (RuntimeError("provider crashed"), "价格获取异常: provider crashed"),
+    ],
+)
+def test_valuation_service_keeps_fetcher_exception_diagnostics_with_pool(error, expected_warning):
+    storage = Mock()
+    fetcher = Mock()
+    storage.get_holdings.return_value = [
+        Holding(
+            asset_id="SPY",
+            asset_name="SPDR S&P 500 ETF",
+            asset_type=AssetType.US_FUND,
+            account="sy",
+            quantity=1,
+            currency="USD",
+            asset_class=AssetClass.US_ASSET,
+        )
+    ]
+    storage.get_total_shares.return_value = 1000
+    fetcher.fetch_batch.side_effect = error
+    manager = _manager(storage, fetcher)
+    pool = RunQuotePool()
+
+    result = ValuationService(
+        manager=manager,
+        storage=storage,
+        price_fetcher=fetcher,
+    ).calculate_valuation("sy", run_quote_pool=pool)
+
+    assert expected_warning in result.warnings
+    assert any("SPDR S&P 500 ETF(SPY): 价格缺失" in warning for warning in result.warnings)
+    assert pool.summary()["fetch_attempted"] == 1
+    assert pool.summary()["failed_unique"] == 1

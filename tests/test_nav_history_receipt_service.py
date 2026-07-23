@@ -251,6 +251,38 @@ def test_nav_receipt_compacts_healthy_price_summaries_across_accounts():
     assert "告警：无" not in text
 
 
+def test_nav_receipt_renders_same_run_reuse_and_accepts_legacy_summary():
+    text = NavHistoryReceiptService.build_message(
+        {
+            "success": True,
+            "status": "completed",
+            "dry_run": False,
+            "date": "2026-07-22",
+            "items": [
+                _written(
+                    "lx",
+                    warnings=[
+                        "[价格汇总] realtime=3, cache=0, stale_fallback=0, missing=0, run_reused=0"
+                    ],
+                ),
+                _written(
+                    "sy",
+                    warnings=[
+                        "[价格汇总] realtime=5, cache=0, stale_fallback=0, missing=0, run_reused=3"
+                    ],
+                ),
+                _written(
+                    "hb",
+                    warnings=["[价格汇总] realtime=2, cache=1, stale_fallback=0, missing=0"],
+                ),
+            ],
+        },
+        executed_at=datetime(2026, 7, 23, 8, 11),
+    )
+
+    assert "价格：正常｜实时 10｜缓存 1｜同轮复用 3" in text
+
+
 def test_nav_receipt_highlights_only_problematic_price_accounts():
     text = NavHistoryReceiptService.build_message(
         {

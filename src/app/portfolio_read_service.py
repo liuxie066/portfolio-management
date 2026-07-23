@@ -14,14 +14,25 @@ class PortfolioReadService:
         self.portfolio = portfolio
         self.reporting_service = reporting_service
 
-    def build_snapshot(self, *, price_timeout_seconds: Optional[int] = None) -> Dict[str, Any]:
+    def build_snapshot(
+        self,
+        *,
+        price_timeout_seconds: Optional[int] = None,
+        run_quote_pool: Any = None,
+    ) -> Dict[str, Any]:
         if price_timeout_seconds is None:
-            valuation = self.portfolio.calculate_valuation(self.account)
+            if run_quote_pool is None:
+                valuation = self.portfolio.calculate_valuation(self.account)
+            else:
+                valuation = self.portfolio.calculate_valuation(
+                    self.account,
+                    run_quote_pool=run_quote_pool,
+                )
         else:
-            valuation = self.portfolio.calculate_valuation(
-                self.account,
-                price_timeout_seconds=price_timeout_seconds,
-            )
+            valuation_kwargs = {"price_timeout_seconds": price_timeout_seconds}
+            if run_quote_pool is not None:
+                valuation_kwargs["run_quote_pool"] = run_quote_pool
+            valuation = self.portfolio.calculate_valuation(self.account, **valuation_kwargs)
         holdings = valuation.holdings or []
         holdings_list = []
         for h in holdings:

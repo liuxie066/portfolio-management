@@ -200,7 +200,8 @@ class PortfolioManager:
 
     def calculate_valuation(self, account: str, fetch_prices: bool = True, price_timeout_seconds: int = 25,
                             allow_stale_price_fallback: bool = True,
-                            price_market_closed_ttl_multiplier: float = 1.0) -> PortfolioValuation:
+                            price_market_closed_ttl_multiplier: float = 1.0,
+                            run_quote_pool: Any = None) -> PortfolioValuation:
         """计算账户估值
 
         Args:
@@ -216,6 +217,7 @@ class PortfolioManager:
             price_timeout_seconds=price_timeout_seconds,
             allow_stale_price_fallback=allow_stale_price_fallback,
             price_market_closed_ttl_multiplier=price_market_closed_ttl_multiplier,
+            run_quote_pool=run_quote_pool,
         )
 
     # ========== 净值记录 ==========
