@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.23 - 2026-07-23
+
+- Sent Futu holdings-sync and NAV History receipts as Feishu post messages with native titles instead of unparsed Markdown headers.
+- Converted receipt section headings into bold post content while keeping heading markers out of the visible message body.
+- Preserved existing receipt content, dry-run behavior, notification failure isolation, and the legacy text-message API.
+
 ## 0.1.22 - 2026-07-23
 
 - Shared successful market quotes across accounts within one daily NAV run, keyed by canonical code and market type.
