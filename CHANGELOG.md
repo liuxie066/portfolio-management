@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.22 - 2026-07-23
+
+- Shared successful market quotes across accounts within one daily NAV run, keyed by canonical code and market type.
+- Kept failed quotes retryable with bounded attempts while preserving stale-price policy, provider diagnostics, and account isolation.
+- Added run-level quote reuse and retry metrics to job results and consolidated NAV receipts.
+
 ## 0.1.21 - 2026-07-23
 
 - Removed twelve unused internal report, cash, NAV-performance, configuration, and local-cache methods.
