@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.26 - 2026-07-24
+
+- Added a tag-triggered GitHub Actions workflow that publishes releases for pushed `v*` tags with repository-scoped `GITHUB_TOKEN` credentials.
+- Kept release publication idempotent by accepting existing published releases, publishing existing drafts, and verifying remote tags before creating new releases.
+- Removed the release path's dependency on local GitHub CLI keyring access while retaining generated notes, bounded runtime, and minimal `contents: write` permissions.
+
 ## 0.1.25 - 2026-07-24
 
 - Bounded multi-account valuation-evidence requests with one shared absolute deadline and one merged quote/FX snapshot across all requested accounts.
