@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping, Sequence
 from decimal import Decimal
 from typing import Any
 
@@ -32,8 +33,17 @@ class ValuationService:
         price_market_closed_ttl_multiplier: float = 1.0,
         run_quote_pool: Any = None,
         supplemental_codes: list[str] | None = None,
+        deadline: float | None = None,
+        holdings: Sequence[Any] | None = None,
+        price_snapshot: Mapping[str, Any] | None = None,
+        price_warnings: Sequence[str] | None = None,
+        total_shares: Any = None,
     ) -> PortfolioValuation:
-        holdings = self.storage.get_holdings(account=account)
+        account_holdings = (
+            list(holdings)
+            if holdings is not None
+            else list(self.storage.get_holdings(account=account))
+        )
         supplemental = list(
             dict.fromkeys(
                 str(code or "").strip()
@@ -41,64 +51,37 @@ class ValuationService:
                 if str(code or "").strip()
             )
         )
-        if not holdings and not supplemental:
-            return PortfolioValuation(account=account, total_value_cny=0)
+        if not account_holdings and not supplemental:
+            return PortfolioValuation(
+                account=account,
+                total_value_cny=0,
+                warnings=[
+                    str(value)
+                    for value in (price_warnings or [])
+                    if str(value).strip()
+                ],
+            )
 
-        prices: dict[str, Any] = {}
-        price_errors: list[str] = []
+        prices: dict[str, Any] = dict(price_snapshot or {})
+        price_errors: list[str] = [
+            str(value)
+            for value in (price_warnings or [])
+            if str(value).strip()
+        ]
         normalization_warnings: list[str] = []
-        if self.price_fetcher and fetch_prices:
-            name_map = {h.asset_id: h.asset_name for h in holdings}
-            name_map.update(
-                {str(h.asset_id).strip().upper(): h.asset_name for h in holdings if h.asset_id}
+        if price_snapshot is None and self.price_fetcher and fetch_prices:
+            prices, fetch_warnings = self.fetch_price_snapshot(
+                holdings=account_holdings,
+                supplemental_codes=supplemental,
+                price_timeout_seconds=price_timeout_seconds,
+                allow_stale_price_fallback=allow_stale_price_fallback,
+                price_market_closed_ttl_multiplier=price_market_closed_ttl_multiplier,
+                run_quote_pool=run_quote_pool,
+                deadline=deadline,
             )
-            asset_type_map = {h.asset_id: h.asset_type for h in holdings}
-            asset_type_map.update(
-                {str(h.asset_id).strip().upper(): h.asset_type for h in holdings if h.asset_id}
-            )
-            for code in supplemental:
-                name_map.setdefault(code, code)
-
-            try:
-                from src.market_time import MarketTimeUtil
-
-                any_open = (
-                    MarketTimeUtil.is_cn_market_open()
-                    or MarketTimeUtil.is_hk_market_open()
-                    or MarketTimeUtil.is_us_market_open()
-                )
-                accept_stale_when_closed = allow_stale_price_fallback and not any_open
-                market_closed_ttl_multiplier = price_market_closed_ttl_multiplier if not any_open else 1.0
-            except Exception:
-                accept_stale_when_closed = False
-                market_closed_ttl_multiplier = 1.0
-
-            deadline = time.monotonic() + max(0.0, float(price_timeout_seconds))
-            try:
-                fetch_kwargs = {
-                    "name_map": name_map,
-                    "asset_type_map": asset_type_map,
-                    "market_closed_ttl_multiplier": market_closed_ttl_multiplier,
-                    "accept_stale_when_closed": accept_stale_when_closed,
-                    "use_concurrent": True,
-                    "skip_us": False,
-                    "deadline": deadline,
-                }
-                codes = list(dict.fromkeys([h.asset_id for h in holdings] + supplemental))
-                if run_quote_pool is None:
-                    prices = self.price_fetcher.fetch_batch(codes, **fetch_kwargs)
-                else:
-                    prices = run_quote_pool.fetch_batch(
-                        codes,
-                        fetch_batch=self.price_fetcher.fetch_batch,
-                        **fetch_kwargs,
-                    )
-            except TimeoutError:
-                price_errors.append(f"价格获取超时（{price_timeout_seconds}秒）")
-            except Exception as exc:
-                price_errors.append(f"价格获取异常: {exc}")
-        else:
-            for holding in holdings:
+            price_errors.extend(fetch_warnings)
+        elif price_snapshot is None:
+            for holding in account_holdings:
                 price = self.storage.get_price(holding.asset_id)
                 if price:
                     prices[holding.asset_id] = price
@@ -125,7 +108,7 @@ class ValuationService:
             "run_reused": 0,
         }
 
-        for holding in holdings:
+        for holding in account_holdings:
             holding_code = str(holding.asset_id).strip()
             price = (
                 price_lookup.get(holding.asset_id)
@@ -214,13 +197,17 @@ class ValuationService:
             elif holding.asset_class == AssetClass.HK_ASSET:
                 hk_asset_value += market_value_dec
 
-        for holding in holdings:
+        for holding in account_holdings:
             if total_value_cny > 0 and holding.market_value_cny is not None:
                 weight_dec = self.manager._to_decimal(holding.market_value_cny) / total_value_cny
                 holding.weight = float(self.manager._quantize_weight(weight_dec))
 
-        total_shares = self.storage.get_total_shares(account)
-        total_shares_dec = self.manager._to_decimal(total_shares)
+        resolved_total_shares = (
+            self.storage.get_total_shares(account)
+            if total_shares is None
+            else total_shares
+        )
+        total_shares_dec = self.manager._to_decimal(resolved_total_shares)
         nav = float(self.manager._quantize_nav(total_value_cny / total_shares_dec)) if total_shares_dec > 0 else None
 
         warnings = [*normalization_warnings, *price_errors]
@@ -247,9 +234,9 @@ class ValuationService:
             cn_asset_value=float(self.manager._quantize_money(cn_asset_value)),
             us_asset_value=float(self.manager._quantize_money(us_asset_value)),
             hk_asset_value=float(self.manager._quantize_money(hk_asset_value)),
-            shares=total_shares,
+            shares=resolved_total_shares,
             nav=nav,
-            holdings=holdings,
+            holdings=account_holdings,
             price_evidence={
                 str(code): dict(payload)
                 for code, payload in prices.items()
@@ -257,3 +244,104 @@ class ValuationService:
             },
             warnings=warnings,
         )
+
+    def fetch_price_snapshot(
+        self,
+        *,
+        holdings: Sequence[Any],
+        supplemental_codes: Sequence[str] | None = None,
+        price_timeout_seconds: int = 25,
+        allow_stale_price_fallback: bool = True,
+        price_market_closed_ttl_multiplier: float = 1.0,
+        run_quote_pool: Any = None,
+        deadline: float | None = None,
+    ) -> tuple[dict[str, Any], list[str]]:
+        """Fetch one deadline-bound quote snapshot for one or more accounts."""
+        supplemental = list(
+            dict.fromkeys(
+                str(code or "").strip()
+                for code in (supplemental_codes or [])
+                if str(code or "").strip()
+            )
+        )
+        snapshot_holdings = list(holdings)
+        if not snapshot_holdings and not supplemental:
+            return {}, []
+        if not self.price_fetcher:
+            return {}, ["价格获取不可用：未配置行情服务"]
+
+        name_map = {holding.asset_id: holding.asset_name for holding in snapshot_holdings}
+        name_map.update(
+            {
+                str(holding.asset_id).strip().upper(): holding.asset_name
+                for holding in snapshot_holdings
+                if holding.asset_id
+            }
+        )
+        asset_type_map = {
+            holding.asset_id: holding.asset_type
+            for holding in snapshot_holdings
+        }
+        asset_type_map.update(
+            {
+                str(holding.asset_id).strip().upper(): holding.asset_type
+                for holding in snapshot_holdings
+                if holding.asset_id
+            }
+        )
+        for code in supplemental:
+            name_map.setdefault(code, code)
+
+        try:
+            from src.market_time import MarketTimeUtil
+
+            any_open = (
+                MarketTimeUtil.is_cn_market_open()
+                or MarketTimeUtil.is_hk_market_open()
+                or MarketTimeUtil.is_us_market_open()
+            )
+            accept_stale_when_closed = allow_stale_price_fallback and not any_open
+            market_closed_ttl_multiplier = (
+                price_market_closed_ttl_multiplier if not any_open else 1.0
+            )
+        except Exception:
+            accept_stale_when_closed = False
+            market_closed_ttl_multiplier = 1.0
+
+        effective_deadline = (
+            deadline
+            if deadline is not None
+            else time.monotonic() + max(0.0, float(price_timeout_seconds))
+        )
+        fetch_kwargs = {
+            "name_map": name_map,
+            "asset_type_map": asset_type_map,
+            "market_closed_ttl_multiplier": market_closed_ttl_multiplier,
+            "accept_stale_when_closed": accept_stale_when_closed,
+            "use_concurrent": True,
+            "skip_us": False,
+            "deadline": effective_deadline,
+        }
+        codes = list(
+            dict.fromkeys(
+                [holding.asset_id for holding in snapshot_holdings] + supplemental
+            )
+        )
+        try:
+            if run_quote_pool is None:
+                prices = self.price_fetcher.fetch_batch(codes, **fetch_kwargs)
+            else:
+                prices = run_quote_pool.fetch_batch(
+                    codes,
+                    fetch_batch=self.price_fetcher.fetch_batch,
+                    **fetch_kwargs,
+                )
+        except TimeoutError:
+            return {}, [f"价格获取超时（{price_timeout_seconds}秒）"]
+        except Exception as exc:
+            return {}, [f"价格获取异常: {type(exc).__name__}"]
+
+        warnings: list[str] = []
+        if time.monotonic() >= effective_deadline:
+            warnings.append(f"价格获取达到全局 deadline（{price_timeout_seconds}秒）")
+        return dict(prices or {}), warnings

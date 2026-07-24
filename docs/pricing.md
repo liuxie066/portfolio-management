@@ -4,7 +4,8 @@
 
 1) **Tencent batch** for CN/HK/exchange-traded funds (`asset_type=exchange_fund`): `qt.gtimg.cn` (fast, low dependency)
 2) **Tencent jj** for open-end fund NAV (`asset_type=otc_fund`) (fast, low dependency)
-3) US: Finnhub (if API key) → Sina US fallback (`hq.sinajs.cn/list=gb_*`)
+3) US: Sina US batch first (`hq.sinajs.cn/list=gb_*`) → Finnhub only for missing symbols
+   within one shared 4-second supplement budget → stale cache
 4) Open-end funds: Tencent fund NAV → East Money fallback
 
 ## Cache policy
@@ -25,7 +26,8 @@ Runtime ownership is now split as:
 - `src/pricing/service.py`: public structured quote entry (`fetch_quote`, `fetch_batch`) and diagnostics.
 - `src/pricing/batch.py`: optimized batch planner used by `PriceService.fetch_batch()` and the `PriceFetcher` facade.
 - `src/pricing/providers/tencent_batch.py`: Tencent batch implementation for CN/HK/exchange funds/open-end fund NAV.
-- `src/pricing/providers/us_batch.py`: fast US batch implementation with Finnhub/Sina US and stale fallback.
+- `src/pricing/providers/us_batch.py`: Sina-first US batch implementation with
+  request-scoped Finnhub supplementation and stale fallback.
 - `src/pricing/cache.py`: cache hit, stale fallback, TTL, and cache writes.
 - `src/pricing/fixed.py`: fixed-price cash/MMF quote construction.
 - `src/pricing/fx.py`: USD/HKD exchange-rate cache and multi-source fallback.
@@ -43,5 +45,7 @@ TTL is computed by `src/market_time.py::MarketTimeUtil.get_cache_ttl()`.
 - `PortfolioManager.calculate_valuation()` appends a warning line:
   - `[价格汇总] realtime=..., cache=..., stale_fallback=..., missing=...`
   - plus Tencent batch meta when available.
+- Provider failures log only provider, symbol, and exception type. Request URLs
+  and Finnhub query tokens are never included.
 
 - Use `scripts/diagnose_pricing.py` to inspect per-asset states.

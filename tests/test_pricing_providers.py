@@ -213,10 +213,73 @@ def test_sina_us_empty_quote_does_not_fetch_exchange_rate():
     assert USStockProvider(fetcher).fetch_sina("AAPL") is None
 
 
-def test_us_batch_merges_finnhub_failures_into_one_sina_request(monkeypatch):
+def test_us_single_prefers_sina_and_skips_finnhub(monkeypatch):
+    fetcher = PriceFetcher()
+    sina_quote = {
+        "code": "AAPL",
+        "price": 193,
+        "currency": "USD",
+        "cny_price": 1370.3,
+        "source": "sina_us",
+    }
+    finnhub_calls = []
+    monkeypatch.setattr(
+        USStockProvider,
+        "fetch_sina",
+        lambda self, code, **kwargs: sina_quote,
+    )
+    monkeypatch.setattr(
+        USStockProvider,
+        "fetch_finnhub",
+        lambda self, code, key, **kwargs: finnhub_calls.append(code),
+    )
+    monkeypatch.setattr(
+        "src.pricing.providers.us._config.get",
+        lambda key, default=None: "key",
+    )
+
+    result = USStockProvider(fetcher).fetch_us_stock("AAPL")
+
+    assert result == sina_quote
+    assert finnhub_calls == []
+
+
+def test_us_single_failure_logs_redact_finnhub_request_url(monkeypatch, capsys):
+    fetcher = PriceFetcher()
+    monkeypatch.setattr(
+        USStockProvider,
+        "fetch_sina",
+        lambda self, code, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        USStockProvider,
+        "fetch_finnhub",
+        lambda self, code, key, **kwargs: (_ for _ in ()).throw(
+            RuntimeError(
+                "https://finnhub.io/api/v1/quote"
+                "?symbol=AAPL&token=secret-token"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "src.pricing.providers.us._config.get",
+        lambda key, default=None: "secret-token",
+    )
+
+    result = USStockProvider(fetcher).fetch_us_stock("AAPL")
+    output = capsys.readouterr().out
+
+    assert result is None
+    assert "provider=finnhub symbol=AAPL error_type=RuntimeError" in output
+    assert "secret-token" not in output
+    assert "https://finnhub.io" not in output
+
+
+def test_us_batch_uses_one_sina_request_and_skips_finnhub_when_complete(monkeypatch):
     fetcher = PriceFetcher()
     fetcher._fetch_exchange_rates = lambda **kw: {"USDCNY": 7.1}
     requests = []
+    finnhub_calls = []
 
     def fake_get(url, **kwargs):
         requests.append(url)
@@ -225,42 +288,55 @@ def test_us_batch_merges_finnhub_failures_into_one_sina_request(monkeypatch):
     fetcher.session.get = fake_get
     monkeypatch.setattr("src.pricing.providers.us_batch._config.get", lambda key, default=None: "key")
     monkeypatch.setattr(
-        USStockProvider, "fetch_finnhub", lambda self, code, key, **kw: (_ for _ in ()).throw(RuntimeError("timeout"))
+        USStockProvider,
+        "fetch_finnhub",
+        lambda self, code, key, **kw: finnhub_calls.append(code),
     )
 
     result = fetch_us_batch(fetcher, ["FUTU", "BABA"], name_map={}, expired_cache={}, _nested=True)
 
     assert len(requests) == 1
     assert "gb_futu,gb_baba" in requests[0]
+    assert finnhub_calls == []
     assert result["FUTU"]["source"] == "sina_us"
     assert result["BABA"]["source"] == "sina_us"
 
 
-def test_us_batch_break_path_merges_skipped_codes_into_sina_request(monkeypatch):
+def test_us_batch_finnhub_failure_circuits_remaining_missing_symbols(
+    monkeypatch, capsys
+):
     fetcher = PriceFetcher()
     fetcher._fetch_exchange_rates = lambda **kw: {"USDCNY": 7.1}
     codes = ["FUTU", "BABA", "GOOGL", "PDD", "TCOM"]
     requests = []
+    finnhub_calls = []
 
     def fake_get(url, **kwargs):
         requests.append(url)
-        return FakeSinaResponse("\n".join(_sina_us_line(c) for c in codes))
+        return FakeSinaResponse(_sina_us_line("futu"))
+
+    def fail_finnhub(self, code, key, **kw):
+        finnhub_calls.append(code)
+        raise RuntimeError(
+            "https://finnhub.io/api/v1/quote?symbol=BABA&token=secret-token"
+        )
 
     fetcher.session.get = fake_get
     monkeypatch.setattr("src.pricing.providers.us_batch._config.get", lambda key, default=None: "key")
-    monkeypatch.setattr(
-        USStockProvider, "fetch_finnhub", lambda self, code, key, **kw: (_ for _ in ()).throw(RuntimeError("timeout"))
-    )
+    monkeypatch.setattr(USStockProvider, "fetch_finnhub", fail_finnhub)
 
     result = fetch_us_batch(fetcher, codes, name_map={}, expired_cache={}, _nested=True)
+    output = capsys.readouterr().out
 
     assert len(requests) == 1
-    for code in codes:
-        assert "gb_" + code.lower() in requests[0]
-        assert result[code]["source"] == "sina_us"
+    assert finnhub_calls == ["BABA"]
+    assert result["FUTU"]["source"] == "sina_us"
+    assert "provider=finnhub symbol=BABA error_type=RuntimeError" in output
+    assert "secret-token" not in output
+    assert "https://finnhub.io" not in output
 
 
-def test_us_batch_deadline_exhausted_still_reaches_fallbacks(monkeypatch):
+def test_us_batch_deadline_exhausted_returns_expired_cache(monkeypatch):
     import time as _time
 
     fetcher = PriceFetcher()
@@ -281,75 +357,47 @@ def test_us_batch_deadline_exhausted_still_reaches_fallbacks(monkeypatch):
     )
     assert result["BABA"]["source"] == "cache_fallback"
 
-    # TimeoutError at the loop top must not skip the Sina merge for leftovers
-    requests = []
 
-    def fake_get(url, **kwargs):
-        requests.append(url)
-        return FakeSinaResponse("\n".join([_sina_us_line("futu"), _sina_us_line("baba")]))
-
-    fetcher.session.get = fake_get
-    real_remaining = getattr(__import__("src.pricing.providers.us_batch", fromlist=["remaining_timeout"]), "remaining_timeout")
-    state = {"tripped": False}
-
-    def trip_once(deadline, default):
-        if not state["tripped"]:
-            state["tripped"] = True
-            raise TimeoutError("pricing deadline exceeded")
-        return real_remaining(deadline, default)
-
-    monkeypatch.setattr("src.pricing.providers.us_batch.remaining_timeout", trip_once)
-
-    result = fetch_us_batch(fetcher, ["FUTU", "BABA"], name_map={}, expired_cache={}, _nested=True)
-    assert len(requests) == 1
-    assert "gb_futu,gb_baba" in requests[0]
-    assert result["FUTU"]["source"] == "sina_us"
-    assert result["BABA"]["source"] == "sina_us"
-
-
-def test_us_batch_reserves_deadline_for_sina(monkeypatch):
+def test_us_batch_caps_all_finnhub_supplementation_to_one_subdeadline(monkeypatch):
     import time as _time
 
     fetcher = PriceFetcher()
     fetcher._fetch_exchange_rates = lambda **kw: {"USDCNY": 7.1}
     fetcher.session.get = lambda url, **kwargs: FakeSinaResponse(
-        "\n".join([_sina_us_line("futu"), _sina_us_line("baba")])
+        _sina_us_line("futu")
     )
     monkeypatch.setattr("src.pricing.providers.us_batch._config.get", lambda key, default=None: "key")
 
     finnhub_deadlines = []
-    monkeypatch.setattr(
-        USStockProvider,
-        "fetch_finnhub",
-        lambda self, code, key, **kw: (
-            finnhub_deadlines.append(kw.get("deadline")),
-            (_ for _ in ()).throw(RuntimeError("timeout")),
-        )[1],
-    )
 
+    def fetch_finnhub(self, code, key, **kwargs):
+        finnhub_deadlines.append(kwargs.get("deadline"))
+        return {
+            "code": code,
+            "price": 80,
+            "currency": "USD",
+            "cny_price": 568,
+            "source": "finnhub",
+        }
+
+    monkeypatch.setattr(USStockProvider, "fetch_finnhub", fetch_finnhub)
+
+    started = _time.monotonic()
     deadline = _time.monotonic() + 25
     result = fetch_us_batch(fetcher, ["FUTU", "BABA"], name_map={}, expired_cache={}, _nested=True, deadline=deadline)
 
-    # Finnhub attempts run against a sub-deadline that reserves SINA_DEADLINE_RESERVE_SEC
-    assert finnhub_deadlines
-    for d in finnhub_deadlines:
-        assert abs(d - (deadline - 6.0)) < 0.001
+    assert len(finnhub_deadlines) == 1
+    assert started < finnhub_deadlines[0] <= started + 4.1
     assert result["FUTU"]["source"] == "sina_us"
-    assert result["BABA"]["source"] == "sina_us"
+    assert result["BABA"]["source"] == "finnhub"
 
 
-def test_us_batch_skips_finnhub_when_its_budget_already_spent(monkeypatch):
+def test_us_batch_skips_finnhub_when_global_deadline_is_spent(monkeypatch):
     import time as _time
 
     fetcher = PriceFetcher()
     fetcher._fetch_exchange_rates = lambda **kw: {"USDCNY": 7.1}
-    requests = []
-
-    def fake_get(url, **kwargs):
-        requests.append(url)
-        return FakeSinaResponse("\n".join([_sina_us_line("futu"), _sina_us_line("baba")]))
-
-    fetcher.session.get = fake_get
+    fetcher.session.get = lambda url, **kwargs: FakeSinaResponse("")
     monkeypatch.setattr("src.pricing.providers.us_batch._config.get", lambda key, default=None: "key")
 
     calls = {"n": 0}
@@ -360,19 +408,16 @@ def test_us_batch_skips_finnhub_when_its_budget_already_spent(monkeypatch):
 
     monkeypatch.setattr(USStockProvider, "fetch_finnhub", counting_finnhub)
 
-    # Only 3s left overall: the 6s reserve leaves no Finnhub budget at all
     result = fetch_us_batch(
         fetcher,
         ["FUTU", "BABA"],
         name_map={},
         expired_cache={},
         _nested=True,
-        deadline=_time.monotonic() + 3,
+        deadline=_time.monotonic() - 1,
     )
     assert calls["n"] == 0
-    assert len(requests) == 1
-    assert result["FUTU"]["source"] == "sina_us"
-    assert result["BABA"]["source"] == "sina_us"
+    assert result == {}
 
 
 def test_sina_us_dotted_symbol_maps_to_dollar_query_code():

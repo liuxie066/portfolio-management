@@ -166,9 +166,23 @@ def test_valuation_service_warns_for_missing_foreign_cash_fx():
     assert any("无法获取汇率" in warning for warning in result.warnings)
 
 
-def test_valuation_service_preserves_origin_and_counts_run_reuse_independently():
+def test_valuation_service_preserves_origin_and_counts_run_reuse_independently(
+    monkeypatch,
+):
     storage = Mock()
     fetcher = Mock()
+    monkeypatch.setattr(
+        "src.market_time.MarketTimeUtil.is_cn_market_open",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "src.market_time.MarketTimeUtil.is_hk_market_open",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "src.market_time.MarketTimeUtil.is_us_market_open",
+        lambda: False,
+    )
 
     def holdings(account):
         return [
@@ -247,7 +261,7 @@ def test_valuation_service_revalidates_payload_returned_by_pool():
     ("error", "expected_warning"),
     [
         (TimeoutError("deadline"), "价格获取超时（25秒）"),
-        (RuntimeError("provider crashed"), "价格获取异常: provider crashed"),
+        (RuntimeError("provider crashed"), "价格获取异常: RuntimeError"),
     ],
 )
 def test_valuation_service_keeps_fetcher_exception_diagnostics_with_pool(error, expected_warning):
@@ -279,3 +293,48 @@ def test_valuation_service_keeps_fetcher_exception_diagnostics_with_pool(error, 
     assert any("SPDR S&P 500 ETF(SPY): 价格缺失" in warning for warning in result.warnings)
     assert pool.summary()["fetch_attempted"] == 1
     assert pool.summary()["failed_unique"] == 1
+
+
+def test_valuation_service_uses_caller_deadline_and_prefetched_snapshot():
+    storage = Mock()
+    fetcher = Mock()
+    holding = Holding(
+        asset_id="BABA",
+        asset_name="阿里巴巴",
+        asset_type=AssetType.US_STOCK,
+        account="lx",
+        quantity=2,
+        currency="USD",
+        asset_class=AssetClass.US_ASSET,
+    )
+    storage.get_total_shares.side_effect = AssertionError(
+        "evidence valuation must not read shares"
+    )
+    service = ValuationService(
+        manager=_manager(storage, fetcher),
+        storage=storage,
+        price_fetcher=fetcher,
+    )
+
+    result = service.calculate_valuation(
+        "lx",
+        deadline=123.0,
+        holdings=[holding],
+        price_snapshot={
+            "BABA": {
+                "price": 80,
+                "cny_price": 580,
+                "currency": "USD",
+                "source": "sina_us",
+            }
+        },
+        price_warnings=["共享行情快照为 partial"],
+        total_shares=0,
+    )
+
+    fetcher.fetch_batch.assert_not_called()
+    storage.get_holdings.assert_not_called()
+    storage.get_total_shares.assert_not_called()
+    assert result.total_value_cny == 1160
+    assert result.holdings[0].market_value_cny == 1160
+    assert "共享行情快照为 partial" in result.warnings

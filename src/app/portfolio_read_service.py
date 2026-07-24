@@ -74,6 +74,10 @@ class PortfolioReadService:
         supplemental_codes: Optional[list[str]] = None,
         price_timeout_seconds: int = 30,
         run_quote_pool: Any = None,
+        deadline: float | None = None,
+        holdings: Optional[list[Any]] = None,
+        price_snapshot: Optional[Dict[str, Any]] = None,
+        price_warnings: Optional[list[str]] = None,
     ) -> Dict[str, Any]:
         supplemental = list(
             dict.fromkeys(
@@ -82,11 +86,23 @@ class PortfolioReadService:
                 if str(code or "").strip()
             )
         )
+        valuation_kwargs: Dict[str, Any] = {
+            "price_timeout_seconds": price_timeout_seconds,
+            "run_quote_pool": run_quote_pool,
+            "supplemental_codes": supplemental,
+        }
+        if deadline is not None:
+            valuation_kwargs["deadline"] = deadline
+        if holdings is not None:
+            valuation_kwargs["holdings"] = holdings
+        if price_snapshot is not None:
+            valuation_kwargs["price_snapshot"] = price_snapshot
+            valuation_kwargs["total_shares"] = 0
+        if price_warnings is not None:
+            valuation_kwargs["price_warnings"] = price_warnings
         valuation = self.portfolio.calculate_valuation(
             self.account,
-            price_timeout_seconds=price_timeout_seconds,
-            run_quote_pool=run_quote_pool,
-            supplemental_codes=supplemental,
+            **valuation_kwargs,
         )
         raw_evidence = dict(getattr(valuation, "price_evidence", None) or {})
         quote_lookup = self._quote_lookup(raw_evidence)
@@ -161,6 +177,12 @@ class PortfolioReadService:
             for item in valuation_messages
             if not str(item).strip().startswith("[价格汇总]")
         ]
+        if any(
+            marker in warning
+            for warning in warnings
+            for marker in ("deadline", "价格获取超时", "价格获取异常")
+        ):
+            partial = True
         warnings.extend(f"{code}: supplemental quote missing" for code in missing_supplemental)
         return {
             "account": self.account,

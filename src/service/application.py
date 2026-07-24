@@ -5,6 +5,7 @@ This layer gives HTTP, CLI, and future workers one application boundary.
 """
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 from uuid import uuid4
@@ -164,6 +165,7 @@ class PortfolioService:
         supplemental_codes: Any = None,
         price_timeout: int = 30,
     ) -> Dict[str, Any]:
+        request_deadline = time.monotonic() + max(0.0, float(price_timeout))
         normalized_accounts = list(
             dict.fromkeys(
                 str(item or "").strip().lower()
@@ -218,12 +220,69 @@ class PortfolioService:
         holdings: list[Dict[str, Any]] = []
         quotes_by_identity: Dict[tuple[str, str], Dict[str, Any]] = {}
         warnings: list[str] = []
+        holdings_by_account: Dict[str, list[Any]] = {}
+        pending_accounts: list[str] = []
         for account in normalized_accounts:
+            if time.monotonic() >= request_deadline:
+                account_items.append(
+                    {
+                        "account": account,
+                        "status": "deadline_exceeded",
+                        "holdings": [],
+                        "quotes": [],
+                        "warnings": [
+                            f"{account}: 全局 deadline 前未读取账户持仓"
+                        ],
+                    }
+                )
+                continue
+            try:
+                account_holdings = list(
+                    self.storage.get_holdings(account=account)
+                )
+            except Exception as exc:
+                account_items.append(
+                    {
+                        "account": account,
+                        "status": "unavailable",
+                        "holdings": [],
+                        "quotes": [],
+                        "warnings": [f"{account}: {exc}"],
+                    }
+                )
+                continue
+            holdings_by_account[account] = account_holdings
+            pending_accounts.append(account)
+
+        shared_prices: Dict[str, Any] = {}
+        shared_price_warnings: list[str] = []
+        if pending_accounts and time.monotonic() < request_deadline:
+            all_holdings = [
+                holding
+                for account in pending_accounts
+                for holding in holdings_by_account[account]
+            ]
+            shared_prices, shared_price_warnings = self.portfolio.fetch_price_snapshot(
+                holdings=all_holdings,
+                supplemental_codes=normalized_codes,
+                price_timeout_seconds=price_timeout,
+                run_quote_pool=pool,
+                deadline=request_deadline,
+            )
+        elif pending_accounts:
+            shared_price_warnings = [
+                f"价格获取达到全局 deadline（{price_timeout}秒）"
+            ]
+
+        for account in pending_accounts:
             try:
                 item = self._read_service(account).build_valuation_evidence(
                     supplemental_codes=normalized_codes,
                     price_timeout_seconds=price_timeout,
-                    run_quote_pool=pool,
+                    deadline=request_deadline,
+                    holdings=holdings_by_account[account],
+                    price_snapshot=shared_prices,
+                    price_warnings=shared_price_warnings,
                 )
             except Exception as exc:
                 item = {
@@ -234,6 +293,15 @@ class PortfolioService:
                     "warnings": [f"{account}: {exc}"],
                 }
             account_items.append(item)
+
+        account_order = {
+            account: index
+            for index, account in enumerate(normalized_accounts)
+        }
+        account_items.sort(
+            key=lambda item: account_order.get(str(item.get("account") or ""), len(account_order))
+        )
+        for item in account_items:
             holdings.extend(
                 dict(row)
                 for row in (item.get("holdings") or [])
@@ -270,6 +338,8 @@ class PortfolioService:
                 "snapshot_id": f"valuation-{uuid4().hex}",
                 "observed_at": observed_at,
                 "quote_pool": pool.summary(),
+                "deadline_seconds": price_timeout,
+                "deadline_exceeded": time.monotonic() >= request_deadline,
             },
             "holdings": holdings,
             "quotes": list(quotes_by_identity.values()),

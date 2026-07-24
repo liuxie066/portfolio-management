@@ -11,6 +11,10 @@ from ..types import PriceRequest, ProviderResult
 from .sina_us import fetch_sina_us_quotes
 
 
+SINA_REQUEST_BUDGET_SEC = 5.0
+FINNHUB_REQUEST_BUDGET_SEC = 4.0
+
+
 class USStockProvider:
     name = "us-stock"
 
@@ -28,32 +32,53 @@ class USStockProvider:
             payload = self.fetch_us_stock(code, deadline=deadline) if deadline is not None else self.fetch_us_stock(code)
             return ProviderResult(payload, self.name, latency_ms=int((time.time() - started) * 1000))
         except Exception as exc:
-            return ProviderResult(None, self.name, f"{type(exc).__name__}: {exc}", int((time.time() - started) * 1000))
+            return ProviderResult(
+                None,
+                self.name,
+                f"error_type={type(exc).__name__}",
+                int((time.time() - started) * 1000),
+            )
 
     def fetch_us_stock(self, code: str, *, deadline: float | None = None) -> Optional[dict]:
         quote_code = code.replace(".", "-")
         errors = []
 
-        finnhub_key = _config.get("finnhub_api_key")
-        if finnhub_key:
-            try:
-                result = self.fetch_finnhub(quote_code, finnhub_key, deadline=deadline)
-                if result:
-                    return result
-            except Exception as exc:
-                errors.append(f"Finnhub: {exc}")
-
+        sina_deadline = time.monotonic() + SINA_REQUEST_BUDGET_SEC
+        if deadline is not None:
+            sina_deadline = min(sina_deadline, deadline)
         try:
             result = self.fetcher._retry_with_backoff(
-                lambda: self.fetch_sina(code, deadline=deadline),
-                max_retries=2,
+                lambda: self.fetch_sina(code, deadline=sina_deadline),
+                max_retries=1,
                 base_delay=1.0,
-                deadline=deadline,
+                deadline=sina_deadline,
             )
             if result:
                 return result
         except Exception as exc:
-            errors.append(f"Sina US: {exc}")
+            errors.append(
+                f"provider=sina_us symbol={code} "
+                f"error_type={type(exc).__name__}"
+            )
+
+        finnhub_key = _config.get("finnhub_api_key")
+        if finnhub_key:
+            finnhub_deadline = time.monotonic() + FINNHUB_REQUEST_BUDGET_SEC
+            if deadline is not None:
+                finnhub_deadline = min(finnhub_deadline, deadline)
+            try:
+                result = self.fetch_finnhub(
+                    quote_code,
+                    finnhub_key,
+                    deadline=finnhub_deadline,
+                )
+                if result:
+                    return result
+            except Exception as exc:
+                errors.append(
+                    f"provider=finnhub symbol={code} "
+                    f"error_type={type(exc).__name__}"
+                )
 
         print(f"获取美股价格失败 {code}: {'; '.join(errors)}")
         return None

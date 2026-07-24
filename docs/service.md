@@ -78,8 +78,11 @@ Config keys:
 The valuation-evidence endpoint uses POST only to avoid an unbounded query
 string when many supplemental underlyings are requested. It does not write
 holdings, NAV, or other portfolio facts, shares successful quotes within the
-request, and keeps missing or stale quotes explicit as `partial`. Normal pricing
-cache refresh behavior still applies:
+request, and keeps missing or stale quotes explicit as `partial`. All requested
+accounts share one absolute `price_timeout` deadline and one deduplicated quote/FX
+snapshot. When the deadline is reached, PM stops starting further quote work and
+returns completed holdings and quotes with `success=true`, `status=partial`, and
+per-account status/warnings. Normal pricing cache refresh behavior still applies:
 
 ```bash
 curl -X POST http://127.0.0.1:8765/analysis/valuation-evidence \

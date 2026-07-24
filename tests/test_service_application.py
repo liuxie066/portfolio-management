@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import time
 from datetime import date
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from src.models import AssetType
+from src.models import AssetClass, AssetType, Holding
+from src.portfolio import PortfolioManager
 from src.service import PortfolioService
 
 
@@ -131,6 +133,13 @@ def test_portfolio_service_multi_account_overview_exposes_error_when_all_account
 
 def test_portfolio_service_builds_one_multi_account_valuation_evidence_snapshot():
     read_services = {}
+    storage = SimpleNamespace(
+        get_holdings=Mock(side_effect=lambda *, account: []),
+    )
+    portfolio = SimpleNamespace(
+        reporting_service=object(),
+        fetch_price_snapshot=Mock(return_value=({}, [])),
+    )
 
     def read_service_factory(**kwargs):
         account = kwargs["account"]
@@ -164,8 +173,8 @@ def test_portfolio_service_builds_one_multi_account_valuation_evidence_snapshot(
         return service
 
     service = PortfolioService(
-        storage=SimpleNamespace(),
-        portfolio=SimpleNamespace(reporting_service=object()),
+        storage=storage,
+        portfolio=portfolio,
         read_service_factory=read_service_factory,
     )
     service.list_accounts = Mock(
@@ -186,6 +195,10 @@ def test_portfolio_service_builds_one_multi_account_valuation_evidence_snapshot(
     assert len(result["quotes"]) == 1
     assert result["snapshot"]["snapshot_id"].startswith("valuation-")
     assert result["snapshot"]["quote_pool"]["unique_requested"] == 0
+    assert result["snapshot"]["deadline_seconds"] == 8
+    assert result["snapshot"]["deadline_exceeded"] is False
+    portfolio.fetch_price_snapshot.assert_called_once()
+    assert storage.get_holdings.call_count == 2
     for account in ("lx", "sy"):
         read_services[account].build_valuation_evidence.assert_called_once()
         assert (
@@ -193,6 +206,192 @@ def test_portfolio_service_builds_one_multi_account_valuation_evidence_snapshot(
             .build_valuation_evidence.call_args.kwargs["supplemental_codes"]
             == ["NVDA"]
         )
+        assert (
+            read_services[account]
+            .build_valuation_evidence.call_args.kwargs["price_snapshot"]
+            == {}
+        )
+
+
+def test_multi_account_valuation_fetches_one_shared_quote_snapshot():
+    holdings_by_account = {
+        "lx": [
+            Holding(
+                asset_id="BABA",
+                asset_name="阿里巴巴",
+                asset_type=AssetType.US_STOCK,
+                account="lx",
+                quantity=1,
+                currency="USD",
+                asset_class=AssetClass.US_ASSET,
+            )
+        ],
+        "sy": [
+            Holding(
+                asset_id="FUTU",
+                asset_name="富途",
+                asset_type=AssetType.US_STOCK,
+                account="sy",
+                quantity=2,
+                currency="USD",
+                asset_class=AssetClass.US_ASSET,
+            )
+        ],
+    }
+    storage = Mock()
+    storage.get_holdings.side_effect = (
+        lambda *, account: holdings_by_account[account]
+    )
+    fetcher = Mock()
+    fetcher.fetch_batch.return_value = {
+        "BABA": {
+            "price": 80,
+            "cny_price": 580,
+            "currency": "USD",
+            "source": "sina_us",
+        },
+        "FUTU": {
+            "price": 160,
+            "cny_price": 1160,
+            "currency": "USD",
+            "source": "sina_us",
+        },
+        "SPY": {
+            "price": 600,
+            "cny_price": 4350,
+            "currency": "USD",
+            "source": "sina_us",
+        },
+    }
+    portfolio = PortfolioManager(storage=storage, price_fetcher=fetcher)
+    service = PortfolioService(storage=storage, portfolio=portfolio)
+    service.list_accounts = Mock(
+        return_value={"success": True, "accounts": ["lx", "sy"]}
+    )
+
+    started = time.monotonic()
+    result = service.get_valuation_evidence(
+        accounts=["lx", "sy"],
+        supplemental_codes=["SPY"],
+        price_timeout=1,
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "complete"
+    assert [item["status"] for item in result["account_status"]] == [
+        "complete",
+        "complete",
+    ]
+    fetcher.fetch_batch.assert_called_once()
+    assert fetcher.fetch_batch.call_args.args[0] == ["BABA", "FUTU", "SPY"]
+    deadline = fetcher.fetch_batch.call_args.kwargs["deadline"]
+    assert started < deadline <= started + 1.1
+    assert storage.get_total_shares.call_count == 0
+    assert {item["code"] for item in result["holdings"]} == {"BABA", "FUTU"}
+    assert {item["code"] for item in result["quotes"]} == {
+        "BABA",
+        "FUTU",
+        "SPY",
+    }
+
+
+def test_multi_account_valuation_returns_partial_at_shared_wall_clock_deadline():
+    holdings_by_account = {
+        account: [
+            Holding(
+                asset_id=code,
+                asset_name=code,
+                asset_type=AssetType.US_STOCK,
+                account=account,
+                quantity=1,
+                currency="USD",
+                asset_class=AssetClass.US_ASSET,
+            )
+        ]
+        for account, code in (("lx", "BABA"), ("sy", "FUTU"))
+    }
+    storage = Mock()
+    storage.get_holdings.side_effect = (
+        lambda *, account: holdings_by_account[account]
+    )
+    fetcher = Mock()
+
+    def exhaust_deadline(_codes, **kwargs):
+        deadline = kwargs["deadline"]
+        while time.monotonic() < deadline:
+            time.sleep(0.001)
+        return {}
+
+    fetcher.fetch_batch.side_effect = exhaust_deadline
+    portfolio = PortfolioManager(storage=storage, price_fetcher=fetcher)
+    service = PortfolioService(storage=storage, portfolio=portfolio)
+    service.list_accounts = Mock(
+        return_value={"success": True, "accounts": ["lx", "sy"]}
+    )
+
+    started = time.monotonic()
+    result = service.get_valuation_evidence(
+        accounts=["lx", "sy"],
+        price_timeout=0.05,
+    )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.2
+    assert fetcher.fetch_batch.call_count == 1
+    assert result["success"] is True
+    assert result["status"] == "partial"
+    assert result["snapshot"]["deadline_exceeded"] is True
+    assert [item["status"] for item in result["account_status"]] == [
+        "partial",
+        "partial",
+    ]
+    assert len(result["holdings"]) == 2
+    assert any("全局 deadline" in warning for warning in result["warnings"])
+
+
+def test_multi_account_deadline_stops_loading_later_accounts_and_quote_work():
+    first_holding = Holding(
+        asset_id="BABA",
+        asset_name="阿里巴巴",
+        asset_type=AssetType.US_STOCK,
+        account="lx",
+        quantity=1,
+        currency="USD",
+        asset_class=AssetClass.US_ASSET,
+    )
+    storage = Mock()
+
+    def slow_first_account(*, account):
+        assert account == "lx"
+        time.sleep(0.03)
+        return [first_holding]
+
+    storage.get_holdings.side_effect = slow_first_account
+    fetcher = Mock()
+    portfolio = PortfolioManager(storage=storage, price_fetcher=fetcher)
+    service = PortfolioService(storage=storage, portfolio=portfolio)
+    service.list_accounts = Mock(
+        return_value={"success": True, "accounts": ["lx", "sy"]}
+    )
+
+    result = service.get_valuation_evidence(
+        accounts=["lx", "sy"],
+        price_timeout=0.02,
+    )
+
+    assert storage.get_holdings.call_count == 1
+    fetcher.fetch_batch.assert_not_called()
+    assert result["success"] is True
+    assert result["status"] == "partial"
+    assert [item["status"] for item in result["account_status"]] == [
+        "partial",
+        "deadline_exceeded",
+    ]
+    assert result["holdings"][0]["code"] == "BABA"
+    assert any(
+        "全局 deadline 前未读取账户持仓" in warning
+        for warning in result["account_status"][1]["warnings"]
+    )
 
 
 def test_portfolio_service_rejects_unknown_valuation_evidence_account():

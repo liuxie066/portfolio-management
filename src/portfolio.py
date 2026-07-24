@@ -202,7 +202,12 @@ class PortfolioManager:
                             allow_stale_price_fallback: bool = True,
                             price_market_closed_ttl_multiplier: float = 1.0,
                             run_quote_pool: Any = None,
-                            supplemental_codes: list[str] | None = None) -> PortfolioValuation:
+                            supplemental_codes: list[str] | None = None,
+                            deadline: float | None = None,
+                            holdings: list[Any] | None = None,
+                            price_snapshot: Dict[str, Any] | None = None,
+                            price_warnings: list[str] | None = None,
+                            total_shares: Any = None) -> PortfolioValuation:
         """计算账户估值
 
         Args:
@@ -220,6 +225,30 @@ class PortfolioManager:
             price_market_closed_ttl_multiplier=price_market_closed_ttl_multiplier,
             run_quote_pool=run_quote_pool,
             supplemental_codes=supplemental_codes,
+            deadline=deadline,
+            holdings=holdings,
+            price_snapshot=price_snapshot,
+            price_warnings=price_warnings,
+            total_shares=total_shares,
+        )
+
+    def fetch_price_snapshot(
+        self,
+        *,
+        holdings: list[Any],
+        supplemental_codes: list[str] | None = None,
+        price_timeout_seconds: int = 25,
+        run_quote_pool: Any = None,
+        deadline: float | None = None,
+    ) -> tuple[Dict[str, Any], list[str]]:
+        """Fetch one shared quote snapshot for multi-account valuation."""
+        self.valuation_service.price_fetcher = self.price_fetcher
+        return self.valuation_service.fetch_price_snapshot(
+            holdings=holdings,
+            supplemental_codes=supplemental_codes,
+            price_timeout_seconds=price_timeout_seconds,
+            run_quote_pool=run_quote_pool,
+            deadline=deadline,
         )
 
     # ========== 净值记录 ==========
