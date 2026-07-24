@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.24 - 2026-07-24
+
+- Added a read-only loopback valuation-evidence endpoint for multi-account consumers, returning current non-option holdings, supplemental quotes, explicit CNY FX evidence, quote provenance, freshness, and per-account quality.
+- Reused the canonical valuation and shared run quote pool so options-monitor can request assignment underlyings without introducing a second pricing path.
+- Kept CNY cash and MMF on fixed identity pricing, stale or missing evidence explicit, and all portfolio, NAV, and holdings state unmodified.
+
 ## 0.1.23 - 2026-07-23
 
 - Sent Futu holdings-sync and NAV History receipts as Feishu post messages with native titles instead of unparsed Markdown headers.

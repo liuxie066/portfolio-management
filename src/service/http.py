@@ -5,7 +5,7 @@ from typing import Any, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .application import PortfolioService
 from .bind import allow_remote_from_env, is_loopback_client
@@ -59,6 +59,12 @@ class DailyNavJobRequest(BaseModel):
     sync_futu_dry_run: Optional[bool] = None
     force_non_business_day: bool = False
     run_id: Optional[str] = None
+
+
+class ValuationEvidenceRequest(BaseModel):
+    accounts: list[str] = Field(min_length=1, max_length=20)
+    supplemental_codes: list[str] = Field(default_factory=list, max_length=500)
+    price_timeout: int = Field(default=30, ge=1, le=300)
 
 
 def _service(request: Request) -> PortfolioService:
@@ -165,6 +171,16 @@ def create_app(service: Optional[PortfolioService] = None, allow_remote: Optiona
             period=period,
             as_of_month=as_of_month,
         )
+
+    @app.post("/analysis/valuation-evidence", tags=["analysis"])
+    def get_valuation_evidence_query(
+        request: Request,
+        payload: ValuationEvidenceRequest,
+    ):
+        result = _service(request).get_valuation_evidence(**_payload_dict(payload))
+        if result.get("success") is False and result.get("error_code") == "INPUT_ERROR":
+            return JSONResponse(status_code=400, content=result)
+        return result
 
 
     @app.post("/nav/record", tags=["nav"])

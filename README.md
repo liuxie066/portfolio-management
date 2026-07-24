@@ -121,11 +121,15 @@ python scripts/service.py start
 python scripts/service.py status
 curl http://127.0.0.1:8765/health
 curl 'http://127.0.0.1:8765/accounts/overview?accounts=lx,alice'
+curl -X POST http://127.0.0.1:8765/analysis/valuation-evidence \
+  -H 'Content-Type: application/json' \
+  -d '{"accounts":["lx"],"supplemental_codes":["NVDA"]}'
 ```
 
 `./pm` 常用命令会优先访问本地服务；服务不可用时回退到 `PortfolioService` 本地直连。使用 `--no-service` 可强制直连，使用 `--require-service` 可禁止 fallback。Linux 上可用 `scripts/install.sh --apply --enable-api-service` 显式启用 `portfolio-management-api.service`；安装器只生成 loopback unit，不会自动启用。
 
 HTTP 服务默认只绑定 `127.0.0.1` / `localhost` / `::1`，且当前不带鉴权。非 loopback 绑定必须显式 `--allow-remote`，并放在已有鉴权的网络边界后面。
+`/analysis/valuation-evidence` 虽使用 POST 承载有界查询体，但不写持仓、NAV 或其他 portfolio 事实；它为同机 options-monitor 返回多账户非期权持仓、补充标的报价和显式 FX 证据，行情层仍沿用既有 cache 行为。
 
 ## 日报与发布
 

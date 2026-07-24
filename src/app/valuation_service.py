@@ -31,9 +31,17 @@ class ValuationService:
         allow_stale_price_fallback: bool = True,
         price_market_closed_ttl_multiplier: float = 1.0,
         run_quote_pool: Any = None,
+        supplemental_codes: list[str] | None = None,
     ) -> PortfolioValuation:
         holdings = self.storage.get_holdings(account=account)
-        if not holdings:
+        supplemental = list(
+            dict.fromkeys(
+                str(code or "").strip()
+                for code in (supplemental_codes or [])
+                if str(code or "").strip()
+            )
+        )
+        if not holdings and not supplemental:
             return PortfolioValuation(account=account, total_value_cny=0)
 
         prices: dict[str, Any] = {}
@@ -48,6 +56,8 @@ class ValuationService:
             asset_type_map.update(
                 {str(h.asset_id).strip().upper(): h.asset_type for h in holdings if h.asset_id}
             )
+            for code in supplemental:
+                name_map.setdefault(code, code)
 
             try:
                 from src.market_time import MarketTimeUtil
@@ -74,7 +84,7 @@ class ValuationService:
                     "skip_us": False,
                     "deadline": deadline,
                 }
-                codes = [h.asset_id for h in holdings]
+                codes = list(dict.fromkeys([h.asset_id for h in holdings] + supplemental))
                 if run_quote_pool is None:
                     prices = self.price_fetcher.fetch_batch(codes, **fetch_kwargs)
                 else:
@@ -240,5 +250,10 @@ class ValuationService:
             shares=total_shares,
             nav=nav,
             holdings=holdings,
+            price_evidence={
+                str(code): dict(payload)
+                for code, payload in prices.items()
+                if isinstance(payload, dict)
+            },
             warnings=warnings,
         )

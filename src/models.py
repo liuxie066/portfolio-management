@@ -382,6 +382,9 @@ class PortfolioValuation(BaseModel):
     # 持仓明细
     holdings: List[Holding] = Field(default_factory=list)
 
+    # 本次估值实际观察到的报价证据；仅运行时返回，不持久化
+    price_evidence: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+
     # 估值告警（如分类兜底、价格缺失、缓存回退等）
     warnings: List[str] = Field(default_factory=list)
 

@@ -73,6 +73,19 @@ Config keys:
 - `GET /distribution?accounts=lx,sy&group_cash=true` merges rows with the same asset code and collapses cash/MMF into one `现金及等价物` row; `group_cash=true` implies asset-level distribution.
 - `GET /report/full?account=alice&price_timeout=30`
 - `GET /report/{daily|monthly|yearly}?account=alice&price_timeout=30`
+- `POST /analysis/valuation-evidence` is a read-only bounded query body for one multi-account valuation snapshot. It accepts `accounts`, optional `supplemental_codes`, and `price_timeout`; returns holdings plus native/CNY quote and explicit FX provenance as `portfolio.valuation_evidence.v1`.
+
+The valuation-evidence endpoint uses POST only to avoid an unbounded query
+string when many supplemental underlyings are requested. It does not write
+holdings, NAV, or other portfolio facts, shares successful quotes within the
+request, and keeps missing or stale quotes explicit as `partial`. Normal pricing
+cache refresh behavior still applies:
+
+```bash
+curl -X POST http://127.0.0.1:8765/analysis/valuation-evidence \
+  -H 'Content-Type: application/json' \
+  -d '{"accounts":["lx","sy"],"supplemental_codes":["NVDA","0700.HK"],"price_timeout":30}'
+```
 
 ## Write Endpoints
 

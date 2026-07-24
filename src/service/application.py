@@ -5,7 +5,9 @@ This layer gives HTTP, CLI, and future workers one application boundary.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
+from uuid import uuid4
 
 
 class PortfolioService:
@@ -154,6 +156,134 @@ class PortfolioService:
             )
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    def get_valuation_evidence(
+        self,
+        *,
+        accounts: Any,
+        supplemental_codes: Any = None,
+        price_timeout: int = 30,
+    ) -> Dict[str, Any]:
+        normalized_accounts = list(
+            dict.fromkeys(
+                str(item or "").strip().lower()
+                for item in (accounts or [])
+                if str(item or "").strip()
+            )
+        )
+        normalized_codes = list(
+            dict.fromkeys(
+                str(item or "").strip()
+                for item in (supplemental_codes or [])
+                if str(item or "").strip()
+            )
+        )
+        if not normalized_accounts:
+            return {
+                "success": False,
+                "error_code": "INPUT_ERROR",
+                "error": "accounts must contain at least one account",
+            }
+        if len(normalized_accounts) > 20:
+            return {
+                "success": False,
+                "error_code": "INPUT_ERROR",
+                "error": "accounts must contain at most 20 accounts",
+            }
+        if len(normalized_codes) > 500:
+            return {
+                "success": False,
+                "error_code": "INPUT_ERROR",
+                "error": "supplemental_codes must contain at most 500 codes",
+            }
+
+        account_result = self.list_accounts(include_default=True)
+        available_accounts = {
+            str(item or "").strip().lower()
+            for item in (account_result.get("accounts") or [])
+            if str(item or "").strip()
+        }
+        unknown = [account for account in normalized_accounts if account not in available_accounts]
+        if unknown:
+            return {
+                "success": False,
+                "error_code": "INPUT_ERROR",
+                "error": f"unknown accounts: {', '.join(unknown)}",
+            }
+
+        from src.app.run_quote_pool import RunQuotePool
+
+        pool = RunQuotePool()
+        account_items: list[Dict[str, Any]] = []
+        holdings: list[Dict[str, Any]] = []
+        quotes_by_identity: Dict[tuple[str, str], Dict[str, Any]] = {}
+        warnings: list[str] = []
+        for account in normalized_accounts:
+            try:
+                item = self._read_service(account).build_valuation_evidence(
+                    supplemental_codes=normalized_codes,
+                    price_timeout_seconds=price_timeout,
+                    run_quote_pool=pool,
+                )
+            except Exception as exc:
+                item = {
+                    "account": account,
+                    "status": "unavailable",
+                    "holdings": [],
+                    "quotes": [],
+                    "warnings": [f"{account}: {exc}"],
+                }
+            account_items.append(item)
+            holdings.extend(
+                dict(row)
+                for row in (item.get("holdings") or [])
+                if isinstance(row, dict)
+            )
+            for quote in item.get("quotes") or []:
+                if not isinstance(quote, dict):
+                    continue
+                identity = (
+                    str(quote.get("code") or "").strip().upper(),
+                    str(quote.get("currency") or "").strip().upper(),
+                )
+                if identity[0]:
+                    quotes_by_identity.setdefault(identity, dict(quote))
+            warnings.extend(str(value) for value in (item.get("warnings") or []) if str(value).strip())
+
+        statuses = {str(item.get("status") or "") for item in account_items}
+        status = (
+            "unavailable"
+            if statuses == {"unavailable"}
+            else ("complete" if statuses <= {"complete"} else "partial")
+        )
+        observed_at = datetime.now(timezone.utc).isoformat()
+        return {
+            "schema_version": "portfolio.valuation_evidence.v1",
+            "success": True,
+            "status": status,
+            "scope": {
+                "accounts": normalized_accounts,
+                "supplemental_codes": normalized_codes,
+                "reporting_currency": "CNY",
+            },
+            "snapshot": {
+                "snapshot_id": f"valuation-{uuid4().hex}",
+                "observed_at": observed_at,
+                "quote_pool": pool.summary(),
+            },
+            "holdings": holdings,
+            "quotes": list(quotes_by_identity.values()),
+            "account_status": [
+                {
+                    "account": item.get("account"),
+                    "status": item.get("status"),
+                    "warnings": list(item.get("warnings") or []),
+                    "diagnostics": list(item.get("diagnostics") or []),
+                }
+                for item in account_items
+            ],
+            "warnings": list(dict.fromkeys(warnings)),
+        }
 
     def get_cash(self, *, account: Optional[str] = None) -> Dict[str, Any]:
         from src.app import CashService

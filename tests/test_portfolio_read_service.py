@@ -122,6 +122,90 @@ def test_build_snapshot_passes_optional_run_quote_pool_to_valuation():
     )
 
 
+def test_build_valuation_evidence_preserves_quote_and_fx_provenance():
+    valuation = SimpleNamespace(
+        holdings=[
+            SimpleNamespace(
+                asset_id="USD-CASH",
+                asset_name="美元现金",
+                quantity=100,
+                asset_type=AssetType.CASH,
+                account="lx",
+                broker="富途",
+                currency="USD",
+                current_price=1,
+                cny_price=7.2,
+                market_value_cny=720,
+            )
+        ],
+        price_evidence={
+            "USD-CASH": {
+                "price": 1,
+                "cny_price": 7.2,
+                "currency": "USD",
+                "exchange_rate": 7.2,
+                "source": "fixed",
+                "source_chain": ["fixed", "fx"],
+                "fetched_at": "2026-07-24T01:00:00+00:00",
+            },
+            "NVDA": {
+                "price": 120,
+                "cny_price": 864,
+                "currency": "USD",
+                "exchange_rate": 7.2,
+                "source": "finnhub",
+                "fetched_at": "2026-07-24T01:00:01+00:00",
+            },
+        },
+        warnings=["[价格汇总] realtime=2"],
+    )
+    portfolio = SimpleNamespace(calculate_valuation=Mock(return_value=valuation))
+    service = PortfolioReadService(
+        account="lx",
+        storage=Mock(),
+        portfolio=portfolio,
+        reporting_service=Mock(),
+    )
+    pool = object()
+
+    result = service.build_valuation_evidence(
+        supplemental_codes=["NVDA"],
+        price_timeout_seconds=9,
+        run_quote_pool=pool,
+    )
+
+    assert result["status"] == "complete"
+    assert result["holdings"][0]["asset_type"] == "cash"
+    assert result["quotes"][0]["exchange_rate_to_cny"] == 7.2
+    assert {item["code"] for item in result["quotes"]} == {"USD-CASH", "NVDA"}
+    portfolio.calculate_valuation.assert_called_once_with(
+        "lx",
+        price_timeout_seconds=9,
+        run_quote_pool=pool,
+        supplemental_codes=["NVDA"],
+    )
+
+
+def test_build_valuation_evidence_marks_missing_supplemental_quote_partial():
+    valuation = SimpleNamespace(
+        holdings=[],
+        price_evidence={},
+        warnings=[],
+    )
+    service = PortfolioReadService(
+        account="lx",
+        storage=Mock(),
+        portfolio=SimpleNamespace(calculate_valuation=Mock(return_value=valuation)),
+        reporting_service=Mock(),
+    )
+
+    result = service.build_valuation_evidence(supplemental_codes=["NVDA"])
+
+    assert result["status"] == "partial"
+    assert result["quotes"] == []
+    assert result["warnings"] == ["NVDA: supplemental quote missing"]
+
+
 def test_get_holdings_without_price_keeps_light_storage_read():
     portfolio = SimpleNamespace(calculate_valuation=Mock())
     storage = SimpleNamespace(

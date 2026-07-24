@@ -65,6 +65,50 @@ def test_valuation_service_values_holdings_with_prices():
     assert result.holdings[0].weight == 0.173554
 
 
+def test_valuation_service_fetches_supplemental_codes_and_exposes_price_evidence():
+    storage = Mock()
+    fetcher = Mock()
+    storage.get_holdings.return_value = [
+        Holding(
+            asset_id="CNY-CASH",
+            asset_name="人民币现金",
+            asset_type=AssetType.CASH,
+            account="lx",
+            quantity=100,
+            currency="CNY",
+            asset_class=AssetClass.CASH,
+        )
+    ]
+    storage.get_total_shares.return_value = 1000
+    fetcher.fetch_batch.return_value = {
+        "CNY-CASH": {
+            "price": 1,
+            "cny_price": 1,
+            "currency": "CNY",
+            "exchange_rate": 1,
+            "source": "fixed",
+        },
+        "NVDA": {
+            "price": 120,
+            "cny_price": 864,
+            "currency": "USD",
+            "exchange_rate": 7.2,
+            "source": "finnhub",
+        },
+    }
+    service = ValuationService(
+        manager=_manager(storage, fetcher),
+        storage=storage,
+        price_fetcher=fetcher,
+    )
+
+    result = service.calculate_valuation("lx", supplemental_codes=["NVDA", "NVDA"])
+
+    assert fetcher.fetch_batch.call_args.args[0] == ["CNY-CASH", "NVDA"]
+    assert result.total_value_cny == 100
+    assert result.price_evidence["NVDA"]["exchange_rate"] == 7.2
+
+
 def test_valuation_service_matches_price_keys_case_insensitively():
     storage = Mock()
     fetcher = Mock()

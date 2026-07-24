@@ -45,6 +45,14 @@ class FakePortfolioService:
         self.calls.append(("capital_facts", kwargs))
         return {"success": True, "status": "ok", **kwargs}
 
+    def get_valuation_evidence(self, **kwargs):
+        self.calls.append(("valuation_evidence", kwargs))
+        return {
+            "success": True,
+            "status": "complete",
+            "scope": kwargs,
+        }
+
     def record_nav(self, **kwargs):
         self.calls.append(("record_nav", kwargs))
         return {"success": True, "dry_run": kwargs["dry_run"], "account": kwargs["account"]}
@@ -119,6 +127,11 @@ def test_http_service_routes_delegate_to_portfolio_service():
     assert client.get("/cash", params={"account": "alice/bob"}).json()["account"] == "alice/bob"
     assert client.get("/nav", params={"account": "alice/bob", "days": 14}).json()["days"] == 14
     assert client.get("/analysis/capital-facts", params={"account": "alice/bob", "period": "mtd", "as_of_month": "2026-06"}).json()["status"] == "ok"
+    evidence = client.post(
+        "/analysis/valuation-evidence",
+        json={"accounts": ["alice"], "supplemental_codes": ["NVDA"], "price_timeout": 13},
+    ).json()
+    assert evidence["status"] == "complete"
     assert client.post("/nav/record", json={"account": "alice/bob", "price_timeout": 8, "dry_run": False, "confirm": True, "overwrite_existing": False, "run_id": "run-nav-1"}).json()["dry_run"] is False
     assert client.get("/nav/duplicates", params={"account": "alice/bob"}).json()["duplicate_group_count"] == 0
     assert client.get("/distribution", params={"account": "alice/bob"}).json()["account"] == "alice/bob"
@@ -136,6 +149,10 @@ def test_http_service_routes_delegate_to_portfolio_service():
         ("cash", {"account": "alice/bob"}),
         ("nav", {"account": "alice/bob", "days": 14}),
         ("capital_facts", {"account": "alice/bob", "period": "mtd", "as_of_month": "2026-06"}),
+        (
+            "valuation_evidence",
+            {"accounts": ["alice"], "supplemental_codes": ["NVDA"], "price_timeout": 13},
+        ),
         ("record_nav", {"account": "alice/bob", "price_timeout": 8, "dry_run": False, "confirm": True, "overwrite_existing": False, "use_bulk_persist": False, "run_id": "run-nav-1"}),
         ("audit_nav_history_duplicates", {"account": "alice/bob"}),
         ("distribution", {"account": "alice/bob", "accounts": None, "by_asset": False, "include_value": True}),

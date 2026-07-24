@@ -129,6 +129,87 @@ def test_portfolio_service_multi_account_overview_exposes_error_when_all_account
     assert result["errors"] == [{"account": "default", "error": "missing holdings table"}]
 
 
+def test_portfolio_service_builds_one_multi_account_valuation_evidence_snapshot():
+    read_services = {}
+
+    def read_service_factory(**kwargs):
+        account = kwargs["account"]
+        service = SimpleNamespace(
+            build_valuation_evidence=Mock(
+                return_value={
+                    "account": account,
+                    "status": "complete",
+                    "holdings": [
+                        {
+                            "account": account,
+                            "code": f"{account}-CASH",
+                            "asset_type": "cash",
+                            "market_value_cny": 100,
+                        }
+                    ],
+                    "quotes": [
+                        {
+                            "code": "NVDA",
+                            "currency": "USD",
+                            "price_native": 120,
+                            "price_cny": 864,
+                            "exchange_rate_to_cny": 7.2,
+                        }
+                    ],
+                    "warnings": [],
+                }
+            )
+        )
+        read_services[account] = service
+        return service
+
+    service = PortfolioService(
+        storage=SimpleNamespace(),
+        portfolio=SimpleNamespace(reporting_service=object()),
+        read_service_factory=read_service_factory,
+    )
+    service.list_accounts = Mock(
+        return_value={"success": True, "accounts": ["lx", "sy"]}
+    )
+
+    result = service.get_valuation_evidence(
+        accounts=["LX", "sy"],
+        supplemental_codes=["NVDA", "NVDA"],
+        price_timeout=8,
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "complete"
+    assert result["scope"]["accounts"] == ["lx", "sy"]
+    assert result["scope"]["supplemental_codes"] == ["NVDA"]
+    assert len(result["holdings"]) == 2
+    assert len(result["quotes"]) == 1
+    assert result["snapshot"]["snapshot_id"].startswith("valuation-")
+    assert result["snapshot"]["quote_pool"]["unique_requested"] == 0
+    for account in ("lx", "sy"):
+        read_services[account].build_valuation_evidence.assert_called_once()
+        assert (
+            read_services[account]
+            .build_valuation_evidence.call_args.kwargs["supplemental_codes"]
+            == ["NVDA"]
+        )
+
+
+def test_portfolio_service_rejects_unknown_valuation_evidence_account():
+    service = PortfolioService(storage=SimpleNamespace())
+    service.list_accounts = Mock(
+        return_value={"success": True, "accounts": ["lx"]}
+    )
+
+    result = service.get_valuation_evidence(accounts=["sy"])
+
+    assert result == {
+        "success": False,
+        "error_code": "INPUT_ERROR",
+        "error": "unknown accounts: sy",
+    }
+
+
 def test_portfolio_service_get_nav_uses_direct_storage_path():
     navs = [
         SimpleNamespace(
