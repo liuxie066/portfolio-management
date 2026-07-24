@@ -1,0 +1,59 @@
+name: Publish GitHub Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Publish release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Publish or verify release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="${GITHUB_REF_NAME}"
+          release_state="$(
+            gh release view "${tag}" \
+              --json isDraft \
+              --jq '.isDraft' \
+              2>/dev/null || true
+          )"
+
+          case "${release_state}" in
+            false)
+              echo "Release ${tag} already exists."
+              ;;
+            true)
+              gh release edit "${tag}" --draft=false
+              ;;
+            "")
+              gh release create "${tag}" \
+                --verify-tag \
+                --title "${tag}" \
+                --generate-notes \
+                --fail-on-no-commits
+              ;;
+            *)
+              echo "Unexpected release state: ${release_state}" >&2
+              exit 1
+              ;;
+          esac
+
+          gh release view "${tag}" \
+            --json tagName,isDraft,isPrerelease,url \
+            --jq 'select(.isDraft == false) | {tagName,isDraft,isPrerelease,url}'
