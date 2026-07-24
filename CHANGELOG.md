@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.25 - 2026-07-24
+
+- Bounded multi-account valuation-evidence requests with one shared absolute deadline and one merged quote/FX snapshot across all requested accounts.
+- Returned explicit partial account and quote evidence when the request budget is exhausted, without continuing later account or provider work in the background.
+- Made Sina batch the primary US quote path, limited Finnhub supplements to one short request budget with circuit breaking, and removed provider URLs and tokens from pricing errors and logs.
+
 ## 0.1.24 - 2026-07-24
 
 - Added a read-only loopback valuation-evidence endpoint for multi-account consumers, returning current non-option holdings, supplemental quotes, explicit CNY FX evidence, quote provenance, freshness, and per-account quality.
