@@ -177,7 +177,7 @@ Feishu Bitable is the production source of truth. Core tables:
 
 Optional capability tables:
 
-- `transactions`
+- `transactions` (legacy read-only archive; no active product writer)
 - `compensation_tasks`
 - `schema_version`
 

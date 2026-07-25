@@ -7,9 +7,7 @@ from decimal import Decimal
 from typing import Any, Dict, Optional, Union
 
 from .models import (
-    Holding, Transaction, CashFlow, NAVHistory,
-    PortfolioValuation, AssetType, AssetClass,
-    CASH_ASSET_ID, MMF_ASSET_ID
+    CashFlow, NAVHistory, PortfolioValuation,
 )
 from .price_fetcher import PriceFetcher
 from .app import (
@@ -115,56 +113,6 @@ class PortfolioManager:
             asset_id=asset_id,
             user_provided_name=user_provided_name,
             timeout=timeout,
-        )
-
-    def buy(self, tx_date: date, asset_id: str, asset_name: str, asset_type: AssetType,
-            account: str, quantity: float, price: float, currency: str,
-            broker: Optional[str] = None, fee: float = 0, remark: str = "",
-            asset_class: Optional[AssetClass] = None, industry: Optional[str] = None,
-            auto_deduct_cash: bool = True, request_id: str = None) -> Transaction:
-        """
-        买入资产
-        默认自动扣减现金：先扣现金(CNY-CASH)，不足部分扣货币基金(CNY-MMF)
-        采用先校验、后执行的策略确保原子性
-        """
-        return self.trade_service.buy(
-            tx_date=tx_date,
-            asset_id=asset_id,
-            asset_name=asset_name,
-            asset_type=asset_type,
-            account=account,
-            quantity=quantity,
-            price=price,
-            currency=currency,
-            broker=broker,
-            fee=fee,
-            remark=remark,
-            asset_class=asset_class,
-            industry=industry,
-            auto_deduct_cash=auto_deduct_cash,
-            request_id=request_id,
-        )
-
-    def sell(self, tx_date: date, asset_id: str, account: str, quantity: float,
-             price: float, currency: str, broker: Optional[str] = None,
-             fee: float = 0, remark: str = "",
-             auto_add_cash: bool = True, request_id: str = None) -> Transaction:
-        """
-        卖出资产 (不更新成本，仅减少持仓)
-        默认自动增加现金到 CNY-CASH
-        """
-        return self.trade_service.sell(
-            tx_date=tx_date,
-            asset_id=asset_id,
-            account=account,
-            quantity=quantity,
-            price=price,
-            currency=currency,
-            broker=broker,
-            fee=fee,
-            remark=remark,
-            auto_add_cash=auto_add_cash,
-            request_id=request_id,
         )
 
     def deposit(self, flow_date: date, account: str, amount: float, currency: str,
