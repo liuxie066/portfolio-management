@@ -1,8 +1,7 @@
 from datetime import date
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 from src.portfolio import PortfolioManager
-from src.models import Transaction, TransactionType, Holding, AssetType, CashFlow
 
 
 def test_normalize_payload_helpers():
@@ -22,36 +21,6 @@ def test_normalize_payload_helpers():
     holding_stock = manager._normalize_holding_payload(quantity=1.005, cash_like=False)
     assert holding_cash['quantity'] == 1.01
     assert holding_stock['quantity'] == 1.005
-
-
-@patch.object(PortfolioManager, '_get_asset_name', return_value='平安银行')
-def test_buy_creates_quantized_transaction_and_holding(mock_get_name):
-    storage = Mock()
-    fetcher = Mock()
-    manager = PortfolioManager(storage=storage, price_fetcher=fetcher)
-    storage.get_holding.return_value = None
-    storage.add_transaction.side_effect = lambda tx: tx
-    storage.replace_holding.side_effect = lambda holding: holding
-
-    manager.buy(
-        tx_date=date(2025, 3, 14),
-        asset_id='000001',
-        asset_name='平安银行',
-        asset_type=AssetType.A_STOCK,
-        account='测试账户',
-        quantity=1.005,
-        price=1.005,
-        currency='CNY',
-        fee=0.005,
-        auto_deduct_cash=False,
-    )
-
-    tx = storage.add_transaction.call_args[0][0]
-    holding = storage.replace_holding.call_args[0][0]
-    assert tx.price == 1.01
-    assert tx.fee == 0.01
-    assert tx.amount == 1.02
-    assert holding.quantity == 1.005
 
 
 def test_deposit_creates_quantized_cashflow_and_cash_holding():
@@ -90,36 +59,3 @@ def test_foreign_cash_flow_requires_cny_amount_or_exchange_rate():
         assert False, 'expected ValueError'
     except ValueError as e:
         assert '外币现金流必须显式提供 cny_amount 或 exchange_rate' in str(e)
-
-
-def test_sell_creates_quantized_transaction_boundary():
-    storage = Mock()
-    fetcher = Mock()
-    manager = PortfolioManager(storage=storage, price_fetcher=fetcher)
-    storage.get_holding.return_value = Holding(
-        asset_id='000001',
-        asset_name='平安银行',
-        asset_type=AssetType.A_STOCK,
-        account='测试账户',
-        quantity=1000,
-        currency='CNY',
-    )
-    storage.add_transaction.side_effect = lambda tx: tx
-    manager.cash_service.add_cash = Mock()
-
-    manager.sell(
-        tx_date=date(2025, 3, 14),
-        asset_id='000001',
-        account='测试账户',
-        quantity=1.005,
-        price=1.005,
-        currency='CNY',
-        fee=0.005,
-        auto_add_cash=False,
-    )
-
-    tx = storage.add_transaction.call_args[0][0]
-    assert tx.quantity == -1.005
-    assert tx.price == 1.01
-    assert tx.fee == 0.01
-    assert tx.amount == -1.02

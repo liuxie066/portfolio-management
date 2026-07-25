@@ -61,12 +61,15 @@ Allowed `asset_type` values include: `a_stock`, `hk_stock`, `us_stock`, `exchang
 
 Role: optional
 
-Purpose: optional trade ledger. It is not part of the daily NAV core path unless you choose to maintain trade history.
+Status: legacy read-only archive
+
+Purpose: historical trade ledger. The product has no active `transactions` writer;
+Futu synchronization updates current `holdings` quantity and average cost directly.
 
 Manual edit policy:
 - Current positions are maintained in `holdings`; cash movements used by NAV are maintained in `cash_flow`.
 - Manual correction of existing transaction rows is acceptable for obvious data fixes.
-- Do not treat this table as a required manual workflow while the product is focused on daily NAV and position distribution.
+- Do not treat this table as a required manual workflow or a source for current positions.
 - If you later want trade replay/cost analysis, re-enable this table as a maintained ledger and migrate `tx_date` to a true date field.
 
 Manual view fields:

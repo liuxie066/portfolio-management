@@ -20,11 +20,9 @@ from src.portfolio import PortfolioManager
 from src.price_fetcher import PriceFetcher
 from src.models import AssetType, AssetClass, Industry, Holding, NAVHistory
 from src.asset_utils import (
-    validate_code as validate_asset_code,
     detect_asset_type,
     parse_date,
 )
-from src.broker_message_parser import parse_futu_fill_message
 from src.app import AccountNavRecorderService, FutuBalanceSyncService, PortfolioReadService, ReportGenerationService, ReportQueryService
 from src.app.nav_finality import NavWriteContext
 from src.app.account_service import AccountService, normalize_accounts
@@ -37,7 +35,6 @@ from src.domain.nav.performance import (
 from src.service.application import PortfolioService
 from src.write_guard import (
     validate_and_normalize_cash_flow_input,
-    validate_and_normalize_trade_input,
     validate_and_normalize_nav_input,
 )
 from src.process_lock import account_lock_key, process_lock
@@ -108,151 +105,6 @@ class PortfolioSkill:
             api=self,
         )
 
-    # ---------- 交易记录 ----------
-
-    def buy(self, code: str, name: str, quantity: float, price: float,
-            date_str: str = None, broker: str = "平安证券", fee: float = 0,
-            auto_deduct_cash: bool = False, request_id: str = None,
-            skip_validation: bool = False) -> Dict[str, Any]:
-        """
-        记录买入交易
-
-        Args:
-            code: 资产代码（如 600519、AAPL）
-            name: 资产名称
-            quantity: 买入数量
-            price: 买入价格
-            date_str: 交易日期 (YYYY-MM-DD)，默认今天
-            broker: 券商/平台，默认 "平安证券"
-            fee: 手续费
-            auto_deduct_cash: 是否自动扣减现金，默认 False
-            request_id: 请求唯一标识（用于幂等性控制）
-            skip_validation: 是否跳过代码有效性校验（默认校验）
-
-        Returns:
-            {"success": bool, "transaction": dict, "message": str}
-        """
-        try:
-            tx_date = parse_date(date_str)
-
-            # 代码格式校验（不自动补齐，格式错误直接报错）
-            validated_code = validate_asset_code(code)
-
-            asset_type, currency, asset_class = detect_asset_type(validated_code)
-
-            # 代码有效性校验（通过价格接口验证）
-            if not skip_validation:
-                price_data = self.price_fetcher.fetch(validated_code)
-                if not price_data or 'error' in price_data or not price_data.get('price'):
-                    return {
-                        "success": False,
-                        "error": f"代码 {validated_code} 无效或无法获取价格",
-                        "message": f"代码 {validated_code} 无效或无法获取价格，请检查代码是否正确。如需强制记录，请设置 skip_validation=True"
-                    }
-
-            tx = self.portfolio.buy(
-                tx_date=tx_date,
-                asset_id=validated_code,
-                asset_name=name,
-                asset_type=asset_type,
-                account=self.account,
-                quantity=quantity,
-                price=price,
-                currency=currency,
-                broker=broker,
-                fee=fee,
-                asset_class=asset_class,
-                industry=Industry.OTHER,
-                auto_deduct_cash=auto_deduct_cash,
-                request_id=request_id
-            )
-
-            # 使用实际保存的完整名称（可能已从接口自动获取）
-            saved_name = tx.asset_name or name
-            return {
-                "success": True,
-                "transaction": {
-                    "record_id": tx.record_id,
-                    "date": tx.tx_date.isoformat(),
-                    "type": tx.tx_type.value,
-                    "code": tx.asset_id,
-                    "name": saved_name,
-                    "quantity": tx.quantity,
-                    "price": tx.price,
-                    "amount": tx.quantity * tx.price,
-                    "fee": tx.fee,
-                    "total_cost": tx.quantity * tx.price + tx.fee
-                },
-                "replayed": tx.was_replayed,
-                "message": f"买入记录已保存: {saved_name} {quantity}股 @ ¥{price}"
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e), "message": f"记录失败: {e}"}
-
-    def sell(self, code: str, quantity: float, price: float,
-             date_str: str = None, broker: str = None, fee: float = 0,
-             auto_add_cash: bool = False, request_id: str = None) -> Dict[str, Any]:
-        """
-        记录卖出交易
-
-        Args:
-            code: 资产代码
-            quantity: 卖出数量
-            price: 卖出价格
-            date_str: 交易日期 (YYYY-MM-DD)
-            broker: 券商/平台
-            fee: 手续费
-            auto_add_cash: 是否自动增加现金
-            request_id: 请求唯一标识（用于幂等性控制）
-
-        Returns:
-            {"success": bool, "transaction": dict, "message": str}
-        """
-        try:
-            tx_date = parse_date(date_str)
-
-            # 代码格式校验（不自动补齐，格式错误直接报错）
-            validated_code = validate_asset_code(code)
-
-            # 获取持仓信息
-            holding = self.storage.get_holding(validated_code, self.account, broker)
-            if not holding:
-                return {
-                    "success": False,
-                    "error": f"未找到持仓: {validated_code}",
-                    "message": f"未找到持仓: {validated_code}"
-                }
-
-            tx = self.portfolio.sell(
-                tx_date=tx_date,
-                asset_id=validated_code,
-                account=self.account,
-                quantity=quantity,
-                price=price,
-                currency=holding.currency,
-                broker=broker or holding.broker,
-                fee=fee,
-                auto_add_cash=auto_add_cash,
-                request_id=request_id
-            )
-
-            return {
-                "success": True,
-                "transaction": {
-                    "record_id": tx.record_id,
-                    "date": tx.tx_date.isoformat(),
-                    "code": tx.asset_id,
-                    "name": tx.asset_name,
-                    "quantity": quantity,
-                    "price": price,
-                    "proceeds": quantity * price - fee,
-                    "fee": fee
-                },
-                "message": f"卖出记录已保存: {tx.asset_name} {quantity}股 @ ¥{price}"
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e), "message": f"记录失败: {e}"}
-
     def deposit(self, amount: float, date_str: str = None,
                 remark: str = "入金", currency: str = "CNY") -> Dict[str, Any]:
         """记录入金"""
@@ -308,84 +160,6 @@ class PortfolioSkill:
             return {"success": False, "error": str(e)}
 
     # ---------- 持仓查询 ----------
-
-    def record_transaction_from_message(self, message: str,
-                                        broker: str = "富途",
-                                        fee: float = 0,
-                                        auto_cash: bool = False,
-                                        request_id: str = None,
-                                        dry_run: bool = True,
-                                        skip_validation: bool = False) -> Dict[str, Any]:
-        """解析券商成交提醒并写入交易表（transactions）。
-
-        当前支持富途成交提醒：
-        - 成功买入20股$富途控股 (FUTU.US)$，成交价格：147 ... 2026/03/12 21:59:45 (香港)
-
-        dry_run=True 时只返回解析结构，不写入。
-        """
-        parsed = parse_futu_fill_message(message, default_market=broker)
-        if not parsed.ok:
-            return {"success": False, "error": parsed.error, "parsed": parsed.__dict__}
-
-        # map to skill buy/sell
-        # derive code in our system: strip suffix like .US/.HK if needed
-        code = parsed.asset_id or ""
-        # portfolio-management asset_id for US is typically ticker like FUTU (not FUTU.US)
-        code_norm = code.replace('.US', '').replace('.HK', '') if code else None
-
-        # date
-        date_str = parsed.tx_date
-
-        # name
-        name = parsed.asset_name or code_norm or code
-
-        # Build a deterministic request_id unless user provided
-        rid = request_id or parsed.request_id
-
-        if dry_run:
-            return {
-                "success": True,
-                "dry_run": True,
-                "parsed": parsed.__dict__,
-                "action": {
-                    "tx_type": parsed.tx_type,
-                    "code": code_norm,
-                    "name": name,
-                    "quantity": parsed.quantity,
-                    "price": parsed.price,
-                    "date_str": date_str,
-                    "broker": broker,
-                    "fee": fee,
-                    "request_id": rid,
-                    "auto_cash": auto_cash,
-                }
-            }
-
-        if parsed.tx_type == 'BUY':
-            return self.buy(
-                code=code_norm,
-                name=name,
-                quantity=float(parsed.quantity),
-                price=float(parsed.price),
-                date_str=date_str,
-                broker=broker,
-                fee=fee,
-                auto_deduct_cash=auto_cash,
-                request_id=rid,
-                skip_validation=skip_validation,
-            )
-        else:
-            return self.sell(
-                code=code_norm,
-                quantity=float(parsed.quantity),
-                price=float(parsed.price),
-                date_str=date_str,
-                broker=broker,
-                fee=fee,
-                auto_add_cash=auto_cash,
-                request_id=rid,
-            )
-
 
     def get_holdings(self, include_cash: bool = True, group_by_market: bool = False,
                      include_price: bool = False, timeout: int = 10) -> Dict[str, Any]:
@@ -1087,48 +861,6 @@ def get_skill(account: str = None) -> PortfolioSkill:
                     _skill_instances[acct] = PortfolioSkill(account=acct)
     return _skill_instances[acct]
 
-
-# 交易记录
-def buy(code: str, name: str, quantity: float, price: float, account: str = None, **kwargs) -> Dict:
-    """买入资产"""
-    return get_skill(account).buy(code, name, quantity, price, **kwargs)
-
-def sell(code: str, quantity: float, price: float, account: str = None, **kwargs) -> Dict:
-    """卖出资产"""
-    return get_skill(account).sell(code, quantity, price, **kwargs)
-
-
-def record_transaction_from_message(message: str,
-                                    broker: str = "富途",
-                                    fee: float = 0,
-                                    auto_cash: bool = False,
-                                    request_id: str = None,
-                                    dry_run: bool = True,
-                                    skip_validation: bool = False,
-                                    account: str = None) -> Dict:
-    """从券商成交提醒消息中解析并记录交易。
-
-    当前支持（富途成交提醒，示例）：
-    - 成功买入20股$富途控股 (FUTU.US)$，成交价格：147 ... 2026/03/12 21:59:45 (香港)
-
-    Args:
-      message: 原始消息全文
-      market: 交易渠道/券商（默认 富途）
-      fee: 手续费（消息里通常没有，默认 0，可手填）
-      auto_cash: 买入时自动扣现金 / 卖出时自动加现金
-      request_id: 幂等键（不传则系统会自动生成）
-      dry_run: True 时只返回解析结果，不写入交易表
-      skip_validation: 是否跳过代码有效性校验
-    """
-    return get_skill(account).record_transaction_from_message(
-        message=message,
-        broker=broker,
-        fee=fee,
-        auto_cash=auto_cash,
-        request_id=request_id,
-        dry_run=dry_run,
-        skip_validation=skip_validation,
-    )
 
 def deposit(amount: float, account: str = None, **kwargs) -> Dict:
     """入金"""
