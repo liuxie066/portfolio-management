@@ -5,6 +5,7 @@
 """
 import json
 import os
+import hashlib
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
@@ -320,6 +321,84 @@ def validate_deploy_config(*, require_futu: bool = False) -> Dict[str, Any]:
         "issues": issues,
         "warnings": warnings,
         "required_keys": list(REQUIRED_DAILY_JOB_KEYS),
+    }
+
+
+def get_futu_account_settings(account: str) -> Dict[str, Any]:
+    """Return explicit account-scoped OpenD authority settings.
+
+    Global ``futu.acc_id`` is intentionally not a fallback: it cannot safely
+    distinguish multiple real accounts.
+    """
+    normalized = str(account or "").strip().lower()
+    if not normalized or not normalized.replace("_", "").replace("-", "").isalnum():
+        raise ValueError("invalid portfolio account label")
+    prefix = f"FUTU_{normalized.upper().replace('-', '_')}"
+    configured, found = _get_from_file(f"futu.accounts.{normalized}", {})
+    values = dict(configured) if found and isinstance(configured, dict) else {}
+    env_values = {
+        "acc_id": os.environ.get(f"{prefix}_ACC_ID"),
+        "trd_env": os.environ.get(f"{prefix}_TRD_ENV"),
+        "trd_market": os.environ.get(f"{prefix}_TRD_MARKET"),
+        "cash_currency": os.environ.get(f"{prefix}_CASH_CURRENCY"),
+    }
+    for key, value in env_values.items():
+        if value not in (None, ""):
+            values[key] = value
+
+    try:
+        acc_id = int(values.get("acc_id"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"futu.accounts.{normalized}.acc_id must be explicit") from exc
+    if acc_id <= 0:
+        raise ValueError(f"futu.accounts.{normalized}.acc_id must be positive")
+    trd_env = str(values.get("trd_env") or "REAL").upper()
+    if trd_env != "REAL":
+        raise ValueError(f"futu.accounts.{normalized}.trd_env must be REAL")
+    trd_market = str(values.get("trd_market") or "").upper()
+    if not trd_market:
+        raise ValueError(f"futu.accounts.{normalized}.trd_market must be explicit")
+    cash_currency = str(values.get("cash_currency") or "").upper()
+    if cash_currency != "CNH":
+        raise ValueError(f"futu.accounts.{normalized}.cash_currency must be CNH")
+    fingerprint = hashlib.sha256(str(acc_id).encode()).hexdigest()
+    return {
+        "account": normalized,
+        "acc_id": acc_id,
+        "account_fingerprint": f"sha256:{fingerprint}",
+        "trd_env": trd_env,
+        "trd_market": trd_market,
+        "cash_currency": cash_currency,
+    }
+
+
+def validate_futu_account_mappings(accounts: Iterable[str]) -> Dict[str, Any]:
+    issues = []
+    mappings = []
+    seen: Dict[int, str] = {}
+    for account in accounts:
+        try:
+            settings = get_futu_account_settings(account)
+        except ValueError as exc:
+            issues.append({"account": str(account).lower(), "error": str(exc)})
+            continue
+        acc_id = settings["acc_id"]
+        if acc_id in seen:
+            issues.append({
+                "account": settings["account"],
+                "error": f"acc_id duplicates account {seen[acc_id]}",
+            })
+        else:
+            seen[acc_id] = settings["account"]
+        mappings.append({
+            key: value
+            for key, value in settings.items()
+            if key != "acc_id"
+        })
+    return {
+        "success": not issues,
+        "mappings": mappings,
+        "issues": issues,
     }
 
 

@@ -198,6 +198,68 @@ def test_futu_openapi_provider_reads_mmf_from_accinfo_fund_assets():
     assert ctx.position_called is False
 
 
+def test_futu_cash_never_falls_back_to_non_authoritative_fields():
+    provider = FutuOpenApiBalanceProvider()
+    assert provider._cash_from_row({
+        "available_funds": 100,
+        "withdraw_cash": 90,
+        "power": 200,
+    }) is None
+    assert provider._cash_from_row({"cash": 0, "available_funds": 100}) == 0
+
+
+def test_authoritative_cash_and_mmf_missing_block_before_write():
+    provider = SimpleNamespace(
+        fetch_balances=lambda: FutuBalanceSnapshot(
+            cash=None,
+            mmf=0,
+            source="futu-openapi",
+            source_currency="CNH",
+            cash_source_field=None,
+            cash_present=False,
+            mmf_source_field="fund_assets",
+            mmf_present=True,
+            source_snapshot_id="snapshot-redacted",
+            observed_at_utc="2026-07-26T00:00:00Z",
+            account_fingerprint="sha256:redacted",
+            trd_env="REAL",
+            trd_market="US",
+        )
+    )
+    storage = FakeStorage()
+    result = FutuBalanceSyncService(storage, provider).sync_cash_and_mmf(account="lx")
+    assert result["success"] is False
+    assert "cash field is missing" in result["error"]
+    assert storage.updates == []
+    assert storage.creates == []
+
+
+def test_authoritative_zero_is_present_and_preserves_cnh_cny_evidence():
+    provider = SimpleNamespace(
+        fetch_balances=lambda: FutuBalanceSnapshot(
+            cash=0,
+            mmf=0,
+            source="futu-openapi",
+            source_currency="CNH",
+            cash_source_field="cash",
+            cash_present=True,
+            mmf_source_field="fund_assets",
+            mmf_present=True,
+            source_snapshot_id="snapshot-redacted",
+            observed_at_utc="2026-07-26T00:00:00Z",
+            account_fingerprint="sha256:redacted",
+            trd_env="REAL",
+            trd_market="US",
+        )
+    )
+    result = FutuBalanceSyncService(FakeStorage(), provider).sync_cash_and_mmf(account="lx", dry_run=True)
+    assert result["success"] is True
+    assert result["source_metadata"]["source_currency"] == "CNH"
+    assert result["source_metadata"]["normalized_currency"] == "CNY"
+    assert result["source_metadata"]["cash"] == {"present": True, "source_field": "cash"}
+    assert result["source_metadata"]["fund_mmf"] == {"present": True, "source_field": "fund_assets"}
+
+
 def test_futu_openapi_provider_reads_defaults_from_config_file():
     with TemporaryDirectory() as tmp:
         config_file = Path(tmp) / "config.json"
