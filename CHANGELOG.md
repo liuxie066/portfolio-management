@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.28 - 2026-07-27
+
+- Queried Futu account information with the market-supported HKD or USD conversion currency instead of the rejected `Currency.NONE`, while preserving authoritative per-currency cash evidence and failing closed for unsupported markets.
+
 ## 0.1.27 - 2026-07-26
 
 - Added a versioned PM runtime and data-quality producer with atomic artifacts, independently authenticated `GET /quality/status`, account-scoped OpenD mapping/sync/replica checks, and a local fail-closed official NAV gate.
