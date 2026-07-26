@@ -5,7 +5,13 @@ from collections.abc import Callable, Sequence
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
-from src.models import AssetType, CASH_ASSET_ID, MMF_ASSET_ID
+from src.models import (
+    AssetType,
+    CASH_ASSET_ID,
+    HKD_CASH_ASSET_ID,
+    MMF_ASSET_ID,
+    USD_CASH_ASSET_ID,
+)
 
 _POSITION_TYPES = {
     AssetType.A_STOCK,
@@ -15,6 +21,11 @@ _POSITION_TYPES = {
     AssetType.CN_FUND,
     AssetType.HK_FUND,
     AssetType.US_FUND,
+}
+_CASH_ASSETS = {
+    "CNY": CASH_ASSET_ID,
+    "USD": USD_CASH_ASSET_ID,
+    "HKD": HKD_CASH_ASSET_ID,
 }
 
 
@@ -52,12 +63,10 @@ class FutuSyncReconciler:
     def reconcile_balances(self, snapshot: Any, *, account: str, broker: str) -> dict[str, Any]:
         def read() -> dict[str, Any]:
             return {
-                "pm.securities_cash": self._cash_verdict(
+                "pm.securities_cash": self._cash_by_currency_verdict(
                     account=account,
                     broker=broker,
-                    asset_id=CASH_ASSET_ID,
-                    expected=snapshot.cash,
-                    reason_code="SECURITIES_CASH_MISMATCH",
+                    expected=snapshot.cash_by_currency,
                 ),
                 "pm.fund_mmf": self._cash_verdict(
                     account=account,
@@ -110,12 +119,10 @@ class FutuSyncReconciler:
         return {
             "pm.holdings_quantity": _verdict(quantity_diff, "HOLDINGS_QUANTITY_MISMATCH"),
             "pm.cost_basis": _verdict(cost_diff, "COST_BASIS_MISMATCH"),
-            "pm.securities_cash": self._cash_verdict(
+            "pm.securities_cash": self._cash_by_currency_verdict(
                 account=account,
                 broker=broker,
-                asset_id=CASH_ASSET_ID,
-                expected=snapshot.cash,
-                reason_code="SECURITIES_CASH_MISMATCH",
+                expected=snapshot.cash_by_currency,
             ),
             "pm.fund_mmf": self._cash_verdict(
                 account=account,
@@ -146,6 +153,38 @@ class FutuSyncReconciler:
             }
         matches = stored is not None and _money(stored.quantity) == _money(expected)
         return _verdict([] if matches else [asset_id], reason_code)
+
+    def _cash_by_currency_verdict(
+        self,
+        *,
+        account: str,
+        broker: str,
+        expected: Any,
+    ) -> dict[str, Any]:
+        expected_by_currency = dict(expected or {})
+        differences: list[str] = []
+        for currency, asset_id in _CASH_ASSETS.items():
+            try:
+                stored = self.storage.get_holding(
+                    asset_id,
+                    account,
+                    broker=broker,
+                )
+            except Exception:
+                return {
+                    "status": "unavailable",
+                    "reason_code": "REPOSITORY_READ_FAILED",
+                    "diff_count": 0,
+                    "diff_subjects": [],
+                }
+            expected_amount = expected_by_currency.get(currency)
+            if (
+                expected_amount is None
+                or stored is None
+                or _money(stored.quantity) != _money(expected_amount)
+            ):
+                differences.append(asset_id)
+        return _verdict(differences, "SECURITIES_CASH_MISMATCH")
 
 
 def _verdict(diff: Sequence[str], reason_code: str) -> dict[str, Any]:

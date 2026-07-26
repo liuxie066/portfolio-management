@@ -293,9 +293,18 @@ class PMQualityService:
                 "account_fingerprint": str(metadata["account_fingerprint"]),
                 "environment": str(metadata["trd_env"]),
                 "market": str(metadata["trd_market"]),
-                "source_currency": str(metadata["source_currency"]),
                 "payload_sha256": str(metadata["payload_sha256"]),
             }]
+            source["extensions"] = {
+                "pm": {
+                    "profile_fingerprint": str(
+                        metadata["profile_fingerprint"]
+                    ),
+                    "cash_source_fields": dict(
+                        (metadata.get("cash") or {}).get("source_fields") or {}
+                    ),
+                }
+            }
 
         stages = (receipt or {}).get("stages") or {}
         stage_complete = _REQUIRED_SYNC_STAGES.issubset(stages) and all(
@@ -406,9 +415,9 @@ class PMQualityService:
         if settings:
             dataset["extensions"] = {
                 "account_fingerprint": settings["account_fingerprint"],
+                "profile_fingerprint": settings["profile_fingerprint"],
                 "trd_env": settings["trd_env"],
                 "trd_market": settings["trd_market"],
-                "source_currency": settings["cash_currency"],
             }
         return dataset
 
@@ -690,8 +699,11 @@ class PMQualityService:
                 expected={
                     "provider": "futu-openapi",
                     "environment": "REAL",
-                    "source_currency": "CNH",
-                    "normalized_currency": "CNY",
+                    "cash_source_fields": {
+                        "CNY": "cn_cash",
+                        "USD": "us_cash",
+                        "HKD": "hk_cash",
+                    },
                     "refresh_cache": True,
                     "account_verified": True,
                     "pagination_complete": True,

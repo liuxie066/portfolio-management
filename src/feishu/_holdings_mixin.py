@@ -85,6 +85,22 @@ class HoldingsMixin:
     ) -> Optional[Holding]:
         return self.holdings.get_holding(asset_id, account, broker)
 
+    def get_holding_fresh(self, asset_id: str, account: str, broker: str) -> Optional[Holding]:
+        return self.holdings.get_holding_fresh(asset_id, account, broker)
+
+    def get_holdings_fresh(
+        self,
+        *,
+        account: Optional[str] = None,
+        asset_type: Optional[str] = None,
+        include_empty: bool = True,
+    ) -> List[Holding]:
+        return self.holdings.get_holdings_fresh(
+            account=account,
+            asset_type=asset_type,
+            include_empty=include_empty,
+        )
+
     def get_holdings(
         self,
         account: Optional[str] = None,

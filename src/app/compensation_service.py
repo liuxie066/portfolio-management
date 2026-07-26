@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass, field
 from datetime import date
 from pathlib import Path
@@ -178,57 +179,80 @@ class CompensationService:
                 "error": "legacy or unsupported compensation payload; automatic retry refused",
             }
 
-        with process_lock(account_lock_key(str(initial.get("account") or ""))):
-            with process_lock(f"compensation:{task_id}"):
-                task = self.get_task(task_id)
-                if task is None:
-                    raise ValueError(f"compensation task not found: {task_id}")
-                if task.get("status") == "RESOLVED":
-                    return {"success": True, **task, "already_resolved": True}
+        target_accounts = {
+            str((target.get("identity") or {}).get("account") or target.get("account") or "")
+            for target in (initial.get("payload") or {}).get("targets") or []
+            if isinstance(target, dict)
+        }
+        target_accounts.discard("")
+        if not target_accounts:
+            target_accounts.add(str(initial.get("account") or ""))
+        with ExitStack() as lock_stack:
+            for account in sorted(target_accounts):
+                lock_stack.enter_context(process_lock(account_lock_key(account)))
+            lock_stack.enter_context(process_lock(f"compensation:{task_id}"))
+            task = self.get_task(task_id)
+            if task is None:
+                raise ValueError(f"compensation task not found: {task_id}")
+            if task.get("status") == "RESOLVED":
+                return {"success": True, **task, "already_resolved": True}
 
-                retry_count = int(task.get("retry_count") or 0) + 1
-                self._append_status(task_id, "RUNNING", retry_count=retry_count, target_outcomes=[])
-                outcomes: list[Dict[str, Any]] = []
-                try:
-                    for index, target in enumerate(task["payload"]["targets"]):
-                        outcome = self._apply_target(target)
-                        outcomes.append({"index": index, "type": target.get("type"), **outcome})
-                        self._append_status(
-                            task_id,
-                            "RUNNING",
-                            retry_count=retry_count,
-                            target_outcomes=list(outcomes),
-                        )
-                except Exception as exc:
-                    error_type = "state_conflict" if isinstance(exc, CompensationStateConflict) else "target_apply_failed"
+            retry_count = int(task.get("retry_count") or 0) + 1
+            self._append_status(
+                task_id,
+                "RUNNING",
+                retry_count=retry_count,
+                target_outcomes=[],
+            )
+            outcomes: list[Dict[str, Any]] = []
+            try:
+                for index, target in enumerate(task["payload"]["targets"]):
+                    outcome = self._apply_target(target)
+                    outcomes.append({
+                        "index": index,
+                        "type": target.get("type"),
+                        **outcome,
+                    })
                     self._append_status(
                         task_id,
-                        "FAILED",
+                        "RUNNING",
                         retry_count=retry_count,
-                        error=str(exc),
-                        error_type=error_type,
-                        target_outcomes=outcomes,
+                        target_outcomes=list(outcomes),
                     )
-                    return {
-                        "success": False,
-                        "status": "FAILED",
-                        "task_id": task_id,
-                        "supported": True,
-                        "error_type": error_type,
-                        "error": str(exc),
-                        "target_outcomes": outcomes,
-                    }
-
+            except Exception as exc:
+                error_type = (
+                    "state_conflict"
+                    if isinstance(exc, CompensationStateConflict)
+                    else "target_apply_failed"
+                )
                 self._append_status(
                     task_id,
-                    "RESOLVED",
+                    "FAILED",
                     retry_count=retry_count,
-                    error="",
+                    error=str(exc),
+                    error_type=error_type,
                     target_outcomes=outcomes,
-                    resolved_at=bj_now_naive().isoformat(),
                 )
-                resolved = self.get_task(task_id) or {}
-                return {"success": True, **resolved}
+                return {
+                    "success": False,
+                    "status": "FAILED",
+                    "task_id": task_id,
+                    "supported": True,
+                    "error_type": error_type,
+                    "error": str(exc),
+                    "target_outcomes": outcomes,
+                }
+
+            self._append_status(
+                task_id,
+                "RESOLVED",
+                retry_count=retry_count,
+                error="",
+                target_outcomes=outcomes,
+                resolved_at=bj_now_naive().isoformat(),
+            )
+            resolved = self.get_task(task_id) or {}
+            return {"success": True, **resolved}
 
     def apply_target(self, target: Dict[str, Any]) -> Dict[str, Any]:
         """Apply one target during the original write under its account lock."""

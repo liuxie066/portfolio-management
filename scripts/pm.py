@@ -39,6 +39,7 @@ import contextlib
 import os
 import json
 import sys
+from datetime import date
 from pathlib import Path
 
 # Ensure repo root is on sys.path for direct local imports.
@@ -402,19 +403,300 @@ def cmd_futu_accounts(args):
 def cmd_cash_flow_reconcile(args):
     if bool(args.apply) and not bool(args.confirm):
         raise SystemExit("cash-flow reconcile --apply requires --confirm. Re-run without --apply for dry-run.")
+    manual_values = (
+        getattr(args, "exchange_rate", None),
+        getattr(args, "rate_date", None),
+        getattr(args, "rate_source", None),
+    )
+    manual_evidence = any(value not in (None, "") for value in manual_values)
+    if manual_evidence:
+        if not getattr(args, "record_id", None):
+            raise SystemExit("manual FX evidence requires --record-id")
+        if any(value in (None, "") for value in manual_values):
+            raise SystemExit(
+                "manual FX evidence requires --exchange-rate, --rate-date, and --rate-source"
+            )
+        try:
+            rate_date = date.fromisoformat(str(args.rate_date))
+        except ValueError as exc:
+            raise SystemExit("--rate-date must be YYYY-MM-DD") from exc
+    else:
+        rate_date = None
 
     def direct():
         from src.feishu_storage import FeishuStorage
+        from src.app.cash_flow_effect_store import CashFlowEffectStore
+        from src.app.cash_flow_effect_service import CashFlowEffectService
 
+        effect_store = None
+        if manual_evidence and bool(args.apply):
+            effect_store = CashFlowEffectStore()
         storage = FeishuStorage()
-        return storage.reconcile_cash_flows(
+        result = storage.reconcile_cash_flows(
             account=getattr(args, "account", None),
             dry_run=not bool(args.apply),
+            record_id=getattr(args, "record_id", None),
+            manual_exchange_rate=getattr(args, "exchange_rate", None),
+            rate_date=rate_date,
+            rate_source=getattr(args, "rate_source", None),
         )
+        if manual_evidence and bool(args.apply):
+            rows = [
+                row
+                for row in result.get("rows") or []
+                if row.get("record_id") == args.record_id
+                and row.get("status") != "error"
+            ]
+            if len(rows) != 1:
+                raise RuntimeError(
+                    "manual FX confirmation requires exactly one valid cash_flow row"
+                )
+            row = rows[0]
+            confirmation_id = effect_store.record_fx_confirmation(
+                record_id=str(row["record_id"]),
+                source_hash=str(row["source_hash"]),
+                exchange_rate=str(row["exchange_rate"]),
+                exchange_rate_date=str(row["exchange_rate_date"]),
+                exchange_rate_source=str(row["exchange_rate_source"]),
+                exchange_rate_evidence_type=str(
+                    row["exchange_rate_evidence_type"]
+                ),
+                cny_amount=str(row["cny_amount"]),
+                confirmation=CashFlowEffectService._operator_context(),
+            )
+            result = dict(result)
+            result["fx_confirmation_id"] = confirmation_id
+        return result
 
     res = _call_backend(args, direct)
     _emit_cash_flow_reconcile(res, args.json)
     return res
+
+
+def _cash_flow_effect_components():
+    from src import config
+    from src.app.cash_flow_effect_service import CashFlowEffectService
+    from src.app.cash_flow_effect_store import CashFlowEffectStore
+    from src.feishu_storage import FeishuStorage
+
+    store = CashFlowEffectStore()
+    store.assert_cutover(config.get("cash_flow.effects.cutover_date"))
+    storage = FeishuStorage()
+    return storage, store, CashFlowEffectService(storage=storage, store=store)
+
+
+def cmd_cash_flow_effects_init(args):
+    if not bool(args.confirm):
+        raise SystemExit("cash-flow effects init requires --confirm")
+
+    def direct():
+        from src import config
+        from src.app.cash_flow_effect_service import CashFlowEffectService
+        from src.app.cash_flow_effect_store import CashFlowEffectStore
+        from src.feishu_storage import FeishuStorage
+
+        path = CashFlowEffectStore.resolve_db_path()
+        if path.exists():
+            raise RuntimeError(
+                f"cash-flow effect database already exists; init cannot rebaseline: {path}"
+            )
+        configured = config.get("cash_flow.effects.cutover_date")
+        if not configured:
+            raise RuntimeError(
+                "set cash_flow.effects.cutover_date in the unified config "
+                "before initialization"
+            )
+        if date.fromisoformat(str(configured)[:10]) != date.fromisoformat(
+            args.cutover_date
+        ):
+            raise RuntimeError(
+                "configured cash_flow.effects.cutover_date differs from init argument"
+            )
+        storage = FeishuStorage()
+        flows = storage.get_cash_flows()
+        holdings = storage.get_holdings_fresh(include_empty=True)
+        store = CashFlowEffectStore.initialize(
+            cutover_date=args.cutover_date,
+            db_path=path,
+        )
+        service = CashFlowEffectService(storage=storage, store=store)
+        initialized = service.initialize_from_snapshot(
+            flows=flows,
+            holdings=holdings,
+        )
+        return {
+            "success": True,
+            "integrity": store.integrity_check(),
+            **initialized,
+        }
+
+    result = _call_backend(args, direct)
+    _dump(result, args.json)
+    return result
+
+
+def cmd_cash_flow_review(args):
+    def direct():
+        _, _, service = _cash_flow_effect_components()
+        return service.review(account=getattr(args, "account", None))
+
+    result = _call_backend(args, direct)
+    _dump(result, args.json)
+    return result
+
+
+def cmd_cash_flow_effects_scan(args):
+    def direct():
+        from src.app.cash_flow_effect_receipt_service import (
+            CashFlowEffectReceiptService,
+        )
+
+        _, store, service = _cash_flow_effect_components()
+        result = service.scan(
+            account=getattr(args, "account", None),
+            enqueue_receipts=True,
+        )
+        result = dict(result)
+        result["receipts"] = CashFlowEffectReceiptService(
+            store=store
+        ).dispatch_pending()
+        return result
+
+    result = _call_backend(args, direct)
+    _dump(result, args.json)
+    return result
+
+
+def cmd_cash_flow_effects_list(args):
+    def direct():
+        _, _, service = _cash_flow_effect_components()
+        return {
+            "success": True,
+            "effects": service.list_effects(
+                account=getattr(args, "account", None),
+                latest_only=not bool(args.all_versions),
+            ),
+        }
+
+    result = _call_backend(args, direct)
+    _dump(result, args.json)
+    return result
+
+
+def cmd_cash_flow_effects_show(args):
+    def direct():
+        _, store, _ = _cash_flow_effect_components()
+        effect = store.get_effect(args.effect_id)
+        if not effect:
+            raise KeyError(f"cash-flow effect not found: {args.effect_id}")
+        return {
+            "success": True,
+            "effect": effect,
+            "events": store.list_events(args.effect_id),
+        }
+
+    result = _call_backend(args, direct)
+    _dump(result, args.json)
+    return result
+
+
+def cmd_cash_flow_effects_preview(args):
+    def direct():
+        _, _, service = _cash_flow_effect_components()
+        return service.preview(
+            args.effect_id,
+            external_action=getattr(args, "external_action", None),
+            historical_apply=bool(args.historical_apply),
+        )
+
+    result = _call_backend(args, direct)
+    _dump(result, args.json)
+    return result
+
+
+def _dispatch_effect_receipts(store):
+    from src.app.cash_flow_effect_receipt_service import (
+        CashFlowEffectReceiptService,
+    )
+
+    return CashFlowEffectReceiptService(store=store).dispatch_pending()
+
+
+def cmd_cash_flow_effects_confirm(args):
+    if not bool(args.confirm):
+        raise SystemExit("cash-flow effects confirm requires --confirm")
+
+    def direct():
+        _, store, service = _cash_flow_effect_components()
+        result = service.confirm(
+            args.effect_id,
+            preview_hash=args.preview_hash,
+            confirm=True,
+            external_action=getattr(args, "external_action", None),
+            historical_apply=bool(args.historical_apply),
+        )
+        result = dict(result)
+        result["receipts"] = _dispatch_effect_receipts(store)
+        return result
+
+    result = _call_backend(args, direct)
+    _dump(result, args.json)
+    return result
+
+
+def cmd_cash_flow_effects_record_only(args):
+    if not bool(args.confirm):
+        raise SystemExit("cash-flow effects record-only requires --confirm")
+
+    def direct():
+        _, store, service = _cash_flow_effect_components()
+        result = service.record_only(args.effect_id, confirm=True)
+        result = dict(result)
+        result["receipts"] = _dispatch_effect_receipts(store)
+        return result
+
+    result = _call_backend(args, direct)
+    _dump(result, args.json)
+    return result
+
+
+def cmd_cash_flow_effects_retry(args):
+    if not bool(args.confirm):
+        raise SystemExit("cash-flow effects retry requires --confirm")
+
+    def direct():
+        _, store, service = _cash_flow_effect_components()
+        result = service.retry(args.effect_id, confirm=True)
+        result = dict(result)
+        result["receipts"] = _dispatch_effect_receipts(store)
+        return result
+
+    result = _call_backend(args, direct)
+    _dump(result, args.json)
+    return result
+
+
+def cmd_cash_flow_effects_audit(args):
+    def direct():
+        _, _, service = _cash_flow_effect_components()
+        return service.audit(account=args.account)
+
+    result = _call_backend(args, direct)
+    _dump(result, args.json)
+    return result
+
+
+def cmd_cash_flow_effects_backup(args):
+    if not bool(args.confirm):
+        raise SystemExit("cash-flow effects backup requires --confirm")
+
+    def direct():
+        _, store, _ = _cash_flow_effect_components()
+        return store.backup(args.output)
+
+    result = _call_backend(args, direct)
+    _dump(result, args.json)
+    return result
 
 
 def cmd_compensation_list(args):
@@ -847,9 +1129,9 @@ def build_parser() -> argparse.ArgumentParser:
         subparser.add_argument("--confirm", action="store_true", help="required with --write")
         subparser.add_argument("--overwrite", action="store_true", help="overwrite an existing NAV row for the same date")
         subparser.add_argument("--use-bulk-persist", action="store_true", help="use nav_history bulk upsert path")
-        subparser.add_argument("--sync-futu-cash-mmf", action="store_true", help="sync Futu cash/MMF holdings before each account snapshot")
-        subparser.add_argument("--sync-futu-dry-run", dest="sync_futu_dry_run", action="store_true", default=None, help="preview Futu cash/MMF sync without writing holdings")
-        subparser.add_argument("--sync-futu-write", dest="sync_futu_dry_run", action="store_false", help="write Futu cash/MMF sync results when the job is also writing NAV")
+        subparser.add_argument("--sync-futu-cash-mmf", action="store_true", help="observe Futu per-currency CASH and sync MMF before each account snapshot")
+        subparser.add_argument("--sync-futu-dry-run", dest="sync_futu_dry_run", action="store_true", default=None, help="preview Futu CASH observation/MMF sync without writes")
+        subparser.add_argument("--sync-futu-write", dest="sync_futu_dry_run", action="store_false", help="persist MMF sync and CASH reconciliation observations when NAV is also writing")
         subparser.add_argument("--force-non-business-day", action="store_true", help="run even when calendar marks the NAV date non-business")
         subparser.add_argument("--run-id", default=None, help="operator-supplied run id for tracing")
         subparser.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
@@ -923,7 +1205,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="output JSON",
     )
     p_futu_accounts.set_defaults(func=cmd_futu_accounts)
-    p_futu_sync = futu_sub.add_parser("sync", help="sync Futu cash/MMF and stock/ETF quantity + average cost")
+    p_futu_sync = futu_sub.add_parser("sync", help="observe Futu CASH; sync MMF and stock/ETF quantity + average cost")
     p_futu_sync.add_argument("--account", default=argparse.SUPPRESS, help="account to operate on; defaults to config/PORTFOLIO_ACCOUNT")
     p_futu_sync.add_argument("--dry-run", action="store_true", default=True, help="preview only (default)")
     p_futu_sync.add_argument("--write", dest="dry_run", action="store_false", help="write holdings changes")
@@ -940,10 +1222,106 @@ def build_parser() -> argparse.ArgumentParser:
         help="fill generated fields for manually entered cash_flow rows",
     )
     p_cash_flow_reconcile.add_argument("--account", default=argparse.SUPPRESS, help="account to operate on; defaults to all accounts")
+    p_cash_flow_reconcile.add_argument("--record-id", help="limit reconciliation to one Feishu cash_flow record")
+    p_cash_flow_reconcile.add_argument("--exchange-rate", type=float, help="manual historical FX rate; requires single-record evidence")
+    p_cash_flow_reconcile.add_argument("--rate-date", help="manual FX evidence date (must equal flow_date)")
+    p_cash_flow_reconcile.add_argument("--rate-source", help="traceable manual FX evidence source")
     p_cash_flow_reconcile.add_argument("--apply", action="store_true", help="write derived fields back to Feishu")
     p_cash_flow_reconcile.add_argument("--confirm", action="store_true", help="required with --apply")
     p_cash_flow_reconcile.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
     p_cash_flow_reconcile.set_defaults(func=cmd_cash_flow_reconcile)
+
+    p_cash_flow_review = cash_flow_sub.add_parser(
+        "review",
+        help="scan Feishu and show unresolved effects",
+    )
+    p_cash_flow_review.add_argument("--account", default=argparse.SUPPRESS)
+    p_cash_flow_review.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    p_cash_flow_review.set_defaults(func=cmd_cash_flow_review)
+
+    p_cash_flow_effects = cash_flow_sub.add_parser(
+        "effects",
+        help="durable cash-flow holding effect workflow",
+    )
+    cash_flow_effects_sub = p_cash_flow_effects.add_subparsers(
+        dest="cash_flow_effects_cmd",
+        required=True,
+    )
+    p_effects_init = cash_flow_effects_sub.add_parser(
+        "init",
+        help="initialize immutable SQLite workflow and CASH baselines",
+    )
+    p_effects_init.add_argument("--cutover-date", required=True)
+    p_effects_init.add_argument("--confirm", action="store_true")
+    p_effects_init.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    p_effects_init.set_defaults(func=cmd_cash_flow_effects_init)
+
+    p_effects_scan = cash_flow_effects_sub.add_parser(
+        "scan",
+        help="read Feishu, discover effects, and deliver durable receipts",
+    )
+    p_effects_scan.add_argument("--account", default=argparse.SUPPRESS)
+    p_effects_scan.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    p_effects_scan.set_defaults(func=cmd_cash_flow_effects_scan)
+
+    p_effects_list = cash_flow_effects_sub.add_parser("list")
+    p_effects_list.add_argument("--account", default=argparse.SUPPRESS)
+    p_effects_list.add_argument("--all-versions", action="store_true")
+    p_effects_list.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    p_effects_list.set_defaults(func=cmd_cash_flow_effects_list)
+
+    p_effects_show = cash_flow_effects_sub.add_parser("show")
+    p_effects_show.add_argument("--effect-id", required=True)
+    p_effects_show.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    p_effects_show.set_defaults(func=cmd_cash_flow_effects_show)
+
+    p_effects_preview = cash_flow_effects_sub.add_parser("preview")
+    p_effects_preview.add_argument("--effect-id", required=True)
+    p_effects_preview.add_argument(
+        "--external-action",
+        choices=("accept_current", "restore"),
+    )
+    p_effects_preview.add_argument("--historical-apply", action="store_true")
+    p_effects_preview.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    p_effects_preview.set_defaults(func=cmd_cash_flow_effects_preview)
+
+    p_effects_confirm = cash_flow_effects_sub.add_parser("confirm")
+    p_effects_confirm.add_argument("--effect-id", required=True)
+    p_effects_confirm.add_argument("--preview-hash", required=True)
+    p_effects_confirm.add_argument(
+        "--external-action",
+        choices=("accept_current", "restore"),
+    )
+    p_effects_confirm.add_argument("--historical-apply", action="store_true")
+    p_effects_confirm.add_argument("--confirm", action="store_true")
+    p_effects_confirm.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    p_effects_confirm.set_defaults(func=cmd_cash_flow_effects_confirm)
+
+    p_effects_record_only = cash_flow_effects_sub.add_parser("record-only")
+    p_effects_record_only.add_argument("--effect-id", required=True)
+    p_effects_record_only.add_argument("--confirm", action="store_true")
+    p_effects_record_only.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    p_effects_record_only.set_defaults(func=cmd_cash_flow_effects_record_only)
+
+    p_effects_retry = cash_flow_effects_sub.add_parser("retry")
+    p_effects_retry.add_argument("--effect-id", required=True)
+    p_effects_retry.add_argument("--confirm", action="store_true")
+    p_effects_retry.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    p_effects_retry.set_defaults(func=cmd_cash_flow_effects_retry)
+
+    p_effects_audit = cash_flow_effects_sub.add_parser("audit")
+    p_effects_audit.add_argument("--account", required=True)
+    p_effects_audit.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    p_effects_audit.set_defaults(func=cmd_cash_flow_effects_audit)
+
+    p_effects_backup = cash_flow_effects_sub.add_parser(
+        "backup",
+        help="create a verified SQLite online backup without overwriting",
+    )
+    p_effects_backup.add_argument("--output", required=True)
+    p_effects_backup.add_argument("--confirm", action="store_true")
+    p_effects_backup.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    p_effects_backup.set_defaults(func=cmd_cash_flow_effects_backup)
 
     p_compensation = sp.add_parser("compensation", help="inspect and retry durable compensation tasks")
     compensation_sub = p_compensation.add_subparsers(dest="compensation_cmd", required=True)

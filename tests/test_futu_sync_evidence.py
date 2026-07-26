@@ -5,12 +5,28 @@ from pathlib import Path
 from src.app.futu_balance_sync_service import FutuBalanceSnapshot, FutuBalanceSyncService
 from src.app.futu_sync_evidence import FutuSyncEvidenceStore
 from src.app.futu_sync_reconciler import FutuSyncReconciler
+from src.models import AssetType, Holding
 
 
 class _Storage:
     def __init__(self, *, fail_asset_id: str | None = None) -> None:
         self.fail_asset_id = fail_asset_id
-        self.holdings = {}
+        self.holdings = {
+            (asset_id, "lx", "富途"): Holding(
+                asset_id=asset_id,
+                asset_name=asset_id,
+                asset_type=AssetType.CASH,
+                account="lx",
+                broker="富途",
+                quantity=quantity,
+                currency=currency,
+            )
+            for currency, asset_id, quantity in (
+                ("CNY", "CNY-CASH", 100),
+                ("USD", "USD-CASH", 0),
+                ("HKD", "HKD-CASH", 0),
+            )
+        }
         self.writes = []
 
     def get_holding(self, asset_id, account, broker=None):
@@ -30,17 +46,25 @@ class _Storage:
 class _Provider:
     def fetch_balances(self) -> FutuBalanceSnapshot:
         return FutuBalanceSnapshot(
-            cash=100,
+            cash_by_currency={"CNY": 100, "USD": 0, "HKD": 0},
             mmf=200,
             source="futu-openapi",
-            source_currency="CNH",
-            cash_source_field="cash",
-            cash_present=True,
+            account_id=123,
+            profile_fingerprint="sha256:redacted",
+            cash_source_fields={
+                "CNY": "cn_cash",
+                "USD": "us_cash",
+                "HKD": "hk_cash",
+            },
+            cash_present_by_currency={"CNY": True, "USD": True, "HKD": True},
             mmf_source_field="fund_assets",
             mmf_present=True,
             source_snapshot_id="snapshot-redacted-001",
             observed_at_utc="2026-07-26T00:00:00Z",
-            account_fingerprint="sha256:redacted",
+            account_fingerprint=(
+                "sha256:"
+                "a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3"
+            ),
             trd_env="REAL",
             trd_market="US",
             account_verified=True,
@@ -63,7 +87,11 @@ def test_sync_receipt_persists_latest_and_history_across_restart(tmp_path: Path)
     latest = FutuSyncEvidenceStore(tmp_path / "receipts").latest("lx")
     assert latest["sync_run_id"] == "sync-run-001"
     assert latest["source_snapshot_id"] == "snapshot-redacted-001"
-    assert latest["source_metadata"]["source_currency"] == "CNH"
+    assert latest["source_metadata"]["cash"]["source_fields"] == {
+        "CNY": "cn_cash",
+        "USD": "us_cash",
+        "HKD": "hk_cash",
+    }
     assert latest["source_metadata"]["source_snapshot_id"] == "snapshot-redacted-001"
     assert latest["source_metadata"]["refresh_cache"] is True
     assert latest["source_metadata"]["account_verified"] is True

@@ -61,8 +61,11 @@ python scripts/publish_daily_report.py --nav-date 2026-05-22
 - `--service-url` overrides the local service endpoint.
 - `--require-service` fails when the local service is unavailable; `--no-service` forces the direct application service path.
 - `--run-id` lets operators supply a trace id; otherwise the script generates one and carries it through NAV, report bundle, HTML, and publish output.
-- `report.sync_futu_cash_mmf` / `PM_SYNC_FUTU_CASH_MMF` controls publisher-side Futu cash/MMF sync; CLI flags still override config.
-- The embedded `pm daily-job` cash/MMF sync flags are compatibility-only. Production full holdings synchronization is a separate `pm futu sync` step orchestrated by `scripts/portfolio_scheduled_job.sh`.
+- `report.sync_futu_cash_mmf` / `PM_SYNC_FUTU_CASH_MMF` controls publisher-side
+  Futu CASH observation and MMF sync; CLI flags still override config.
+- The embedded `pm daily-job` flags have the same observe-only CASH semantics.
+  Production full non-CASH holdings synchronization is a separate
+  `pm futu sync` step orchestrated by `scripts/portfolio_scheduled_job.sh`.
 - `publish_report(...)` returns local artifact paths. `public_url` is always `null` and `public_url_status` is `disabled`.
 - This script is intentionally split into three layers:
   - data collection: `build_report_data(...)`

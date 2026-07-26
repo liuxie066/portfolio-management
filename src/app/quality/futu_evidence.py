@@ -15,6 +15,11 @@ _SCHEDULES = (
     ("evening", time(17, 10), frozenset({0, 1, 2, 3, 4})),
 )
 _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
+_CASH_SOURCE_FIELDS = {
+    "CNY": "cn_cash",
+    "USD": "us_cash",
+    "HKD": "hk_cash",
+}
 
 
 @dataclass(frozen=True)
@@ -145,14 +150,22 @@ def source_receipt_complete(
         and metadata.get("provider") == "futu-openapi"
         and _parse_utc(metadata.get("observed_at_utc")) is not None
         and metadata.get("account_fingerprint") == settings.get("account_fingerprint")
+        and metadata.get("profile_fingerprint")
+        == settings.get("profile_fingerprint")
         and str(metadata.get("trd_env") or "").upper() == str(settings.get("trd_env") or "").upper()
         and str(metadata.get("trd_market") or "").upper()
         == str(settings.get("trd_market") or "").upper()
-        and str(metadata.get("source_currency") or "").upper()
-        == str(settings.get("cash_currency") or "").upper()
-        and str(metadata.get("source_currency") or "").upper() == "CNH"
-        and str(metadata.get("normalized_currency") or "").upper() == "CNY"
-        and (metadata.get("cash") or {}).get("source_field") == "cash"
+        and (metadata.get("cash") or {}).get("mode") == "per_currency"
+        and (metadata.get("cash") or {}).get("present") is True
+        and (metadata.get("cash") or {}).get("source_fields")
+        == _CASH_SOURCE_FIELDS
+        and all(
+            ((metadata.get("cash") or {}).get("present_by_currency") or {}).get(
+                currency
+            )
+            is True
+            for currency in _CASH_SOURCE_FIELDS
+        )
         and (metadata.get("fund_mmf") or {}).get("source_field") == "fund_assets"
         and metadata.get("refresh_cache") is True
         and metadata.get("account_verified") is True

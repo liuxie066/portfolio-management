@@ -122,7 +122,8 @@ def test_docs_schema_field_parser_ignores_non_field_backticks():
     assert "price_cache" not in specs
     assert "flow_type" in specs["cash_flow"].required
     assert "direction" not in specs["cash_flow"].required
-    assert "broker" not in specs["cash_flow"].required
+    assert "broker" in specs["cash_flow"].required
+    assert "exchange_rate_date" in specs["cash_flow"].optional
     assert "total_value" in specs["nav_history"].required
     assert "exchange_fund" not in specs["holdings"].optional
     assert "otc_fund" not in specs["holdings"].optional
@@ -142,7 +143,10 @@ def test_schema_check_does_not_block_on_missing_optional_tables(monkeypatch):
 
         fields = {
             "holdings": {"asset_id", "asset_name", "asset_type", "account", "broker", "quantity", "currency"},
-            "cash_flow": {"flow_date", "account", "amount", "currency", "flow_type", "cny_amount", "dedup_key"},
+            "cash_flow": {
+                "flow_date", "account", "broker", "amount", "currency",
+                "flow_type", "cny_amount", "dedup_key",
+            },
             "nav_history": {"date", "account", "total_value", "shares", "nav"},
             "holdings_snapshot": {
                 "as_of", "account", "asset_id", "broker", "quantity",

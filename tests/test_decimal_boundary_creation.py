@@ -1,6 +1,8 @@
 from datetime import date
 from unittest.mock import Mock
 
+import pytest
+
 from src.portfolio import PortfolioManager
 
 
@@ -23,7 +25,7 @@ def test_normalize_payload_helpers():
     assert holding_stock['quantity'] == 1.005
 
 
-def test_deposit_creates_quantized_cashflow_and_cash_holding():
+def test_deposit_legacy_entry_is_disabled_without_any_write():
     storage = Mock()
     fetcher = Mock()
     manager = PortfolioManager(storage=storage, price_fetcher=fetcher)
@@ -31,31 +33,25 @@ def test_deposit_creates_quantized_cashflow_and_cash_holding():
     storage.get_holding.return_value = None
     storage.replace_holding.side_effect = lambda holding: holding
 
-    manager.deposit(
-        flow_date=date(2025, 3, 14),
-        account='测试账户',
-        amount=1.005,
-        currency='CNY',
-        cny_amount=1.005,
-    )
-
-    cf = storage.add_cash_flow.call_args[0][0]
-    holding = storage.replace_holding.call_args[0][0]
-    assert cf.amount == 1.01
-    assert cf.cny_amount == 1.01
-    assert holding.quantity == 1.01
+    with pytest.raises(RuntimeError, match="cash_flow_entry_disabled"):
+        manager.deposit(
+            flow_date=date(2025, 3, 14),
+            account='测试账户',
+            amount=1.005,
+            currency='CNY',
+            cny_amount=1.005,
+        )
+    storage.add_cash_flow.assert_not_called()
+    storage.replace_holding.assert_not_called()
 
 
-def test_foreign_cash_flow_requires_cny_amount_or_exchange_rate():
+def test_foreign_deposit_legacy_entry_is_disabled_before_validation():
     manager = PortfolioManager(storage=Mock(), price_fetcher=Mock())
 
-    try:
+    with pytest.raises(RuntimeError, match="cash_flow_entry_disabled"):
         manager.deposit(
             flow_date=date(2025, 3, 14),
             account='测试账户',
             amount=1000,
             currency='USD',
         )
-        assert False, 'expected ValueError'
-    except ValueError as e:
-        assert '外币现金流必须显式提供 cny_amount 或 exchange_rate' in str(e)

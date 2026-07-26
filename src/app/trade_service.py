@@ -6,8 +6,6 @@ from typing import Any, Optional
 
 from src.app.compensation_service import PartialWriteError
 from src.models import CashFlow, Holding
-from src.process_lock import account_lock_key, process_lock
-from src.write_guard import validate_and_normalize_cash_flow_input
 
 
 class TradeService:
@@ -111,21 +109,7 @@ class TradeService:
         source: str = "",
         remark: str = "",
     ) -> CashFlow:
-        self._require_valid(validate_and_normalize_cash_flow_input(
-            amount=amount, cny_amount=cny_amount, exchange_rate=exchange_rate,
-        ))
-        with process_lock(account_lock_key(account)):
-            return self._cash_flow_locked(
-                flow_type="DEPOSIT",
-                flow_date=flow_date,
-                account=account,
-                amount=amount,
-                currency=currency,
-                cny_amount=cny_amount,
-                exchange_rate=exchange_rate,
-                source=source,
-                remark=remark,
-            )
+        raise RuntimeError("cash_flow_entry_disabled")
 
     def withdraw(
         self,
@@ -137,56 +121,7 @@ class TradeService:
         exchange_rate: Optional[float] = None,
         remark: str = "",
     ) -> CashFlow:
-        self._require_valid(validate_and_normalize_cash_flow_input(
-            amount=amount, cny_amount=cny_amount, exchange_rate=exchange_rate,
-        ))
-        with process_lock(account_lock_key(account)):
-            return self._cash_flow_locked(
-                flow_type="WITHDRAW",
-                flow_date=flow_date,
-                account=account,
-                amount=amount,
-                currency=currency,
-                cny_amount=cny_amount,
-                exchange_rate=exchange_rate,
-                source="",
-                remark=remark,
-            )
+        raise RuntimeError("cash_flow_entry_disabled")
 
     def _cash_flow_locked(self, **kwargs) -> CashFlow:
-        cf_payload = self.manager._normalize_cash_flow_payload(
-            amount=kwargs["amount"],
-            currency=kwargs["currency"],
-            cny_amount=kwargs["cny_amount"],
-            exchange_rate=kwargs["exchange_rate"],
-        )
-        direction = 1 if kwargs["flow_type"] == "DEPOSIT" else -1
-        before_cash, target_cash = self.cash_service.plan_cash_holding_target(
-            kwargs["account"], direction * cf_payload["amount"], kwargs["currency"]
-        )
-        targets = [self._holding_target(
-            target_type="CASH_TARGET_SET", before=before_cash, target=target_cash,
-        )]
-        cf = CashFlow(
-            flow_date=kwargs["flow_date"],
-            account=kwargs["account"],
-            amount=direction * cf_payload["amount"],
-            currency=kwargs["currency"],
-            cny_amount=direction * cf_payload["cny_amount"],
-            exchange_rate=cf_payload["exchange_rate"],
-            flow_type=kwargs["flow_type"],
-            source=kwargs["source"],
-            remark=kwargs["remark"],
-        )
-        cf = self.storage.add_cash_flow(cf)
-        if getattr(cf, "was_replayed", False) is True:
-            return cf
-        self._apply_targets_after_ledger(
-            operation=kwargs["flow_type"],
-            account=kwargs["account"],
-            related_record_id=cf.record_id,
-            ledger=cf,
-            ledger_step="cash_flow_created",
-            targets=targets,
-        )
-        return cf
+        raise RuntimeError("cash_flow_entry_disabled")

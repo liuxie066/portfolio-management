@@ -20,6 +20,11 @@ def _write_result():
         "account": "sy",
         "dry_run": False,
         "cash_mmf": {"created": 0, "updated": 1},
+        "cash_effects": {
+            "created": 1,
+            "resolved": 0,
+            "suppressed_by_cash_flow": 0,
+        },
         "summary": {
             "created": 0,
             "updated": 1,
@@ -63,6 +68,9 @@ def test_futu_sync_receipt_sends_write_summary_from_liukanshan():
     assert "# PM · 回执 · sy" in calls[1][2]
     assert "类型｜持仓同步" in calls[1][2]
     assert "状态｜✅ 成功" in calls[1][2]
+    assert "CASH 仅观测" in calls[1][2]
+    assert "新增待处理 1" in calls[1][2]
+    assert "pm cash-flow review" in calls[1][2]
     assert "成本 127.52→116.68" in calls[1][2]
 
 

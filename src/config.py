@@ -25,6 +25,8 @@ _FALSE_VALUES = {"0", "false", "no", "n", "off"}
 ENV_MAP = {
     "account": "PORTFOLIO_ACCOUNT",
     "data.dir": "PM_DATA_DIR",
+    "cash_flow.effects.cutover_date": "PM_CASH_FLOW_EFFECTS_CUTOVER_DATE",
+    "cash_flow.effects.db_path": "PM_CASH_FLOW_EFFECTS_DB_PATH",
     "service.host": "PORTFOLIO_SERVICE_HOST",
     "service.port": "PORTFOLIO_SERVICE_PORT",
     "service.url": "PORTFOLIO_SERVICE_URL",
@@ -75,6 +77,8 @@ ENV_FALLBACKS = {
 OPERATOR_CONFIG_KEYS = (
     "account",
     "data.dir",
+    "cash_flow.effects.cutover_date",
+    "cash_flow.effects.db_path",
     "service.host",
     "service.port",
     "service.url",
@@ -88,10 +92,7 @@ OPERATOR_CONFIG_KEYS = (
     "report.sync_futu_cash_mmf",
     "futu.opend.host",
     "futu.opend.port",
-    "futu.trd_env",
-    "futu.acc_id",
-    "futu.trd_market",
-    "futu.cash_currency",
+    "futu.profiles",
     "feishu.app_id",
     "feishu.app_secret",
     "feishu.app_token",
@@ -143,9 +144,7 @@ OPERATOR_DEFAULTS: Dict[str, Any] = {
     "report.sync_futu_cash_mmf": False,
     "futu.opend.host": "127.0.0.1",
     "futu.opend.port": 11111,
-    "futu.trd_env": "REAL",
-    "futu.trd_market": "HK",
-    "futu.cash_currency": "CNH",
+    "futu.profiles": {},
     "feishu.connect_timeout": 5.0,
     "feishu.read_timeout": 30.0,
 }
@@ -246,6 +245,56 @@ def get(key: str, default=None):
     return value
 
 
+def get_futu_profile(account: str) -> Dict[str, Any]:
+    """Return one explicit PM-account -> OpenD profile mapping.
+
+    Cash effects and scheduled stock synchronization share this mapping.  No
+    environment-based account switching or default-profile fallback is allowed.
+    """
+    profiles = get("futu.profiles", {})
+    if not isinstance(profiles, dict):
+        raise ValueError("futu.profiles must be a mapping keyed by PM account")
+    raw = profiles.get(str(account))
+    if not isinstance(raw, dict):
+        raise ValueError(f"missing futu.profiles mapping for account={account}")
+    required = ("host", "port", "acc_id", "trd_env", "trd_market")
+    missing = [key for key in required if raw.get(key) in (None, "")]
+    if missing:
+        raise ValueError(
+            f"incomplete futu.profiles.{account}: missing {', '.join(missing)}"
+        )
+    profile = {
+        "host": str(raw["host"]).strip(),
+        "port": int(raw["port"]),
+        "acc_id": int(raw["acc_id"]),
+        "trd_env": str(raw["trd_env"]).upper(),
+        "trd_market": str(raw["trd_market"]).upper(),
+    }
+    if not profile["host"]:
+        raise ValueError(f"futu.profiles.{account}.host must be explicit")
+    if profile["port"] <= 0:
+        raise ValueError(f"futu.profiles.{account}.port must be positive")
+    if profile["acc_id"] <= 0:
+        raise ValueError(f"futu.profiles.{account}.acc_id must be positive")
+    return profile
+
+
+def _futu_profile_fingerprint(profile: Dict[str, Any]) -> str:
+    canonical = json.dumps(
+        {
+            "host": profile["host"],
+            "port": profile["port"],
+            "acc_id": profile["acc_id"],
+            "trd_env": profile["trd_env"],
+            "trd_market": profile["trd_market"],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return f"sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
+
+
 def _redact_value(key: str, value: Any) -> Any:
     if value in (None, ""):
         return value
@@ -310,10 +359,23 @@ def validate_deploy_config(
             })
 
     if require_futu:
-        if not get("futu.opend.host"):
-            issues.append({"key": "futu.opend.host", "error": "missing Futu OpenD host", "env": ENV_MAP.get("futu.opend.host")})
-        if get_int("futu.opend.port") is None:
-            issues.append({"key": "futu.opend.port", "error": "missing or invalid Futu OpenD port", "env": ENV_MAP.get("futu.opend.port")})
+        profiles = get("futu.profiles")
+        if not isinstance(profiles, dict) or not profiles:
+            issues.append({
+                "key": "futu.profiles",
+                "error": "missing explicit PM account -> Futu OpenD profiles",
+                "env": None,
+            })
+        else:
+            for account in sorted(profiles):
+                try:
+                    get_futu_profile(str(account))
+                except (TypeError, ValueError) as exc:
+                    issues.append({
+                        "key": f"futu.profiles.{account}",
+                        "error": str(exc),
+                        "env": None,
+                    })
         for key in (
             "feishu.receipt.app_id",
             "feishu.receipt.app_secret",
@@ -331,7 +393,7 @@ def validate_deploy_config(
         mapping_result = validate_futu_account_mappings(get_quality_accounts())
         issues.extend(
             {
-                "key": f"futu.accounts.{item['account']}",
+                "key": f"futu.profiles.{item['account']}",
                 "error": item["error"],
                 "env": None,
             }
@@ -364,50 +426,32 @@ def validate_deploy_config(
 
 
 def get_futu_account_settings(account: str) -> Dict[str, Any]:
-    """Return explicit account-scoped OpenD authority settings.
-
-    Global ``futu.acc_id`` is intentionally not a fallback: it cannot safely
-    distinguish multiple real accounts.
-    """
+    """Return quality evidence settings from the canonical Futu profile."""
     normalized = str(account or "").strip().lower()
     if not normalized or not normalized.replace("_", "").replace("-", "").isalnum():
         raise ValueError("invalid portfolio account label")
-    prefix = f"FUTU_{normalized.upper().replace('-', '_')}"
-    configured, found = _get_from_file(f"futu.accounts.{normalized}", {})
-    values = dict(configured) if found and isinstance(configured, dict) else {}
-    env_values = {
-        "acc_id": os.environ.get(f"{prefix}_ACC_ID"),
-        "trd_env": os.environ.get(f"{prefix}_TRD_ENV"),
-        "trd_market": os.environ.get(f"{prefix}_TRD_MARKET"),
-        "cash_currency": os.environ.get(f"{prefix}_CASH_CURRENCY"),
-    }
-    for key, value in env_values.items():
-        if value not in (None, ""):
-            values[key] = value
-
-    try:
-        acc_id = int(values.get("acc_id"))
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"futu.accounts.{normalized}.acc_id must be explicit") from exc
+    profile = get_futu_profile(normalized)
+    acc_id = int(profile["acc_id"])
     if acc_id <= 0:
-        raise ValueError(f"futu.accounts.{normalized}.acc_id must be positive")
-    trd_env = str(values.get("trd_env") or "REAL").upper()
+        raise ValueError(f"futu.profiles.{normalized}.acc_id must be positive")
+    trd_env = str(profile["trd_env"]).upper()
     if trd_env != "REAL":
-        raise ValueError(f"futu.accounts.{normalized}.trd_env must be REAL")
-    trd_market = str(values.get("trd_market") or "").upper()
+        raise ValueError(f"futu.profiles.{normalized}.trd_env must be REAL")
+    trd_market = str(profile["trd_market"]).upper()
     if not trd_market:
-        raise ValueError(f"futu.accounts.{normalized}.trd_market must be explicit")
-    cash_currency = str(values.get("cash_currency") or "").upper()
-    if cash_currency != "CNH":
-        raise ValueError(f"futu.accounts.{normalized}.cash_currency must be CNH")
-    fingerprint = hashlib.sha256(str(acc_id).encode()).hexdigest()
+        raise ValueError(f"futu.profiles.{normalized}.trd_market must be explicit")
+    account_fingerprint = (
+        f"sha256:{hashlib.sha256(str(acc_id).encode()).hexdigest()}"
+    )
     return {
         "account": normalized,
         "acc_id": acc_id,
-        "account_fingerprint": f"sha256:{fingerprint}",
+        "account_fingerprint": account_fingerprint,
+        "profile_fingerprint": _futu_profile_fingerprint(profile),
+        "host": profile["host"],
+        "port": profile["port"],
         "trd_env": trd_env,
         "trd_market": trd_market,
-        "cash_currency": cash_currency,
     }
 
 

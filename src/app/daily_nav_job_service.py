@@ -160,11 +160,11 @@ class DailyNavJobService:
             ),
         }
 
-    def _cash_flow_blocker(self, account: str, *, dry_run: bool) -> Optional[Dict[str, Any]]:
+    def _cash_flow_blocker(self, account: str) -> Optional[Dict[str, Any]]:
         reconcile = getattr(self.storage, "reconcile_cash_flows", None)
         if not callable(reconcile):
             return None
-        result = reconcile(account=account, dry_run=dry_run)
+        result = reconcile(account=account, dry_run=True)
         if result.get("success") is False:
             return {
                 "status": "cash_flow_check_failed",
@@ -181,7 +181,7 @@ class DailyNavJobService:
                 "error": "cash_flow has invalid manual rows",
                 "cash_flow_reconcile": result,
             }
-        if dry_run and int(result.get("change_count") or 0) > 0:
+        if int(result.get("change_count") or 0) > 0:
             return {
                 "status": "cash_flow_pending",
                 "success": False,
@@ -296,7 +296,7 @@ class DailyNavJobService:
                 })
                 continue
 
-            cash_flow_blocker = self._cash_flow_blocker(target_account, dry_run=dry_run)
+            cash_flow_blocker = self._cash_flow_blocker(target_account)
             if cash_flow_blocker:
                 cash_flow_blocker.setdefault("date", resolved_nav_date.isoformat())
                 items.append(cash_flow_blocker)

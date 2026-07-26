@@ -73,12 +73,27 @@ class CashFlowMixin:
         account: Optional[str] = None,
         *,
         dry_run: bool = True,
-        fx_rates: Optional[Dict[str, float]] = None,
+        fx_rates: Optional[Dict[str, Any]] = None,
+        record_id: Optional[str] = None,
+        manual_exchange_rate: Optional[float] = None,
+        rate_date: Optional[date] = None,
+        rate_source: Optional[str] = None,
     ) -> Dict[str, Any]:
+        kwargs: Dict[str, Any] = {
+            "account": account,
+            "dry_run": dry_run,
+            "fx_rates": fx_rates,
+        }
+        if record_id is not None:
+            kwargs["record_id"] = record_id
+        if manual_exchange_rate is not None:
+            kwargs["manual_exchange_rate"] = manual_exchange_rate
+        if rate_date is not None:
+            kwargs["rate_date"] = rate_date
+        if rate_source is not None:
+            kwargs["rate_source"] = rate_source
         return self.cash_flow.reconcile_cash_flows(
-            account=account,
-            dry_run=dry_run,
-            fx_rates=fx_rates,
+            **kwargs,
         )
 
     def _parse_cash_flow_manual_fields(self, fields: Dict[str, Any]) -> Dict[str, Any]:
