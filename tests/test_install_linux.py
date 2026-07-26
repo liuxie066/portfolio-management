@@ -23,7 +23,7 @@ def _args(tmp_path: Path, *extra: str):
     ])
 
 
-def test_install_linux_plan_uses_yaml_config_and_two_timers(tmp_path):
+def test_install_linux_plan_uses_yaml_config_and_three_timers(tmp_path):
     payload = install_linux.build_plan(_args(tmp_path))
 
     assert payload["success"] is True
@@ -42,6 +42,12 @@ def test_install_linux_plan_uses_yaml_config_and_two_timers(tmp_path):
         "service": install_linux.EVENING_SERVICE_NAME,
         "on_calendar": "Mon..Fri *-*-* 17:10:00 Asia/Shanghai",
         "mode": "evening",
+    }
+    assert payload["systemd"]["cash_flow"] == {
+        "timer": install_linux.CASH_FLOW_TIMER_NAME,
+        "service": install_linux.CASH_FLOW_SERVICE_NAME,
+        "on_calendar": "*-*-* *:00/15:00 Asia/Shanghai",
+        "mode": "scan",
     }
     assert payload["systemd"]["enable_api_service"] is False
     assert payload["systemd"]["api"] == {
@@ -85,13 +91,15 @@ def test_install_linux_apply_writes_files_without_overwriting_existing_config(tm
         install_linux.TIMER_NAME,
         install_linux.EVENING_SERVICE_NAME,
         install_linux.EVENING_TIMER_NAME,
+        install_linux.CASH_FLOW_SERVICE_NAME,
+        install_linux.CASH_FLOW_TIMER_NAME,
         install_linux.API_SERVICE_NAME,
     ):
         assert (paths.systemd_dir / unit_name).exists()
     assert commands == [["systemctl", "daemon-reload"]]
 
 
-def test_install_linux_enable_starts_both_timers(tmp_path, monkeypatch):
+def test_install_linux_enable_starts_all_timers(tmp_path, monkeypatch):
     commands = []
     monkeypatch.setattr(install_linux.subprocess, "run", lambda command, check: commands.append(command))
 
@@ -105,6 +113,7 @@ def test_install_linux_enable_starts_both_timers(tmp_path, monkeypatch):
             "--now",
             install_linux.TIMER_NAME,
             install_linux.EVENING_TIMER_NAME,
+            install_linux.CASH_FLOW_TIMER_NAME,
         ],
     ]
 
@@ -269,7 +278,7 @@ def test_install_linux_service_units_use_versioned_wrapper_and_shared_lock(tmp_p
     evening = install_linux.render_service_unit(paths, run_user="portfolio", mode="evening")
 
     assert f"Environment=PORTFOLIO_PM_BIN={tmp_path / 'bin' / 'pm'}" in morning
-    assert f"Environment=PORTFOLIO_FUTU_SY_ENV_FILE={tmp_path / 'etc' / 'futu-sy.env'}" in morning
+    assert "PORTFOLIO_FUTU_SY_ENV_FILE" not in morning
     assert f"{install_linux.SCHEDULE_LOCK_FILE} {tmp_path / 'app' / 'scripts' / 'portfolio_scheduled_job.sh'} morning" in morning
     assert f"{install_linux.SCHEDULE_LOCK_FILE} {tmp_path / 'app' / 'scripts' / 'portfolio_scheduled_job.sh'} evening" in evening
     assert "--sync-futu-cash-mmf" not in morning

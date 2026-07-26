@@ -21,7 +21,13 @@ class FakeProvider:
         self.mmf = mmf
 
     def fetch_balances(self):
-        return FutuBalanceSnapshot(cash=self.cash, mmf=self.mmf, source="fake")
+        return FutuBalanceSnapshot(
+            cash_by_currency={"CNY": self.cash, "USD": None, "HKD": None},
+            mmf=self.mmf,
+            source="fake",
+            account_id=123,
+            profile_fingerprint="profile-lx",
+        )
 
 
 class FakeStorage:
@@ -57,7 +63,7 @@ class FakeReplaceStorage(FakeStorage):
         return holding
 
 
-def test_sync_cash_and_mmf_updates_existing_holdings_by_delta():
+def test_sync_cash_and_mmf_observes_cash_and_updates_only_mmf():
     storage = FakeStorage()
     storage.holdings[("CNY-CASH", "lx", "富途")] = Holding(
         asset_id="CNY-CASH",
@@ -81,17 +87,18 @@ def test_sync_cash_and_mmf_updates_existing_holdings_by_delta():
     result = FutuBalanceSyncService(storage, FakeProvider()).sync_cash_and_mmf(account="lx")
 
     assert result["success"] is True
-    assert result["updated"] == 2
+    assert result["cash_mode"] == "observe_only"
+    assert result["cash_observations"]["CNY"] == 100.126
+    assert result["updated"] == 1
     assert result["created"] == 0
     assert storage.updates == [
-        ("CNY-CASH", "lx", 80.13, "富途"),
         ("CNY-MMF", "lx", 150.33, "富途"),
     ]
-    assert storage.holdings[("CNY-CASH", "lx", "富途")].quantity == 100.13
+    assert storage.holdings[("CNY-CASH", "lx", "富途")].quantity == 20
     assert storage.holdings[("CNY-MMF", "lx", "富途")].quantity == 200.33
 
 
-def test_sync_cash_and_mmf_replaces_existing_holding_fields_when_supported():
+def test_sync_cash_and_mmf_never_replaces_existing_cash_fields():
     storage = FakeReplaceStorage()
     storage.holdings[("CNY-CASH", "lx", "富途")] = Holding(
         record_id="rec_cash",
@@ -106,33 +113,27 @@ def test_sync_cash_and_mmf_replaces_existing_holding_fields_when_supported():
 
     result = FutuBalanceSyncService(storage, FakeProvider(cash=100.126, mmf=None)).sync_cash_and_mmf(account="lx")
 
-    assert result["updated"] == 1
-    assert result["items"][0]["fields_changed"] is True
-    assert result["items"][0]["field_updates"] == {
-        "asset_name": "人民币现金",
-        "asset_type": "cash",
-        "currency": "CNY",
-        "asset_class": "现金",
-        "industry": "现金",
-    }
+    assert result["updated"] == 0
+    assert result["items"] == []
+    assert result["cash_observations"]["CNY"] == 100.126
     assert storage.updates == []
-    assert [h.asset_id for h in storage.replacements] == ["CNY-CASH"]
+    assert storage.replacements == []
     holding = storage.holdings[("CNY-CASH", "lx", "富途")]
-    assert holding.quantity == 100.13
-    assert holding.asset_name == "人民币现金"
-    assert holding.asset_type == AssetType.CASH
-    assert holding.currency == "CNY"
+    assert holding.quantity == 20
+    assert holding.asset_name == "旧现金名"
+    assert holding.asset_type == AssetType.OTHER
+    assert holding.currency == "USD"
 
 
-def test_sync_cash_and_mmf_creates_missing_holdings():
+def test_sync_cash_and_mmf_creates_only_missing_mmf():
     storage = FakeStorage()
 
     result = FutuBalanceSyncService(storage, FakeProvider(cash=10, mmf=0)).sync_cash_and_mmf(account="lx")
 
-    assert result["created"] == 2
+    assert result["created"] == 1
     assert storage.updates == []
-    assert [h.asset_id for h in storage.creates] == ["CNY-CASH", "CNY-MMF"]
-    assert storage.holdings[("CNY-CASH", "lx", "富途")].quantity == 10.0
+    assert [h.asset_id for h in storage.creates] == ["CNY-MMF"]
+    assert ("CNY-CASH", "lx", "富途") not in storage.holdings
     assert storage.holdings[("CNY-MMF", "lx", "富途")].quantity == 0.0
 
 
@@ -150,7 +151,8 @@ def test_sync_cash_and_mmf_dry_run_does_not_write():
 
     result = FutuBalanceSyncService(storage, FakeProvider(cash=100, mmf=None)).sync_cash_and_mmf(account="lx", dry_run=True)
 
-    assert result["items"][0]["delta"] == 80.0
+    assert result["items"] == []
+    assert result["cash_observations"]["CNY"] == 100
     assert storage.updates == []
     assert storage.creates == []
     assert storage.holdings[("CNY-CASH", "lx", "富途")].quantity == 20
@@ -161,29 +163,25 @@ def test_sync_cash_and_mmf_accepts_manual_balances_without_provider():
 
     result = FutuBalanceSyncService(storage).sync_cash_and_mmf(account="lx", cash_balance=1.235, mmf_balance=None)
 
-    assert result["items"] == [
-        {
-            "asset_id": "CNY-CASH",
-            "asset_name": "人民币现金",
-            "current": 0.0,
-            "target": 1.24,
-            "delta": 1.24,
-            "created": True,
-            "updated": True,
-            "fields_changed": False,
-            "field_updates": {},
-        }
-    ]
-    assert storage.holdings[("CNY-CASH", "lx", "富途")].quantity == 1.24
+    assert result["items"] == []
+    assert result["cash_observations"]["CNY"] == 1.235
+    assert storage.holdings == {}
 
 
-def test_futu_openapi_provider_reads_mmf_from_accinfo_fund_assets():
+def test_futu_openapi_provider_reads_exact_currency_cash_and_mmf():
     class FakeCtx:
         def __init__(self):
             self.position_called = False
 
         def accinfo_query(self, **kwargs):
-            return 0, [{"cash": "12.345", "fund_assets": "345.678"}]
+            return 0, [{
+                "acc_id": 123,
+                "cash": "999999",
+                "cn_cash": "12.345",
+                "us_cash": "6.7",
+                "hk_cash": "-8.9",
+                "fund_assets": "345.678",
+            }]
 
         def position_list_query(self, **kwargs):
             self.position_called = True
@@ -191,24 +189,32 @@ def test_futu_openapi_provider_reads_mmf_from_accinfo_fund_assets():
 
     futu_sdk = SimpleNamespace(RET_OK=0, TrdEnv=SimpleNamespace(REAL="REAL"), Currency=SimpleNamespace(CNH="CNH"))
     ctx = FakeCtx()
-    provider = FutuOpenApiBalanceProvider()
+    provider = FutuOpenApiBalanceProvider(acc_id=123)
 
-    assert provider._fetch_cash(futu_sdk, ctx) == 12.345
+    assert provider._fetch_cash_balances(futu_sdk, ctx) == {
+        "CNY": 12.345,
+        "USD": 6.7,
+        "HKD": -8.9,
+    }
     assert provider._fetch_mmf(futu_sdk, ctx) == 345.68
     assert ctx.position_called is False
 
 
-def test_futu_openapi_provider_reads_defaults_from_config_file():
+def test_futu_openapi_provider_reads_explicit_account_profile_from_config_file():
     with TemporaryDirectory() as tmp:
         config_file = Path(tmp) / "config.json"
         config_file.write_text(
             json.dumps({
                 "futu": {
-                    "opend": {"host": "10.0.0.2", "port": 22222},
-                    "trd_env": "SIMULATE",
-                    "acc_id": 123456,
-                    "trd_market": "US",
-                    "cash_currency": "USD",
+                    "profiles": {
+                        "lx": {
+                            "host": "10.0.0.2",
+                            "port": 22222,
+                            "trd_env": "SIMULATE",
+                            "acc_id": 123456,
+                            "trd_market": "US",
+                        }
+                    },
                 }
             }),
             encoding="utf-8",
@@ -228,13 +234,12 @@ def test_futu_openapi_provider_reads_defaults_from_config_file():
                 patch.delenv(name, raising=False)
             config.reload_config()
 
-            provider = FutuOpenApiBalanceProvider()
+            provider = FutuOpenApiBalanceProvider.from_account("lx")
             assert provider.host == "10.0.0.2"
             assert provider.port == 22222
             assert provider.trd_env == "SIMULATE"
             assert provider.acc_id == 123456
             assert provider.trd_market == "US"
-            assert provider.cash_currency == "USD"
         finally:
             patch.undo()
             config.reload_config()
@@ -274,10 +279,12 @@ class FakePortfolioProvider:
         from src.app.futu_balance_sync_service import FutuPortfolioSnapshot
 
         return FutuPortfolioSnapshot(
-            cash=self.cash,
+            cash_by_currency={"CNY": self.cash, "USD": None, "HKD": None},
             mmf=self.mmf,
             positions=self.positions,
             source="fake-portfolio",
+            account_id=123,
+            profile_fingerprint="profile-lx",
         )
 
 
@@ -574,7 +581,7 @@ def test_sync_portfolio_holds_account_lock_across_diff_and_all_writes(monkeypatc
     assert state["locked"] is False
 
 
-def test_sync_portfolio_reports_partial_write_when_cash_sync_fails_after_positions():
+def test_sync_portfolio_never_touches_cash_after_positions_write():
     class CashFailureStorage(FakePortfolioStorage):
         def get_holding(self, asset_id, account, broker=None):
             if asset_id == "CNY-CASH" and self.bulk_calls:
@@ -599,9 +606,9 @@ def test_sync_portfolio_reports_partial_write_when_cash_sync_fails_after_positio
 
     result = service.sync_portfolio(account="lx", dry_run=False, confirm=True)
 
-    assert result["success"] is False
-    assert result["write_stage"] == "cash_mmf"
-    assert result["partial_write_possible"] is True
+    assert result["success"] is True
+    assert result["cash_mmf"]["cash_mode"] == "observe_only"
+    assert result["cash_mmf"]["cash_observations"]["CNY"] == 100
     assert result["summary"]["updated"] == 1
     assert len(storage.bulk_calls) == 1
 
@@ -679,7 +686,14 @@ def test_futu_portfolio_provider_fetches_average_cost_and_closes_contexts(monkey
             self.position_kwargs = None
 
         def accinfo_query(self, **kwargs):
-            return 0, [{"cash": 12.34, "fund_assets": 56.78}]
+            return 0, [{
+                "acc_id": 123,
+                "cash": 999999,
+                "cn_cash": 12.34,
+                "us_cash": 5.67,
+                "hk_cash": -1,
+                "fund_assets": 56.78,
+            }]
 
         def position_list_query(self, **kwargs):
             self.position_kwargs = kwargs
@@ -724,7 +738,11 @@ def test_futu_portfolio_provider_fetches_average_cost_and_closes_contexts(monkey
 
     snapshot = provider.fetch_portfolio()
 
-    assert snapshot.cash == 12.34
+    assert snapshot.cash_by_currency == {
+        "CNY": 12.34,
+        "USD": 5.67,
+        "HKD": -1.0,
+    }
     assert snapshot.mmf == 56.78
     assert snapshot.positions[0].quantity == 10.1256
     assert snapshot.positions[0].average_cost == 100.25
@@ -738,7 +756,13 @@ def test_futu_portfolio_provider_closes_contexts_when_classification_fails(monke
         closed = False
 
         def accinfo_query(self, **kwargs):
-            return 0, [{"cash": 1, "fund_assets": 2}]
+            return 0, [{
+                "acc_id": 123,
+                "cn_cash": 1,
+                "us_cash": 2,
+                "hk_cash": 3,
+                "fund_assets": 2,
+            }]
 
         def position_list_query(self, **kwargs):
             return 0, [{"code": "US.FUTU", "qty": 1}]

@@ -49,76 +49,41 @@ class TestPortfolioManagerDepositWithdraw:
         self.manager = PortfolioManager(storage=self.mock_storage)
 
     def test_deposit(self):
-        """测试入金"""
-        self.mock_storage.add_cash_flow.return_value = CashFlow(
-            flow_date=date(2025, 3, 14),
-            account='测试账户',
-            amount=100000,
-            currency='CNY',
-            flow_type='DEPOSIT'
-        )
-        self.mock_storage.get_holding.return_value = None
-        self.mock_storage.upsert_holding.return_value = Mock()
-
-        result = self.manager.deposit(
-            flow_date=date(2025, 3, 14),
-            account='测试账户',
-            amount=100000,
-            currency='CNY'
-        )
-
-        assert result is not None
-        assert result.amount == 100000
-        assert result.flow_type == 'DEPOSIT'
-        self.mock_storage.add_cash_flow.assert_called_once()
+        """Legacy 入金入口稳定拒绝且不写入。"""
+        with pytest.raises(RuntimeError, match="cash_flow_entry_disabled"):
+            self.manager.deposit(
+                flow_date=date(2025, 3, 14),
+                account='测试账户',
+                amount=100000,
+                currency='CNY'
+            )
+        self.mock_storage.add_cash_flow.assert_not_called()
+        self.mock_storage.replace_holding.assert_not_called()
 
     def test_deposit_with_exchange_rate(self):
-        """测试入金带汇率"""
-        self.mock_storage.add_cash_flow.return_value = Mock()
-        self.mock_storage.get_holding.return_value = None
-        self.mock_storage.upsert_holding.return_value = Mock()
-
-        self.manager.deposit(
-            flow_date=date(2025, 3, 14),
-            account='测试账户',
-            amount=10000,
-            currency='USD',
-            cny_amount=72000,
-            exchange_rate=7.2
-        )
-
-        call_args = self.mock_storage.add_cash_flow.call_args
-        assert call_args[0][0].cny_amount == 72000
-        assert call_args[0][0].exchange_rate == 7.2
+        """带汇率参数也不能绕过禁用入口。"""
+        with pytest.raises(RuntimeError, match="cash_flow_entry_disabled"):
+            self.manager.deposit(
+                flow_date=date(2025, 3, 14),
+                account='测试账户',
+                amount=10000,
+                currency='USD',
+                cny_amount=72000,
+                exchange_rate=7.2
+            )
+        self.mock_storage.add_cash_flow.assert_not_called()
 
     def test_withdraw(self):
-        """测试出金"""
-        self.mock_storage.add_cash_flow.return_value = CashFlow(
-            flow_date=date(2025, 3, 14),
-            account='测试账户',
-            amount=-50000,
-            currency='CNY',
-            flow_type='WITHDRAW'
-        )
-        self.mock_storage.get_holding.return_value = Holding(
-            asset_id='CNY-CASH',
-            asset_name='人民币现金',
-            asset_type=AssetType.CASH,
-            account='测试账户',
-            quantity=100000,
-            currency='CNY'
-        )
-
-        result = self.manager.withdraw(
-            flow_date=date(2025, 3, 14),
-            account='测试账户',
-            amount=50000,
-            currency='CNY'
-        )
-
-        assert result is not None
-        assert result.amount == -50000
-        assert result.flow_type == 'WITHDRAW'
+        """Legacy 出金入口稳定拒绝且不写入。"""
+        with pytest.raises(RuntimeError, match="cash_flow_entry_disabled"):
+            self.manager.withdraw(
+                flow_date=date(2025, 3, 14),
+                account='测试账户',
+                amount=50000,
+                currency='CNY'
+            )
+        self.mock_storage.add_cash_flow.assert_not_called()
+        self.mock_storage.replace_holding.assert_not_called()
 
 class TestPortfolioManagerValuation:
     """测试组合估值"""

@@ -1,6 +1,6 @@
 # Feishu Bitable Schema (truth source)
 
-Schema version: `0004_manual_editable_fields`
+Schema version: `0005_cash_flow_holding_effects`
 
 This doc defines the canonical Feishu Bitable field names expected by the code.
 Field names must match exactly: they are case-sensitive and underscore-sensitive.
@@ -27,7 +27,11 @@ Business key: `(asset_id, account, broker)`
 
 Manual edit policy:
 - Non-Futu stock/fund/other holding rows are maintained manually in the manual view.
-- For `broker=富途`, `pm futu sync` treats Futu as the source of truth for cash/MMF balances and STOCK/ETF quantities plus average cost.
+- CASH rows are not directly maintained by scheduled sync. External cash-flow
+  effects and Futu reconciliation use an explicit preview hash and per-row CLI
+  confirmation before writing.
+- For `broker=富途`, `pm futu sync` observes per-currency CASH, synchronizes MMF,
+  and treats Futu as the source of truth for STOCK/ETF quantity and average cost.
 - Existing Futu stock/ETF rows update only `quantity`, `avg_cost`, and `updated_at`; names and manual metadata remain unchanged. New rows use Futu name/type/currency metadata.
 - `avg_cost` maps only from Futu `average_cost`; `diluted_cost` and deprecated `cost_price` are never used. Closed positions keep the row with `quantity=0` and clear `avg_cost`.
 
@@ -110,16 +114,20 @@ Role: core
 Purpose: cash deposits/withdrawals used by NAV calculation. This table must stay easy to maintain manually.
 
 Manual view fields:
-- `flow_date`, `account`, `amount`, `currency`, `remark`
+- `flow_date`, `account`, `broker`, `amount`, `currency`, `remark`
 
 Manual rule:
 - `amount` is positive for deposit and negative for withdrawal.
+- `broker` is mandatory and explicitly routes the same-currency CASH identity.
 - Manual users do not fill exchange-rate, CNY, flow-type, dedup, or source fields.
 - After manual insertion or edit, run `pm cash-flow reconcile` to preview generated fields, then `pm cash-flow reconcile --apply --confirm` to write them.
 
 System fields:
 - `flow_type` - derived from amount sign (`DEPOSIT` / `WITHDRAW`)
 - `exchange_rate` - derived when `currency != CNY`
+- `exchange_rate_date` - historical evidence date; must equal `flow_date`
+- `exchange_rate_source` - stable provider or traceable evidence source
+- `exchange_rate_evidence_type` - `provider`, `manual_supplement`, or `cny_identity`
 - `cny_amount` - derived from `amount * exchange_rate`
 - `dedup_key` - generated for duplicate protection
 - `source` - `manual`, `system`, `broker_sync`, or repair source
@@ -127,6 +135,7 @@ System fields:
 Required fields:
 - `flow_date` (date) - manual
 - `account` (text) - manual
+- `broker` (text) - manual
 - `amount` (number) - manual
 - `currency` (text) - manual
 - `flow_type` (text/select) - system
@@ -135,6 +144,9 @@ Required fields:
 
 Optional fields:
 - `exchange_rate` (number) - system
+- `exchange_rate_date` (date) - system
+- `exchange_rate_source` (text) - system
+- `exchange_rate_evidence_type` (text/select) - system
 - `source` (text) - system
 - `remark` (text) - manual
 - `updated_at` (text/datetime) - system

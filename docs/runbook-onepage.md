@@ -23,10 +23,12 @@
 3. 解析账户列表；未指定时从当前 holdings 发现账户。
 4. 审计 `nav_history` 同账户同日期重复记录。
 5. 检查人工 `cash_flow` 行是否还有待补齐系统字段。
-6. 外层调度脚本先独立运行 lx/sy `pm futu sync`；内嵌现金/MMF同步仅兼容旧流程。
-7. 为每个账户构建一次带价格的估值快照。
-8. 写入 `nav_history`，成功后写入 `holdings_snapshot`。
-9. 正式多账户任务发送一条 NAV 汇总回执；dry-run 不发送。
+6. fresh scan 检查 Cash Flow holding effects；未解决项阻断所有受影响账户。
+7. 外层调度脚本先独立运行 lx/sy `pm futu sync`；CASH 只观测，MMF 和
+   股票/ETF 才同步。
+8. 为每个账户构建一次带价格的估值快照。
+9. 写入 `nav_history`，成功后写入 `holdings_snapshot`。
+10. 正式多账户任务发送一条 NAV 汇总回执；dry-run 不发送。
 
 常用命令：
 

@@ -45,25 +45,7 @@ class CashService:
         return f"{currency}-CASH"
 
     def update_cash_holding(self, account: str, amount: float, currency: str, cny_amount: float = None) -> None:
-        asset_id = self.cash_asset_id_for_currency(currency)
-        cash_holding = self.storage.get_holding(asset_id, account)
-        quantity = float(self.quantize_money(amount))
-
-        if cash_holding:
-            self.storage.update_holding_quantity(asset_id, account, quantity)
-            return
-
-        holding = Holding(
-            asset_id=asset_id,
-            asset_name=f"{currency}现金",
-            asset_type=AssetType.CASH,
-            account=account,
-            quantity=quantity,
-            currency=currency,
-            asset_class=AssetClass.CASH,
-            industry="现金",
-        )
-        self.storage.upsert_holding(holding)
+        raise RuntimeError("cash_flow_entry_disabled")
 
     def sync_cash_like_balance(
         self,
@@ -78,9 +60,11 @@ class CashService:
     ) -> dict[str, Any]:
         """Sync a cash-like holding to an absolute target balance.
 
-        Use this for broker/API balance sync. Delta-style cash operations should
-        keep using ``update_cash_holding`` / ``add_cash`` / ``deduct_cash``.
+        CASH is rejected here and must use a confirmed cash-flow effect.
+        The current broker sync caller uses this method only for MMF.
         """
+        if asset_type == AssetType.CASH:
+            raise RuntimeError("cash_effect_confirmation_required")
         target_qty = float(self.quantize_money(target))
         existing = self.storage.get_holding(asset_id, account, broker)
         current_qty = float(self.quantize_money(existing.quantity if existing else 0))
@@ -261,26 +245,4 @@ class CashService:
         return True
 
     def add_cash(self, account: str, amount: float) -> bool:
-        if amount <= 0:
-            return True
-
-        amount_dec = self.quantize_money(amount)
-        cash_holding = self.storage.get_holding(CASH_ASSET_ID, account)
-
-        if cash_holding:
-            self.storage.update_holding_quantity(CASH_ASSET_ID, account, float(amount_dec))
-        else:
-            holding = Holding(
-                asset_id=CASH_ASSET_ID,
-                asset_name="人民币现金",
-                asset_type=AssetType.CASH,
-                account=account,
-                quantity=float(amount_dec),
-                currency="CNY",
-                asset_class=AssetClass.CASH,
-                industry="现金",
-            )
-            self.storage.upsert_holding(holding)
-
-        print(f"  增加到 {CASH_ASSET_ID}: ¥{float(amount_dec):,.2f}")
-        return True
+        raise RuntimeError("cash_flow_entry_disabled")

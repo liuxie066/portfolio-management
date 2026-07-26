@@ -1,4 +1,4 @@
-"""Synchronize Futu cash, MMF, stock/ETF quantities, and average costs."""
+"""Observe Futu CASH and synchronize MMF plus stock/ETF holdings."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -10,7 +10,6 @@ from src import config
 from src.models import (
     AssetClass,
     AssetType,
-    CASH_ASSET_ID,
     MMF_ASSET_ID,
     Holding,
 )
@@ -21,12 +20,13 @@ from .cash_service import CashService
 
 @dataclass(frozen=True)
 class FutuBalanceSnapshot:
-    """Absolute cash-like balances fetched from Futu."""
+    """Authoritative observe-only per-currency cash plus the MMF balance."""
 
-    cash: Optional[float] = None
+    cash_by_currency: Dict[str, Optional[float]] | None = None
     mmf: Optional[float] = None
-    currency: str = "CNY"
     source: str = "futu"
+    account_id: Optional[int] = None
+    profile_fingerprint: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -46,18 +46,19 @@ class FutuPositionSnapshot:
 
 @dataclass(frozen=True)
 class FutuPortfolioSnapshot:
-    """Complete cash-like and position snapshot for one Futu account."""
+    """Complete positions, MMF, and observe-only cash snapshot."""
 
-    cash: Optional[float] = None
+    cash_by_currency: Dict[str, Optional[float]] | None = None
     mmf: Optional[float] = None
     positions: tuple[FutuPositionSnapshot, ...] = ()
-    currency: str = "CNY"
     source: str = "futu"
+    account_id: Optional[int] = None
+    profile_fingerprint: Optional[str] = None
 
 
 class FutuBalanceProvider(Protocol):
     def fetch_balances(self) -> FutuBalanceSnapshot:
-        """Return absolute Futu cash/MMF balances."""
+        """Return absolute Futu cash observations and the MMF balance."""
 
 
 class FutuPortfolioProvider(Protocol):
@@ -101,7 +102,11 @@ class FutuOpenApiBalanceProvider:
     should inject a provider instead of constructing this adapter.
     """
 
-    CASH_COLUMNS = ("cash", "available_funds", "withdraw_cash", "power")
+    CASH_COLUMNS = {
+        "CNY": "cn_cash",
+        "USD": "us_cash",
+        "HKD": "hk_cash",
+    }
     MMF_COLUMNS = ("fund_assets",)
 
     def __init__(
@@ -112,14 +117,28 @@ class FutuOpenApiBalanceProvider:
         trd_env: Optional[str] = None,
         acc_id: Optional[int] = None,
         trd_market: Optional[str] = None,
-        cash_currency: Optional[str] = None,
     ):
         self.host = host or config.get("futu.opend.host", "127.0.0.1")
         self.port = int(port if port is not None else (config.get_int("futu.opend.port", 11111) or 11111))
         self.trd_env = trd_env or config.get("futu.trd_env", "REAL")
         self.acc_id = int(acc_id) if acc_id is not None else config.get_int("futu.acc_id")
         self.trd_market = trd_market or config.get("futu.trd_market", "HK")
-        self.cash_currency = cash_currency or config.get("futu.cash_currency", "CNH")
+
+    @classmethod
+    def from_account(cls, account: str) -> "FutuOpenApiBalanceProvider":
+        return cls(**config.get_futu_profile(account))
+
+    @property
+    def profile_fingerprint(self) -> str:
+        from .cash_flow_effect_store import sha256_json
+
+        return sha256_json({
+            "host": self.host,
+            "port": self.port,
+            "acc_id": self.acc_id,
+            "trd_env": self.trd_env,
+            "trd_market": self.trd_market,
+        })
 
     def fetch_balances(self) -> FutuBalanceSnapshot:
         futu_sdk = self._import_sdk()
@@ -130,10 +149,11 @@ class FutuOpenApiBalanceProvider:
             self._close(ctx)
 
         return FutuBalanceSnapshot(
-            cash=self._cash_from_row(row),
+            cash_by_currency=self._cash_balances_from_row(row),
             mmf=self._mmf_from_row(row),
-            currency="CNY",
             source="futu-openapi",
+            account_id=self.acc_id,
+            profile_fingerprint=self.profile_fingerprint,
         )
 
     def fetch_portfolio(self) -> FutuPortfolioSnapshot:
@@ -157,11 +177,12 @@ class FutuOpenApiBalanceProvider:
             self._close(trade_ctx)
 
         return FutuPortfolioSnapshot(
-            cash=self._cash_from_row(account_row),
+            cash_by_currency=self._cash_balances_from_row(account_row),
             mmf=self._mmf_from_row(account_row),
             positions=positions,
-            currency="CNY",
             source="futu-openapi",
+            account_id=self.acc_id,
+            profile_fingerprint=self.profile_fingerprint,
         )
 
     @staticmethod
@@ -175,18 +196,18 @@ class FutuOpenApiBalanceProvider:
                 raise RuntimeError("未安装 futu/moomoo SDK；请安装 Futu OpenAPI SDK 并启动 OpenD，或注入自定义 provider") from exc
         return futu_sdk
 
-    def _fetch_cash(self, futu_sdk: Any, ctx: Any) -> Optional[float]:
-        return self._cash_from_row(self._fetch_accinfo_row(futu_sdk, ctx))
+    def _fetch_cash_balances(self, futu_sdk: Any, ctx: Any) -> Dict[str, Optional[float]]:
+        return self._cash_balances_from_row(self._fetch_accinfo_row(futu_sdk, ctx))
 
     def _fetch_mmf(self, futu_sdk: Any, ctx: Any) -> Optional[float]:
         return self._mmf_from_row(self._fetch_accinfo_row(futu_sdk, ctx))
 
-    def _cash_from_row(self, row: dict[str, Any]) -> Optional[float]:
-        for column in self.CASH_COLUMNS:
+    def _cash_balances_from_row(self, row: dict[str, Any]) -> Dict[str, Optional[float]]:
+        balances: Dict[str, Optional[float]] = {}
+        for currency, column in self.CASH_COLUMNS.items():
             value = row.get(column)
-            if value is not None:
-                return float(value)
-        return None
+            balances[currency] = _optional_float(value)
+        return balances
 
     def _mmf_from_row(self, row: dict[str, Any]) -> Optional[float]:
         for column in self.MMF_COLUMNS:
@@ -196,6 +217,10 @@ class FutuOpenApiBalanceProvider:
         return None
 
     def _fetch_accinfo_row(self, futu_sdk: Any, ctx: Any) -> dict[str, Any]:
+        if self.acc_id is None:
+            raise ValueError(
+                "Futu acc_id is required for authoritative cash observations"
+            )
         kwargs = self._accinfo_kwargs(futu_sdk)
         try:
             ret, data = ctx.accinfo_query(**kwargs)
@@ -203,7 +228,16 @@ class FutuOpenApiBalanceProvider:
             kwargs.pop("currency", None)
             ret, data = ctx.accinfo_query(**kwargs)
         self._ensure_ok(futu_sdk, ret, data, "accinfo_query")
-        return _first_row(data)
+        row = _first_row(data)
+        returned_acc_id = row.get("acc_id")
+        if returned_acc_id in (None, ""):
+            raise RuntimeError("Futu accinfo_query response lacks acc_id evidence")
+        if int(returned_acc_id) != int(self.acc_id):
+            raise RuntimeError(
+                f"Futu account mismatch: expected acc_id={self.acc_id}, "
+                f"returned={returned_acc_id}"
+            )
+        return row
 
     def _fetch_position_rows(self, futu_sdk: Any, ctx: Any) -> list[dict[str, Any]]:
         kwargs: dict[str, Any] = {
@@ -287,7 +321,7 @@ class FutuOpenApiBalanceProvider:
     def _accinfo_kwargs(self, futu_sdk: Any) -> dict[str, Any]:
         kwargs: dict[str, Any] = {}
         kwargs["trd_env"] = self._enum_value(futu_sdk, "TrdEnv", self.trd_env)
-        kwargs["currency"] = self._enum_value(futu_sdk, "Currency", self.cash_currency)
+        kwargs["currency"] = self._enum_value(futu_sdk, "Currency", "NONE")
         if self.acc_id is not None:
             kwargs["acc_id"] = self.acc_id
         return kwargs
@@ -344,9 +378,13 @@ class FutuBalanceSyncService:
         mmf_balance: Optional[float] = None,
     ) -> dict[str, Any]:
         snapshot = (
-            FutuBalanceSnapshot(cash=cash_balance, mmf=mmf_balance)
+            FutuBalanceSnapshot(
+                cash_by_currency={"CNY": cash_balance, "USD": None, "HKD": None},
+                mmf=mmf_balance,
+                source="manual-observation",
+            )
             if cash_balance is not None or mmf_balance is not None
-            else self._fetch_balances()
+            else self._fetch_balances(account)
         )
 
         with process_lock(account_lock_key(account)):
@@ -372,7 +410,7 @@ class FutuBalanceSyncService:
             return self._failure(account, broker, dry_run, "allow-empty-stock-snapshot requires confirm=True")
 
         try:
-            snapshot = self._fetch_portfolio()
+            snapshot = self._fetch_portfolio(account)
         except Exception as exc:
             return self._failure(account, broker, dry_run, str(exc))
 
@@ -403,10 +441,11 @@ class FutuBalanceSyncService:
                 write_stage = "cash_mmf"
                 cash_result = self._sync_cash_snapshot(
                     FutuBalanceSnapshot(
-                        cash=snapshot.cash,
+                        cash_by_currency=snapshot.cash_by_currency,
                         mmf=snapshot.mmf,
-                        currency=snapshot.currency,
                         source=snapshot.source,
+                        account_id=snapshot.account_id,
+                        profile_fingerprint=snapshot.profile_fingerprint,
                     ),
                     account=account,
                     broker=broker,
@@ -446,15 +485,6 @@ class FutuBalanceSyncService:
         items.extend(self._sync_asset(
             account=account,
             broker=broker,
-            asset_id=CASH_ASSET_ID,
-            asset_name="人民币现金",
-            asset_type=AssetType.CASH,
-            target=snapshot.cash,
-            dry_run=dry_run,
-        ))
-        items.extend(self._sync_asset(
-            account=account,
-            broker=broker,
             asset_id=MMF_ASSET_ID,
             asset_name="货币基金",
             asset_type=AssetType.MMF,
@@ -467,6 +497,10 @@ class FutuBalanceSyncService:
             "broker": broker,
             "dry_run": dry_run,
             "source": snapshot.source,
+            "cash_mode": "observe_only",
+            "cash_observations": dict(snapshot.cash_by_currency or {}),
+            "account_id": snapshot.account_id,
+            "profile_fingerprint": snapshot.profile_fingerprint,
             "items": [item.__dict__ for item in items],
             "updated": sum(1 for item in items if item.updated),
             "created": sum(1 for item in items if item.created),
@@ -602,12 +636,17 @@ class FutuBalanceSyncService:
 
         return items, replacements
 
-    def _fetch_balances(self) -> FutuBalanceSnapshot:
-        provider = self.provider or FutuOpenApiBalanceProvider()
+    def _fetch_balances(self, account: str) -> FutuBalanceSnapshot:
+        provider = self.provider or FutuOpenApiBalanceProvider.from_account(account)
         return provider.fetch_balances()
 
-    def _fetch_portfolio(self) -> FutuPortfolioSnapshot:
-        provider = self.provider or FutuOpenApiBalanceProvider()
+    def _fetch_portfolio(self, account: Optional[str] = None) -> FutuPortfolioSnapshot:
+        if self.provider is not None:
+            provider = self.provider
+        elif account:
+            provider = FutuOpenApiBalanceProvider.from_account(account)
+        else:
+            raise ValueError("account is required to select a Futu profile")
         fetch = getattr(provider, "fetch_portfolio", None)
         if not callable(fetch):
             raise RuntimeError("Futu portfolio provider does not implement fetch_portfolio()")

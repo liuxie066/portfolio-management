@@ -247,6 +247,90 @@ class HoldingsRepository:
 
         return holding
 
+    def get_holding_fresh(self, asset_id: str, account: str, broker: str) -> Optional[Holding]:
+        """Read one exact holding identity from Feishu, bypassing every cache.
+
+        Cash-flow confirmation uses this method so a preview can never be
+        applied against a stale local holding snapshot.
+        """
+        if not broker:
+            raise ValueError("broker is required for an exact fresh holding read")
+        filter_str = (
+            f'CurrentValue.[asset_id] = "{self._escape_filter_value(asset_id)}" '
+            f'AND CurrentValue.[account] = "{self._escape_filter_value(account)}" '
+            f'AND CurrentValue.[broker] = "{self._escape_filter_value(broker)}"'
+        )
+        records = self.client.list_records(
+            'holdings',
+            filter_str=filter_str,
+            field_names=self.HOLDING_PROJECTION_FIELDS,
+        )
+        if len(records) > 1:
+            raise RuntimeError(
+                f"duplicate holding identity: asset_id={asset_id}, account={account}, broker={broker}"
+            )
+        self._invalidate_holding_cache(asset_id, account, broker)
+        if not records:
+            return None
+
+        fields = self._from_feishu_fields(records[0].get('fields') or {}, 'holdings')
+        fields.setdefault('asset_id', asset_id)
+        fields.setdefault('account', account)
+        fields.setdefault('broker', broker)
+        fields['record_id'] = records[0]['record_id']
+        holding = self._dict_to_holding(fields)
+        self._put_holding_cache(holding)
+        return holding
+
+    def get_holdings_fresh(
+        self,
+        *,
+        account: Optional[str] = None,
+        asset_type: Optional[str] = None,
+        include_empty: bool = True,
+    ) -> List[Holding]:
+        """Read a complete holdings slice directly from Feishu."""
+        conditions = []
+        if account:
+            conditions.append(
+                f'CurrentValue.[account] = "{self._escape_filter_value(account)}"'
+            )
+        if asset_type:
+            conditions.append(
+                f'CurrentValue.[asset_type] = "{self._escape_filter_value(asset_type)}"'
+            )
+        records = self.client.list_records(
+            'holdings',
+            filter_str=' AND '.join(conditions) if conditions else None,
+            field_names=self.HOLDING_PROJECTION_FIELDS,
+        )
+        holdings: List[Holding] = []
+        seen: set[tuple[str, str, str]] = set()
+        for record in records:
+            fields = self._from_feishu_fields(record.get('fields') or {}, 'holdings')
+            fields['record_id'] = record['record_id']
+            holding = self._dict_to_holding(fields)
+            identity = (holding.asset_id, holding.account, holding.broker or "")
+            if identity in seen:
+                raise RuntimeError(
+                    "duplicate holding identity: "
+                    f"asset_id={identity[0]}, account={identity[1]}, broker={identity[2]}"
+                )
+            seen.add(identity)
+            self._invalidate_holding_cache(*identity)
+            self._put_holding_cache(holding)
+            if not include_empty and holding.quantity == 0:
+                continue
+            if (
+                not include_empty
+                and holding.quantity < 0
+                and holding.asset_type != AssetType.CASH
+            ):
+                continue
+            holdings.append(holding)
+        holdings.sort(key=lambda item: (item.account, item.broker, item.asset_id))
+        return holdings
+
     def get_holdings(self, account: Optional[str] = None, asset_type: Optional[str] = None, include_empty: bool = False) -> List[Holding]:
         """获取持仓列表（优先使用内存缓存索引）"""
         # 当缓存已加载且无 asset_type 过滤时，直接从缓存返回
@@ -263,7 +347,9 @@ class HoldingsRepository:
                 if account and fields.get('account') != account:
                     continue
                 holding = self._dict_to_holding(fields)
-                if not include_empty and holding.quantity <= 0:
+                if not include_empty and holding.quantity == 0:
+                    continue
+                if not include_empty and holding.quantity < 0 and holding.asset_type != AssetType.CASH:
                     continue
                 holdings.append(holding)
             holdings.sort(key=lambda h: (h.asset_type.value if h.asset_type else '', h.asset_id))
@@ -289,7 +375,9 @@ class HoldingsRepository:
             fields['record_id'] = record['record_id']
             holding = self._dict_to_holding(fields)
             self._put_holding_cache(holding)
-            if not include_empty and holding.quantity <= 0:
+            if not include_empty and holding.quantity == 0:
+                continue
+            if not include_empty and holding.quantity < 0 and holding.asset_type != AssetType.CASH:
                 continue
             holdings.append(holding)
 
@@ -354,9 +442,8 @@ class HoldingsRepository:
         """Replace one holding row by business key.
 
         Unlike ``upsert_holding`` this treats ``quantity`` as the absolute
-        target value and refreshes the canonical descriptor fields.  It is used
-        by broker balance sync where Futu is the source of truth for cash/MMF
-        balances.
+        target value and refreshes the canonical descriptor fields. CASH
+        callers must enforce their confirmed effect boundary before invoking it.
         """
         from ...time_utils import bj_now_naive
 

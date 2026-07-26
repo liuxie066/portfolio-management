@@ -19,10 +19,11 @@ If full Futu holdings sync is enabled:
 ./pm futu sync --account lx --json
 ```
 
-`pm futu sync` is dry-run by default. It synchronizes cash/MMF plus LONG
-STOCK/ETF quantity and Futu `average_cost`; `diluted_cost` is never used. Run
-it independently before `daily-job` so holdings refresh even when NAV skips an
-existing date.
+`pm futu sync` is dry-run by default. It observes `cn_cash/us_cash/hk_cash`,
+synchronizes MMF plus LONG STOCK/ETF quantity and Futu `average_cost`, and never
+writes CASH directly; aggregate `cash` and `diluted_cost` are never used. Run it
+independently before `daily-job` so broker observations and non-CASH holdings
+refresh even when NAV skips an existing date.
 
 A real write sends a success/failure receipt from the configured Feishu
 “刘看山” app. Dry-runs do not send. Check `receipt.status` in JSON output;

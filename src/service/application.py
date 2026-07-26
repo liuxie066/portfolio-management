@@ -379,6 +379,17 @@ class PortfolioService:
                 confirm=confirm,
                 allow_empty_stock_snapshot=allow_empty_stock_snapshot,
             )
+            if result.get("success") and not dry_run:
+                from src.app.cash_flow_effect_service import (
+                    observe_futu_cash_result,
+                )
+
+                result = dict(result)
+                result["cash_effects"] = observe_futu_cash_result(
+                    storage=self.storage,
+                    account=resolved_account,
+                    cash_result=dict(result.get("cash_mmf") or {}),
+                )
         except Exception as exc:
             result = {
                 "success": False,

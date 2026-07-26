@@ -56,7 +56,7 @@ def test_morning_syncs_both_accounts_then_runs_one_multi_account_nav_job(tmp_pat
     assert result.returncode == 0
     assert calls == [
         "futu sync --account lx --write --confirm --json --no-service|port=unset",
-        "futu sync --account sy --write --confirm --json --no-service|port=11112",
+        "futu sync --account sy --write --confirm --json --no-service|port=unset",
         "daily-job --accounts lx,hb,sy --write --confirm --json --no-service|port=unset",
     ]
 
@@ -67,7 +67,7 @@ def test_evening_only_syncs_both_futu_accounts(tmp_path):
     assert result.returncode == 0
     assert calls == [
         "futu sync --account lx --write --confirm --json --no-service|port=unset",
-        "futu sync --account sy --write --confirm --json --no-service|port=11112",
+        "futu sync --account sy --write --confirm --json --no-service|port=unset",
     ]
 
 
@@ -82,7 +82,7 @@ def test_sync_failure_still_attempts_both_accounts_and_blocks_nav(tmp_path):
     assert "NAV job was not started" in result.stderr
 
 
-def test_missing_sy_env_blocks_nav_after_lx_attempt(tmp_path):
+def test_missing_legacy_sy_env_does_not_affect_unified_profile_routing(tmp_path):
     calls, sy_env, env = _fixture(tmp_path)
     sy_env.unlink()
 
@@ -93,8 +93,10 @@ def test_missing_sy_env_blocks_nav_after_lx_attempt(tmp_path):
         text=True,
     )
 
-    assert result.returncode == 1
+    assert result.returncode == 0
     assert calls.read_text(encoding="utf-8").splitlines() == [
-        "futu sync --account lx --write --confirm --json --no-service|port=unset"
+        "futu sync --account lx --write --confirm --json --no-service|port=unset",
+        "futu sync --account sy --write --confirm --json --no-service|port=unset",
+        "daily-job --accounts lx,hb,sy --write --confirm --json --no-service|port=unset",
     ]
-    assert "sy Futu env file is not readable" in result.stderr
+    assert result.stderr == ""

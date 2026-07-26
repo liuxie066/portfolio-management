@@ -30,13 +30,27 @@ report:
   disable_nav_runtime_validation: false
 
 futu:
-  opend:
-    host: 127.0.0.1
-    port: 11111
-  trd_env: REAL
-  acc_id:
-  trd_market: HK
-  cash_currency: CNH
+  # Cash effects and scheduled stock sync use this same explicit mapping.
+  profiles:
+    lx:
+      host: 127.0.0.1
+      port: 11111
+      acc_id:
+      trd_env: REAL
+      trd_market: HK
+    sy:
+      host: 127.0.0.1
+      port: 11112
+      acc_id:
+      trd_env: REAL
+      trd_market: HK
+
+cash_flow:
+  effects:
+    # Set once during `pm cash-flow effects init`; changing it later is refused.
+    cutover_date:
+    # Relative paths are resolved inside data.dir.
+    db_path: cash_flow_effects.sqlite3
 
 finnhub_api_key: ""
 

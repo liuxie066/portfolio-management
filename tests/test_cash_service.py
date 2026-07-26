@@ -1,10 +1,12 @@
 from unittest.mock import Mock
 
+import pytest
+
 from src.app.cash_service import CashService
 from src.models import AssetType, Holding
 
 
-def test_cash_service_update_existing_cny_holding():
+def test_cash_service_update_existing_cny_holding_is_disabled():
     storage = Mock()
     storage.get_holding.return_value = Holding(
         asset_id="CNY-CASH",
@@ -16,23 +18,21 @@ def test_cash_service_update_existing_cny_holding():
     )
     service = CashService(storage)
 
-    service.update_cash_holding("a", 1.005, "CNY", 1.005)
+    with pytest.raises(RuntimeError, match="cash_flow_entry_disabled"):
+        service.update_cash_holding("a", 1.005, "CNY", 1.005)
 
-    storage.update_holding_quantity.assert_called_once_with("CNY-CASH", "a", 1.01)
+    storage.update_holding_quantity.assert_not_called()
 
 
-def test_cash_service_creates_foreign_cash_holding():
+def test_cash_service_foreign_cash_holding_entry_is_disabled():
     storage = Mock()
     storage.get_holding.return_value = None
     service = CashService(storage)
 
-    service.update_cash_holding("a", 1000, "USD", 7200)
+    with pytest.raises(RuntimeError, match="cash_flow_entry_disabled"):
+        service.update_cash_holding("a", 1000, "USD", 7200)
 
-    holding = storage.upsert_holding.call_args[0][0]
-    assert holding.asset_id == "USD-CASH"
-    assert holding.asset_type == AssetType.CASH
-    assert holding.quantity == 1000.0
-    assert holding.currency == "USD"
+    storage.upsert_holding.assert_not_called()
 
 
 def test_cash_service_deducts_cash_then_mmf():
@@ -60,16 +60,14 @@ def test_cash_service_insufficient_cash_returns_false():
     assert service.deduct_cash("a", 5000) is False
 
 
-def test_cash_service_add_cash_creates_when_missing():
+def test_cash_service_add_cash_is_disabled():
     storage = Mock()
     storage.get_holding.return_value = None
     service = CashService(storage)
 
-    assert service.add_cash("a", 1.005) is True
-
-    holding = storage.upsert_holding.call_args[0][0]
-    assert holding.asset_id == "CNY-CASH"
-    assert holding.quantity == 1.01
+    with pytest.raises(RuntimeError, match="cash_flow_entry_disabled"):
+        service.add_cash("a", 1.005)
+    storage.upsert_holding.assert_not_called()
 
 
 def test_cash_service_sync_cash_like_balance_uses_absolute_target_delta():
@@ -102,23 +100,21 @@ def test_cash_service_sync_cash_like_balance_uses_absolute_target_delta():
     storage.update_holding_quantity.assert_called_once_with("CNY-MMF", "a", 5.01, "富途")
 
 
-def test_cash_service_sync_cash_like_balance_dry_run_does_not_write():
+def test_cash_service_sync_cash_like_balance_refuses_cash_even_dry_run():
     storage = Mock()
     storage.get_holding.return_value = None
     service = CashService(storage)
 
-    result = service.sync_cash_like_balance(
-        account="a",
-        asset_id="CNY-CASH",
-        asset_name="人民币现金",
-        asset_type=AssetType.CASH,
-        target=20,
-        broker="富途",
-        dry_run=True,
-    )
-
-    assert result["created"] is True
-    assert result["delta"] == 20.0
+    with pytest.raises(RuntimeError, match="cash_effect_confirmation_required"):
+        service.sync_cash_like_balance(
+            account="a",
+            asset_id="CNY-CASH",
+            asset_name="人民币现金",
+            asset_type=AssetType.CASH,
+            target=20,
+            broker="富途",
+            dry_run=True,
+        )
     storage.update_holding_quantity.assert_not_called()
     storage.upsert_holding.assert_not_called()
 

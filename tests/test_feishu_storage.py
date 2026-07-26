@@ -749,6 +749,8 @@ class TestFeishuStorageCashFlowOperations:
                 'record_id': 'cf_1',
                 'fields': {
                     'flow_date': '2025-03-14',
+                    'account': '测试账户',
+                    'broker': '华泰',
                     'amount': '100000',
                     'cny_amount': '100000',
                     'currency': 'CNY'
@@ -758,6 +760,8 @@ class TestFeishuStorageCashFlowOperations:
                 'record_id': 'cf_2',
                 'fields': {
                     'flow_date': '2025-03-13',
+                    'account': '测试账户',
+                    'broker': '华泰',
                     'amount': '-50000',
                     'cny_amount': '-50000',
                     'currency': 'CNY'
@@ -818,6 +822,7 @@ class TestFeishuStorageCashFlowOperations:
                 'fields': {
                     'flow_date': '2025-03-14',
                     'account': '测试账户',
+                    'broker': '华泰',
                     'amount': '100000',
                     'currency': 'CNY',
                     'remark': 'manual row',
@@ -830,6 +835,7 @@ class TestFeishuStorageCashFlowOperations:
         expected_key = make_cf_dedup_key(CashFlow(
             flow_date=date(2025, 3, 14),
             account='测试账户',
+            broker='华泰',
             amount=100000,
             currency='CNY',
             cny_amount=100000,
@@ -845,6 +851,9 @@ class TestFeishuStorageCashFlowOperations:
         assert result['rows'][0]['updates'] == {
             'flow_type': 'DEPOSIT',
             'exchange_rate': 1.0,
+            'exchange_rate_date': date(2025, 3, 14),
+            'exchange_rate_source': 'currency_identity',
+            'exchange_rate_evidence_type': 'cny_identity',
             'cny_amount': 100000.0,
             'dedup_key': expected_key,
             'source': 'manual',
@@ -863,6 +872,7 @@ class TestFeishuStorageCashFlowOperations:
                     'fields': {
                         'flow_date': '2025-03-14',
                         'account': '测试账户',
+                        'broker': '华泰',
                         'amount': '100000',
                         'currency': 'CNY',
                     },
@@ -885,6 +895,7 @@ class TestFeishuStorageCashFlowOperations:
                 'fields': {
                     'flow_date': '2025-03-14',
                     'account': '测试账户',
+                    'broker': '华泰',
                     'amount': '10',
                     'currency': 'USD',
                 },
@@ -907,6 +918,7 @@ class TestFeishuStorageCashFlowOperations:
         stale_key = make_cf_dedup_key(CashFlow(
             flow_date=date(2025, 3, 14),
             account='测试账户',
+            broker='华泰',
             amount=5,
             currency='USD',
             cny_amount=36,
@@ -919,9 +931,13 @@ class TestFeishuStorageCashFlowOperations:
                 'fields': {
                     'flow_date': '2025-03-14',
                     'account': '测试账户',
+                    'broker': '华泰',
                     'amount': '10',
                     'currency': 'USD',
                     'exchange_rate': '7.2',
+                    'exchange_rate_date': '2025-03-14',
+                    'exchange_rate_source': 'historical-provider',
+                    'exchange_rate_evidence_type': 'provider',
                     'cny_amount': '36',
                     'flow_type': 'WITHDRAW',
                     'dedup_key': stale_key,
@@ -946,6 +962,7 @@ class TestFeishuStorageCashFlowOperations:
                 'fields': {
                     'flow_date': '2025-03-14',
                     'account': '测试账户',
+                    'broker': '华泰',
                     'amount': '-100',
                     'currency': 'CNY',
                 },

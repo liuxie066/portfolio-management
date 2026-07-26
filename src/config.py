@@ -24,6 +24,8 @@ _FALSE_VALUES = {"0", "false", "no", "n", "off"}
 ENV_MAP = {
     "account": "PORTFOLIO_ACCOUNT",
     "data.dir": "PM_DATA_DIR",
+    "cash_flow.effects.cutover_date": "PM_CASH_FLOW_EFFECTS_CUTOVER_DATE",
+    "cash_flow.effects.db_path": "PM_CASH_FLOW_EFFECTS_DB_PATH",
     "service.host": "PORTFOLIO_SERVICE_HOST",
     "service.port": "PORTFOLIO_SERVICE_PORT",
     "service.url": "PORTFOLIO_SERVICE_URL",
@@ -70,6 +72,8 @@ ENV_FALLBACKS = {
 OPERATOR_CONFIG_KEYS = (
     "account",
     "data.dir",
+    "cash_flow.effects.cutover_date",
+    "cash_flow.effects.db_path",
     "service.host",
     "service.port",
     "service.url",
@@ -83,6 +87,7 @@ OPERATOR_CONFIG_KEYS = (
     "futu.acc_id",
     "futu.trd_market",
     "futu.cash_currency",
+    "futu.profiles",
     "feishu.app_id",
     "feishu.app_secret",
     "feishu.app_token",
@@ -133,6 +138,7 @@ OPERATOR_DEFAULTS: Dict[str, Any] = {
     "futu.trd_env": "REAL",
     "futu.trd_market": "HK",
     "futu.cash_currency": "CNH",
+    "futu.profiles": {},
     "feishu.connect_timeout": 5.0,
     "feishu.read_timeout": 30.0,
 }
@@ -233,6 +239,34 @@ def get(key: str, default=None):
     return value
 
 
+def get_futu_profile(account: str) -> Dict[str, Any]:
+    """Return one explicit PM-account -> OpenD profile mapping.
+
+    Cash effects and scheduled stock synchronization share this mapping.  No
+    environment-based account switching or default-profile fallback is allowed.
+    """
+    profiles = get("futu.profiles", {})
+    if not isinstance(profiles, dict):
+        raise ValueError("futu.profiles must be a mapping keyed by PM account")
+    raw = profiles.get(str(account))
+    if not isinstance(raw, dict):
+        raise ValueError(f"missing futu.profiles mapping for account={account}")
+    required = ("host", "port", "acc_id", "trd_env")
+    missing = [key for key in required if raw.get(key) in (None, "")]
+    if missing:
+        raise ValueError(
+            f"incomplete futu.profiles.{account}: missing {', '.join(missing)}"
+        )
+    profile = {
+        "host": str(raw["host"]),
+        "port": int(raw["port"]),
+        "acc_id": int(raw["acc_id"]),
+        "trd_env": str(raw["trd_env"]).upper(),
+        "trd_market": str(raw.get("trd_market") or "HK").upper(),
+    }
+    return profile
+
+
 def _redact_value(key: str, value: Any) -> Any:
     if value in (None, ""):
         return value
@@ -293,10 +327,23 @@ def validate_deploy_config(*, require_futu: bool = False) -> Dict[str, Any]:
             })
 
     if require_futu:
-        if not get("futu.opend.host"):
-            issues.append({"key": "futu.opend.host", "error": "missing Futu OpenD host", "env": ENV_MAP.get("futu.opend.host")})
-        if get_int("futu.opend.port") is None:
-            issues.append({"key": "futu.opend.port", "error": "missing or invalid Futu OpenD port", "env": ENV_MAP.get("futu.opend.port")})
+        profiles = get("futu.profiles")
+        if not isinstance(profiles, dict) or not profiles:
+            issues.append({
+                "key": "futu.profiles",
+                "error": "missing explicit PM account -> Futu OpenD profiles",
+                "env": None,
+            })
+        else:
+            for account in sorted(profiles):
+                try:
+                    get_futu_profile(str(account))
+                except (TypeError, ValueError) as exc:
+                    issues.append({
+                        "key": f"futu.profiles.{account}",
+                        "error": str(exc),
+                        "env": None,
+                    })
         for key in (
             "feishu.receipt.app_id",
             "feishu.receipt.app_secret",

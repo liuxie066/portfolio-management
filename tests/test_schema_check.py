@@ -106,3 +106,66 @@ def test_parse_docs_schema_normalizes_json_text_family(tmp_path):
     assert spec.required["asset_id"] == frozenset({"text"})
     assert spec.optional["updated_at"] == frozenset({"text", "datetime"})
     assert spec.optional["details"] == frozenset({"text", "json-text"})
+
+
+def test_cash_flow_effect_schema_migration_is_dry_run_then_confirmed_apply():
+    class FakeClient:
+        def __init__(self):
+            self.created = []
+
+        def _get_table_config(self, table_name):
+            assert table_name == "cash_flow"
+            return "base", "tbl"
+
+        def _request(self, method, endpoint, **kwargs):
+            if method == "GET":
+                return {
+                    "items": [
+                        {"field_name": "broker", "type": 1},
+                        {"field_name": "exchange_rate_date", "type": 5},
+                    ],
+                    "has_more": False,
+                }
+            self.created.append(kwargs["json"])
+            return {"field_id": f"fld{len(self.created)}"}
+
+    client = FakeClient()
+    preview = migrate_schema.migrate_cash_flow_effect_fields(client=client)
+    assert preview["dry_run"] is True
+    assert preview["missing"] == [
+        "exchange_rate_source",
+        "exchange_rate_evidence_type",
+    ]
+    assert client.created == []
+
+    applied = migrate_schema.migrate_cash_flow_effect_fields(
+        apply=True,
+        confirm=True,
+        client=client,
+    )
+    assert applied["success"] is True
+    assert [item["field_name"] for item in client.created] == [
+        "exchange_rate_source",
+        "exchange_rate_evidence_type",
+    ]
+
+
+def test_cash_flow_effect_schema_migration_blocks_incompatible_existing_field():
+    class FakeClient:
+        def _get_table_config(self, _table_name):
+            return "base", "tbl"
+
+        def _request(self, method, _endpoint, **_kwargs):
+            assert method == "GET"
+            return {
+                "items": [{"field_name": "broker", "type": 2}],
+                "has_more": False,
+            }
+
+    result = migrate_schema.migrate_cash_flow_effect_fields(
+        apply=True,
+        confirm=True,
+        client=FakeClient(),
+    )
+    assert result["success"] is False
+    assert result["incompatible"][0]["field_name"] == "broker"

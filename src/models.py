@@ -240,10 +240,14 @@ class CashFlow(BaseModel):
     # 核心字段
     flow_date: date = Field(..., description="日期")
     account: str = Field(..., description="账户")
+    broker: str = Field("", description="券商（现金目标的必选路由）")
     amount: float = Field(..., description="金额(正数入金,负数出金)")
     currency: str = Field(..., description="币种")
     cny_amount: Optional[float] = None
     exchange_rate: Optional[float] = None
+    exchange_rate_date: Optional[date] = None
+    exchange_rate_source: Optional[str] = None
+    exchange_rate_evidence_type: Optional[str] = None
     flow_type: str = Field(..., description="DEPOSIT/WITHDRAW")
     source: Optional[str] = None
     remark: Optional[str] = None
@@ -453,8 +457,8 @@ def make_request_id(prefix: str = "tx") -> str:
 def make_cf_dedup_key(cf: CashFlow) -> str:
     """生成出入金记录的防重指纹
 
-    基于 (account, flow_date, flow_type, amount, currency) 生成 SHA256 前16位。
+    基于 (account, broker, flow_date, flow_type, amount, currency) 生成 SHA256 前16位。
     同一天、同金额、同币种的出入金会生成相同的 key。
     """
-    raw = f"{cf.account}|{cf.flow_date}|{cf.flow_type}|{cf.amount}|{cf.currency}"
+    raw = f"{cf.account}|{cf.broker}|{cf.flow_date}|{cf.flow_type}|{cf.amount}|{cf.currency}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
