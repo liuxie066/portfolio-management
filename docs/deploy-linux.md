@@ -107,6 +107,17 @@ pm config doctor --require-futu --json
 pm config doctor --require-futu --require-quality --json
 ```
 
+首次配置 `futu.accounts.<account>.acc_id` 前，在 OpenD 所在主机只读发现账户：
+
+```bash
+pm futu accounts --market US --json
+```
+
+该命令只读取 OpenD 账户列表，不读取余额/持仓、不发飞书、不写业务数据。输出的
+`acc_id` 是敏感配置标识，不得进入日志、文档或 Git；空、不完整或重复列表会
+fail closed。由操作者将已核实的 REAL 账户分别映射到 `lx`/`sy`，随后再执行
+`config doctor` 和同步 dry-run。
+
 质量 producer 还要求 `quality.accounts`、各账户显式唯一的
 `futu.accounts.<account>.acc_id`，以及独立 `quality.read_token`。正式接入 Hub
 时才将 `quality.onboarded` 改为 `true`；该状态一旦启用，正式 NAV 写入会直接在

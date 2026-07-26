@@ -738,6 +738,87 @@ def test_futu_code_normalization_preserves_us_dot_symbol_and_hk_leading_zero():
     assert _normalize_futu_code("SH.600519") == "600519"
 
 
+def test_futu_account_discovery_returns_only_mapping_authority_fields_and_closes_context(
+    monkeypatch,
+):
+    class FakeTradeCtx:
+        def __init__(self):
+            self.closed = False
+
+        def get_acc_list(self):
+            return 0, [
+                {
+                    "acc_id": 222,
+                    "trd_env": "REAL",
+                    "acc_type": "MARGIN",
+                    "card_num": "must-not-leak",
+                    "cash": 999,
+                },
+                {
+                    "acc_id": 111,
+                    "trd_env": "SIMULATE",
+                    "acc_type": "CASH",
+                },
+            ]
+
+        def close(self):
+            self.closed = True
+
+    trade_ctx = FakeTradeCtx()
+    sdk = SimpleNamespace(
+        RET_OK=0,
+        TrdMarket=SimpleNamespace(US="US"),
+        OpenSecTradeContext=lambda **kwargs: trade_ctx,
+    )
+    provider = FutuOpenApiBalanceProvider(trd_market="US")
+    monkeypatch.setattr(provider, "_import_sdk", lambda: sdk)
+
+    result = provider.discover_accounts()
+
+    assert result["success"] is True
+    assert result["read_only"] is True
+    assert result["contains_sensitive_identifiers"] is True
+    assert [item["acc_id"] for item in result["accounts"]] == [111, 222]
+    assert result["accounts"][1] == {
+        "acc_id": 222,
+        "account_fingerprint": (
+            "sha256:9b871512327c09ce91dd649b3f96a63b7408ef267c8cc5710114e629730cb61f"
+        ),
+        "trd_env": "REAL",
+        "trd_market": "US",
+    }
+    assert "card_num" not in json.dumps(result)
+    assert "cash" not in json.dumps(result)
+    assert trade_ctx.closed is True
+
+
+def test_futu_account_discovery_fails_closed_on_duplicate_ids(monkeypatch):
+    class FakeTradeCtx:
+        def get_acc_list(self):
+            return 0, [
+                {"acc_id": 111, "trd_env": "REAL"},
+                {"acc_id": 111, "trd_env": "SIMULATE"},
+            ]
+
+        def close(self):
+            pass
+
+    sdk = SimpleNamespace(
+        RET_OK=0,
+        TrdMarket=SimpleNamespace(US="US"),
+        OpenSecTradeContext=lambda **kwargs: FakeTradeCtx(),
+    )
+    provider = FutuOpenApiBalanceProvider(trd_market="US")
+    monkeypatch.setattr(provider, "_import_sdk", lambda: sdk)
+
+    try:
+        provider.discover_accounts()
+    except RuntimeError as exc:
+        assert "duplicate account IDs" in str(exc)
+    else:
+        raise AssertionError("expected duplicate OpenD account IDs to fail closed")
+
+
 def test_futu_portfolio_provider_fetches_average_cost_and_closes_contexts(monkeypatch):
     class FakeTradeCtx:
         def __init__(self):

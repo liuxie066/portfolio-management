@@ -71,6 +71,8 @@ feishu:
 ./pm positions distribution --accounts lx,sy --group-cash --json
 ./pm nav duplicates --json
 ./pm quality status --json
+# 首次配置显式 Futu 账户映射；输出包含敏感 acc_id，不得记录或提交
+./pm futu accounts --market US --json
 ```
 
 质量 producer 由受控定时任务执行 `pm quality refresh --json`，原子发布最近一次
@@ -79,6 +81,10 @@ artifact，不会触发 OpenD 刷新、飞书写入或重新计算；它使用�
 `PM_QUALITY_READ_TOKEN`。`/health=ok` 只表示进程可用，不表示持仓、现金或 NAV
 可信。Linux 安装器可显式启用独立的 `portfolio-quality-refresh.timer`，默认每
 15 分钟刷新一次；它和 holdings/NAV 写入 timer 相互独立。
+
+`pm futu accounts` 只调用 OpenD 账户列表，不读取余额/持仓、不发飞书、不写
+业务数据；空、不完整或重复账户列表会 fail closed。操作者核实 REAL 账户并完成
+`lx`/`sy` 映射后，仍须先运行 `config doctor` 和同步 dry-run。
 
 日净值记录：
 

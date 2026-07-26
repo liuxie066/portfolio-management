@@ -169,6 +169,53 @@ class FutuOpenApiBalanceProvider:
             verify_account=True,
         )
 
+    def discover_accounts(self) -> dict[str, Any]:
+        """Return only the OpenD authority fields needed for explicit mapping."""
+        futu_sdk = self._import_sdk()
+        ctx = self._open_trade_context(futu_sdk)
+        try:
+            query = getattr(ctx, "get_acc_list", None)
+            if not callable(query):
+                raise RuntimeError("Futu account list query is unavailable")
+            ret, data = query()
+            self._ensure_ok(futu_sdk, ret, data, "get_acc_list")
+            rows = _rows(data)
+        finally:
+            self._close(ctx)
+
+        if not rows:
+            raise RuntimeError("Futu account list is empty")
+
+        accounts: list[dict[str, Any]] = []
+        seen_acc_ids: set[int] = set()
+        for row in rows:
+            acc_id = _optional_int(row.get("acc_id"))
+            trd_env = str(row.get("trd_env") or "").strip().upper()
+            if acc_id is None or acc_id <= 0 or not trd_env:
+                raise RuntimeError("Futu account list contains incomplete authority fields")
+            if acc_id in seen_acc_ids:
+                raise RuntimeError("Futu account list contains duplicate account IDs")
+            seen_acc_ids.add(acc_id)
+            account = {
+                "acc_id": acc_id,
+                "account_fingerprint": (
+                    f"sha256:{hashlib.sha256(str(acc_id).encode()).hexdigest()}"
+                ),
+                "trd_env": trd_env,
+                "trd_market": str(self.trd_market).upper(),
+            }
+            accounts.append(account)
+
+        return {
+            "success": True,
+            "read_only": True,
+            "contains_sensitive_identifiers": True,
+            "do_not_log_or_commit": True,
+            "observed_at_utc": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "trd_market": str(self.trd_market).upper(),
+            "accounts": sorted(accounts, key=lambda item: int(item["acc_id"])),
+        }
+
     def fetch_balances(self) -> FutuBalanceSnapshot:
         futu_sdk = self._import_sdk()
         ctx = self._open_trade_context(futu_sdk)

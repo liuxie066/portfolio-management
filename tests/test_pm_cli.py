@@ -863,6 +863,60 @@ def test_pm_futu_sync_defaults_to_dry_run_and_passes_safety_flags():
     }]
 
 
+def test_pm_futu_accounts_is_direct_read_only_and_requires_explicit_market(
+    monkeypatch,
+):
+    calls = []
+
+    class FakeProvider:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        def discover_accounts(self):
+            return {
+                "success": True,
+                "read_only": True,
+                "accounts": [{"acc_id": 123, "trd_env": "REAL"}],
+            }
+
+    import src.app as app_module
+
+    monkeypatch.setattr(app_module, "FutuOpenApiBalanceProvider", FakeProvider)
+    stdout = io.StringIO()
+    with redirect_stdout(stdout):
+        assert pm.main(["futu", "accounts", "--market", "US", "--json"]) == 0
+
+    assert json.loads(stdout.getvalue())["read_only"] is True
+    assert calls == [{"trd_market": "US", "verify_account": False}]
+
+    try:
+        pm.main(["futu", "accounts", "--json"])
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("expected --market to be required")
+
+
+def test_pm_futu_accounts_returns_safe_error_without_upstream_details(monkeypatch):
+    class FailingProvider:
+        def __init__(self, **kwargs):
+            pass
+
+        def discover_accounts(self):
+            raise RuntimeError("sensitive upstream detail")
+
+    import src.app as app_module
+
+    monkeypatch.setattr(app_module, "FutuOpenApiBalanceProvider", FailingProvider)
+    stdout = io.StringIO()
+    with redirect_stdout(stdout):
+        assert pm.main(["futu", "accounts", "--market", "US", "--json"]) == 1
+
+    output = stdout.getvalue()
+    assert "FUTU_ACCOUNT_DISCOVERY_FAILED" in output
+    assert "sensitive upstream detail" not in output
+
+
 def test_pm_futu_sync_write_and_empty_override_require_confirm():
     for argv in (
         ["futu", "sync", "--account", "lx", "--write"],

@@ -377,6 +377,28 @@ def cmd_futu_sync(args):
     return result
 
 
+def cmd_futu_accounts(args):
+    from src.app import FutuOpenApiBalanceProvider
+
+    try:
+        result = _call_backend(
+            args,
+            lambda: FutuOpenApiBalanceProvider(
+                trd_market=str(args.market).upper(),
+                verify_account=False,
+            ).discover_accounts(),
+        )
+    except Exception:
+        result = {
+            "success": False,
+            "read_only": True,
+            "reason_code": "FUTU_ACCOUNT_DISCOVERY_FAILED",
+            "error": "Futu account discovery failed",
+        }
+    _dump(result, args.json)
+    return result
+
+
 def cmd_cash_flow_reconcile(args):
     if bool(args.apply) and not bool(args.confirm):
         raise SystemExit("cash-flow reconcile --apply requires --confirm. Re-run without --apply for dry-run.")
@@ -884,6 +906,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_futu = sp.add_parser("futu", help="Futu holdings synchronization")
     futu_sub = p_futu.add_subparsers(dest="futu_cmd", required=True)
+    p_futu_accounts = futu_sub.add_parser(
+        "accounts",
+        help="read the OpenD account list needed for explicit account mapping",
+    )
+    p_futu_accounts.add_argument(
+        "--market",
+        required=True,
+        choices=("US", "HK"),
+        help="explicit Futu trade market context",
+    )
+    p_futu_accounts.add_argument(
+        "--json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="output JSON",
+    )
+    p_futu_accounts.set_defaults(func=cmd_futu_accounts)
     p_futu_sync = futu_sub.add_parser("sync", help="sync Futu cash/MMF and stock/ETF quantity + average cost")
     p_futu_sync.add_argument("--account", default=argparse.SUPPRESS, help="account to operate on; defaults to config/PORTFOLIO_ACCOUNT")
     p_futu_sync.add_argument("--dry-run", action="store_true", default=True, help="preview only (default)")
