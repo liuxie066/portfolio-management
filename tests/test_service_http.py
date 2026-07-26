@@ -17,6 +17,26 @@ class FakePortfolioService:
         self.calls.append(("health", {}))
         return {"success": True, "status": "ok"}
 
+    def quality_status(self):
+        self.calls.append(("quality_status", {}))
+        return {
+            "schema_version": "investment.quality_status.v1",
+            "producer": {
+                "service": "portfolio-management",
+                "producer_version": "0.1.0",
+                "policy_version": "quality-policy-v1",
+                "instance_id": "pm-test",
+            },
+            "observed_at_utc": "2026-07-26T01:00:00Z",
+            "runtime": {
+                "status": "healthy",
+                "as_of_utc": "2026-07-26T01:00:00Z",
+                "checks": [],
+            },
+            "datasets": [],
+            "incidents": [],
+        }
+
     def list_accounts(self, **kwargs):
         self.calls.append(("list_accounts", kwargs))
         return {"success": True, "accounts": ["alice"]}
@@ -161,6 +181,53 @@ def test_http_service_routes_delegate_to_portfolio_service():
         ("daily_nav_job", {"accounts": ["alice", "bob"], "nav_date": "2026-05-22", "price_timeout": 12, "dry_run": True, "confirm": False, "overwrite_existing": False, "use_bulk_persist": False, "sync_futu_cash_mmf": False, "force_non_business_day": False}),
         ("generate_report", {"account": "alice/bob", "report_type": "monthly", "price_timeout": 11}),
     ]
+
+
+def test_quality_status_is_independently_authenticated_no_store_and_etag(monkeypatch):
+    monkeypatch.setenv("PM_QUALITY_READ_TOKEN", "pm-read-secret")
+    service = FakePortfolioService()
+    client = _client(create_app(service=service))
+
+    unauthorized = client.get("/quality/status")
+    assert unauthorized.status_code == 401
+    assert unauthorized.json()["error"]["code"] == "QUALITY_AUTH_FAILED"
+    assert unauthorized.headers["cache-control"] == "no-store"
+    assert service.calls == []
+
+    response = client.get(
+        "/quality/status",
+        headers={"Authorization": "Bearer pm-read-secret"},
+    )
+    assert response.status_code == 200
+    assert response.json()["schema_version"] == "investment.quality_status.v1"
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-quality-schema-version"] == "investment.quality_status.v1"
+    assert response.headers["etag"].startswith('"sha256:')
+
+    unchanged = client.get(
+        "/quality/status",
+        headers={
+            "Authorization": "Bearer pm-read-secret",
+            "If-None-Match": response.headers["etag"],
+        },
+    )
+    assert unchanged.status_code == 304
+    assert service.calls == [("quality_status", {}), ("quality_status", {})]
+
+
+def test_quality_status_missing_artifact_is_safe_503(monkeypatch):
+    monkeypatch.setenv("PM_QUALITY_READ_TOKEN", "pm-read-secret")
+    service = FakePortfolioService()
+    service.quality_status = lambda: None
+
+    response = _client(create_app(service=service)).get(
+        "/quality/status",
+        headers={"Authorization": "Bearer pm-read-secret"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "QUALITY_STATUS_UNAVAILABLE"
+    assert "path" not in response.text.lower()
 
 
 def test_http_capital_facts_validates_period_and_month():

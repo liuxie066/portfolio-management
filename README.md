@@ -70,7 +70,14 @@ feishu:
 # 合并 lx/sy 相同标的，并将现金和货币基金合并为“现金及等价物”
 ./pm positions distribution --accounts lx,sy --group-cash --json
 ./pm nav duplicates --json
+./pm quality status --json
 ```
+
+质量 producer 由受控定时任务执行 `pm quality refresh --json`，原子发布最近一次
+`investment.quality_status.v1` artifact。HTTP `GET /quality/status` 只读取该
+artifact，不会触发 OpenD 刷新、飞书写入或重新计算；它使用独立
+`PM_QUALITY_READ_TOKEN`。`/health=ok` 只表示进程可用，不表示持仓、现金或 NAV
+可信。
 
 日净值记录：
 

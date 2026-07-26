@@ -25,6 +25,7 @@ class PortfolioService:
         read_service_factory: Optional[Any] = None,
         futu_receipt_service: Optional[Any] = None,
         nav_receipt_service: Optional[Any] = None,
+        quality_service: Optional[Any] = None,
         default_account: Optional[str] = None,
     ):
         self._storage = storage
@@ -35,6 +36,7 @@ class PortfolioService:
         self._read_service_factory = read_service_factory
         self._futu_receipt_service = futu_receipt_service
         self._nav_receipt_service = nav_receipt_service
+        self._quality_service = quality_service
         self._default_account = default_account
 
     @property
@@ -99,6 +101,21 @@ class PortfolioService:
             "status": "ok",
             "service": "portfolio-management",
         }
+
+    def quality_status(self) -> Optional[Dict[str, Any]]:
+        if self._quality_service is not None:
+            return self._quality_service.read_published()
+        from src.app.quality.artifact import QualityArtifactStore
+
+        return QualityArtifactStore().read()
+
+    def refresh_quality_status(self, *, accounts: Any = None) -> Dict[str, Any]:
+        from src import config
+        from src.app.quality.service import PMQualityService
+
+        normalized = list(accounts or config.get_quality_accounts())
+        service = self._quality_service or PMQualityService(self.storage)
+        return service.refresh(accounts=normalized)
 
     def list_accounts(self, *, include_default: bool = True) -> Dict[str, Any]:
         from src.app import AccountService

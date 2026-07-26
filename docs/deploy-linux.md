@@ -104,7 +104,13 @@ pm daily-job --json --no-service
 
 ```bash
 pm config doctor --require-futu --json
+pm config doctor --require-futu --require-quality --json
 ```
+
+质量 producer 还要求 `quality.accounts`、各账户显式唯一的
+`futu.accounts.<account>.acc_id`，以及独立 `quality.read_token`。正式接入 Hub
+时才将 `quality.onboarded` 改为 `true`；该状态一旦启用，正式 NAV 写入会直接在
+PM 本地 fail closed，不依赖 Hub 在线。
 
 ## 启用同机只读 API 边界
 
@@ -114,9 +120,11 @@ pm config doctor --require-futu --json
 sudo scripts/install.sh --apply --enable-api-service
 systemctl status portfolio-management-api.service
 curl http://127.0.0.1:8765/health
+curl -H "Authorization: Bearer $PM_QUALITY_READ_TOKEN" \
+  http://127.0.0.1:8765/quality/status
 ```
 
-安装器始终生成 unit，但只有显式传入 `--enable-api-service` 才会执行 `systemctl enable --now`。unit 固定运行 `scripts/serve.py --host 127.0.0.1 --port 8765`，不使用 `--allow-remote`，也不依赖两个 timer。服务当前无鉴权，禁止把它直接绑定或转发到非 loopback 网络。
+安装器始终生成 unit，但只有显式传入 `--enable-api-service` 才会执行 `systemctl enable --now`。unit 固定运行 `scripts/serve.py --host 127.0.0.1 --port 8765`，不使用 `--allow-remote`，也不依赖两个 timer。普通业务接口仍只依赖 loopback 边界；质量接口额外要求独立只读 token。禁止把服务直接绑定或转发到非 loopback 网络。
 
 ## 启用定时任务
 

@@ -675,9 +675,46 @@ def cmd_config_inspect(args):
 def cmd_config_doctor(args):
     from src import config
 
-    res = config.validate_deploy_config(require_futu=bool(args.require_futu))
+    res = config.validate_deploy_config(
+        require_futu=bool(args.require_futu),
+        require_quality=bool(args.require_quality),
+    )
     _dump(res, args.json)
     return res
+
+
+def cmd_quality_status(args):
+    def via_service(client):
+        return client.quality_status()
+
+    def direct():
+        from src.service.application import PortfolioService
+
+        payload = PortfolioService().quality_status()
+        if payload is None:
+            return {"success": False, "error": "quality status is unavailable"}
+        return payload
+
+    result = _service_or_fallback(args, via_service, direct, allow_fallback=True)
+    _dump(result, args.json)
+    return result
+
+
+def cmd_quality_refresh(args):
+    from src import config
+    from src.service.application import PortfolioService
+
+    accounts = (
+        [item.strip().lower() for item in args.accounts.split(",") if item.strip()]
+        if args.accounts
+        else config.get_quality_accounts()
+    )
+    result = _call_backend(
+        args,
+        lambda: PortfolioService().refresh_quality_status(accounts=accounts),
+    )
+    _dump(result, args.json)
+    return result
 
 
 def cmd_report(args):
@@ -814,8 +851,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_config_inspect.set_defaults(func=cmd_config_inspect)
     p_config_doctor = config_sub.add_parser("doctor", help="validate config needed by scheduled daily NAV jobs")
     p_config_doctor.add_argument("--require-futu", action="store_true", help="require Futu OpenD settings and SDK importability")
+    p_config_doctor.add_argument("--require-quality", action="store_true", help="require quality producer token and account scope")
     p_config_doctor.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
     p_config_doctor.set_defaults(func=cmd_config_doctor)
+
+    p_quality = sp.add_parser("quality", help="read the last published data-quality status")
+    quality_sub = p_quality.add_subparsers(dest="quality_cmd", required=True)
+    p_quality_status = quality_sub.add_parser("status", help="read the last published quality artifact")
+    p_quality_status.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
+    add_service_args(p_quality_status)
+    p_quality_status.set_defaults(func=cmd_quality_status)
+    p_quality_refresh = quality_sub.add_parser(
+        "refresh",
+        help="rebuild and atomically publish the local quality artifact",
+    )
+    p_quality_refresh.add_argument("--accounts", default=None, help="comma-separated account scope")
+    p_quality_refresh.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
+    p_quality_refresh.set_defaults(func=cmd_quality_refresh)
 
     p_hold = sp.add_parser("holdings", help="list holdings")
     p_hold.add_argument("--include-price", action="store_true", help="include price fields (may be slow)")

@@ -1,14 +1,19 @@
 """FastAPI HTTP service for portfolio-management."""
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 from typing import Any, Literal, Optional
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from .application import PortfolioService
 from .bind import allow_remote_from_env, is_loopback_client
+from src import config
 
 
 REPORT_TYPES = {"daily", "monthly", "yearly"}
@@ -75,6 +80,25 @@ def _payload_dict(payload: BaseModel) -> dict:
     return payload.model_dump(exclude_none=True)
 
 
+def _quality_headers(request_id: str, *, etag: str | None = None) -> dict[str, str]:
+    headers = {
+        "Cache-Control": "no-store",
+        "X-Request-Id": request_id,
+        "X-Quality-Schema-Version": "investment.quality_status.v1",
+    }
+    if etag:
+        headers["ETag"] = etag
+    return headers
+
+
+def _quality_error(status_code: int, code: str, message: str, request_id: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content={"error": {"code": code, "message": message, "request_id": request_id}},
+        headers=_quality_headers(request_id),
+    )
+
+
 def create_app(service: Optional[PortfolioService] = None, allow_remote: Optional[bool] = None) -> FastAPI:
     app = FastAPI(
         title="Portfolio Management Service",
@@ -97,6 +121,47 @@ def create_app(service: Optional[PortfolioService] = None, allow_remote: Optiona
     @app.get("/health", tags=["system"])
     def health(request: Request):
         return _service(request).health()
+
+    @app.get("/quality/status", tags=["quality"])
+    def quality_status(request: Request):
+        request_id = f"req-{uuid4().hex}"
+        expected = str(config.get("quality.read_token") or "")
+        authorization = request.headers.get("authorization", "")
+        supplied = authorization[7:] if authorization.startswith("Bearer ") else ""
+        if not expected or not supplied or not hmac.compare_digest(expected, supplied):
+            return _quality_error(
+                401,
+                "QUALITY_AUTH_FAILED",
+                "quality endpoint authentication failed",
+                request_id,
+            )
+        try:
+            payload = _service(request).quality_status()
+        except Exception:
+            return _quality_error(
+                503,
+                "QUALITY_STATUS_UNAVAILABLE",
+                "quality status is unavailable",
+                request_id,
+            )
+        if payload is None:
+            return _quality_error(
+                503,
+                "QUALITY_STATUS_UNAVAILABLE",
+                "quality status is unavailable",
+                request_id,
+            )
+        canonical = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        etag = f'"sha256:{hashlib.sha256(canonical).hexdigest()}"'
+        headers = _quality_headers(request_id, etag=etag)
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers=headers)
+        return JSONResponse(content=payload, headers=headers)
 
     @app.get("/accounts", tags=["accounts"])
     def list_accounts(

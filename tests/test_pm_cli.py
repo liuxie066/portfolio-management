@@ -75,6 +75,39 @@ def test_pm_cash_passes_account():
     assert out["account"] == "bob"
 
 
+def test_pm_quality_status_uses_same_published_application_payload():
+    expected = {
+        "schema_version": "investment.quality_status.v1",
+        "producer": {"service": "portfolio-management"},
+        "datasets": [],
+    }
+
+    class FakePortfolioService:
+        def quality_status(self):
+            return expected
+
+    stdout = io.StringIO()
+    with _PortfolioServicePatch(FakePortfolioService), redirect_stdout(stdout):
+        assert pm.main(["quality", "status", "--no-service", "--json"]) == 0
+
+    assert json.loads(stdout.getvalue()) == expected
+
+
+def test_pm_quality_refresh_publishes_for_explicit_accounts():
+    class FakePortfolioService:
+        def refresh_quality_status(self, **kwargs):
+            return {
+                "schema_version": "investment.quality_status.v1",
+                "accounts": kwargs["accounts"],
+            }
+
+    stdout = io.StringIO()
+    with _PortfolioServicePatch(FakePortfolioService), redirect_stdout(stdout):
+        assert pm.main(["quality", "refresh", "--accounts", "LX,sy", "--json"]) == 0
+
+    assert json.loads(stdout.getvalue())["accounts"] == ["lx", "sy"]
+
+
 def test_pm_json_suppresses_internal_stdout_by_default():
     class FakePortfolioService:
         def get_cash(self, **kwargs):

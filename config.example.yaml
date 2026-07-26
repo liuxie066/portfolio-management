@@ -17,6 +17,15 @@ service:
   port: 8765
   url: ""
 
+quality:
+  # Use a PM-specific secret in production; never reuse the OM read token.
+  read_token: ""
+  instance_id: portfolio-management-local
+  accounts: [lx, sy]
+  # Set true only in the approved producer-onboarding change. Once true,
+  # official NAV writes fail closed on current local evidence.
+  onboarded: false
+
 calendar:
   # Beijing-date non-trading days. Weekends are skipped automatically.
   holidays: []
@@ -33,10 +42,17 @@ futu:
   opend:
     host: 127.0.0.1
     port: 11111
-  trd_env: REAL
-  acc_id:
-  trd_market: HK
-  cash_currency: CNH
+  accounts:
+    lx:
+      acc_id:
+      trd_env: REAL
+      trd_market: US
+      cash_currency: CNH
+    sy:
+      acc_id:
+      trd_env: REAL
+      trd_market: US
+      cash_currency: CNH
 
 finnhub_api_key: ""
 

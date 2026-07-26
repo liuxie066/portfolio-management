@@ -152,6 +152,33 @@ feishu:
             config.reload_config()
 
 
+def test_quality_config_token_is_redacted_and_accounts_are_normalized():
+    with TemporaryDirectory() as tmp:
+        config_file = Path(tmp) / "config.yaml"
+        config_file.write_text(
+            """
+account: fallback
+quality:
+  read_token: quality-secret-123
+  accounts: [LX, sy, lx]
+""",
+            encoding="utf-8",
+        )
+        patch = MonkeyPatch()
+        try:
+            patch.setenv(config.CONFIG_FILE_ENV, str(config_file))
+            patch.delenv("PM_QUALITY_READ_TOKEN", raising=False)
+            patch.delenv("PM_QUALITY_ACCOUNTS", raising=False)
+            config.reload_config()
+
+            inspected = config.inspect_config(keys=["quality.read_token"])
+            assert inspected["values"]["quality.read_token"]["value"] == "qua...123"
+            assert config.get_quality_accounts() == ["lx", "sy"]
+        finally:
+            patch.undo()
+            config.reload_config()
+
+
 def test_validate_deploy_config_accepts_complete_yaml_config():
     with TemporaryDirectory() as tmp:
         config_file = Path(tmp) / "config.yaml"

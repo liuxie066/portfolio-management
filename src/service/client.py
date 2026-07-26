@@ -75,9 +75,15 @@ def _failure_message(payload: Dict[str, Any]) -> str:
 
 
 class PortfolioServiceClient:
-    def __init__(self, base_url: Optional[str] = None, timeout: float = 0.5):
+    def __init__(
+        self,
+        base_url: Optional[str] = None,
+        timeout: float = 0.5,
+        quality_read_token: Optional[str] = None,
+    ):
         self.base_url = (base_url or config.get_service_url()).rstrip("/")
         self.timeout = timeout
+        self.quality_read_token = quality_read_token
 
     def _request(
         self,
@@ -85,6 +91,7 @@ class PortfolioServiceClient:
         path: str,
         params: Optional[Dict[str, Any]] = None,
         body: Optional[Dict[str, Any]] = None,
+        headers: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         clean_params = {
             key: value
@@ -93,14 +100,14 @@ class PortfolioServiceClient:
         }
         query = f"?{urlencode(clean_params)}" if clean_params else ""
         data = None
-        headers = {"Accept": "application/json"}
+        request_headers = {"Accept": "application/json", **(headers or {})}
         if body is not None:
             data = json.dumps(body).encode("utf-8")
-            headers["Content-Type"] = "application/json"
+            request_headers["Content-Type"] = "application/json"
         request = Request(
             f"{self.base_url}{path}{query}",
             data=data,
-            headers=headers,
+            headers=request_headers,
             method=method,
         )
 
@@ -139,6 +146,14 @@ class PortfolioServiceClient:
 
     def health(self) -> Dict[str, Any]:
         return self._get("/health")
+
+    def quality_status(self) -> Dict[str, Any]:
+        token = self.quality_read_token or str(config.get("quality.read_token") or "")
+        return self._request(
+            "GET",
+            "/quality/status",
+            headers={"Authorization": f"Bearer {token}"},
+        )
 
     def is_available(self) -> bool:
         try:

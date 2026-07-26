@@ -28,6 +28,10 @@ ENV_MAP = {
     "service.host": "PORTFOLIO_SERVICE_HOST",
     "service.port": "PORTFOLIO_SERVICE_PORT",
     "service.url": "PORTFOLIO_SERVICE_URL",
+    "quality.read_token": "PM_QUALITY_READ_TOKEN",
+    "quality.instance_id": "PM_QUALITY_INSTANCE_ID",
+    "quality.accounts": "PM_QUALITY_ACCOUNTS",
+    "quality.onboarded": "PM_QUALITY_ONBOARDED",
     "nav.disable_runtime_validation": "PORTFOLIO_NAV_DISABLE_RUNTIME_VALIDATION",
     "report.account_label": "PM_REPORT_ACCOUNT_LABEL",
     "report.reports_dir": "PM_REPORTS_DIR",
@@ -74,6 +78,10 @@ OPERATOR_CONFIG_KEYS = (
     "service.host",
     "service.port",
     "service.url",
+    "quality.read_token",
+    "quality.instance_id",
+    "quality.accounts",
+    "quality.onboarded",
     "calendar.holidays",
     "report.reports_dir",
     "report.publish_root",
@@ -117,6 +125,7 @@ SECRET_KEYS = {
     "feishu.receipt.app_secret",
     "feishu.receipt.open_id",
     "finnhub_api_key",
+    "quality.read_token",
 }
 
 OPERATOR_DEFAULTS: Dict[str, Any] = {
@@ -125,6 +134,9 @@ OPERATOR_DEFAULTS: Dict[str, Any] = {
     "service.host": "127.0.0.1",
     "service.port": 8765,
     "service.url": "",
+    "quality.instance_id": "portfolio-management-local",
+    "quality.accounts": [],
+    "quality.onboarded": False,
     "calendar.holidays": [],
     "report.reports_dir": "reports",
     "report.publish_root": "../prototypes",
@@ -268,7 +280,11 @@ def inspect_config(*, keys: Optional[Iterable[str]] = None, redact: bool = True)
     }
 
 
-def validate_deploy_config(*, require_futu: bool = False) -> Dict[str, Any]:
+def validate_deploy_config(
+    *,
+    require_futu: bool = False,
+    require_quality: bool = False,
+) -> Dict[str, Any]:
     """Validate configuration needed by scheduled daily NAV jobs."""
     issues = []
     warnings = []
@@ -312,6 +328,29 @@ def validate_deploy_config(*, require_futu: bool = False) -> Dict[str, Any]:
                 __import__("moomoo")
             except Exception:
                 warnings.append({"key": "futu.sdk", "warning": "futu/moomoo SDK is not importable; Futu sync will fail unless installed"})
+        mapping_result = validate_futu_account_mappings(get_quality_accounts())
+        issues.extend(
+            {
+                "key": f"futu.accounts.{item['account']}",
+                "error": item["error"],
+                "env": None,
+            }
+            for item in mapping_result["issues"]
+        )
+
+    if require_quality:
+        if not get("quality.read_token"):
+            issues.append({
+                "key": "quality.read_token",
+                "error": "missing quality read token",
+                "env": ENV_MAP.get("quality.read_token"),
+            })
+        if not get("quality.accounts"):
+            issues.append({
+                "key": "quality.accounts",
+                "error": "at least one quality account is required",
+                "env": ENV_MAP.get("quality.accounts"),
+            })
 
     return {
         "success": not issues,
@@ -450,6 +489,22 @@ def get_float(key: str, default: Optional[float] = None) -> Optional[float]:
 def get_account() -> str:
     """获取默认账户标识"""
     return get("account", "default")
+
+
+def get_quality_accounts() -> list[str]:
+    value = get("quality.accounts")
+    if isinstance(value, str):
+        raw = value.split(",")
+    elif isinstance(value, (list, tuple, set)):
+        raw = value
+    else:
+        raw = []
+    accounts = [
+        str(item or "").strip().lower()
+        for item in raw
+        if str(item or "").strip()
+    ]
+    return list(dict.fromkeys(accounts)) or [get_account().strip().lower()]
 
 
 def get_initial_value() -> float:

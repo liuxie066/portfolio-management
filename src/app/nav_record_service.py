@@ -8,6 +8,8 @@ from typing import Any, Optional
 from src import config
 from src.app.compensation_service import PartialWriteError
 from src.app.nav_finality import NavWriteContext
+from src.app.quality.evidence import valuation_quality_evidence
+from src.app.quality.policy import assert_official_nav_write_allowed
 from src.app.snapshot_service import snapshot_digest
 from src.models import NAVHistory, PortfolioValuation
 from src.time_utils import bj_today
@@ -81,8 +83,13 @@ class NavRecordService:
     ) -> NAVHistory:
         if valuation is None:
             valuation = self.manager.calculate_valuation(account)
+        valuation_quality = valuation_quality_evidence(valuation)
         if persist and not dry_run:
             self._assert_valuation_reliable_for_write(valuation)
+            assert_official_nav_write_allowed(
+                account=account,
+                valuation_quality=valuation_quality,
+            )
 
         today_value = nav_date or bj_today()
         today = today_value.date() if isinstance(today_value, datetime) else today_value
@@ -178,6 +185,7 @@ class NavRecordService:
         resolved_context = resolved_context.with_runtime(run_id=run_id)
         details = dict(nav_record.details or {})
         details["finality"] = resolved_context.to_details()
+        details["valuation_quality"] = valuation_quality
         if resolved_context.run_id:
             details["run_id"] = resolved_context.run_id
         nav_record.details = details
