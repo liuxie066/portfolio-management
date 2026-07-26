@@ -388,16 +388,7 @@ class FutuOpenApiBalanceProvider:
             kwargs.pop("currency", None)
             ret, data = ctx.accinfo_query(**kwargs)
         self._ensure_ok(futu_sdk, ret, data, "accinfo_query")
-        row = _first_row(data)
-        returned_acc_id = row.get("acc_id")
-        if returned_acc_id in (None, ""):
-            raise RuntimeError("Futu accinfo_query response lacks acc_id evidence")
-        if int(returned_acc_id) != int(self.acc_id):
-            raise RuntimeError(
-                f"Futu account mismatch: expected acc_id={self.acc_id}, "
-                f"returned={returned_acc_id}"
-            )
-        return row
+        return _first_row(data)
 
     def _fetch_position_rows(self, futu_sdk: Any, ctx: Any) -> list[dict[str, Any]]:
         kwargs: dict[str, Any] = {

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.29 - 2026-07-27
+
+- Accepted the documented Futu account-funds response shape, which omits `acc_id` from the returned DataFrame, while retaining explicit account selection and the independent account-list authority check.
+
 ## 0.1.28 - 2026-07-27
 
 - Queried Futu account information with the market-supported HKD or USD conversion currency instead of the rejected `Currency.NONE`, while preserving authoritative per-currency cash evidence and failing closed for unsupported markets.

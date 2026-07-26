@@ -857,8 +857,8 @@ def test_futu_portfolio_provider_fetches_average_cost_and_closes_contexts(monkey
 
         def accinfo_query(self, **kwargs):
             assert kwargs["currency"] == "HKD"
+            assert kwargs["acc_id"] == 123
             return 0, [{
-                "acc_id": 123,
                 "cash": 999999,
                 "cn_cash": 12.34,
                 "us_cash": 5.67,
