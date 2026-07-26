@@ -15,6 +15,8 @@ historical Skill/Python API remains available only as a compatibility adapter.
 - Cash-flow holding effects design: `docs/cash-flow-holding-effects.md`
 - Cash-flow holding effects operations: `docs/cash-flow-effects-runbook.md`
 - Schema checks: `docs/migrations.md`
+- PM runtime and data quality: `docs/quality-monitoring/README.md`
+- OM-facing PM API contract: `docs/om-api-contract.md`
 
 ## Product Entrypoints
 
