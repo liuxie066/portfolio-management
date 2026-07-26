@@ -19,6 +19,17 @@ class FakePortfolioService:
 
     def quality_status(self):
         self.calls.append(("quality_status", {}))
+        dataset_ids = (
+            "pm.account_mapping",
+            "pm.holdings_quantity",
+            "pm.cost_basis",
+            "pm.securities_cash",
+            "pm.fund_mmf",
+            "pm.prices",
+            "pm.fx",
+            "pm.nav",
+            "pm.nav_history",
+        )
         return {
             "schema_version": "investment.quality_status.v1",
             "producer": {
@@ -33,13 +44,26 @@ class FakePortfolioService:
                 "as_of_utc": "2026-07-26T01:00:00Z",
                 "checks": [],
             },
-            "datasets": [],
+            "datasets": [
+                {
+                    "dataset_id": dataset_id,
+                    "scope": {"account": "alice"},
+                    "status": "trusted",
+                    "as_of_utc": "2026-07-26T01:00:00Z",
+                    "freshness": {
+                        "status": "fresh",
+                        "observed_at_utc": "2026-07-26T01:00:00Z",
+                    },
+                    "reason_codes": [],
+                }
+                for dataset_id in dataset_ids
+            ],
             "incidents": [],
         }
 
     def list_accounts(self, **kwargs):
         self.calls.append(("list_accounts", kwargs))
-        return {"success": True, "accounts": ["alice"]}
+        return {"success": True, "accounts": ["alice"], "count": 1}
 
     def list_nav_accounts(self, **kwargs):
         self.calls.append(("list_nav_accounts", kwargs))
@@ -47,19 +71,35 @@ class FakePortfolioService:
 
     def multi_account_overview(self, **kwargs):
         self.calls.append(("overview", kwargs))
-        return {"success": True, "accounts": kwargs["accounts"]}
+        accounts = [item for item in (kwargs["accounts"] or "").split(",") if item]
+        return {
+            "success": True,
+            "status": "ok",
+            "accounts": accounts,
+            "account_count": len(accounts),
+            "successful_count": len(accounts),
+            "failed_count": 0,
+            "summary": {},
+            "items": [],
+        }
 
     def get_holdings(self, **kwargs):
         self.calls.append(("holdings", kwargs))
-        return {"success": True, "account": kwargs["account"]}
+        return {"success": True, "account": kwargs["account"], "holdings": [], "count": 0}
 
     def get_cash(self, **kwargs):
         self.calls.append(("cash", kwargs))
-        return {"success": True, "account": kwargs["account"]}
+        return {
+            "success": True,
+            "account": kwargs["account"],
+            "by_currency": {},
+            "items": [],
+            "count": 0,
+        }
 
     def get_nav(self, **kwargs):
         self.calls.append(("nav", kwargs))
-        return {"success": True, "days": kwargs["days"]}
+        return {"success": True, "days": kwargs["days"], "latest": {}, "history": []}
 
     def get_capital_facts(self, **kwargs):
         self.calls.append(("capital_facts", kwargs))
@@ -95,11 +135,20 @@ class FakePortfolioService:
 
     def get_distribution(self, **kwargs):
         self.calls.append(("distribution", kwargs))
-        return {"success": True, "account": kwargs["account"]}
+        return {"success": True, "account": kwargs["account"], "total_value": 0, "by_type": []}
 
     def full_report(self, **kwargs):
         self.calls.append(("full_report", kwargs))
-        return {"success": True, "account": kwargs["account"]}
+        return {
+            "success": True,
+            "account": kwargs["account"],
+            "generated_at": "2026-07-26T01:00:00",
+            "overview": {},
+            "nav": None,
+            "returns": {},
+            "top_holdings": [],
+            "distribution": {},
+        }
 
     def generate_report(self, **kwargs):
         self.calls.append(("generate_report", kwargs))
@@ -158,7 +207,7 @@ def test_http_service_routes_delegate_to_portfolio_service():
     assert client.get("/health").json()["status"] == "ok"
     assert client.get("/accounts", params={"include_default": False}).json()["accounts"] == ["alice"]
     assert client.get("/accounts/nav", params={"include_default": True}).json()["accounts"] == ["alice"]
-    assert client.get("/accounts/overview", params={"accounts": "alice,bob", "price_timeout": 7}).json()["accounts"] == "alice,bob"
+    assert client.get("/accounts/overview", params={"accounts": "alice,bob", "price_timeout": 7}).json()["accounts"] == ["alice", "bob"]
     assert client.get("/holdings", params={"account": "alice/bob", "include_cash": False, "group_by_market": True, "include_price": True}).json()["account"] == "alice/bob"
     assert client.get("/cash", params={"account": "alice/bob"}).json()["account"] == "alice/bob"
     assert client.get("/nav", params={"account": "alice/bob", "days": 14}).json()["days"] == 14
@@ -275,7 +324,17 @@ def test_http_futu_holdings_sync_routes_delegate_to_service():
     class FutuService(FakePortfolioService):
         def sync_futu_holdings(self, **kwargs):
             self.calls.append(("sync_futu_holdings", kwargs))
-            return {"success": True, **kwargs}
+            return {
+                "success": True,
+                "status": "written",
+                "broker": "富途",
+                "source": "futu-openapi",
+                "source_snapshot_id": "snapshot-1",
+                "sync_run_id": "sync-1",
+                "stages": {},
+                "positions": [],
+                **kwargs,
+            }
 
     service = FutuService()
     client = _client(create_app(service=service))
@@ -340,7 +399,11 @@ def test_om_facing_v1_routes_match_legacy_and_expose_version_headers():
         legacy = client.request(method, legacy_path, params=params, json=payload)
         versioned = client.request(method, f"/api/v1{legacy_path}", params=params, json=payload)
         assert versioned.status_code == legacy.status_code == 200
-        assert versioned.json() == legacy.json()
+        versioned_payload = versioned.json()
+        assert versioned_payload.pop("freshness")["status"] == "fresh"
+        assert versioned_payload.pop("retrieved_at_utc").endswith("Z")
+        legacy_payload = {key: value for key, value in legacy.json().items() if value is not None}
+        assert versioned_payload == legacy_payload
         assert versioned.headers["x-pm-api-version"] == "portfolio.api.v1"
         assert legacy.headers["deprecation"] == "true"
         assert legacy.headers["link"] == f'</api/v1{legacy_path}>; rel="successor-version"'
@@ -367,6 +430,46 @@ def test_v1_errors_are_stable_and_legacy_payload_is_unchanged():
     assert invalid.json()["error_code"] == "INPUT_VALIDATION_ERROR"
 
 
+def test_v1_freshness_is_unavailable_when_owner_evidence_is_missing():
+    service = FakePortfolioService()
+    service.quality_status = lambda: {
+        "schema_version": "investment.quality_status.v1",
+        "datasets": [],
+    }
+
+    payload = _client(create_app(service=service)).get(
+        "/api/v1/cash",
+        params={"account": "alice"},
+    ).json()
+
+    assert payload["freshness"] == {
+        "status": "unavailable",
+        "trust_status": "unavailable",
+        "dataset_ids": ["pm.securities_cash", "pm.fund_mmf"],
+        "reason_codes": ["DATASET_EVIDENCE_MISSING"],
+    }
+
+
+def test_v1_freshness_propagates_stale_partial_owner_evidence():
+    service = FakePortfolioService()
+    artifact = service.quality_status()
+    for dataset in artifact["datasets"]:
+        if dataset["dataset_id"] == "pm.fund_mmf":
+            dataset["status"] = "partial"
+            dataset["freshness"]["status"] = "stale"
+            dataset["reason_codes"] = ["SOURCE_STALE"]
+    service.quality_status = lambda: artifact
+
+    payload = _client(create_app(service=service)).get(
+        "/api/v1/cash",
+        params={"account": "alice"},
+    ).json()
+
+    assert payload["freshness"]["status"] == "stale"
+    assert payload["freshness"]["trust_status"] == "partial"
+    assert payload["freshness"]["reason_codes"] == ["SOURCE_STALE"]
+
+
 def test_openapi_contract_contains_only_real_om_v1_capabilities():
     schema = create_app(service=FakePortfolioService()).openapi()
     required = {
@@ -387,3 +490,7 @@ def test_openapi_contract_contains_only_real_om_v1_capabilities():
         operation = next(iter(schema["paths"][path].values()))
         header = operation["responses"]["200"]["headers"]["X-PM-API-Version"]
         assert header["schema"]["const"] == "portfolio.api.v1"
+    accounts_schema = schema["components"]["schemas"]["AccountsResponse"]
+    assert {"success", "accounts", "count", "freshness", "retrieved_at_utc"} <= set(accounts_schema["required"])
+    holdings_schema = schema["components"]["schemas"]["HoldingsResponse"]
+    assert {"success", "count", "freshness", "retrieved_at_utc"} <= set(holdings_schema["required"])
