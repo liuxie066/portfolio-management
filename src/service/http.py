@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 from uuid import uuid4
 
@@ -12,7 +13,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .application import PortfolioService
 from .bind import allow_remote_from_env, is_loopback_client
@@ -89,9 +90,93 @@ class ValuationEvidenceRequest(BaseModel):
     price_timeout: int = Field(default=30, ge=1, le=300)
 
 
+class FreshnessEvidence(BaseModel):
+    status: Literal["fresh", "stale", "unknown", "unavailable"]
+    trust_status: Literal["trusted", "partial", "untrusted", "unavailable"]
+    observed_at_utc: Optional[str] = None
+    dataset_ids: list[str]
+    reason_codes: list[str] = Field(default_factory=list)
+
+
 class PublicResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
-    success: bool
+    success: Literal[True]
+    freshness: FreshnessEvidence
+    retrieved_at_utc: str
+
+
+class AccountsResponse(PublicResponse):
+    accounts: list[str]
+    count: int
+
+
+class AccountsOverviewResponse(PublicResponse):
+    status: str
+    accounts: list[str]
+    account_count: int
+    successful_count: int
+    failed_count: int
+    summary: dict[str, Any]
+    items: list[dict[str, Any]]
+
+
+class HoldingsResponse(PublicResponse):
+    count: int
+    holdings: Optional[list[dict[str, Any]]] = None
+    by_market: Optional[dict[str, list[dict[str, Any]]]] = None
+
+    @model_validator(mode="after")
+    def validate_holding_shape(self):
+        if self.holdings is None and self.by_market is None:
+            raise ValueError("holdings or by_market is required")
+        return self
+
+
+class CashResponse(PublicResponse):
+    by_currency: dict[str, Any]
+    items: list[dict[str, Any]]
+    count: int
+
+
+class NavResponse(PublicResponse):
+    latest: dict[str, Any]
+    history: list[dict[str, Any]]
+
+
+class DistributionResponse(PublicResponse):
+    total_value: Optional[float] = None
+    total_quantity: Optional[float] = None
+    accounts: Optional[list[str]] = None
+    by_type: Optional[list[dict[str, Any]]] = None
+    by_asset: Optional[list[dict[str, Any]]] = None
+
+    @model_validator(mode="after")
+    def validate_distribution_shape(self):
+        if self.by_type is None and self.by_asset is None:
+            raise ValueError("by_type or by_asset is required")
+        return self
+
+
+class FullReportResponse(PublicResponse):
+    generated_at: str
+    overview: dict[str, Any]
+    nav: Optional[dict[str, Any]] = None
+    returns: dict[str, Any]
+    top_holdings: list[dict[str, Any]]
+    distribution: dict[str, Any]
+
+
+class FutuHoldingsSyncResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    success: Literal[True]
+    account: str
+    broker: str
+    dry_run: bool
+    source: str
+    source_snapshot_id: str
+    sync_run_id: str
+    stages: dict[str, Any]
+    positions: list[dict[str, Any]]
 
 
 class CapitalFactsResponse(PublicResponse):
@@ -171,9 +256,21 @@ def _public_result(
     result: Any,
     *,
     input_error_status: int | None = None,
+    dataset_ids: tuple[str, ...] = (),
+    accounts: tuple[str, ...] = (),
 ) -> Any:
-    if not _is_v1(request) or not isinstance(result, dict) or result.get("success") is not False:
+    if not _is_v1(request) or not isinstance(result, dict):
         return result
+    if result.get("success") is not False:
+        enriched = dict(result)
+        if dataset_ids:
+            enriched["freshness"] = _view_freshness(
+                request,
+                dataset_ids=dataset_ids,
+                accounts=accounts,
+            )
+            enriched["retrieved_at_utc"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        return enriched
     code = str(result.get("error_code") or "PM_SERVICE_UNAVAILABLE").strip().upper()
     status_code = input_error_status if code == "INPUT_ERROR" and input_error_status else 503
     return JSONResponse(
@@ -186,6 +283,98 @@ def _public_result(
             "details": {},
         },
     )
+
+
+def _view_freshness(
+    request: Request,
+    *,
+    dataset_ids: tuple[str, ...],
+    accounts: tuple[str, ...],
+) -> dict[str, Any]:
+    requested = set(dataset_ids)
+    account_filter = {item.strip().lower() for item in accounts if item.strip()}
+    try:
+        quality = _service(request).quality_status()
+    except Exception:
+        quality = None
+    datasets = quality.get("datasets") if isinstance(quality, dict) else None
+    if not isinstance(datasets, list):
+        return _unavailable_freshness(dataset_ids, "QUALITY_ARTIFACT_UNAVAILABLE")
+
+    matched: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in datasets:
+        if not isinstance(item, dict) or item.get("dataset_id") not in requested:
+            continue
+        account = str((item.get("scope") or {}).get("account") or "").strip().lower()
+        if account_filter and account not in account_filter:
+            continue
+        matched[(str(item["dataset_id"]), account)] = item
+
+    expected = {
+        (dataset_id, account)
+        for dataset_id in dataset_ids
+        for account in (account_filter or {""})
+    }
+    if account_filter:
+        missing = expected - set(matched)
+    else:
+        found_ids = {dataset_id for dataset_id, _ in matched}
+        missing = {(dataset_id, "") for dataset_id in requested - found_ids}
+    if missing:
+        return _unavailable_freshness(dataset_ids, "DATASET_EVIDENCE_MISSING")
+
+    items = list(matched.values())
+    trust_values = {str(item.get("status") or "unavailable") for item in items}
+    freshness_values = {
+        str((item.get("freshness") or {}).get("status") or "unknown")
+        for item in items
+    }
+    if "unavailable" in trust_values:
+        trust_status = "unavailable"
+    elif "untrusted" in trust_values:
+        trust_status = "untrusted"
+    elif "partial" in trust_values:
+        trust_status = "partial"
+    else:
+        trust_status = "trusted"
+
+    if trust_status == "unavailable":
+        freshness_status = "unavailable"
+    elif "stale" in freshness_values:
+        freshness_status = "stale"
+    elif freshness_values == {"fresh"}:
+        freshness_status = "fresh"
+    else:
+        freshness_status = "unknown"
+
+    observed = [
+        str((item.get("freshness") or {}).get("observed_at_utc") or item.get("as_of_utc") or "")
+        for item in items
+    ]
+    observed = sorted(item for item in observed if item)
+    reasons = sorted({
+        str(reason)
+        for item in items
+        for reason in (item.get("reason_codes") or [])
+        if reason
+    })
+    return {
+        "status": freshness_status,
+        "trust_status": trust_status,
+        "observed_at_utc": observed[0] if observed else None,
+        "dataset_ids": list(dataset_ids),
+        "reason_codes": reasons,
+    }
+
+
+def _unavailable_freshness(dataset_ids: tuple[str, ...], reason_code: str) -> dict[str, Any]:
+    return {
+        "status": "unavailable",
+        "trust_status": "unavailable",
+        "observed_at_utc": None,
+        "dataset_ids": list(dataset_ids),
+        "reason_codes": [reason_code],
+    }
 
 
 def create_app(service: Optional[PortfolioService] = None, allow_remote: Optional[bool] = None) -> FastAPI:
@@ -282,7 +471,7 @@ def create_app(service: Optional[PortfolioService] = None, allow_remote: Optiona
         return JSONResponse(content=payload, headers=headers)
 
     @app.get("/accounts", tags=["accounts"], include_in_schema=False)
-    @app.get("/api/v1/accounts", tags=["accounts"], response_model=PublicResponse, responses=V1_RESPONSES)
+    @app.get("/api/v1/accounts", tags=["accounts"], response_model=AccountsResponse, response_model_exclude_none=True, responses=V1_RESPONSES)
     def list_accounts(
         request: Request,
         include_default: bool = Query(True, description="Include configured default account even if empty."),
@@ -290,6 +479,7 @@ def create_app(service: Optional[PortfolioService] = None, allow_remote: Optiona
         return _public_result(
             request,
             _service(request).list_accounts(include_default=include_default),
+            dataset_ids=("pm.account_mapping",),
         )
 
     @app.get("/accounts/nav", tags=["accounts"])
@@ -300,21 +490,28 @@ def create_app(service: Optional[PortfolioService] = None, allow_remote: Optiona
         return _service(request).list_nav_accounts(include_default=include_default)
 
     @app.get("/accounts/overview", tags=["accounts"], include_in_schema=False)
-    @app.get("/api/v1/accounts/overview", tags=["accounts"], response_model=PublicResponse, responses=V1_RESPONSES)
+    @app.get("/api/v1/accounts/overview", tags=["accounts"], response_model=AccountsOverviewResponse, response_model_exclude_none=True, responses=V1_RESPONSES)
     def multi_account_overview(
         request: Request,
         accounts: Optional[str] = Query(None, description="Comma-separated accounts. Empty means auto-discover."),
         price_timeout: int = Query(30, ge=1, le=300),
         include_details: bool = Query(False),
     ):
+        selected_accounts = tuple(item.strip() for item in (accounts or "").split(",") if item.strip())
         return _public_result(request, _service(request).multi_account_overview(
             accounts=accounts,
             price_timeout=price_timeout,
             include_details=include_details,
-        ))
+        ), dataset_ids=(
+            "pm.holdings_quantity",
+            "pm.securities_cash",
+            "pm.fund_mmf",
+            "pm.prices",
+            "pm.fx",
+        ), accounts=selected_accounts)
 
     @app.get("/holdings", tags=["holdings"], include_in_schema=False)
-    @app.get("/api/v1/holdings", tags=["holdings"], response_model=PublicResponse, responses=V1_RESPONSES)
+    @app.get("/api/v1/holdings", tags=["holdings"], response_model=HoldingsResponse, response_model_exclude_none=True, responses=V1_RESPONSES)
     def get_holdings_query(
         request: Request,
         account: str = Query(...),
@@ -322,34 +519,47 @@ def create_app(service: Optional[PortfolioService] = None, allow_remote: Optiona
         group_by_market: bool = Query(False),
         include_price: bool = Query(False),
     ):
+        required = ["pm.holdings_quantity", "pm.cost_basis"]
+        if include_cash:
+            required.extend(["pm.securities_cash", "pm.fund_mmf"])
         return _public_result(request, _service(request).get_holdings(
             account=account,
             include_cash=include_cash,
             group_by_market=group_by_market,
             include_price=include_price,
-        ))
+        ), dataset_ids=tuple(required), accounts=(account,))
 
 
     @app.get("/cash", tags=["cash"], include_in_schema=False)
-    @app.get("/api/v1/cash", tags=["cash"], response_model=PublicResponse, responses=V1_RESPONSES)
+    @app.get("/api/v1/cash", tags=["cash"], response_model=CashResponse, response_model_exclude_none=True, responses=V1_RESPONSES)
     def get_cash_query(request: Request, account: str = Query(...)):
-        return _public_result(request, _service(request).get_cash(account=account))
+        return _public_result(
+            request,
+            _service(request).get_cash(account=account),
+            dataset_ids=("pm.securities_cash", "pm.fund_mmf"),
+            accounts=(account,),
+        )
 
 
     @app.post("/futu/holdings/sync", tags=["holdings"], include_in_schema=False)
-    @app.post("/api/v1/futu/holdings/sync", tags=["holdings"], response_model=PublicResponse, responses=V1_RESPONSES)
+    @app.post("/api/v1/futu/holdings/sync", tags=["holdings"], response_model=FutuHoldingsSyncResponse, responses=V1_RESPONSES)
     def sync_futu_holdings_query(request: Request, payload: FutuHoldingsSyncRequest):
         return _public_result(request, _service(request).sync_futu_holdings(**_payload_dict(payload)))
 
 
     @app.get("/nav", tags=["nav"], include_in_schema=False)
-    @app.get("/api/v1/nav", tags=["nav"], response_model=PublicResponse, responses=V1_RESPONSES)
+    @app.get("/api/v1/nav", tags=["nav"], response_model=NavResponse, response_model_exclude_none=True, responses=V1_RESPONSES)
     def get_nav_query(
         request: Request,
         account: str = Query(...),
         days: int = Query(30, ge=1, le=10000),
     ):
-        return _public_result(request, _service(request).get_nav(account=account, days=days))
+        return _public_result(
+            request,
+            _service(request).get_nav(account=account, days=days),
+            dataset_ids=("pm.nav", "pm.nav_history"),
+            accounts=(account,),
+        )
 
     @app.get("/analysis/capital-facts", tags=["analysis"], include_in_schema=False)
     @app.get(
@@ -368,7 +578,7 @@ def create_app(service: Optional[PortfolioService] = None, allow_remote: Optiona
             account=account,
             period=period,
             as_of_month=as_of_month,
-        ))
+        ), dataset_ids=("pm.nav_history",), accounts=(account,))
 
     @app.post("/analysis/valuation-evidence", tags=["analysis"], include_in_schema=False)
     @app.post(
@@ -384,7 +594,13 @@ def create_app(service: Optional[PortfolioService] = None, allow_remote: Optiona
         result = _service(request).get_valuation_evidence(**_payload_dict(payload))
         if not _is_v1(request) and result.get("success") is False and result.get("error_code") == "INPUT_ERROR":
             return JSONResponse(status_code=400, content=result)
-        return _public_result(request, result, input_error_status=400)
+        return _public_result(
+            request,
+            result,
+            input_error_status=400,
+            dataset_ids=("pm.holdings_quantity", "pm.prices", "pm.fx"),
+            accounts=tuple(payload.accounts),
+        )
 
 
     @app.post("/nav/record", tags=["nav"])
@@ -398,7 +614,7 @@ def create_app(service: Optional[PortfolioService] = None, allow_remote: Optiona
         return _service(request).audit_nav_history_duplicates(account=account)
 
     @app.get("/distribution", tags=["positions"], include_in_schema=False)
-    @app.get("/api/v1/distribution", tags=["positions"], response_model=PublicResponse, responses=V1_RESPONSES)
+    @app.get("/api/v1/distribution", tags=["positions"], response_model=DistributionResponse, response_model_exclude_none=True, responses=V1_RESPONSES)
     def get_distribution_query(
         request: Request,
         account: Optional[str] = Query(None),
@@ -415,17 +631,42 @@ def create_app(service: Optional[PortfolioService] = None, allow_remote: Optiona
         }
         if group_cash:
             kwargs["group_cash"] = True
-        return _public_result(request, _service(request).get_distribution(**kwargs))
+        selected_accounts = tuple(item.strip() for item in (accounts or account or "").split(",") if item.strip())
+        return _public_result(
+            request,
+            _service(request).get_distribution(**kwargs),
+            dataset_ids=(
+                "pm.holdings_quantity",
+                "pm.securities_cash",
+                "pm.fund_mmf",
+                "pm.prices",
+                "pm.fx",
+            ),
+            accounts=selected_accounts,
+        )
 
 
     @app.get("/report/full", tags=["reports"], include_in_schema=False)
-    @app.get("/api/v1/report/full", tags=["reports"], response_model=PublicResponse, responses=V1_RESPONSES)
+    @app.get("/api/v1/report/full", tags=["reports"], response_model=FullReportResponse, response_model_exclude_none=True, responses=V1_RESPONSES)
     def full_report_query(
         request: Request,
         account: str = Query(...),
         price_timeout: int = Query(30, ge=1, le=300),
     ):
-        return _public_result(request, _service(request).full_report(account=account, price_timeout=price_timeout))
+        return _public_result(
+            request,
+            _service(request).full_report(account=account, price_timeout=price_timeout),
+            dataset_ids=(
+                "pm.holdings_quantity",
+                "pm.securities_cash",
+                "pm.fund_mmf",
+                "pm.prices",
+                "pm.fx",
+                "pm.nav",
+                "pm.nav_history",
+            ),
+            accounts=(account,),
+        )
 
 
     @app.post("/report/daily-bundle", tags=["reports"])
