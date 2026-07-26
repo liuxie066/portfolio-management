@@ -26,5 +26,11 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pytest
 
-      - name: Validate pinned contract
-        run: python -m pytest -q tests/test_quality_status_contract_vendor.py
+      - name: Validate pinned and published contracts
+        run: |
+          python -m scripts.export_om_openapi --check
+          python -m pytest -q \
+            tests/test_quality_status_contract_vendor.py \
+            tests/test_quality_document_ownership.py \
+            tests/test_om_openapi_contract.py \
+            tests/test_om_api_contract_release.py

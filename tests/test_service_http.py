@@ -287,7 +287,21 @@ def test_http_futu_holdings_sync_routes_delegate_to_service():
         "allow_empty_stock_snapshot": True,
     }).json()
     assert query["account"] == "lx"
+    versioned = client.post("/api/v1/futu/holdings/sync", json={
+        "account": "lx",
+        "dry_run": False,
+        "confirm": True,
+        "allow_empty_stock_snapshot": True,
+    })
+    assert versioned.json()["account"] == "lx"
+    assert versioned.headers["x-pm-api-version"] == "portfolio.api.v1"
     assert service.calls == [
+        ("sync_futu_holdings", {
+            "account": "lx",
+            "dry_run": False,
+            "confirm": True,
+            "allow_empty_stock_snapshot": True,
+        }),
         ("sync_futu_holdings", {
             "account": "lx",
             "dry_run": False,

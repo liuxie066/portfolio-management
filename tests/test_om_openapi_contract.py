@@ -26,3 +26,5 @@ def test_openapi_required_response_contracts_are_machine_readable() -> None:
     assert capital["responses"]["200"]["content"]["application/json"]["schema"]
     assert valuation["responses"]["200"]["content"]["application/json"]["schema"]
     assert capital["responses"]["503"]["content"]["application/json"]["schema"]
+    assert "NavRecordRequest" not in document["components"]["schemas"]
+    assert "DailyNavJobRequest" not in document["components"]["schemas"]

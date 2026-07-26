@@ -20,7 +20,35 @@ def build_contract() -> dict:
         for path, value in document["paths"].items()
         if path.startswith("/api/v1/")
     }
+    schemas = (document.get("components") or {}).get("schemas") or {}
+    required = _schema_references(document["paths"])
+    selected: dict[str, dict] = {}
+    while required:
+        name = required.pop()
+        if name in selected or name not in schemas:
+            continue
+        selected[name] = schemas[name]
+        required.update(_schema_references(schemas[name]))
+    document["components"] = {"schemas": dict(sorted(selected.items()))}
     return document
+
+
+def _schema_references(value: object) -> set[str]:
+    if isinstance(value, dict):
+        references = {
+            str(item).rsplit("/", 1)[-1]
+            for key, item in value.items()
+            if key == "$ref" and isinstance(item, str)
+        }
+        for item in value.values():
+            references.update(_schema_references(item))
+        return references
+    if isinstance(value, list):
+        references: set[str] = set()
+        for item in value:
+            references.update(_schema_references(item))
+        return references
+    return set()
 
 
 def render_contract() -> str:
