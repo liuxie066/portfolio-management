@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from typing import Any
 
 from src import config
 from src.app.futu_sync_evidence import FutuSyncEvidenceStore
+
+from .futu_evidence import (
+    evaluate_receipt_freshness,
+    resolve_account_mappings,
+    source_receipt_complete,
+)
 
 NAV_REQUIRED_DATASETS = (
     "pm.account_mapping",
@@ -41,6 +48,7 @@ def assert_official_nav_write_allowed(
     account: str,
     valuation_quality: Mapping[str, Any],
     receipt_store: FutuSyncEvidenceStore | None = None,
+    now: datetime | None = None,
 ) -> None:
     """Fail closed at the authoritative NAV write boundary after onboarding.
 
@@ -52,14 +60,26 @@ def assert_official_nav_write_allowed(
     if not config.get_bool("quality.onboarded", False):
         return
 
-    mapping_status = "trusted"
-    try:
-        config.get_futu_account_settings(account)
-    except ValueError:
-        mapping_status = "unavailable"
-
+    mapping_states = resolve_account_mappings([*config.get_quality_accounts(), account])
+    mapping_state = mapping_states[account]
     receipt = (receipt_store or FutuSyncEvidenceStore()).latest(account)
-    verdicts = ((receipt or {}).get("reconciliation") or {}).get("datasets") or {}
+    freshness = evaluate_receipt_freshness(
+        receipt,
+        now=(now or datetime.now(UTC)),
+    )
+    receipt_usable = bool(
+        freshness.current
+        and source_receipt_complete(
+            receipt,
+            settings=mapping_state["settings"],
+        )
+    )
+    mapping_status = "trusted" if receipt_usable else "unavailable"
+    verdicts = (
+        ((receipt or {}).get("reconciliation") or {}).get("datasets") or {}
+        if receipt_usable
+        else {}
+    )
     datasets: dict[str, dict[str, Any]] = {
         "pm.account_mapping": {"status": mapping_status},
         "pm.holdings_quantity": {

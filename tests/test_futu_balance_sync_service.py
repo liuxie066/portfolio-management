@@ -224,6 +224,8 @@ def test_authoritative_cash_and_mmf_missing_block_before_write():
             account_fingerprint="sha256:redacted",
             trd_env="REAL",
             trd_market="US",
+            account_verified=True,
+            pagination_complete=True,
         )
     )
     storage = FakeStorage()
@@ -250,6 +252,8 @@ def test_authoritative_zero_is_present_and_preserves_cnh_cny_evidence():
             account_fingerprint="sha256:redacted",
             trd_env="REAL",
             trd_market="US",
+            account_verified=True,
+            pagination_complete=True,
         )
     )
     result = FutuBalanceSyncService(FakeStorage(), provider).sync_cash_and_mmf(account="lx", dry_run=True)

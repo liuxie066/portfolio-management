@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import date
+import hashlib
+from datetime import UTC, date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -46,29 +47,47 @@ def _configure(monkeypatch, tmp_path: Path, *, onboarded: bool = False) -> None:
     config.reload_config()
 
 
-def _receipt(*, cost_status: str = "trusted", cash_status: str = "trusted", mmf_status: str = "trusted"):
+def _receipt(
+    *,
+    cost_status: str = "trusted",
+    cash_status: str = "trusted",
+    mmf_status: str = "trusted",
+    observed_at_utc: str = "2026-07-26T01:00:00Z",
+    success: bool = True,
+    refresh_cache: bool = True,
+    account_verified: bool = True,
+    pagination_complete: bool = True,
+):
+    fingerprint = hashlib.sha256(b"123456").hexdigest()
     return {
         "schema_version": "pm.futu_sync_receipt.v1",
         "sync_run_id": "sync-001",
+        "account": "lx",
         "source_snapshot_id": "snapshot-redacted-001",
         "source_metadata": {
             "provider": "futu-openapi",
-            "observed_at_utc": "2026-07-26T01:00:00Z",
-            "account_fingerprint": "sha256:redacted",
+            "source_snapshot_id": "snapshot-redacted-001",
+            "observed_at_utc": observed_at_utc,
+            "account_fingerprint": f"sha256:{fingerprint}",
             "trd_env": "REAL",
             "trd_market": "US",
             "source_currency": "CNH",
             "normalized_currency": "CNY",
             "cash": {"present": True, "source_field": "cash"},
             "fund_mmf": {"present": True, "source_field": "fund_assets"},
-            "refresh_cache": True,
+            "refresh_cache": refresh_cache,
+            "account_verified": account_verified,
+            "pagination_complete": pagination_complete,
+            "position_snapshot_included": True,
+            "position_count": 1,
+            "payload_sha256": "0" * 64,
         },
         "stages": {
             "positions": {"status": "succeeded"},
             "securities_cash": {"status": "succeeded"},
             "fund_mmf": {"status": "succeeded"},
         },
-        "success": True,
+        "success": success,
         "partial_write_possible": False,
         "reconciliation": {
             "status": "trusted" if {cost_status, cash_status, mmf_status} == {"trusted"} else "untrusted",
@@ -154,7 +173,7 @@ def test_cost_basis_does_not_block_nav_but_cash_or_mmf_does():
 def test_pm_quality_payload_validates_and_is_dataset_scoped(monkeypatch, tmp_path: Path):
     _configure(monkeypatch, tmp_path)
     receipt_store = FutuSyncEvidenceStore(tmp_path / "receipts")
-    _publish_receipt(receipt_store, _receipt(cost_status="untrusted"))
+    _publish_receipt(receipt_store, _receipt())
     storage = SimpleNamespace(
         get_nav_history=lambda _account, days: [_final_nav()],
         audit_nav_history_duplicates=lambda account: {
@@ -167,12 +186,13 @@ def test_pm_quality_payload_validates_and_is_dataset_scoped(monkeypatch, tmp_pat
         receipt_store=receipt_store,
         artifact_store=QualityArtifactStore(tmp_path / "status.json"),
         instance_id="pm-test",
+        now_fn=lambda: datetime(2026, 7, 26, 10, tzinfo=UTC),
     )
 
     payload = service.refresh(accounts=["lx"])
     datasets = {item["dataset_id"]: item for item in payload["datasets"]}
 
-    assert datasets["pm.cost_basis"]["status"] == "untrusted"
+    assert datasets["pm.cost_basis"]["status"] == "trusted"
     assert datasets["pm.nav"]["status"] == "trusted"
     assert datasets["pm.nav"]["blocked_by"] == []
     check_ids = {
@@ -201,6 +221,12 @@ def test_pm_quality_payload_validates_and_is_dataset_scoped(monkeypatch, tmp_pat
     }
     assert service.read_published() == payload
     assert QualityArtifactStore(tmp_path / "status.json").read() == payload
+    assert payload["runtime"]["status"] == "healthy"
+    runtime_checks = {item["check_id"]: item for item in payload["runtime"]["checks"]}
+    assert runtime_checks["RT-PM-002"]["status"] == "pass"
+    assert runtime_checks["RT-PM-003"]["status"] == "pass"
+    assert datasets["pm.futu_snapshot"]["freshness"]["status"] == "fresh"
+    assert datasets["pm.futu_snapshot"]["source_snapshots"][0]["payload_sha256"] == "0" * 64
 
 
 def test_pm_quality_finality_and_partial_write_fail_closed(monkeypatch, tmp_path: Path):
@@ -219,6 +245,7 @@ def test_pm_quality_finality_and_partial_write_fail_closed(monkeypatch, tmp_path
         storage,
         receipt_store=receipt_store,
         artifact_store=QualityArtifactStore(tmp_path / "status.json"),
+        now_fn=lambda: datetime(2026, 7, 26, 10, tzinfo=UTC),
     ).build(accounts=["lx"])
     datasets = {item["dataset_id"]: item for item in payload["datasets"]}
 
@@ -243,6 +270,7 @@ def test_onboarded_nav_write_gate_uses_local_receipt_not_hub(monkeypatch, tmp_pa
         account="lx",
         valuation_quality=quality,
         receipt_store=store,
+        now=datetime(2026, 7, 26, 10, tzinfo=UTC),
     )
 
     _publish_receipt(store, _receipt(cash_status="untrusted"))
@@ -251,8 +279,196 @@ def test_onboarded_nav_write_gate_uses_local_receipt_not_hub(monkeypatch, tmp_pa
             account="lx",
             valuation_quality=quality,
             receipt_store=store,
+            now=datetime(2026, 7, 26, 10, tzinfo=UTC),
         )
     except ValueError as exc:
         assert "pm.securities_cash" in str(exc)
     else:
         raise AssertionError("expected the onboarded NAV gate to fail closed")
+
+
+def test_stale_sync_receipt_marks_runtime_and_dependent_datasets_unavailable(
+    monkeypatch,
+    tmp_path: Path,
+):
+    _configure(monkeypatch, tmp_path)
+    receipt_store = FutuSyncEvidenceStore(tmp_path / "receipts")
+    _publish_receipt(receipt_store, _receipt())
+    storage = SimpleNamespace(
+        get_nav_history=lambda _account, days: [_final_nav()],
+        audit_nav_history_duplicates=lambda account: {
+            "success": True,
+            "duplicate_group_count": 0,
+        },
+    )
+
+    payload = PMQualityService(
+        storage,
+        receipt_store=receipt_store,
+        artifact_store=QualityArtifactStore(tmp_path / "status.json"),
+        now_fn=lambda: datetime(2026, 7, 27, 0, 26, tzinfo=UTC),
+    ).build(accounts=["lx"])
+    datasets = {item["dataset_id"]: item for item in payload["datasets"]}
+    runtime_checks = {item["check_id"]: item for item in payload["runtime"]["checks"]}
+
+    assert payload["runtime"]["status"] == "unhealthy"
+    assert runtime_checks["RT-PM-002"]["reason_code"] == "SYNC_RECEIPT_STALE"
+    assert runtime_checks["RT-PM-003"]["reason_code"] == "SYNC_RECEIPT_STALE"
+    for dataset_id in (
+        "pm.futu_snapshot",
+        "pm.futu_sync",
+        "pm.holdings_quantity",
+        "pm.cost_basis",
+        "pm.securities_cash",
+        "pm.fund_mmf",
+    ):
+        assert datasets[dataset_id]["status"] == "unavailable"
+        assert datasets[dataset_id]["freshness"]["status"] == "stale"
+        assert datasets[dataset_id]["freshness"]["expected_by_utc"] == "2026-07-27T00:25:00Z"
+    assert datasets["pm.nav"]["status"] == "untrusted"
+
+
+def test_current_window_grace_keeps_previous_completed_window_current(
+    monkeypatch,
+    tmp_path: Path,
+):
+    _configure(monkeypatch, tmp_path)
+    receipt_store = FutuSyncEvidenceStore(tmp_path / "receipts")
+    _publish_receipt(receipt_store, _receipt())
+    storage = SimpleNamespace(
+        get_nav_history=lambda _account, days: [_final_nav()],
+        audit_nav_history_duplicates=lambda account: {
+            "success": True,
+            "duplicate_group_count": 0,
+        },
+    )
+
+    payload = PMQualityService(
+        storage,
+        receipt_store=receipt_store,
+        artifact_store=QualityArtifactStore(tmp_path / "status.json"),
+        now_fn=lambda: datetime(2026, 7, 27, 0, 20, tzinfo=UTC),
+    ).build(accounts=["lx"])
+
+    assert payload["runtime"]["status"] == "healthy"
+    assert all(item["status"] == "pass" for item in payload["runtime"]["checks"])
+
+
+def test_current_failed_sync_and_incomplete_opend_evidence_are_independent(
+    monkeypatch,
+    tmp_path: Path,
+):
+    _configure(monkeypatch, tmp_path)
+    receipt_store = FutuSyncEvidenceStore(tmp_path / "receipts")
+    failed = _receipt(
+        observed_at_utc="2026-07-27T00:30:00Z",
+        success=False,
+    )
+    failed["stages"]["fund_mmf"] = {"status": "failed"}
+    _publish_receipt(receipt_store, failed)
+    storage = SimpleNamespace(
+        get_nav_history=lambda _account, days: [_final_nav()],
+        audit_nav_history_duplicates=lambda account: {
+            "success": True,
+            "duplicate_group_count": 0,
+        },
+    )
+
+    payload = PMQualityService(
+        storage,
+        receipt_store=receipt_store,
+        artifact_store=QualityArtifactStore(tmp_path / "status.json"),
+        now_fn=lambda: datetime(2026, 7, 27, 1, 0, tzinfo=UTC),
+    ).build(accounts=["lx"])
+    checks = {item["check_id"]: item for item in payload["runtime"]["checks"]}
+
+    assert checks["RT-PM-002"]["status"] == "fail"
+    assert checks["RT-PM-002"]["reason_code"] == "PM_SYNC_WINDOW_FAILED"
+    assert checks["RT-PM-003"]["status"] == "pass"
+
+    invalid = _receipt(
+        observed_at_utc="2026-07-27T00:30:00Z",
+        refresh_cache=False,
+    )
+    _publish_receipt(receipt_store, invalid)
+    payload = PMQualityService(
+        storage,
+        receipt_store=receipt_store,
+        artifact_store=QualityArtifactStore(tmp_path / "status.json"),
+        now_fn=lambda: datetime(2026, 7, 27, 1, 0, tzinfo=UTC),
+    ).build(accounts=["lx"])
+    checks = {item["check_id"]: item for item in payload["runtime"]["checks"]}
+    datasets = {item["dataset_id"]: item for item in payload["datasets"]}
+
+    assert checks["RT-PM-002"]["status"] == "pass"
+    assert checks["RT-PM-003"]["reason_code"] == "PM_OPEND_EVIDENCE_INCOMPLETE"
+    assert datasets["pm.futu_snapshot"]["status"] == "unavailable"
+
+
+def test_onboarded_nav_gate_rejects_stale_receipt(monkeypatch, tmp_path: Path):
+    _configure(monkeypatch, tmp_path, onboarded=True)
+    store = FutuSyncEvidenceStore(tmp_path / "receipts")
+    _publish_receipt(store, _receipt())
+
+    with pytest.raises(ValueError, match="pm.holdings_quantity"):
+        assert_official_nav_write_allowed(
+            account="lx",
+            valuation_quality={
+                "prices": {"status": "trusted"},
+                "fx": {"status": "trusted"},
+            },
+            receipt_store=store,
+            now=datetime(2026, 7, 27, 0, 26, tzinfo=UTC),
+        )
+
+
+def test_duplicate_account_mapping_blocks_every_colliding_account(
+    monkeypatch,
+    tmp_path: Path,
+):
+    path = tmp_path / "config.yaml"
+    shared = {
+        "acc_id": 123456,
+        "trd_env": "REAL",
+        "trd_market": "US",
+        "cash_currency": "CNH",
+    }
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "data": {"dir": str(tmp_path / "data")},
+                "quality": {"accounts": ["lx", "sy"]},
+                "futu": {
+                    "accounts": {
+                        "lx": shared,
+                        "sy": dict(shared),
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(config.CONFIG_FILE_ENV, str(path))
+    config.reload_config()
+    storage = SimpleNamespace(
+        get_nav_history=lambda _account, days: [],
+        audit_nav_history_duplicates=lambda account: {
+            "success": True,
+            "duplicate_group_count": 0,
+        },
+    )
+
+    payload = PMQualityService(
+        storage,
+        receipt_store=FutuSyncEvidenceStore(tmp_path / "receipts"),
+        artifact_store=QualityArtifactStore(tmp_path / "status.json"),
+        now_fn=lambda: datetime(2026, 7, 27, 1, 0, tzinfo=UTC),
+    ).build(accounts=["lx", "sy"])
+    mappings = [
+        item for item in payload["datasets"] if item["dataset_id"] == "pm.account_mapping"
+    ]
+
+    assert {item["scope"]["account"] for item in mappings} == {"lx", "sy"}
+    assert all(item["status"] == "unavailable" for item in mappings)
+    assert all(item["reason_codes"] == ["ACCOUNT_MAPPING_DUPLICATE"] for item in mappings)
+    assert payload["runtime"]["status"] == "unhealthy"

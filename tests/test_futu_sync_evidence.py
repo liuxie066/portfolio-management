@@ -43,6 +43,8 @@ class _Provider:
             account_fingerprint="sha256:redacted",
             trd_env="REAL",
             trd_market="US",
+            account_verified=True,
+            pagination_complete=True,
         )
 
 
@@ -62,6 +64,13 @@ def test_sync_receipt_persists_latest_and_history_across_restart(tmp_path: Path)
     assert latest["sync_run_id"] == "sync-run-001"
     assert latest["source_snapshot_id"] == "snapshot-redacted-001"
     assert latest["source_metadata"]["source_currency"] == "CNH"
+    assert latest["source_metadata"]["source_snapshot_id"] == "snapshot-redacted-001"
+    assert latest["source_metadata"]["refresh_cache"] is True
+    assert latest["source_metadata"]["account_verified"] is True
+    assert latest["source_metadata"]["pagination_complete"] is True
+    assert latest["source_metadata"]["position_snapshot_included"] is False
+    assert latest["source_metadata"]["position_count"] is None
+    assert len(latest["source_metadata"]["payload_sha256"]) == 64
     assert "acc_id" not in str(latest)
     assert (tmp_path / "receipts/lx/history/sync-run-001.json").exists()
 
@@ -88,3 +97,32 @@ def test_cash_success_and_mmf_failure_is_dataset_scoped_partial_write(tmp_path: 
     assert receipt["stages"]["fund_mmf"]["status"] == "failed"
     assert receipt["reconciliation"]["datasets"]["pm.securities_cash"]["status"] == "trusted"
     assert receipt["reconciliation"]["datasets"]["pm.fund_mmf"]["status"] == "unavailable"
+
+
+def test_source_query_failure_replaces_latest_with_redacted_failed_attempt(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    store = FutuSyncEvidenceStore(tmp_path / "receipts")
+    service = FutuBalanceSyncService(
+        _Storage(),
+        evidence_store=store,
+    )
+
+    def fail_query(_account: str):
+        raise RuntimeError("sensitive upstream detail")
+
+    monkeypatch.setattr(service, "_fetch_balances", fail_query)
+    result = service.sync_cash_and_mmf(account="lx", sync_run_id="sync-run-failed")
+
+    assert result["success"] is False
+    assert result["receipt_persisted"] is True
+    latest = store.latest("lx")
+    assert latest["sync_run_id"] == "sync-run-failed"
+    assert latest["success"] is False
+    assert latest["failure"] == {
+        "reason_code": "FUTU_SOURCE_QUERY_FAILED",
+        "phase": "source_query",
+    }
+    assert latest["stages"]["source"]["status"] == "failed"
+    assert "sensitive upstream detail" not in str(latest)

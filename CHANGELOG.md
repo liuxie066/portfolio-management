@@ -6,6 +6,8 @@
 - Kept securities-account cash and fund-account MMF as separate quality datasets, with `pm.cash_like_assets` trusted only when both components have complete successful evidence under the accepted CNH/CNY rules.
 - Added an opt-in independent 15-minute `portfolio-quality-refresh.timer` without coupling the check to holdings, cash/MMF, or NAV writes.
 - Made Futu sync receipts record complete account mapping, source/snapshot/readback/finality evidence and fail closed on partial writes or ambiguous account selection.
+- Made PM runtime checks enforce the accepted morning/evening schedule with a 15-minute grace, reject stale receipts at both the producer and local NAV gate, and publish redacted failed-attempt evidence when OpenD query/validation fails before a business write.
+- Bound trusted OpenD snapshots to verified REAL accounts, forced refresh, complete position pagination, one full positions/cash/MMF generation, and a redacted payload digest.
 - Fixed all Feishu holdings write paths to serialize datetime fields as millisecond timestamps, resolving the production cash/MMF `DatetimeFieldConvFail` while preserving unknown average cost as missing.
 
 ## 0.1.26 - 2026-07-24

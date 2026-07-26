@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+import hashlib
+import json
 import uuid
 from math import isfinite
 from typing import Any, Dict, Optional, Protocol, Sequence
@@ -42,6 +44,8 @@ class FutuBalanceSnapshot:
     trd_env: Optional[str] = None
     trd_market: Optional[str] = None
     refresh_cache: bool = True
+    account_verified: bool = False
+    pagination_complete: bool = False
 
 
 @dataclass(frozen=True)
@@ -79,6 +83,8 @@ class FutuPortfolioSnapshot:
     trd_env: Optional[str] = None
     trd_market: Optional[str] = None
     refresh_cache: bool = True
+    account_verified: bool = False
+    pagination_complete: bool = False
 
 
 class FutuBalanceProvider(Protocol):
@@ -189,6 +195,8 @@ class FutuOpenApiBalanceProvider:
             trd_env=self.trd_env,
             trd_market=self.trd_market,
             refresh_cache=True,
+            account_verified=bool(self.verify_account),
+            pagination_complete=True,
         )
 
     def fetch_portfolio(self) -> FutuPortfolioSnapshot:
@@ -230,6 +238,8 @@ class FutuOpenApiBalanceProvider:
             trd_env=self.trd_env,
             trd_market=self.trd_market,
             refresh_cache=True,
+            account_verified=bool(self.verify_account),
+            pagination_complete=True,
         )
 
     @staticmethod
@@ -443,17 +453,40 @@ class FutuBalanceSyncService:
         mmf_balance: Optional[float] = None,
         sync_run_id: Optional[str] = None,
     ) -> dict[str, Any]:
-        snapshot = (
-            FutuBalanceSnapshot(cash=cash_balance, mmf=mmf_balance)
-            if cash_balance is not None or mmf_balance is not None
-            else self._fetch_balances(account)
-        )
+        resolved_run_id = sync_run_id or f"futu-sync-{uuid.uuid4().hex}"
+        source_requested = cash_balance is None and mmf_balance is None
+        try:
+            snapshot = (
+                FutuBalanceSnapshot(cash=cash_balance, mmf=mmf_balance)
+                if not source_requested
+                else self._fetch_balances(account)
+            )
+        except Exception as exc:
+            failure = self._failure(account, broker, dry_run, str(exc))
+            if source_requested and not dry_run and self.provider is None:
+                return self._persist_failed_attempt(
+                    failure,
+                    account=account,
+                    sync_run_id=resolved_run_id,
+                    reason_code="FUTU_SOURCE_QUERY_FAILED",
+                    phase="source_query",
+                )
+            return failure
         try:
             self._validate_authoritative_balances(snapshot)
         except Exception as exc:
-            return self._failure(account, broker, dry_run, str(exc))
+            failure = self._failure(account, broker, dry_run, str(exc))
+            if snapshot.source == "futu-openapi" and not dry_run:
+                return self._persist_failed_attempt(
+                    failure,
+                    account=account,
+                    sync_run_id=resolved_run_id,
+                    reason_code="FUTU_SOURCE_VALIDATION_FAILED",
+                    phase="source_validation",
+                    snapshot=snapshot,
+                )
+            return failure
 
-        resolved_run_id = sync_run_id or f"futu-sync-{uuid.uuid4().hex}"
         with process_lock(account_lock_key(account)):
             result = self._sync_cash_snapshot(
                 snapshot,
@@ -486,12 +519,30 @@ class FutuBalanceSyncService:
         if allow_empty_stock_snapshot and not confirm:
             return self._failure(account, broker, dry_run, "allow-empty-stock-snapshot requires confirm=True")
 
+        resolved_run_id = sync_run_id or f"futu-sync-{uuid.uuid4().hex}"
+        snapshot = None
         try:
             snapshot = self._fetch_portfolio(account)
             self._validate_authoritative_balances(snapshot)
         except Exception as exc:
-            return self._failure(account, broker, dry_run, str(exc))
-        resolved_run_id = sync_run_id or f"futu-sync-{uuid.uuid4().hex}"
+            failure = self._failure(account, broker, dry_run, str(exc))
+            if not dry_run and (
+                self.provider is None
+                or getattr(snapshot, "source", None) == "futu-openapi"
+            ):
+                return self._persist_failed_attempt(
+                    failure,
+                    account=account,
+                    sync_run_id=resolved_run_id,
+                    reason_code=(
+                        "FUTU_SOURCE_QUERY_FAILED"
+                        if snapshot is None
+                        else "FUTU_SOURCE_VALIDATION_FAILED"
+                    ),
+                    phase="source_query" if snapshot is None else "source_validation",
+                    snapshot=snapshot,
+                )
+            return failure
 
         with process_lock(account_lock_key(account)):
             try:
@@ -502,7 +553,31 @@ class FutuBalanceSyncService:
                     allow_empty_stock_snapshot=allow_empty_stock_snapshot,
                 )
             except Exception as exc:
-                return self._failure(account, broker, dry_run, str(exc))
+                failure = self._failure(account, broker, dry_run, str(exc))
+                if snapshot.source == "futu-openapi" and not dry_run:
+                    return self._persist_failed_attempt(
+                        failure,
+                        account=account,
+                        sync_run_id=resolved_run_id,
+                        reason_code="FUTU_POSITION_DIFF_INVALID",
+                        phase="position_diff",
+                        snapshot=snapshot,
+                        stages={
+                            "positions": {
+                                "status": "failed",
+                                "partial_write_possible": False,
+                            },
+                            "securities_cash": {
+                                "status": "not_run",
+                                "partial_write_possible": False,
+                            },
+                            "fund_mmf": {
+                                "status": "not_run",
+                                "partial_write_possible": False,
+                            },
+                        },
+                    )
+                return failure
 
             summary = {
                 "created": sum(item.action == "create" for item in items),
@@ -541,6 +616,8 @@ class FutuBalanceSyncService:
                         trd_env=snapshot.trd_env,
                         trd_market=snapshot.trd_market,
                         refresh_cache=snapshot.refresh_cache,
+                        account_verified=snapshot.account_verified,
+                        pagination_complete=snapshot.pagination_complete,
                     ),
                     account=account,
                     broker=broker,
@@ -707,6 +784,74 @@ class FutuBalanceSyncService:
         result["receipt_refs"] = refs
         return result
 
+    def _persist_failed_attempt(
+        self,
+        result: dict[str, Any],
+        *,
+        account: str,
+        sync_run_id: str,
+        reason_code: str,
+        phase: str,
+        snapshot: Any | None = None,
+        stages: dict[str, dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        attempted_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        if snapshot is not None:
+            try:
+                source_metadata = self._public_source_metadata(snapshot)
+            except Exception:
+                source_metadata = {
+                    "provider": "futu-openapi",
+                    "observed_at_utc": attempted_at,
+                    "evidence_complete": False,
+                }
+        else:
+            source_metadata = {
+                "provider": "futu-openapi",
+                "observed_at_utc": attempted_at,
+                "evidence_complete": False,
+            }
+        receipt = {
+            "schema_version": "pm.futu_sync_receipt.v1",
+            "sync_run_id": sync_run_id,
+            "account": account,
+            "source_snapshot_id": getattr(snapshot, "source_snapshot_id", None),
+            "source_metadata": source_metadata,
+            "stages": stages or {
+                "source": {
+                    "status": "failed",
+                    "partial_write_possible": False,
+                },
+            },
+            "success": False,
+            "partial_write_possible": False,
+            "reconciliation": None,
+            "failure": {
+                "reason_code": reason_code,
+                "phase": phase,
+            },
+        }
+        result.update(
+            {
+                "sync_run_id": sync_run_id,
+                "source_snapshot_id": receipt["source_snapshot_id"],
+                "source_metadata": source_metadata,
+                "stages": receipt["stages"],
+                "partial_write_possible": False,
+                "failure_reason_code": reason_code,
+            }
+        )
+        try:
+            refs = self.evidence_store.save(account, sync_run_id, receipt)
+        except Exception:
+            result["quality_status"] = "untrusted"
+            result["receipt_persisted"] = False
+            result["receipt_reason_code"] = "SYNC_RECEIPT_PERSIST_FAILED"
+            return result
+        result["receipt_persisted"] = True
+        result["receipt_refs"] = refs
+        return result
+
     def _attach_reconciliation(
         self,
         snapshot: Any,
@@ -749,9 +894,30 @@ class FutuBalanceSyncService:
             raise RuntimeError("Futu trading environment must be REAL")
         if not snapshot.account_fingerprint:
             raise RuntimeError("Futu account fingerprint is missing")
+        if not snapshot.source_snapshot_id:
+            raise RuntimeError("Futu source snapshot identity is missing")
+        if not snapshot.observed_at_utc:
+            raise RuntimeError("Futu snapshot observation time is missing")
+        try:
+            observed_at = datetime.fromisoformat(
+                str(snapshot.observed_at_utc).replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            raise RuntimeError("Futu snapshot observation time is invalid") from exc
+        if observed_at.tzinfo is None:
+            raise RuntimeError("Futu snapshot observation time is invalid")
+        if not snapshot.trd_market:
+            raise RuntimeError("Futu trading market is missing")
+        if snapshot.refresh_cache is not True:
+            raise RuntimeError("Futu snapshot must use refresh_cache=True")
+        if snapshot.account_verified is not True:
+            raise RuntimeError("Futu account authority was not verified")
+        if snapshot.pagination_complete is not True:
+            raise RuntimeError("Futu snapshot pagination is incomplete")
 
     @staticmethod
     def _public_source_metadata(snapshot: Any) -> dict[str, Any]:
+        position_snapshot_included = hasattr(snapshot, "positions")
         return {
             "provider": snapshot.source,
             "source_snapshot_id": snapshot.source_snapshot_id,
@@ -770,7 +936,55 @@ class FutuBalanceSyncService:
                 "source_field": snapshot.mmf_source_field,
             },
             "refresh_cache": snapshot.refresh_cache,
+            "account_verified": snapshot.account_verified,
+            "pagination_complete": snapshot.pagination_complete,
+            "position_snapshot_included": position_snapshot_included,
+            "position_count": (
+                len(snapshot.positions) if position_snapshot_included else None
+            ),
+            "payload_sha256": FutuBalanceSyncService._snapshot_payload_sha256(snapshot),
         }
+
+    @staticmethod
+    def _snapshot_payload_sha256(snapshot: Any) -> str:
+        positions = [
+            {
+                "asset_id": str(item.asset_id),
+                "security_type": str(item.security_type),
+                "quantity": str(item.quantity),
+                "average_cost": None if item.average_cost is None else str(item.average_cost),
+                "currency": str(item.currency),
+                "market": str(item.market),
+                "position_side": str(item.position_side),
+            }
+            for item in getattr(snapshot, "positions", ())
+        ]
+        positions.sort(
+            key=lambda item: (
+                item["market"],
+                item["asset_id"],
+                item["security_type"],
+                item["position_side"],
+            )
+        )
+        payload = {
+            "account_fingerprint": snapshot.account_fingerprint,
+            "trd_env": snapshot.trd_env,
+            "trd_market": snapshot.trd_market,
+            "source_currency": snapshot.source_currency,
+            "normalized_currency": snapshot.currency,
+            "cash": None if snapshot.cash is None else str(snapshot.cash),
+            "fund_mmf": None if snapshot.mmf is None else str(snapshot.mmf),
+            "position_snapshot_included": hasattr(snapshot, "positions"),
+            "positions": positions,
+        }
+        canonical = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def _build_position_diff(
         self,
