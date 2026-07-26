@@ -1,0 +1,52 @@
+name: OM API Contract Validate
+
+on:
+  push:
+    tags:
+      - "pm-api-v*"
+  workflow_dispatch:
+    inputs:
+      contract_ref:
+        description: Existing immutable PM API contract tag to validate
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: om-api-contract-validate-${{ github.event.inputs.contract_ref || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve contract ref
+        id: contract
+        env:
+          REQUESTED_REF: ${{ github.event.inputs.contract_ref }}
+        run: |
+          ref="${REQUESTED_REF:-$GITHUB_REF_NAME}"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout contract release
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ steps.contract.outputs.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Validate immutable contract
+        env:
+          CONTRACT_REF: ${{ steps.contract.outputs.ref }}
+        run: |
+          python -m scripts.export_om_openapi --check
+          python scripts/om_api_contract_release.py validate --tag "$CONTRACT_REF"
