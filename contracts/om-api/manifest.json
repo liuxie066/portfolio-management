@@ -1,0 +1,10 @@
+{
+  "api_version": "portfolio.api.v1",
+  "contract_release": "pm-api-v1.0.0",
+  "canonical_path": "contracts/om-api/v1.openapi.json",
+  "sha256": "f281032bad8b548c52f4d07294338f51eec15d05ce74a1a4e973b9c881d26988",
+  "compatibility": {
+    "breaking_change": "new_major_path",
+    "legacy_paths_minimum_release_cycles": 2
+  }
+}

@@ -1,0 +1,126 @@
+name: OM API Contract Sync
+
+on:
+  push:
+    tags:
+      - "pm-api-v*"
+  workflow_dispatch:
+    inputs:
+      contract_ref:
+        description: Existing immutable PM API contract tag
+        required: true
+        type: string
+  schedule:
+    - cron: "30 1 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: om-api-contract-sync-${{ github.event.inputs.contract_ref || github.ref_name || 'weekly' }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Resolve immutable contract tag
+        id: ref
+        env:
+          REQUESTED_REF: ${{ github.event.inputs.contract_ref }}
+        run: |
+          ref="${REQUESTED_REF:-}"
+          if [ -z "$ref" ]; then
+            if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+              ref="$GITHUB_REF_NAME"
+            else
+              ref="$(python -c 'import json; print(json.load(open("contracts/om-api/manifest.json"))["contract_release"])')"
+            fi
+          fi
+          if ! git rev-parse --verify --quiet "refs/tags/$ref" >/dev/null; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "PM API contract tag $ref is not bootstrapped; reconciliation skipped." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+          echo "contract_ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-list -n 1 "$ref")" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v6
+        if: steps.ref.outputs.ready == 'true'
+        with:
+          python-version: "3.12"
+
+      - name: Checkout contract release
+        if: steps.ref.outputs.ready == 'true'
+        run: git checkout --detach "${{ steps.ref.outputs.contract_ref }}"
+
+      - name: Install and validate contract
+        if: steps.ref.outputs.ready == 'true'
+        env:
+          CONTRACT_REF: ${{ steps.ref.outputs.contract_ref }}
+        run: |
+          python -m pip install -r requirements.txt
+          python -m scripts.export_om_openapi --check
+          python scripts/om_api_contract_release.py validate --tag "$CONTRACT_REF"
+
+      - name: Create scoped GitHub App token
+        if: steps.ref.outputs.ready == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.INVESTMENT_CONTRACT_APP_ID }}
+          private-key: ${{ secrets.INVESTMENT_CONTRACT_APP_PRIVATE_KEY }}
+          owner: liuxie066
+          repositories: options-monitor
+
+      - name: Checkout OM
+        if: steps.ref.outputs.ready == 'true'
+        uses: actions/checkout@v5
+        with:
+          repository: liuxie066/options-monitor
+          token: ${{ steps.app-token.outputs.token }}
+          path: consumer
+
+      - name: Refresh OM vendor copy
+        if: steps.ref.outputs.ready == 'true'
+        env:
+          CONTRACT_REF: ${{ steps.ref.outputs.contract_ref }}
+          CONTRACT_COMMIT: ${{ steps.ref.outputs.commit }}
+        run: |
+          python scripts/om_api_contract_release.py vendor \
+            --tag "$CONTRACT_REF" \
+            --consumer-root consumer \
+            --upstream-commit "$CONTRACT_COMMIT"
+
+      - name: Create or update draft pull request
+        if: steps.ref.outputs.ready == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          CONTRACT_REF: ${{ steps.ref.outputs.contract_ref }}
+        run: |
+          branch="automation/pm-api-contract-$CONTRACT_REF"
+          git -C consumer config user.name "investment-contract-bot[bot]"
+          git -C consumer config user.email "investment-contract-bot[bot]@users.noreply.github.com"
+          git -C consumer checkout -B "$branch"
+          git -C consumer add contracts/portfolio-management
+          if git -C consumer diff --cached --quiet; then
+            echo "OM already pins $CONTRACT_REF." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git -C consumer commit -m "chore: vendor PM API contract $CONTRACT_REF"
+          git -C consumer push --force-with-lease origin "$branch"
+          existing="$(gh pr list --repo liuxie066/options-monitor --head "$branch" --state open --json number --jq '.[0].number // empty')"
+          if [ -z "$existing" ]; then
+            gh pr create \
+              --repo liuxie066/options-monitor \
+              --head "$branch" \
+              --base main \
+              --draft \
+              --title "chore: vendor PM API contract $CONTRACT_REF" \
+              --body "Automated PM OpenAPI vendor refresh. Verify OM consumer-contract and adapter tests before merging. This PR does not release or deploy PM or OM."
+          fi

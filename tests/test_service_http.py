@@ -63,14 +63,30 @@ class FakePortfolioService:
 
     def get_capital_facts(self, **kwargs):
         self.calls.append(("capital_facts", kwargs))
-        return {"success": True, "status": "ok", **kwargs}
+        return {
+            "schema_version": "portfolio.capital_facts.v1",
+            "success": True,
+            "status": "ok",
+            "account": kwargs["account"],
+            "period": {
+                "kind": kwargs["period"],
+                "requested_as_of_month": kwargs["as_of_month"],
+            },
+            "amounts": {"currency": "CNY"},
+        }
 
     def get_valuation_evidence(self, **kwargs):
         self.calls.append(("valuation_evidence", kwargs))
         return {
+            "schema_version": "portfolio.valuation_evidence.v1",
             "success": True,
             "status": "complete",
             "scope": kwargs,
+            "snapshot": {"observed_at": "2026-07-26T00:00:00Z"},
+            "holdings": [],
+            "quotes": [],
+            "account_status": [],
+            "warnings": [],
         }
 
     def record_nav(self, **kwargs):
@@ -279,3 +295,81 @@ def test_http_futu_holdings_sync_routes_delegate_to_service():
             "allow_empty_stock_snapshot": True,
         }),
     ]
+
+
+def test_om_facing_v1_routes_match_legacy_and_expose_version_headers():
+    service = FakePortfolioService()
+    client = _client(create_app(service=service))
+    cases = [
+        ("get", "/accounts", {"include_default": False}, None),
+        ("get", "/accounts/overview", {"accounts": "alice", "price_timeout": 7}, None),
+        ("get", "/holdings", {"account": "alice"}, None),
+        ("get", "/cash", {"account": "alice"}, None),
+        ("get", "/nav", {"account": "alice"}, None),
+        (
+            "get",
+            "/analysis/capital-facts",
+            {"account": "alice", "period": "mtd", "as_of_month": "2026-07"},
+            None,
+        ),
+        ("get", "/distribution", {"account": "alice"}, None),
+        ("get", "/report/full", {"account": "alice"}, None),
+        (
+            "post",
+            "/analysis/valuation-evidence",
+            None,
+            {"accounts": ["alice"], "supplemental_codes": [], "price_timeout": 5},
+        ),
+    ]
+
+    for method, legacy_path, params, payload in cases:
+        legacy = client.request(method, legacy_path, params=params, json=payload)
+        versioned = client.request(method, f"/api/v1{legacy_path}", params=params, json=payload)
+        assert versioned.status_code == legacy.status_code == 200
+        assert versioned.json() == legacy.json()
+        assert versioned.headers["x-pm-api-version"] == "portfolio.api.v1"
+        assert legacy.headers["deprecation"] == "true"
+        assert legacy.headers["link"] == f'</api/v1{legacy_path}>; rel="successor-version"'
+
+
+def test_v1_errors_are_stable_and_legacy_payload_is_unchanged():
+    service = FakePortfolioService()
+    service.get_holdings = lambda **_: {"success": False, "error": "broker unavailable"}
+    client = _client(create_app(service=service))
+
+    legacy = client.get("/holdings", params={"account": "alice"})
+    assert legacy.status_code == 200
+    assert legacy.json() == {"success": False, "error": "broker unavailable"}
+
+    versioned = client.get("/api/v1/holdings", params={"account": "alice"})
+    assert versioned.status_code == 503
+    assert versioned.json()["error_code"] == "PM_SERVICE_UNAVAILABLE"
+    assert versioned.json()["message"] == "broker unavailable"
+    assert versioned.json()["request_id"].startswith("req-")
+    assert versioned.headers["x-pm-api-version"] == "portfolio.api.v1"
+
+    invalid = client.get("/api/v1/holdings")
+    assert invalid.status_code == 422
+    assert invalid.json()["error_code"] == "INPUT_VALIDATION_ERROR"
+
+
+def test_openapi_contract_contains_only_real_om_v1_capabilities():
+    schema = create_app(service=FakePortfolioService()).openapi()
+    required = {
+        "/api/v1/accounts",
+        "/api/v1/accounts/overview",
+        "/api/v1/holdings",
+        "/api/v1/cash",
+        "/api/v1/nav",
+        "/api/v1/analysis/capital-facts",
+        "/api/v1/analysis/valuation-evidence",
+        "/api/v1/distribution",
+        "/api/v1/report/full",
+        "/api/v1/futu/holdings/sync",
+    }
+    assert required <= set(schema["paths"])
+    assert "/api/v1/analysis/cash-facts" not in schema["paths"]
+    for path in required:
+        operation = next(iter(schema["paths"][path].values()))
+        header = operation["responses"]["200"]["headers"]["X-PM-API-Version"]
+        assert header["schema"]["const"] == "portfolio.api.v1"

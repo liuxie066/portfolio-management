@@ -13,6 +13,8 @@ historical Skill/Python API remains available only as a compatibility adapter.
 - Dependency graph: `docs/dependency-graph.md`
 - Feishu schema: `docs/schema.md`
 - Schema checks: `docs/migrations.md`
+- PM runtime and data quality: `docs/quality-monitoring/README.md`
+- OM-facing PM API contract: `docs/om-api-contract.md`
 
 ## Product Entrypoints
 
