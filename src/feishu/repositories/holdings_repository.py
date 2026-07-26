@@ -1,6 +1,6 @@
 """Repository for the Feishu holdings table."""
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 from ...models import (
     Holding, AssetType, AssetClass, Industry, DATETIME_FORMAT,
@@ -317,7 +317,7 @@ class HoldingsRepository:
             )
             update_fields = {
                 'quantity': new_quantity,
-                'updated_at': now.strftime(DATETIME_FORMAT)
+                'updated_at': now,
             }
 
             new_name = holding.asset_name or existing.asset_name
@@ -325,8 +325,9 @@ class HoldingsRepository:
                 update_fields['asset_name'] = new_name
                 print(f"[持仓名称更新] {existing.asset_name} -> {new_name}")
 
+            feishu_update_fields = self._to_feishu_fields(update_fields, 'holdings')
             try:
-                self.client.update_record('holdings', existing.record_id, update_fields)
+                self.client.update_record('holdings', existing.record_id, feishu_update_fields)
             except Exception:
                 self._invalidate_holding_cache(holding.asset_id, holding.account, holding.broker, flush_persistent=True)
                 raise
@@ -411,8 +412,6 @@ class HoldingsRepository:
                 preloaded_accounts.append(account)
 
         now = bj_now_naive()
-        now_str = now.strftime(DATETIME_FORMAT)
-
         update_payloads: List[Dict[str, any]] = []
         update_targets: List[Holding] = []
         create_payloads: List[Dict[str, any]] = []
@@ -441,7 +440,7 @@ class HoldingsRepository:
 
                 update_fields = {
                     'quantity': new_quantity,
-                    'updated_at': now_str,
+                    'updated_at': now,
                 }
                 if mode == 'replace':
                     # Broker snapshots replace the current quantity and average
@@ -451,7 +450,14 @@ class HoldingsRepository:
                 if new_name and new_name != (existing.asset_name or ''):
                     update_fields['asset_name'] = new_name
 
-                update_payloads.append({'record_id': existing.record_id, 'fields': update_fields})
+                update_payloads.append({
+                    'record_id': existing.record_id,
+                    'fields': self._to_feishu_fields(
+                        update_fields,
+                        'holdings',
+                        preserve_none=True,
+                    ),
+                })
 
                 existing.quantity = new_quantity
                 existing.updated_at = now
@@ -515,19 +521,20 @@ class HoldingsRepository:
             )
         if abs(new_quantity) <= 1e-8:
             new_quantity = 0.0
-        now_str = bj_now_naive().strftime('%Y-%m-%d %H:%M:%S')
+        now = bj_now_naive()
         update_fields = {
             'quantity': new_quantity,
-            'updated_at': now_str
+            'updated_at': now,
         }
+        feishu_update_fields = self._to_feishu_fields(update_fields, 'holdings')
         try:
-            self.client.update_record('holdings', holding.record_id, update_fields)
+            self.client.update_record('holdings', holding.record_id, feishu_update_fields)
         except Exception:
             self._invalidate_holding_cache(asset_id, account, broker, flush_persistent=True)
             raise
 
         holding.quantity = new_quantity
-        holding.updated_at = datetime.strptime(now_str, DATETIME_FORMAT)
+        holding.updated_at = now
         self._put_holding_cache(holding)
         return holding
 
@@ -548,8 +555,6 @@ class HoldingsRepository:
 
     def _holding_to_dict(self, holding: Holding) -> Dict:
         """Holding 转字典"""
-        from ...time_utils import bj_now_naive
-
         result = {
             'asset_id': holding.asset_id,
             'asset_name': holding.asset_name,
@@ -565,9 +570,9 @@ class HoldingsRepository:
         }
 
         if holding.created_at:
-            result['created_at'] = holding.created_at.strftime(DATETIME_FORMAT)
+            result['created_at'] = holding.created_at
         if holding.updated_at:
-            result['updated_at'] = holding.updated_at.strftime(DATETIME_FORMAT)
+            result['updated_at'] = holding.updated_at
 
         return result
 

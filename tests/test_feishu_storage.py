@@ -384,6 +384,9 @@ class TestFeishuStorageHoldingOperations:
 
         assert result.record_id == 'existing_rec'
         self.mock_client.update_record.assert_called_once()
+        update_fields = self.mock_client.update_record.call_args.args[2]
+        assert update_fields['asset_name'] == '平安银行股份有限公司'
+        assert isinstance(update_fields['updated_at'], int)
 
     def test_update_holding_quantity(self):
         """测试更新持仓数量"""
@@ -397,6 +400,7 @@ class TestFeishuStorageHoldingOperations:
         self.mock_client.update_record.assert_called_once()
         call_args = self.mock_client.update_record.call_args
         assert call_args[0][2]['quantity'] == 1500  # 1000 + 500
+        assert isinstance(call_args[0][2]['updated_at'], int)
 
     def test_delete_holding_if_zero(self):
         """测试持仓为0时删除"""

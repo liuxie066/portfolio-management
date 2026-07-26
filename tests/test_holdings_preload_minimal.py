@@ -164,6 +164,9 @@ def test_upsert_create_after_preload_missing_key_without_refetch():
     assert created.record_id == "rec_new_1"
     assert len(client.list_records_calls) == 1  # preload only
     assert len(client.create_record_calls) == 1
+    created_fields = client.create_record_calls[0]["fields"]
+    assert isinstance(created_fields["created_at"], int)
+    assert isinstance(created_fields["updated_at"], int)
 
 
 def test_replace_holding_updates_absolute_quantity_and_descriptor_fields():
@@ -203,3 +206,4 @@ def test_replace_holding_updates_absolute_quantity_and_descriptor_fields():
     assert fields["asset_name"] == "人民币现金"
     assert fields["asset_type"] == "cash"
     assert fields["currency"] == "CNY"
+    assert isinstance(fields["updated_at"], int)
