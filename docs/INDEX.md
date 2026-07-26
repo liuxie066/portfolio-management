@@ -12,6 +12,8 @@ historical Skill/Python API remains available only as a compatibility adapter.
 - Architecture map: `docs/architecture.md`
 - Dependency graph: `docs/dependency-graph.md`
 - Feishu schema: `docs/schema.md`
+- Cash-flow holding effects design: `docs/cash-flow-holding-effects.md`
+- Cash-flow holding effects operations: `docs/cash-flow-effects-runbook.md`
 - Schema checks: `docs/migrations.md`
 
 ## Product Entrypoints
@@ -34,8 +36,9 @@ historical Skill/Python API remains available only as a compatibility adapter.
 Use `./pm daily-job`.
 
 It resolves the NAV date, audits duplicate `nav_history` rows, checks pending
-manual `cash_flow` rows, optionally syncs Futu cash/MMF holdings, values each
-account, writes NAV, and records holdings snapshots.
+manual `cash_flow` generated fields and confirmed holding effects, optionally
+observes Futu CASH and syncs MMF, values each account, writes NAV, and records
+holdings snapshots.
 
 ### Daily Report
 
@@ -82,6 +85,10 @@ adapter that delegates inward.
   writing.
 - `cash_flow` rows may be manually entered, but generated fields must be
   reconciled before daily NAV writes.
+- CASH holding changes require a durable effect preview hash and separate,
+  explicit confirmation; the 15-minute scanner never confirms or writes.
+- Futu sync reads only `cn_cash/us_cash/hk_cash` as CASH observations. It does
+  not use or write an aggregate cash balance.
 
 ## Diagnostics
 

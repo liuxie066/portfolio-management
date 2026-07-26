@@ -43,7 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["expectations", "check-live"],
+        choices=["expectations", "check-live", "cash-flow-effects"],
         default="expectations",
         help="schema action (default: expectations)",
     )
@@ -52,14 +52,118 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Exit non-zero when required live fields are missing or have incompatible types.",
     )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="create missing cash-flow effect fields; default is dry-run",
+    )
+    parser.add_argument(
+        "--confirm",
+        action="store_true",
+        help="required with --apply",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    result = run_schema_check(strict=args.strict) if args.command == "check-live" else schema_expectations()
+    if args.command == "check-live":
+        result = run_schema_check(strict=args.strict)
+    elif args.command == "cash-flow-effects":
+        if args.apply and not args.confirm:
+            raise SystemExit("cash-flow-effects --apply requires --confirm")
+        result = migrate_cash_flow_effect_fields(
+            apply=bool(args.apply),
+            confirm=bool(args.confirm),
+        )
+    else:
+        result = schema_expectations()
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result.get("ok", result.get("success", True)) else 1
+
+
+CASH_FLOW_EFFECT_FIELD_DEFINITIONS = {
+    "broker": {"field_name": "broker", "type": 1},
+    "exchange_rate_date": {
+        "field_name": "exchange_rate_date",
+        "type": 5,
+        "property": {"date_formatter": "yyyy-MM-dd", "auto_fill": False},
+    },
+    "exchange_rate_source": {"field_name": "exchange_rate_source", "type": 1},
+    "exchange_rate_evidence_type": {
+        "field_name": "exchange_rate_evidence_type",
+        "type": 1,
+    },
+}
+
+
+def migrate_cash_flow_effect_fields(
+    *,
+    apply: bool = False,
+    confirm: bool = False,
+    client: Any = None,
+) -> dict[str, Any]:
+    """Create only missing fields; incompatible existing fields always block."""
+    if apply and not confirm:
+        raise ValueError("cash-flow-effects apply requires confirm=True")
+    client = client or FeishuClient()
+    app_token, table_id = client._get_table_config("cash_flow")
+    live = _list_live_fields(client, app_token, table_id)
+    by_name = {
+        str(item.get("field_name") or ""): item
+        for item in live
+        if item.get("field_name")
+    }
+    missing = [
+        name for name in CASH_FLOW_EFFECT_FIELD_DEFINITIONS if name not in by_name
+    ]
+    incompatible = []
+    for name, definition in CASH_FLOW_EFFECT_FIELD_DEFINITIONS.items():
+        if name not in by_name:
+            continue
+        try:
+            live_type = int(by_name[name].get("type"))
+        except (TypeError, ValueError):
+            live_type = None
+        if live_type != int(definition["type"]):
+            incompatible.append({
+                "field_name": name,
+                "expected_type": definition["type"],
+                "live_type": live_type,
+            })
+    if incompatible:
+        return {
+            "success": False,
+            "dry_run": not apply,
+            "missing": missing,
+            "incompatible": incompatible,
+            "created": [],
+            "error": "incompatible live fields must be repaired explicitly",
+        }
+    created = []
+    if apply:
+        endpoint = f"/bitable/v1/apps/{app_token}/tables/{table_id}/fields"
+        for name in missing:
+            response = client._request(
+                "POST",
+                endpoint,
+                json=CASH_FLOW_EFFECT_FIELD_DEFINITIONS[name],
+            )
+            created.append({
+                "field_name": name,
+                "field_id": response.get("field_id"),
+            })
+    return {
+        "success": True,
+        "dry_run": not apply,
+        "missing": missing,
+        "incompatible": [],
+        "created": created,
+        "manual_view_action_required": (
+            "add flow_date/account/broker/amount/currency/remark to the operator view "
+            "and hide generated fields"
+        ),
+    }
 
 
 def schema_expectations() -> dict:

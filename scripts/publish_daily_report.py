@@ -78,25 +78,25 @@ def parse_args() -> argparse.Namespace:
         "--sync-futu-cash-mmf",
         dest="sync_futu_cash_mmf",
         action="store_true",
-        help="Sync Futu cash/MMF balances into holdings before building the report snapshot.",
+        help="Observe Futu CASH and sync MMF before building the report snapshot.",
     )
     parser.add_argument(
         "--no-sync-futu-cash-mmf",
         dest="sync_futu_cash_mmf",
         action="store_false",
-        help="Disable Futu cash/MMF sync even if enabled in config/env.",
+        help="Disable Futu CASH observation/MMF sync even if enabled in config/env.",
     )
     parser.add_argument(
         "--sync-futu-dry-run",
         dest="sync_futu_dry_run",
         action="store_true",
-        help="Preview Futu cash/MMF sync without writing holdings (default).",
+        help="Preview Futu CASH observation/MMF sync (default).",
     )
     parser.add_argument(
         "--sync-futu-write",
         dest="sync_futu_dry_run",
         action="store_false",
-        help="Actually write Futu cash/MMF holdings when --sync-futu-cash-mmf is set.",
+        help="Write MMF changes; Futu CASH remains observe-only.",
     )
     parser.set_defaults(
         write_nav=False,

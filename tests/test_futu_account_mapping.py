@@ -17,24 +17,26 @@ def _configure(monkeypatch, tmp_path, payload: dict) -> None:
     config.reload_config()
 
 
-def test_account_mapping_is_explicit_unique_real_and_cnh(monkeypatch, tmp_path) -> None:
+def test_account_mapping_is_explicit_unique_and_real(monkeypatch, tmp_path) -> None:
     _configure(
         monkeypatch,
         tmp_path,
         {
             "futu": {
-                "accounts": {
+                "profiles": {
                     "lx": {
+                        "host": "127.0.0.1",
+                        "port": 11111,
                         "acc_id": 101,
                         "trd_env": "REAL",
                         "trd_market": "US",
-                        "cash_currency": "CNH",
                     },
                     "sy": {
+                        "host": "127.0.0.1",
+                        "port": 11111,
                         "acc_id": 202,
                         "trd_env": "REAL",
                         "trd_market": "US",
-                        "cash_currency": "CNH",
                     },
                 }
             }
@@ -50,28 +52,29 @@ def test_account_mapping_is_explicit_unique_real_and_cnh(monkeypatch, tmp_path) 
     "override",
     [
         {},
-        {"acc_id": 101, "trd_env": "SIMULATE", "trd_market": "US", "cash_currency": "CNH"},
-        {"acc_id": 101, "trd_env": "REAL", "trd_market": "", "cash_currency": "CNH"},
-        {"acc_id": 101, "trd_env": "REAL", "trd_market": "US", "cash_currency": "CNY"},
+        {"host": "127.0.0.1", "port": 11111, "acc_id": 101, "trd_env": "SIMULATE", "trd_market": "US"},
+        {"host": "127.0.0.1", "port": 11111, "acc_id": 101, "trd_env": "REAL", "trd_market": ""},
+        {"host": "127.0.0.1", "port": 0, "acc_id": 101, "trd_env": "REAL", "trd_market": "US"},
     ],
 )
 def test_account_mapping_fails_closed(monkeypatch, tmp_path, override: dict) -> None:
-    _configure(monkeypatch, tmp_path, {"futu": {"accounts": {"lx": override}}})
+    _configure(monkeypatch, tmp_path, {"futu": {"profiles": {"lx": override}}})
     with pytest.raises(ValueError):
         config.get_futu_account_settings("lx")
 
 
 def test_duplicate_acc_id_is_rejected(monkeypatch, tmp_path) -> None:
     account = {
+        "host": "127.0.0.1",
+        "port": 11111,
         "acc_id": 101,
         "trd_env": "REAL",
         "trd_market": "US",
-        "cash_currency": "CNH",
     }
     _configure(
         monkeypatch,
         tmp_path,
-        {"futu": {"accounts": {"lx": account, "sy": dict(account)}}},
+        {"futu": {"profiles": {"lx": account, "sy": dict(account)}}},
     )
     result = config.validate_futu_account_mappings(["lx", "sy"])
     assert result["success"] is False
@@ -85,16 +88,17 @@ def test_account_index_or_global_acc_id_is_never_a_fallback(monkeypatch, tmp_pat
         {
             "futu": {
                 "acc_id": 999,
-                "accounts": {
+                "profiles": {
                     "lx": {
+                        "host": "127.0.0.1",
+                        "port": 11111,
                         "acc_index": 0,
                         "trd_env": "REAL",
                         "trd_market": "US",
-                        "cash_currency": "CNH",
                     }
                 },
             }
         },
     )
-    with pytest.raises(ValueError, match="acc_id must be explicit"):
+    with pytest.raises(ValueError, match="missing acc_id"):
         config.get_futu_account_settings("lx")

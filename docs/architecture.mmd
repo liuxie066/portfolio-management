@@ -30,6 +30,8 @@ flowchart TB
         FutuSync["futu_balance_sync_service.py"]
         FutuReceipt["futu_sync_receipt_service.py"]
         NavReceipt["nav_history_receipt_service.py"]
+        CashFlow["cash_flow_effect_service.py"]
+        CashFlowReceipt["cash_flow_effect_receipt_service.py"]
     end
 
     subgraph Domain["Domain Layer"]
@@ -53,6 +55,7 @@ flowchart TB
         Repos["feishu/repositories/*"]
         FeishuClient["feishu_client.py"]
         LocalCache["local_cache.py / .data"]
+        CashFlowStore["cash_flow_effects.sqlite3<br/>technical workflow state"]
     end
 
     subgraph External["External"]
@@ -87,11 +90,17 @@ flowchart TB
     AppFacade --> FutuReceipt
     AppFacade --> NavReceipt
     AppFacade --> FeishuStorage
+    CLI --> CashFlow
 
     DailyJob --> AccountNav
-    DailyJob -.legacy cash/MMF option.-> FutuSync
+    DailyJob -.Futu CASH observation / MMF.-> FutuSync
     AccountNav --> Read
+    AccountNav --> CashFlow
     AccountNav --> FeishuStorage
+    FutuSync --> CashFlow
+    CashFlow --> FeishuStorage
+    CashFlow --> CashFlowStore
+    CashFlow --> CashFlowReceipt
     ReportPayload --> ReportQuery
     ReportQuery --> Performance
     ReportQuery --> HoldingsProjection
@@ -108,6 +117,7 @@ flowchart TB
     FeishuStorage --> Repos
     FutuReceipt --> FeishuClient
     NavReceipt --> FeishuClient
+    CashFlowReceipt --> FeishuClient
     Repos --> FeishuClient
     Repos --> LocalCache
     FeishuClient --> Feishu

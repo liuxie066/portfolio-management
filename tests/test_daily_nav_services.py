@@ -778,7 +778,7 @@ def test_daily_nav_job_blocks_cash_flow_pending():
     assert result["items"][0]["status"] == "cash_flow_pending"
 
 
-def test_daily_nav_job_applies_cash_flow_reconcile_before_write():
+def test_daily_nav_job_never_applies_cash_flow_reconcile_implicitly():
     calls = []
 
     class FakeStorage:
@@ -813,11 +813,10 @@ def test_daily_nav_job_applies_cash_flow_reconcile_before_write():
         account_runner_factory=FakeRunner,
     ).run(nav_date="2026-05-22", account="alice", dry_run=False, confirm=True)
 
-    assert result["success"] is True
-    assert result["summary"] == {"written": 1}
+    assert result["success"] is False
+    assert result["summary"] == {"cash_flow_pending": 1}
     assert calls == [
-        ("reconcile_cash_flows", "alice", False),
-        ("runner", "alice", False),
+        ("reconcile_cash_flows", "alice", True),
     ]
 
 

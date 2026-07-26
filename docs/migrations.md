@@ -1,7 +1,8 @@
 # Schema Checks
 
-`docs/schema.md` is the schema authority. Feishu table and field changes remain
-manual; this project does not maintain a second local migration-state ledger.
+`docs/schema.md` is the schema authority. Most Feishu table and field changes
+remain manual. The Cash Flow effects migration has one narrowly scoped,
+explicitly confirmed helper for its four new fields.
 
 Inspect documented expectations:
 
@@ -26,3 +27,16 @@ the list-fields response: `1=text`, `2=number`, `3=single select`,
 `4=multi select`, and `5=date`. A documented `datetime` alternative requires
 type `5` with `ui_type=DateTime`; JSON payloads documented as `text/json` use
 type `1`. Unknown type IDs fail required strict checks instead of being inferred.
+
+Cash Flow effects fields can be previewed and then created:
+
+```bash
+python scripts/migrate_schema.py cash-flow-effects
+python scripts/migrate_schema.py cash-flow-effects --apply --confirm
+python scripts/migrate_schema.py check-live --strict
+```
+
+The helper creates only missing `broker`, `exchange_rate_date`,
+`exchange_rate_source`, and `exchange_rate_evidence_type` fields. It never
+changes an incompatible existing field. Operator-view layout remains a manual
+Feishu configuration step.

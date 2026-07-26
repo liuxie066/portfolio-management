@@ -8,6 +8,8 @@ from src.models import AssetType, Holding
 def _holding(asset_id: str, quantity: float, *, avg_cost: float | None = None) -> Holding:
     asset_type = {
         "CNY-CASH": AssetType.CASH,
+        "USD-CASH": AssetType.CASH,
+        "HKD-CASH": AssetType.CASH,
         "CNY-MMF": AssetType.MMF,
     }.get(asset_id, AssetType.US_STOCK)
     return Holding(
@@ -18,13 +20,15 @@ def _holding(asset_id: str, quantity: float, *, avg_cost: float | None = None) -
         broker="富途",
         quantity=quantity,
         avg_cost=avg_cost,
-        currency="CNY" if asset_id.startswith("CNY-") else "USD",
+        currency=asset_id.split("-", 1)[0] if asset_id.endswith("-CASH") else (
+            "CNY" if asset_id.startswith("CNY-") else "USD"
+        ),
     )
 
 
 def _snapshot() -> FutuPortfolioSnapshot:
     return FutuPortfolioSnapshot(
-        cash=100,
+        cash_by_currency={"CNY": 100, "USD": 0, "HKD": 0},
         mmf=200,
         positions=(
             FutuPositionSnapshot(
@@ -47,6 +51,8 @@ class _Storage:
         self.read_count = 0
         self.cash = {
             "CNY-CASH": _holding("CNY-CASH", 100),
+            "USD-CASH": _holding("USD-CASH", 0),
+            "HKD-CASH": _holding("HKD-CASH", 0),
             "CNY-MMF": _holding("CNY-MMF", 200),
         }
 

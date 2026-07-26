@@ -1,6 +1,8 @@
 from datetime import date
 from unittest.mock import Mock
 
+import pytest
+
 from src.app.trade_service import TradeService
 from src.portfolio import PortfolioManager
 
@@ -16,7 +18,7 @@ def test_manual_trade_entrypoints_are_retired():
     assert not hasattr(PortfolioManager, "sell")
 
 
-def test_trade_service_deposit_applies_absolute_cash_target():
+def test_trade_service_deposit_is_stably_disabled():
     storage = Mock()
     storage.get_holding.return_value = None
     storage.add_cash_flow.side_effect = lambda cf: cf
@@ -24,21 +26,19 @@ def test_trade_service_deposit_applies_absolute_cash_target():
     manager = _manager(storage)
     service = TradeService(manager=manager, storage=storage)
 
-    cf = service.deposit(
-        flow_date=date(2025, 3, 14),
-        account="a",
-        amount=1.005,
-        currency="CNY",
-        cny_amount=1.005,
-    )
-
-    assert cf.amount == 1.01
-    target = storage.replace_holding.call_args[0][0]
-    assert target.asset_id == "CNY-CASH"
-    assert target.quantity == 1.01
+    with pytest.raises(RuntimeError, match="cash_flow_entry_disabled"):
+        service.deposit(
+            flow_date=date(2025, 3, 14),
+            account="a",
+            amount=1.005,
+            currency="CNY",
+            cny_amount=1.005,
+        )
+    storage.add_cash_flow.assert_not_called()
+    storage.replace_holding.assert_not_called()
 
 
-def test_trade_service_replay_skips_deposit_cash_side_effect():
+def test_trade_service_disabled_entry_never_reaches_replay_logic():
     storage = Mock()
     storage.get_holding.return_value = None
 
@@ -51,12 +51,12 @@ def test_trade_service_replay_skips_deposit_cash_side_effect():
     manager = _manager(storage)
     service = TradeService(manager=manager, storage=storage)
 
-    cf = service.deposit(
-        flow_date=date(2025, 3, 14),
-        account="a",
-        amount=100,
-        currency="CNY",
-    )
-
-    assert cf.was_replayed is True
+    with pytest.raises(RuntimeError, match="cash_flow_entry_disabled"):
+        service.deposit(
+            flow_date=date(2025, 3, 14),
+            account="a",
+            amount=100,
+            currency="CNY",
+        )
+    storage.add_cash_flow.assert_not_called()
     storage.replace_holding.assert_not_called()

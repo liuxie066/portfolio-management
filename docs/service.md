@@ -115,11 +115,14 @@ Request:
 }
 ```
 
-This independently synchronizes CNY cash/MMF plus Futu LONG STOCK/ETF quantity
-and `average_cost`. It never uses `diluted_cost` or deprecated `cost_price`.
-Real writes require `dry_run=false` and `confirm=true`. An empty eligible stock
-snapshot is blocked while existing Futu stocks are non-zero; the override also
-requires `confirm=true`.
+This independently observes authoritative per-currency CASH, synchronizes MMF,
+and synchronizes Futu LONG STOCK/ETF quantity and `average_cost`. CASH is never
+written here: its `cn_cash/us_cash/hk_cash` observations feed the durable
+cash-flow reconciliation workflow. It never uses aggregate `cash`,
+`diluted_cost`, or deprecated `cost_price`. Real MMF/stock writes require
+`dry_run=false` and `confirm=true`. An empty eligible stock snapshot is blocked
+while existing Futu stocks are non-zero; the override also requires
+`confirm=true`.
 
 For real writes, the application service sends a Feishu receipt through the
 configured “刘看山” app and adds a `receipt` object to the response. Dry-runs
@@ -181,7 +184,10 @@ Behavior:
 4. Block duplicate `nav_history` account/date records.
 5. For one existing row, return `recovery_required` when snapshot recovery is unresolved; return `skipped_existing_nav` only for a supported, explicit finality contract matching the NAV date; otherwise block with `existing_nav_not_final`.
 6. Block pending generated-field reconciliation in manual `cash_flow` rows.
-7. Build one priced snapshot per account and write NAV. The embedded Futu cash/MMF fields remain a legacy compatibility path; full holdings sync is a separate endpoint.
+7. Run a fresh Cash Flow effect scan and block unresolved holding or broker
+   reconciliation effects for every affected account.
+8. Build one priced snapshot per account and write NAV. The embedded Futu path
+   observes CASH and synchronizes MMF; full holdings sync is a separate endpoint.
 
 Top-level response includes:
 
@@ -220,8 +226,12 @@ for NAV recording, report payload, and recent NAV output.
 
 Internal boundaries:
 
-- `FutuBalanceSyncService`: independent Futu cash/MMF and stock/ETF quantity + average-cost sync.
-- `AccountNavRecorderService`: priced snapshot and NAV write; embedded cash/MMF sync is compatibility-only.
+- `FutuBalanceSyncService`: Futu per-currency CASH observation plus MMF and
+  stock/ETF quantity + average-cost sync.
+- `CashFlowEffectService`: discovery, preview hashing, explicit multi-target
+  CASH confirmation, direct-edit detection, compensation, and NAV gate.
+- `AccountNavRecorderService`: priced snapshot and NAV write; its embedded
+  Futu path observes CASH and synchronizes MMF.
 - `DailyReportPayloadService`: report/distribution/recent-NAV payload from the
   existing snapshot and NAV fact.
 - `DailyAccountNavService`: response-shape orchestrator for the two services.

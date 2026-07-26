@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import json
 from datetime import date, datetime
 from typing import Any, Optional
 
@@ -21,9 +22,15 @@ class NavRecordService:
     ``manager`` owns shared NAV helper methods and runtime services.
     """
 
-    def __init__(self, manager: Any, storage: Any):
+    def __init__(
+        self,
+        manager: Any,
+        storage: Any,
+        cash_flow_effect_service: Any = None,
+    ):
         self.manager = manager
         self.storage = storage
+        self._cash_flow_effect_service = cash_flow_effect_service
 
     def _load_navs(self, account: str) -> list:
         preload = getattr(self.storage, "preload_nav_index", None)
@@ -69,6 +76,90 @@ class NavRecordService:
             return
         raise ValueError("NAV 写入拒绝：估值存在阻断性告警: " + " | ".join(blocking_warnings))
 
+    def _configured_effect_service(self) -> Any:
+        if self._cash_flow_effect_service is not None:
+            return self._cash_flow_effect_service
+        from src.app.cash_flow_effect_store import CashFlowEffectStore
+
+        db_path = CashFlowEffectStore.resolve_db_path()
+        cutover = config.get("cash_flow.effects.cutover_date")
+        if cutover in (None, "") and not db_path.exists():
+            return None
+        from src.app.cash_flow_effect_service import CashFlowEffectService
+
+        store = CashFlowEffectStore(db_path)
+        store.assert_cutover(cutover)
+        self._cash_flow_effect_service = CashFlowEffectService(
+            storage=self.storage,
+            store=store,
+        )
+        return self._cash_flow_effect_service
+
+    def _assert_cash_flow_ready_for_write(self, *, account: str, nav_date: date) -> None:
+        result = None
+        reconcile = getattr(self.storage, "reconcile_cash_flows", None)
+        if callable(reconcile):
+            result = reconcile(account=account, dry_run=True)
+            if isinstance(result, dict):
+                if result.get("success") is False or int(result.get("error_count") or 0):
+                    raise ValueError(
+                        "NAV 写入拒绝：cash_flow generated fields 校验失败: "
+                        + str(result.get("error") or result.get("rows") or "unknown error")
+                    )
+                if int(result.get("change_count") or 0):
+                    raise ValueError(
+                        "NAV 写入拒绝：cash_flow generated fields 尚未确认；"
+                        "请另行执行 `pm cash-flow reconcile --apply --confirm`"
+                    )
+
+        effect_service = self._configured_effect_service()
+        result_rows = (
+            result.get("rows")
+            if isinstance(result, dict) and isinstance(result.get("rows"), list)
+            else []
+        )
+        manual_rows = [
+            row
+            for row in result_rows
+            if row.get("status") != "error"
+            and row.get("exchange_rate_evidence_type") == "manual_supplement"
+        ]
+        if manual_rows and effect_service is None:
+            raise ValueError(
+                "NAV 写入拒绝：manual FX evidence 缺少 SQLite 确认记录"
+            )
+        if effect_service is not None:
+            for row in manual_rows:
+                confirmation = effect_service.store.latest_fx_confirmation(
+                    str(row.get("record_id") or "")
+                )
+                expected = {
+                    "source_hash": str(row.get("source_hash") or ""),
+                    "exchange_rate": str(row.get("exchange_rate")),
+                    "exchange_rate_date": str(row.get("exchange_rate_date")),
+                    "exchange_rate_source": str(row.get("exchange_rate_source")),
+                    "exchange_rate_evidence_type": str(
+                        row.get("exchange_rate_evidence_type")
+                    ),
+                    "cny_amount": str(row.get("cny_amount")),
+                }
+                if not confirmation or any(
+                    str(confirmation.get(key)) != value
+                    for key, value in expected.items()
+                ):
+                    raise ValueError(
+                        "NAV 写入拒绝：manual FX evidence 未经独立确认或已失效: "
+                        f"record_id={row.get('record_id')}"
+                    )
+        if effect_service is None:
+            return
+        gate = effect_service.nav_gate(account=account, nav_date=nav_date)
+        if not gate.get("success"):
+            raise ValueError(
+                "NAV 写入拒绝：cash-flow holding effects 未解决: "
+                + json.dumps(gate, ensure_ascii=False, default=str)
+            )
+
     def record_nav(
         self,
         account: str,
@@ -81,6 +172,10 @@ class NavRecordService:
         run_id: Optional[str] = None,
         nav_write_context: Optional[NavWriteContext] = None,
     ) -> NAVHistory:
+        today_value = nav_date or bj_today()
+        today = today_value.date() if isinstance(today_value, datetime) else today_value
+        if persist and not dry_run:
+            self._assert_cash_flow_ready_for_write(account=account, nav_date=today)
         if valuation is None:
             valuation = self.manager.calculate_valuation(account)
         valuation_quality = valuation_quality_evidence(valuation)
@@ -91,8 +186,6 @@ class NavRecordService:
                 valuation_quality=valuation_quality,
             )
 
-        today_value = nav_date or bj_today()
-        today = today_value.date() if isinstance(today_value, datetime) else today_value
         current_year = today.strftime("%Y")
         start_year = config.get_start_year()
 

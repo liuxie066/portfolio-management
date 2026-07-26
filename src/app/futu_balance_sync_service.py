@@ -1,4 +1,4 @@
-"""Synchronize Futu cash, MMF, stock/ETF quantities, and average costs."""
+"""Observe Futu CASH and synchronize MMF plus stock/ETF holdings."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -14,7 +14,6 @@ from src import config
 from src.models import (
     AssetClass,
     AssetType,
-    CASH_ASSET_ID,
     MMF_ASSET_ID,
     Holding,
 )
@@ -27,15 +26,15 @@ from .futu_sync_reconciler import FutuSyncReconciler
 
 @dataclass(frozen=True)
 class FutuBalanceSnapshot:
-    """Absolute cash-like balances fetched from Futu."""
+    """Authoritative observe-only per-currency cash plus the MMF balance."""
 
-    cash: Optional[float] = None
+    cash_by_currency: Dict[str, Optional[float]] | None = None
     mmf: Optional[float] = None
-    currency: str = "CNY"
     source: str = "futu"
-    source_currency: str = "CNH"
-    cash_source_field: Optional[str] = None
-    cash_present: bool = False
+    account_id: Optional[int] = None
+    profile_fingerprint: Optional[str] = None
+    cash_source_fields: Dict[str, str] | None = None
+    cash_present_by_currency: Dict[str, bool] | None = None
     mmf_source_field: Optional[str] = None
     mmf_present: bool = False
     source_snapshot_id: Optional[str] = None
@@ -65,16 +64,16 @@ class FutuPositionSnapshot:
 
 @dataclass(frozen=True)
 class FutuPortfolioSnapshot:
-    """Complete cash-like and position snapshot for one Futu account."""
+    """Complete positions, MMF, and observe-only cash snapshot."""
 
-    cash: Optional[float] = None
+    cash_by_currency: Dict[str, Optional[float]] | None = None
     mmf: Optional[float] = None
     positions: tuple[FutuPositionSnapshot, ...] = ()
-    currency: str = "CNY"
     source: str = "futu"
-    source_currency: str = "CNH"
-    cash_source_field: Optional[str] = None
-    cash_present: bool = False
+    account_id: Optional[int] = None
+    profile_fingerprint: Optional[str] = None
+    cash_source_fields: Dict[str, str] | None = None
+    cash_present_by_currency: Dict[str, bool] | None = None
     mmf_source_field: Optional[str] = None
     mmf_present: bool = False
     source_snapshot_id: Optional[str] = None
@@ -89,7 +88,7 @@ class FutuPortfolioSnapshot:
 
 class FutuBalanceProvider(Protocol):
     def fetch_balances(self) -> FutuBalanceSnapshot:
-        """Return absolute Futu cash/MMF balances."""
+        """Return absolute Futu cash observations and the MMF balance."""
 
 
 class FutuPortfolioProvider(Protocol):
@@ -133,7 +132,11 @@ class FutuOpenApiBalanceProvider:
     should inject a provider instead of constructing this adapter.
     """
 
-    CASH_COLUMNS = ("cash",)
+    CASH_COLUMNS = {
+        "CNY": "cn_cash",
+        "USD": "us_cash",
+        "HKD": "hk_cash",
+    }
     MMF_COLUMNS = ("fund_assets",)
 
     def __init__(
@@ -144,7 +147,6 @@ class FutuOpenApiBalanceProvider:
         trd_env: Optional[str] = None,
         acc_id: Optional[int] = None,
         trd_market: Optional[str] = None,
-        cash_currency: Optional[str] = None,
         account_fingerprint: Optional[str] = None,
         verify_account: bool = False,
     ):
@@ -153,21 +155,41 @@ class FutuOpenApiBalanceProvider:
         self.trd_env = trd_env or config.get("futu.trd_env", "REAL")
         self.acc_id = int(acc_id) if acc_id is not None else config.get_int("futu.acc_id")
         self.trd_market = trd_market or config.get("futu.trd_market", "HK")
-        self.cash_currency = cash_currency or config.get("futu.cash_currency", "CNH")
-        self.account_fingerprint = account_fingerprint
         self.verify_account = verify_account
+        self.account_fingerprint = account_fingerprint or (
+            f"sha256:{hashlib.sha256(str(self.acc_id).encode()).hexdigest()}"
+            if self.acc_id is not None
+            else None
+        )
 
     @classmethod
     def from_account(cls, account: str) -> "FutuOpenApiBalanceProvider":
-        settings = config.get_futu_account_settings(account)
+        settings = config.get_futu_profile(account)
         return cls(
+            host=settings["host"],
+            port=settings["port"],
             acc_id=settings["acc_id"],
             trd_env=settings["trd_env"],
             trd_market=settings["trd_market"],
-            cash_currency=settings["cash_currency"],
-            account_fingerprint=settings["account_fingerprint"],
             verify_account=True,
         )
+
+    @property
+    def profile_fingerprint(self) -> str:
+        payload = {
+            "host": self.host,
+            "port": self.port,
+            "acc_id": self.acc_id,
+            "trd_env": self.trd_env,
+            "trd_market": self.trd_market,
+        }
+        canonical = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return f"sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
 
     def discover_accounts(self) -> dict[str, Any]:
         """Return only the OpenD authority fields needed for explicit mapping."""
@@ -227,13 +249,13 @@ class FutuOpenApiBalanceProvider:
 
         observed_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         return FutuBalanceSnapshot(
-            cash=self._cash_from_row(row),
+            cash_by_currency=self._cash_balances_from_row(row),
             mmf=self._mmf_from_row(row),
-            currency="CNY",
             source="futu-openapi",
-            source_currency=self.cash_currency,
-            cash_source_field="cash" if "cash" in row else None,
-            cash_present="cash" in row and row.get("cash") not in (None, "", "N/A"),
+            account_id=self.acc_id,
+            profile_fingerprint=self.profile_fingerprint,
+            cash_source_fields=dict(self.CASH_COLUMNS),
+            cash_present_by_currency=self._cash_presence_from_row(row),
             mmf_source_field="fund_assets" if "fund_assets" in row else None,
             mmf_present="fund_assets" in row and row.get("fund_assets") not in (None, "", "N/A"),
             source_snapshot_id=f"futu-{uuid.uuid4().hex}",
@@ -269,14 +291,14 @@ class FutuOpenApiBalanceProvider:
 
         observed_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         return FutuPortfolioSnapshot(
-            cash=self._cash_from_row(account_row),
+            cash_by_currency=self._cash_balances_from_row(account_row),
             mmf=self._mmf_from_row(account_row),
             positions=positions,
-            currency="CNY",
             source="futu-openapi",
-            source_currency=self.cash_currency,
-            cash_source_field="cash" if "cash" in account_row else None,
-            cash_present="cash" in account_row and account_row.get("cash") not in (None, "", "N/A"),
+            account_id=self.acc_id,
+            profile_fingerprint=self.profile_fingerprint,
+            cash_source_fields=dict(self.CASH_COLUMNS),
+            cash_present_by_currency=self._cash_presence_from_row(account_row),
             mmf_source_field="fund_assets" if "fund_assets" in account_row else None,
             mmf_present="fund_assets" in account_row and account_row.get("fund_assets") not in (None, "", "N/A"),
             source_snapshot_id=f"futu-{uuid.uuid4().hex}",
@@ -300,14 +322,25 @@ class FutuOpenApiBalanceProvider:
                 raise RuntimeError("未安装 futu/moomoo SDK；请安装 Futu OpenAPI SDK 并启动 OpenD，或注入自定义 provider") from exc
         return futu_sdk
 
-    def _fetch_cash(self, futu_sdk: Any, ctx: Any) -> Optional[float]:
-        return self._cash_from_row(self._fetch_accinfo_row(futu_sdk, ctx))
+    def _fetch_cash_balances(self, futu_sdk: Any, ctx: Any) -> Dict[str, Optional[float]]:
+        return self._cash_balances_from_row(self._fetch_accinfo_row(futu_sdk, ctx))
 
     def _fetch_mmf(self, futu_sdk: Any, ctx: Any) -> Optional[float]:
         return self._mmf_from_row(self._fetch_accinfo_row(futu_sdk, ctx))
 
-    def _cash_from_row(self, row: dict[str, Any]) -> Optional[float]:
-        return self._money_field(row, "cash", quantize=False)
+    def _cash_balances_from_row(self, row: dict[str, Any]) -> Dict[str, Optional[float]]:
+        return {
+            currency: self._money_field(row, column, quantize=False)
+            for currency, column in self.CASH_COLUMNS.items()
+        }
+
+    def _cash_presence_from_row(self, row: dict[str, Any]) -> Dict[str, bool]:
+        return {
+            currency: (
+                column in row and row.get(column) not in (None, "", "N/A")
+            )
+            for currency, column in self.CASH_COLUMNS.items()
+        }
 
     def _mmf_from_row(self, row: dict[str, Any]) -> Optional[float]:
         return self._money_field(row, "fund_assets", quantize=True)
@@ -344,6 +377,10 @@ class FutuOpenApiBalanceProvider:
             raise RuntimeError("configured Futu account environment mismatch")
 
     def _fetch_accinfo_row(self, futu_sdk: Any, ctx: Any) -> dict[str, Any]:
+        if self.acc_id is None:
+            raise ValueError(
+                "Futu acc_id is required for authoritative cash observations"
+            )
         kwargs = self._accinfo_kwargs(futu_sdk)
         try:
             ret, data = ctx.accinfo_query(**kwargs)
@@ -351,7 +388,16 @@ class FutuOpenApiBalanceProvider:
             kwargs.pop("currency", None)
             ret, data = ctx.accinfo_query(**kwargs)
         self._ensure_ok(futu_sdk, ret, data, "accinfo_query")
-        return _first_row(data)
+        row = _first_row(data)
+        returned_acc_id = row.get("acc_id")
+        if returned_acc_id in (None, ""):
+            raise RuntimeError("Futu accinfo_query response lacks acc_id evidence")
+        if int(returned_acc_id) != int(self.acc_id):
+            raise RuntimeError(
+                f"Futu account mismatch: expected acc_id={self.acc_id}, "
+                f"returned={returned_acc_id}"
+            )
+        return row
 
     def _fetch_position_rows(self, futu_sdk: Any, ctx: Any) -> list[dict[str, Any]]:
         kwargs: dict[str, Any] = {
@@ -435,7 +481,7 @@ class FutuOpenApiBalanceProvider:
     def _accinfo_kwargs(self, futu_sdk: Any) -> dict[str, Any]:
         kwargs: dict[str, Any] = {}
         kwargs["trd_env"] = self._enum_value(futu_sdk, "TrdEnv", self.trd_env)
-        kwargs["currency"] = self._enum_value(futu_sdk, "Currency", self.cash_currency)
+        kwargs["currency"] = self._enum_value(futu_sdk, "Currency", "NONE")
         if self.acc_id is not None:
             kwargs["acc_id"] = self.acc_id
         return kwargs
@@ -504,7 +550,15 @@ class FutuBalanceSyncService:
         source_requested = cash_balance is None and mmf_balance is None
         try:
             snapshot = (
-                FutuBalanceSnapshot(cash=cash_balance, mmf=mmf_balance)
+                FutuBalanceSnapshot(
+                    cash_by_currency={
+                        "CNY": cash_balance,
+                        "USD": None,
+                        "HKD": None,
+                    },
+                    mmf=mmf_balance,
+                    source="manual-observation",
+                )
                 if not source_requested
                 else self._fetch_balances(account)
             )
@@ -648,13 +702,15 @@ class FutuBalanceSyncService:
                 write_stage = "cash_mmf"
                 cash_result = self._sync_cash_snapshot(
                     FutuBalanceSnapshot(
-                        cash=snapshot.cash,
+                        cash_by_currency=snapshot.cash_by_currency,
                         mmf=snapshot.mmf,
-                        currency=snapshot.currency,
                         source=snapshot.source,
-                        source_currency=snapshot.source_currency,
-                        cash_source_field=snapshot.cash_source_field,
-                        cash_present=snapshot.cash_present,
+                        account_id=snapshot.account_id,
+                        profile_fingerprint=snapshot.profile_fingerprint,
+                        cash_source_fields=snapshot.cash_source_fields,
+                        cash_present_by_currency=(
+                            snapshot.cash_present_by_currency
+                        ),
                         mmf_source_field=snapshot.mmf_source_field,
                         mmf_present=snapshot.mmf_present,
                         source_snapshot_id=snapshot.source_snapshot_id,
@@ -726,41 +782,16 @@ class FutuBalanceSyncService:
     ) -> dict[str, Any]:
         items = []
         stages = {
-            "securities_cash": {"status": "started", "partial_write_possible": False},
-            "fund_mmf": {"status": "pending", "partial_write_possible": False},
+            "securities_cash": {
+                "status": "succeeded",
+                "mode": "observe_only",
+                "partial_write_possible": False,
+            },
+            "fund_mmf": {
+                "status": "started",
+                "partial_write_possible": False,
+            },
         }
-        try:
-            items.extend(self._sync_asset(
-                account=account,
-                broker=broker,
-                asset_id=CASH_ASSET_ID,
-                asset_name="人民币现金",
-                asset_type=AssetType.CASH,
-                target=snapshot.cash,
-                dry_run=dry_run,
-            ))
-            stages["securities_cash"]["status"] = "succeeded"
-        except Exception as exc:
-            stages["securities_cash"] = {
-                "status": "failed",
-                "partial_write_possible": not dry_run,
-                "reason_code": "SECURITIES_CASH_WRITE_FAILED",
-            }
-            stages["fund_mmf"]["status"] = "not_run"
-            return {
-                "success": False,
-                "account": account,
-                "broker": broker,
-                "dry_run": dry_run,
-                "source": snapshot.source,
-                "source_snapshot_id": snapshot.source_snapshot_id,
-                "source_metadata": self._public_source_metadata(snapshot),
-                "stages": stages,
-                "partial_write_possible": not dry_run,
-                "items": [item.__dict__ for item in items],
-                "error": str(exc),
-            }
-        stages["fund_mmf"]["status"] = "started"
         try:
             items.extend(self._sync_asset(
                 account=account,
@@ -800,6 +831,10 @@ class FutuBalanceSyncService:
             "source_snapshot_id": snapshot.source_snapshot_id,
             "source_metadata": self._public_source_metadata(snapshot),
             "stages": stages,
+            "cash_mode": "observe_only",
+            "cash_observations": dict(snapshot.cash_by_currency or {}),
+            "account_id": snapshot.account_id,
+            "profile_fingerprint": snapshot.profile_fingerprint,
             "items": [item.__dict__ for item in items],
             "updated": sum(1 for item in items if item.updated),
             "created": sum(1 for item in items if item.created),
@@ -924,23 +959,54 @@ class FutuBalanceSyncService:
             }
         result["reconciliation"] = reconcile
         if reconcile["status"] != "trusted":
-            result["success"] = False
             result["quality_status"] = reconcile["status"]
+            datasets = dict(reconcile.get("datasets") or {})
+            non_cash_untrusted = any(
+                verdict.get("status") != "trusted"
+                for dataset_id, verdict in datasets.items()
+                if dataset_id != "pm.securities_cash"
+            )
+            if non_cash_untrusted or not datasets:
+                result["success"] = False
 
     @staticmethod
     def _validate_authoritative_balances(snapshot: Any) -> None:
         if snapshot.source != "futu-openapi":
             return
-        if not snapshot.cash_present or snapshot.cash_source_field != "cash" or snapshot.cash is None:
-            raise RuntimeError("authoritative Futu cash field is missing")
+        expected_fields = dict(FutuOpenApiBalanceProvider.CASH_COLUMNS)
+        balances = dict(snapshot.cash_by_currency or {})
+        source_fields = dict(snapshot.cash_source_fields or {})
+        presence = dict(snapshot.cash_present_by_currency or {})
+        if source_fields != expected_fields:
+            raise RuntimeError(
+                "authoritative Futu per-currency cash field evidence is invalid"
+            )
+        missing = [
+            currency
+            for currency in expected_fields
+            if not presence.get(currency) or balances.get(currency) is None
+        ]
+        if missing:
+            raise RuntimeError(
+                "authoritative Futu per-currency cash fields are missing: "
+                + ", ".join(missing)
+            )
         if not snapshot.mmf_present or snapshot.mmf_source_field != "fund_assets" or snapshot.mmf is None:
             raise RuntimeError("authoritative Futu fund_assets field is missing")
-        if str(snapshot.source_currency).upper() != "CNH" or str(snapshot.currency).upper() != "CNY":
-            raise RuntimeError("Futu cash currency evidence must be CNH normalized to CNY")
         if str(snapshot.trd_env).upper() != "REAL":
             raise RuntimeError("Futu trading environment must be REAL")
+        if snapshot.account_id is None:
+            raise RuntimeError("Futu account ID evidence is missing")
+        if not snapshot.profile_fingerprint:
+            raise RuntimeError("Futu profile fingerprint is missing")
         if not snapshot.account_fingerprint:
             raise RuntimeError("Futu account fingerprint is missing")
+        expected_account_fingerprint = (
+            "sha256:"
+            + hashlib.sha256(str(snapshot.account_id).encode()).hexdigest()
+        )
+        if snapshot.account_fingerprint != expected_account_fingerprint:
+            raise RuntimeError("Futu account fingerprint mismatch")
         if not snapshot.source_snapshot_id:
             raise RuntimeError("Futu source snapshot identity is missing")
         if not snapshot.observed_at_utc:
@@ -970,13 +1036,19 @@ class FutuBalanceSyncService:
             "source_snapshot_id": snapshot.source_snapshot_id,
             "observed_at_utc": snapshot.observed_at_utc,
             "account_fingerprint": snapshot.account_fingerprint,
+            "profile_fingerprint": snapshot.profile_fingerprint,
             "trd_env": snapshot.trd_env,
             "trd_market": snapshot.trd_market,
-            "source_currency": snapshot.source_currency,
-            "normalized_currency": snapshot.currency,
             "cash": {
-                "present": snapshot.cash_present,
-                "source_field": snapshot.cash_source_field,
+                "mode": "per_currency",
+                "present": all(
+                    (snapshot.cash_present_by_currency or {}).get(currency)
+                    for currency in FutuOpenApiBalanceProvider.CASH_COLUMNS
+                ),
+                "source_fields": dict(snapshot.cash_source_fields or {}),
+                "present_by_currency": dict(
+                    snapshot.cash_present_by_currency or {}
+                ),
             },
             "fund_mmf": {
                 "present": snapshot.mmf_present,
@@ -1016,11 +1088,15 @@ class FutuBalanceSyncService:
         )
         payload = {
             "account_fingerprint": snapshot.account_fingerprint,
+            "profile_fingerprint": snapshot.profile_fingerprint,
             "trd_env": snapshot.trd_env,
             "trd_market": snapshot.trd_market,
-            "source_currency": snapshot.source_currency,
-            "normalized_currency": snapshot.currency,
-            "cash": None if snapshot.cash is None else str(snapshot.cash),
+            "cash_by_currency": {
+                currency: None if value is None else str(value)
+                for currency, value in sorted(
+                    (snapshot.cash_by_currency or {}).items()
+                )
+            },
             "fund_mmf": None if snapshot.mmf is None else str(snapshot.mmf),
             "position_snapshot_included": hasattr(snapshot, "positions"),
             "positions": positions,

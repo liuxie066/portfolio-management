@@ -108,56 +108,12 @@ class PortfolioSkill:
     def deposit(self, amount: float, date_str: str = None,
                 remark: str = "入金", currency: str = "CNY") -> Dict[str, Any]:
         """记录入金"""
-        try:
-            flow_date = parse_date(date_str)
-            cf = self.portfolio.deposit(
-                flow_date=flow_date,
-                account=self.account,
-                amount=amount,
-                currency=currency,
-                remark=remark
-            )
-            return {
-                "success": True,
-                "cashflow": {
-                    "record_id": cf.record_id,
-                    "date": cf.flow_date.isoformat(),
-                    "amount": cf.amount,
-                    "currency": cf.currency,
-                    "remark": remark
-                },
-                "replayed": cf.was_replayed,
-                "message": f"入金记录已保存: ¥{amount:,.2f}"
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        return {"success": False, "error": "cash_flow_entry_disabled"}
 
     def withdraw(self, amount: float, date_str: str = None,
                  remark: str = "出金", currency: str = "CNY") -> Dict[str, Any]:
         """记录出金"""
-        try:
-            flow_date = parse_date(date_str)
-            cf = self.portfolio.withdraw(
-                flow_date=flow_date,
-                account=self.account,
-                amount=amount,
-                currency=currency,
-                remark=remark
-            )
-            return {
-                "success": True,
-                "cashflow": {
-                    "record_id": cf.record_id,
-                    "date": cf.flow_date.isoformat(),
-                    "amount": -amount,
-                    "currency": cf.currency,
-                    "remark": remark
-                },
-                "replayed": cf.was_replayed,
-                "message": f"出金记录已保存: ¥{amount:,.2f}"
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        return {"success": False, "error": "cash_flow_entry_disabled"}
 
     # ---------- 持仓查询 ----------
 
@@ -368,49 +324,11 @@ class PortfolioSkill:
 
     def add_cash(self, amount: float, asset: str = "CNY-CASH") -> Dict[str, Any]:
         """Increase an existing cash holding under the account write lock."""
-        try:
-            check = validate_and_normalize_cash_flow_input(amount=amount)
-            if not check["ok"]:
-                raise ValueError(check["errors"])
-            with process_lock(account_lock_key(self.account)):
-                holding = self.storage.get_holding(asset, self.account)
-                if not holding:
-                    return {"success": False, "error": f"未找到 {asset}，需要先创建"}
-                new_qty = holding.quantity + amount
-                self.storage.update_holding_quantity(asset, self.account, amount, getattr(holding, "broker", None))
-                return {
-                    "success": True,
-                    "asset": asset,
-                    "amount": amount,
-                    "balance": new_qty,
-                    "message": f"{asset} 增加 ¥{amount:,.2f}，当前余额: ¥{new_qty:,.2f}",
-                }
-        except Exception as exc:
-            return {"success": False, "error": str(exc)}
+        return {"success": False, "error": "cash_flow_entry_disabled"}
 
     def sub_cash(self, amount: float, asset: str = "CNY-CASH") -> Dict[str, Any]:
         """Decrease an existing cash holding under the account write lock."""
-        try:
-            check = validate_and_normalize_cash_flow_input(amount=amount)
-            if not check["ok"]:
-                raise ValueError(check["errors"])
-            with process_lock(account_lock_key(self.account)):
-                holding = self.storage.get_holding(asset, self.account)
-                if not holding:
-                    return {"success": False, "error": f"未找到 {asset}"}
-                if holding.quantity < amount:
-                    return {"success": False, "error": f"余额不足，当前: ¥{holding.quantity:,.2f}"}
-                new_qty = holding.quantity - amount
-                self.storage.update_holding_quantity(asset, self.account, -amount, getattr(holding, "broker", None))
-                return {
-                    "success": True,
-                    "asset": asset,
-                    "amount": amount,
-                    "balance": new_qty,
-                    "message": f"{asset} 减少 ¥{amount:,.2f}，当前余额: ¥{new_qty:,.2f}",
-                }
-        except Exception as exc:
-            return {"success": False, "error": str(exc)}
+        return {"success": False, "error": "cash_flow_entry_disabled"}
 
     def sync_futu_cash_mmf(
         self,
@@ -922,11 +840,11 @@ def sub_cash(amount: float, account: str = None, **kwargs) -> Dict:
     return get_skill(account).sub_cash(amount, **kwargs)
 
 def sync_futu_cash_mmf(account: str = None, **kwargs) -> Dict:
-    """通过富途 OpenAPI 同步现金/货基余额到 holdings"""
+    """通过富途 OpenAPI 观测 CASH，并同步货币基金到 holdings。"""
     return get_skill(account).sync_futu_cash_mmf(**kwargs)
 
 def sync_futu_holdings(account: str = None, **kwargs) -> Dict:
-    """同步 Futu 现金/MMF、股票/ETF 数量及平均成本。"""
+    """观测 Futu CASH；同步 MMF、股票/ETF 数量及平均成本。"""
     return get_skill(account).sync_futu_holdings(**kwargs)
 
 # 报告

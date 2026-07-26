@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 from datetime import UTC, date, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,12 +29,13 @@ def _configure(monkeypatch, tmp_path: Path, *, onboarded: bool = False) -> None:
                 "data": {"dir": str(tmp_path / "data")},
                 "quality": {"onboarded": onboarded},
                 "futu": {
-                    "accounts": {
+                    "profiles": {
                         "lx": {
+                            "host": "127.0.0.1",
+                            "port": 11111,
                             "acc_id": 123456,
                             "trd_env": "REAL",
                             "trd_market": "US",
-                            "cash_currency": "CNH",
                         }
                     }
                 },
@@ -58,7 +58,7 @@ def _receipt(
     account_verified: bool = True,
     pagination_complete: bool = True,
 ):
-    fingerprint = hashlib.sha256(b"123456").hexdigest()
+    settings = config.get_futu_account_settings("lx")
     return {
         "schema_version": "pm.futu_sync_receipt.v1",
         "sync_run_id": "sync-001",
@@ -68,12 +68,24 @@ def _receipt(
             "provider": "futu-openapi",
             "source_snapshot_id": "snapshot-redacted-001",
             "observed_at_utc": observed_at_utc,
-            "account_fingerprint": f"sha256:{fingerprint}",
+            "account_fingerprint": settings["account_fingerprint"],
+            "profile_fingerprint": settings["profile_fingerprint"],
             "trd_env": "REAL",
             "trd_market": "US",
-            "source_currency": "CNH",
-            "normalized_currency": "CNY",
-            "cash": {"present": True, "source_field": "cash"},
+            "cash": {
+                "mode": "per_currency",
+                "present": True,
+                "source_fields": {
+                    "CNY": "cn_cash",
+                    "USD": "us_cash",
+                    "HKD": "hk_cash",
+                },
+                "present_by_currency": {
+                    "CNY": True,
+                    "USD": True,
+                    "HKD": True,
+                },
+            },
             "fund_mmf": {"present": True, "source_field": "fund_assets"},
             "refresh_cache": refresh_cache,
             "account_verified": account_verified,
@@ -428,10 +440,11 @@ def test_duplicate_account_mapping_blocks_every_colliding_account(
 ):
     path = tmp_path / "config.yaml"
     shared = {
+        "host": "127.0.0.1",
+        "port": 11111,
         "acc_id": 123456,
         "trd_env": "REAL",
         "trd_market": "US",
-        "cash_currency": "CNH",
     }
     path.write_text(
         yaml.safe_dump(
@@ -439,7 +452,7 @@ def test_duplicate_account_mapping_blocks_every_colliding_account(
                 "data": {"dir": str(tmp_path / "data")},
                 "quality": {"accounts": ["lx", "sy"]},
                 "futu": {
-                    "accounts": {
+                    "profiles": {
                         "lx": shared,
                         "sy": dict(shared),
                     }

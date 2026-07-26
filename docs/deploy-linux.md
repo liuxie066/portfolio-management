@@ -67,6 +67,8 @@ sudo python3 scripts/install_linux.py --apply
 - `/etc/systemd/system/portfolio-nav-daily.timer`
 - `/etc/systemd/system/portfolio-futu-evening.service`
 - `/etc/systemd/system/portfolio-futu-evening.timer`
+- `/etc/systemd/system/portfolio-cash-flow-scan.service`
+- `/etc/systemd/system/portfolio-cash-flow-scan.timer`
 - `/etc/systemd/system/portfolio-management-api.service`
 
 如果已有 `config.yaml`，默认保留不覆盖；确需重建模板时显式加 `--overwrite-config`。
@@ -107,7 +109,7 @@ pm config doctor --require-futu --json
 pm config doctor --require-futu --require-quality --json
 ```
 
-首次配置 `futu.accounts.<account>.acc_id` 前，在 OpenD 所在主机只读发现账户：
+首次配置 `futu.profiles.<account>.acc_id` 前，在 OpenD 所在主机只读发现账户：
 
 ```bash
 pm futu accounts --market US --json
@@ -119,7 +121,8 @@ fail closed。由操作者将已核实的 REAL 账户分别映射到 `lx`/`sy`�
 `config doctor` 和同步 dry-run。
 
 质量 producer 还要求 `quality.accounts`、各账户显式唯一的
-`futu.accounts.<account>.acc_id`，以及独立 `quality.read_token`。正式接入 Hub
+`futu.profiles.<account>`（包含 `host`、`port`、`acc_id`、REAL 环境和市场），
+以及独立 `quality.read_token`。正式接入 Hub
 时才将 `quality.onboarded` 改为 `true`；该状态一旦启用，正式 NAV 写入会直接在
 PM 本地 fail closed，不依赖 Hub 在线。
 
@@ -155,25 +158,28 @@ systemctl list-timers portfolio-quality-refresh.timer
 
 ## 启用定时任务
 
-安装器生成两组北京时间 timer：
+安装器生成三组北京时间 timer：
 
 - `portfolio-nav-daily.timer`：周一至周六 `08:10`，先同步 lx/sy holdings，再记录 lx/hb/sy NAV。
 - `portfolio-futu-evening.timer`：周一至周五 `17:10`，只同步 lx/sy holdings。
+- `portfolio-cash-flow-scan.timer`：每 15 分钟完整读取 Feishu cash flow 和
+  CASH holdings，只发现 effect、更新 SQLite 并发送回执。
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now portfolio-nav-daily.timer portfolio-futu-evening.timer
-systemctl list-timers portfolio-nav-daily.timer portfolio-futu-evening.timer
+sudo systemctl enable --now portfolio-nav-daily.timer portfolio-futu-evening.timer portfolio-cash-flow-scan.timer
+systemctl list-timers portfolio-nav-daily.timer portfolio-futu-evening.timer portfolio-cash-flow-scan.timer
 ```
 
-周六早间同步用于捕获周五晚间美股成交，然后记录周五 NAV。周一早间通常会因周五 NAV 已存在而幂等跳过，也能在周六任务失败时提供一次补偿机会。两个 timer 都使用 `Persistent=true`。
+周六早间同步用于捕获周五晚间美股成交，然后记录周五 NAV。周一早间通常会因周五 NAV 已存在而幂等跳过，也能在周六任务失败时提供一次补偿机会。三个 timer 都使用 `Persistent=true`。
 
 手动触发属于真实 holdings/NAV 写入操作。确认后可分别执行：
 
 ```bash
 sudo systemctl start portfolio-nav-daily.service
 sudo systemctl start portfolio-futu-evening.service
-sudo journalctl -u portfolio-nav-daily.service -u portfolio-futu-evening.service -n 200 --no-pager
+sudo systemctl start portfolio-cash-flow-scan.service
+sudo journalctl -u portfolio-nav-daily.service -u portfolio-futu-evening.service -u portfolio-cash-flow-scan.service -n 200 --no-pager
 ```
 
 定时任务由版本化的 `scripts/portfolio_scheduled_job.sh` 编排。早间模式依次执行 lx、sy 完整 Futu 同步，再单次执行：
@@ -182,7 +188,11 @@ sudo journalctl -u portfolio-nav-daily.service -u portfolio-futu-evening.service
 pm daily-job --accounts lx,hb,sy --write --confirm --json --no-service
 ```
 
-晚间模式只执行两个 `pm futu sync`。两个账户都会被尝试；任一同步失败时，早间模式会阻断 NAV，避免使用过期 holdings 估值。sy 的连接参数只在 subshell 中从 `/etc/portfolio-management/futu-sy.env` 加载。`daily-job` 中的现金/MMF内嵌参数只保留旧调用兼容，不用于生产完整同步。
+晚间模式只执行两个 `pm futu sync`。两个账户都会被尝试；任一同步失败时，
+早间模式会阻断 NAV，避免使用过期 holdings 估值。lx/sy 都通过
+`config.yaml` 的同名 `futu.profiles` 显式路由，不再读取单独的 sy env 文件。
+Futu CASH 只观察并生成 reconciliation effect；股票/ETF 与 MMF 保持各自同步。
+Cash Flow 激活、备份和恢复见 `docs/cash-flow-effects-runbook.md`。
 
 完整 Futu 同步还需要配置飞书“刘看山”回执：
 

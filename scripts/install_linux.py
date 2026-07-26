@@ -25,12 +25,15 @@ SERVICE_NAME = "portfolio-nav-daily.service"
 TIMER_NAME = "portfolio-nav-daily.timer"
 EVENING_SERVICE_NAME = "portfolio-futu-evening.service"
 EVENING_TIMER_NAME = "portfolio-futu-evening.timer"
+CASH_FLOW_SERVICE_NAME = "portfolio-cash-flow-scan.service"
+CASH_FLOW_TIMER_NAME = "portfolio-cash-flow-scan.timer"
 API_SERVICE_NAME = "portfolio-management-api.service"
 QUALITY_SERVICE_NAME = "portfolio-quality-refresh.service"
 QUALITY_TIMER_NAME = "portfolio-quality-refresh.timer"
 DEFAULT_MORNING_ON_CALENDAR = "Mon..Sat *-*-* 08:10:00 Asia/Shanghai"
 DEFAULT_EVENING_ON_CALENDAR = "Mon..Fri *-*-* 17:10:00 Asia/Shanghai"
 DEFAULT_QUALITY_REFRESH_INTERVAL = "15min"
+DEFAULT_CASH_FLOW_ON_CALENDAR = "*-*-* *:00/15:00 Asia/Shanghai"
 SCHEDULE_LOCK_FILE = "/var/lock/portfolio-management-scheduled.lock"
 QUALITY_LOCK_FILE = "/var/lock/portfolio-management-quality.lock"
 DEFAULT_OPTIONS_MONITOR_ENV_FILE = "/etc/options-monitor/options-monitor.env"
@@ -110,11 +113,28 @@ def render_config_yaml(paths: InstallPaths) -> str:
             "disable_nav_runtime_validation": False,
         },
         "futu": {
-            "opend": {"host": "127.0.0.1", "port": 11111},
-            "trd_env": "REAL",
-            "acc_id": None,
-            "trd_market": "HK",
-            "cash_currency": "CNH",
+            "profiles": {
+                "lx": {
+                    "host": "127.0.0.1",
+                    "port": 11111,
+                    "acc_id": None,
+                    "trd_env": "REAL",
+                    "trd_market": "HK",
+                },
+                "sy": {
+                    "host": "127.0.0.1",
+                    "port": 11112,
+                    "acc_id": None,
+                    "trd_env": "REAL",
+                    "trd_market": "HK",
+                },
+            },
+        },
+        "cash_flow": {
+            "effects": {
+                "cutover_date": None,
+                "db_path": str(paths.data_dir / "cash_flow_effects.sqlite3"),
+            },
         },
         "finnhub_api_key": "",
         "feishu": {
@@ -236,7 +256,6 @@ def render_service_unit(paths: InstallPaths, *, run_user: str, mode: str) -> str
         else "portfolio-management evening Futu holdings sync"
     )
     schedule_script = paths.app_dir / "scripts" / "portfolio_scheduled_job.sh"
-    sy_env_file = paths.config_dir / "futu-sy.env"
     return f"""[Unit]
 Description={description}
 Wants=network-online.target
@@ -250,9 +269,24 @@ Environment=TZ=Asia/Shanghai
 Environment=APP_DIR={paths.app_dir}
 Environment=PYTHON_BIN={paths.python_bin}
 Environment=PORTFOLIO_PM_BIN={paths.launcher_path}
-Environment=PORTFOLIO_FUTU_SY_ENV_FILE={sy_env_file}
 EnvironmentFile={paths.env_file}
 ExecStart=/usr/bin/flock -n {SCHEDULE_LOCK_FILE} {schedule_script} {mode}
+"""
+
+
+def render_cash_flow_service_unit(paths: InstallPaths, *, run_user: str) -> str:
+    return f"""[Unit]
+Description=portfolio-management Cash Flow effect discovery
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User={run_user}
+WorkingDirectory={paths.app_dir}
+Environment=TZ=Asia/Shanghai
+EnvironmentFile={paths.env_file}
+ExecStart={paths.launcher_path} cash-flow effects scan --json
 """
 
 
@@ -331,6 +365,8 @@ def _unit_paths(paths: InstallPaths) -> dict[str, Path]:
         "morning_timer": paths.systemd_dir / TIMER_NAME,
         "evening_service": paths.systemd_dir / EVENING_SERVICE_NAME,
         "evening_timer": paths.systemd_dir / EVENING_TIMER_NAME,
+        "cash_flow_service": paths.systemd_dir / CASH_FLOW_SERVICE_NAME,
+        "cash_flow_timer": paths.systemd_dir / CASH_FLOW_TIMER_NAME,
         "api_service": paths.systemd_dir / API_SERVICE_NAME,
         "quality_service": paths.systemd_dir / QUALITY_SERVICE_NAME,
         "quality_timer": paths.systemd_dir / QUALITY_TIMER_NAME,
@@ -353,6 +389,8 @@ def build_plan(args) -> dict:
             "morning_timer": str(units["morning_timer"]),
             "evening_service": str(units["evening_service"]),
             "evening_timer": str(units["evening_timer"]),
+            "cash_flow_service": str(units["cash_flow_service"]),
+            "cash_flow_timer": str(units["cash_flow_timer"]),
             "api_service": str(units["api_service"]),
             "quality_service": str(units["quality_service"]),
             "quality_timer": str(units["quality_timer"]),
@@ -391,6 +429,12 @@ def build_plan(args) -> dict:
                 "service": EVENING_SERVICE_NAME,
                 "on_calendar": args.evening_on_calendar,
                 "mode": "evening",
+            },
+            "cash_flow": {
+                "timer": CASH_FLOW_TIMER_NAME,
+                "service": CASH_FLOW_SERVICE_NAME,
+                "on_calendar": args.cash_flow_on_calendar,
+                "mode": "scan",
             },
             "api": {
                 "service": API_SERVICE_NAME,
@@ -481,6 +525,22 @@ def apply_install(args) -> dict:
             mode=0o644,
             overwrite=True,
         ),
+        str(units["cash_flow_service"]): _write_text(
+            units["cash_flow_service"],
+            render_cash_flow_service_unit(paths, run_user=args.run_user),
+            mode=0o644,
+            overwrite=True,
+        ),
+        str(units["cash_flow_timer"]): _write_text(
+            units["cash_flow_timer"],
+            render_timer_unit(
+                on_calendar=args.cash_flow_on_calendar,
+                service_name=CASH_FLOW_SERVICE_NAME,
+                description="Run portfolio-management Cash Flow scan every 15 minutes",
+            ),
+            mode=0o644,
+            overwrite=True,
+        ),
         str(units["api_service"]): _write_text(
             units["api_service"],
             render_api_service_unit(paths, run_user=args.run_user),
@@ -507,7 +567,14 @@ def apply_install(args) -> dict:
 
     systemd_commands = [["systemctl", "daemon-reload"]]
     if args.enable_timer:
-        systemd_commands.append(["systemctl", "enable", "--now", TIMER_NAME, EVENING_TIMER_NAME])
+        systemd_commands.append([
+            "systemctl",
+            "enable",
+            "--now",
+            TIMER_NAME,
+            EVENING_TIMER_NAME,
+            CASH_FLOW_TIMER_NAME,
+        ])
     if args.enable_api_service:
         systemd_commands.append(["systemctl", "enable", "--now", API_SERVICE_NAME])
     if args.enable_quality_timer:
@@ -521,9 +588,9 @@ def apply_install(args) -> dict:
     result["feishu_receipt_env"]["status"] = "imported" if receipt_env else "source_missing"
     result["next_steps"] = [
         f"edit {paths.config_file} and fill Feishu/Futu credentials",
-        f"create {paths.config_dir / 'futu-sy.env'} with sy Futu connection values",
+        "fill the explicit futu.profiles mappings and cash_flow.effects.cutover_date",
         f"{paths.launcher_path} config doctor --json",
-        f"systemctl status {TIMER_NAME} {EVENING_TIMER_NAME}",
+        f"systemctl status {TIMER_NAME} {EVENING_TIMER_NAME} {CASH_FLOW_TIMER_NAME}",
         f"systemctl status {API_SERVICE_NAME}",
         f"systemctl status {QUALITY_TIMER_NAME}",
     ]
@@ -538,7 +605,7 @@ def _print_plan(payload: dict, *, as_json: bool) -> None:
     for key, value in payload.get("paths", {}).items():
         print(f"  {key}: {value}")
     systemd = payload.get("systemd", {})
-    for name in ("morning", "evening"):
+    for name in ("morning", "evening", "cash_flow"):
         job = systemd.get(name, {})
         print(f"  {name}: {job.get('on_calendar')} -> {job.get('service')}")
     if payload.get("writes"):
@@ -577,8 +644,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_EVENING_ON_CALENDAR,
         help="systemd OnCalendar value for evening Futu sync",
     )
+    parser.add_argument(
+        "--cash-flow-on-calendar",
+        default=DEFAULT_CASH_FLOW_ON_CALENDAR,
+        help="systemd OnCalendar value for the 15-minute Cash Flow scanner",
+    )
     parser.add_argument("--overwrite-config", action="store_true", help="overwrite an existing config.yaml")
-    parser.add_argument("--enable-timer", action="store_true", help="run systemctl enable --now for both timers")
+    parser.add_argument("--enable-timer", action="store_true", help="run systemctl enable --now for all three timers")
     parser.add_argument(
         "--enable-api-service",
         action="store_true",
