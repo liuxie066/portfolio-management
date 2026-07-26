@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.27 - 2026-07-26
+
+- Added a versioned PM runtime and data-quality producer with atomic artifacts, independently authenticated `GET /quality/status`, account-scoped OpenD mapping/sync/replica checks, and a local fail-closed official NAV gate.
+- Kept securities-account cash and fund-account MMF as separate quality datasets, with `pm.cash_like_assets` trusted only when both components have complete successful evidence under the accepted CNH/CNY rules.
+- Added an opt-in independent 15-minute `portfolio-quality-refresh.timer` without coupling the check to holdings, cash/MMF, or NAV writes.
+- Made Futu sync receipts record complete account mapping, source/snapshot/readback/finality evidence and fail closed on partial writes or ambiguous account selection.
+- Fixed all Feishu holdings write paths to serialize datetime fields as millisecond timestamps, resolving the production cash/MMF `DatetimeFieldConvFail` while preserving unknown average cost as missing.
+
 ## 0.1.26 - 2026-07-24
 
 - Added a tag-triggered GitHub Actions workflow that publishes releases for pushed `v*` tags with repository-scoped `GITHUB_TOKEN` credentials.
