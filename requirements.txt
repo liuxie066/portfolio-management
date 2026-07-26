@@ -8,3 +8,6 @@ uvicorn[standard]>=0.30.0
 
 # 价格获取
 requests>=2.28.0
+
+# 质量状态契约验证
+jsonschema>=4.23,<5
