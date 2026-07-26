@@ -481,7 +481,14 @@ class FutuOpenApiBalanceProvider:
     def _accinfo_kwargs(self, futu_sdk: Any) -> dict[str, Any]:
         kwargs: dict[str, Any] = {}
         kwargs["trd_env"] = self._enum_value(futu_sdk, "TrdEnv", self.trd_env)
-        kwargs["currency"] = self._enum_value(futu_sdk, "Currency", "NONE")
+        market = str(self.trd_market or "").strip().upper()
+        currency_by_market = {"HK": "HKD", "US": "USD"}
+        currency = currency_by_market.get(market)
+        if currency is None:
+            raise ValueError(
+                f"unsupported Futu trade market for account info query: {self.trd_market}"
+            )
+        kwargs["currency"] = self._enum_value(futu_sdk, "Currency", currency)
         if self.acc_id is not None:
             kwargs["acc_id"] = self.acc_id
         return kwargs

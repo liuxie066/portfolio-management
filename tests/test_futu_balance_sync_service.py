@@ -856,6 +856,7 @@ def test_futu_portfolio_provider_fetches_average_cost_and_closes_contexts(monkey
             self.position_kwargs = None
 
         def accinfo_query(self, **kwargs):
+            assert kwargs["currency"] == "HKD"
             return 0, [{
                 "acc_id": 123,
                 "cash": 999999,
@@ -896,7 +897,7 @@ def test_futu_portfolio_provider_fetches_average_cost_and_closes_contexts(monkey
     sdk = SimpleNamespace(
         RET_OK=0,
         TrdEnv=SimpleNamespace(REAL="REAL"),
-        Currency=SimpleNamespace(CNH="CNH", NONE="N/A"),
+        Currency=SimpleNamespace(HKD="HKD", NONE="N/A"),
         TrdMarket=SimpleNamespace(HK="HK"),
         Market=SimpleNamespace(US="US"),
         SecurityType=SimpleNamespace(NONE="N/A"),
@@ -954,7 +955,7 @@ def test_futu_portfolio_provider_closes_contexts_when_classification_fails(monke
     sdk = SimpleNamespace(
         RET_OK=0,
         TrdEnv=SimpleNamespace(REAL="REAL"),
-        Currency=SimpleNamespace(CNH="CNH", NONE="N/A"),
+        Currency=SimpleNamespace(HKD="HKD", NONE="N/A"),
         TrdMarket=SimpleNamespace(HK="HK"),
         Market=SimpleNamespace(US="US"),
         SecurityType=SimpleNamespace(NONE="N/A"),
@@ -972,6 +973,43 @@ def test_futu_portfolio_provider_closes_contexts_when_classification_fails(monke
 
     assert trade_ctx.closed is True
     assert quote_ctx.closed is True
+
+
+def test_futu_account_info_query_uses_us_market_conversion_currency():
+    sdk = SimpleNamespace(
+        TrdEnv=SimpleNamespace(REAL="REAL"),
+        Currency=SimpleNamespace(USD="USD"),
+    )
+    provider = FutuOpenApiBalanceProvider(
+        acc_id=123,
+        trd_env="REAL",
+        trd_market="US",
+    )
+
+    assert provider._accinfo_kwargs(sdk) == {
+        "trd_env": "REAL",
+        "currency": "USD",
+        "acc_id": 123,
+    }
+
+
+def test_futu_account_info_query_rejects_unsupported_market():
+    sdk = SimpleNamespace(
+        TrdEnv=SimpleNamespace(REAL="REAL"),
+        Currency=SimpleNamespace(),
+    )
+    provider = FutuOpenApiBalanceProvider(
+        acc_id=123,
+        trd_env="REAL",
+        trd_market="SG",
+    )
+
+    try:
+        provider._accinfo_kwargs(sdk)
+    except ValueError as exc:
+        assert "unsupported Futu trade market" in str(exc)
+    else:
+        raise AssertionError("unsupported trade market must fail closed")
 
 
 def test_portfolio_skill_full_futu_sync_defaults_to_dry_run(monkeypatch):
