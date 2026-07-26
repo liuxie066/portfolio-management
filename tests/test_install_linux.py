@@ -49,6 +49,12 @@ def test_install_linux_plan_uses_yaml_config_and_two_timers(tmp_path):
         "host": "127.0.0.1",
         "port": 8765,
     }
+    assert payload["systemd"]["enable_quality_timer"] is False
+    assert payload["systemd"]["quality"] == {
+        "timer": install_linux.QUALITY_TIMER_NAME,
+        "service": install_linux.QUALITY_SERVICE_NAME,
+        "interval": "15min",
+    }
     assert "daily_job_args" not in payload
 
 
@@ -61,6 +67,12 @@ def test_install_linux_rendered_config_points_runtime_dirs(tmp_path):
     assert payload["data"]["dir"] == str(tmp_path / "state")
     assert payload["report"]["reports_dir"] == str(tmp_path / "reports")
     assert payload["feishu"]["app_secret"] == ""
+    assert payload["quality"] == {
+        "read_token": "",
+        "instance_id": "portfolio-management-prod",
+        "accounts": ["lx", "sy"],
+        "onboarded": False,
+    }
 
 
 def test_install_linux_apply_writes_files_without_overwriting_existing_config(tmp_path, monkeypatch):
@@ -86,6 +98,8 @@ def test_install_linux_apply_writes_files_without_overwriting_existing_config(tm
         install_linux.EVENING_SERVICE_NAME,
         install_linux.EVENING_TIMER_NAME,
         install_linux.API_SERVICE_NAME,
+        install_linux.QUALITY_SERVICE_NAME,
+        install_linux.QUALITY_TIMER_NAME,
     ):
         assert (paths.systemd_dir / unit_name).exists()
     assert commands == [["systemctl", "daemon-reload"]]
@@ -121,6 +135,18 @@ def test_install_linux_enable_api_service_is_independent_from_timers(tmp_path, m
     ]
 
 
+def test_install_linux_enable_quality_timer_is_independent(tmp_path, monkeypatch):
+    commands = []
+    monkeypatch.setattr(install_linux.subprocess, "run", lambda command, check: commands.append(command))
+
+    install_linux.apply_install(_args(tmp_path, "--apply", "--enable-quality-timer"))
+
+    assert commands == [
+        ["systemctl", "daemon-reload"],
+        ["systemctl", "enable", "--now", install_linux.QUALITY_TIMER_NAME],
+    ]
+
+
 def test_install_linux_api_service_is_loopback_only_and_long_running(tmp_path):
     paths = install_linux.build_paths(_args(tmp_path))
     unit = install_linux.render_api_service_unit(paths, run_user="portfolio")
@@ -133,6 +159,27 @@ def test_install_linux_api_service_is_loopback_only_and_long_running(tmp_path):
     assert "--allow-remote" not in unit
     assert "scripts/service.py" not in unit
     assert "flock" not in unit
+
+
+def test_install_linux_quality_units_are_read_only_scoped_and_every_15_minutes(tmp_path):
+    paths = install_linux.build_paths(_args(tmp_path))
+    service = install_linux.render_quality_service_unit(paths, run_user="portfolio")
+    timer = install_linux.render_interval_timer_unit(
+        interval="15min",
+        service_name=install_linux.QUALITY_SERVICE_NAME,
+        description="quality",
+    )
+
+    assert "Type=oneshot" in service
+    assert (
+        f"ExecStart=/usr/bin/flock -n {install_linux.QUALITY_LOCK_FILE} "
+        f"{paths.launcher_path} quality refresh --json"
+    ) in service
+    assert "RuntimeMaxSec=300" in service
+    assert "OnBootSec=5min" in timer
+    assert "OnUnitActiveSec=15min" in timer
+    assert f"Unit={install_linux.QUALITY_SERVICE_NAME}" in timer
+    assert "WantedBy=timers.target" in timer
 
 
 def test_install_linux_apply_imports_only_three_options_monitor_feishu_values(tmp_path, monkeypatch):
@@ -307,6 +354,7 @@ def test_install_shell_help_is_available():
     assert "portfolio-management installer" in result.stdout
     assert "--enable-timer" in result.stdout
     assert "--enable-api-service" in result.stdout
+    assert "--enable-quality-timer" in result.stdout
     assert "evening Futu timers" in result.stdout
     assert "--sync-futu-cash-mmf" not in result.stdout
     assert "OM_FEISHU_BOT_APP_ID" in result.stdout

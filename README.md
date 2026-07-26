@@ -77,7 +77,8 @@ feishu:
 `investment.quality_status.v1` artifact。HTTP `GET /quality/status` 只读取该
 artifact，不会触发 OpenD 刷新、飞书写入或重新计算；它使用独立
 `PM_QUALITY_READ_TOKEN`。`/health=ok` 只表示进程可用，不表示持仓、现金或 NAV
-可信。
+可信。Linux 安装器可显式启用独立的 `portfolio-quality-refresh.timer`，默认每
+15 分钟刷新一次；它和 holdings/NAV 写入 timer 相互独立。
 
 日净值记录：
 
@@ -186,6 +187,9 @@ sudo scripts/install.sh --apply --enable-timer
 
 # 如需供同机 options-monitor Copilot 读取，再独立启用 loopback API
 sudo scripts/install.sh --apply --enable-api-service
+
+# 独立启用每 15 分钟质量 artifact 刷新
+sudo scripts/install.sh --apply --enable-quality-timer
 ```
 
 完整步骤见 `docs/deploy-linux.md`。安装器使用版本化的 `scripts/portfolio_scheduled_job.sh` 编排独立 `pm futu sync` 和 `pm daily-job`；`daily-job` 中的现金/MMF内嵌参数只保留旧调用兼容。

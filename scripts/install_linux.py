@@ -26,9 +26,13 @@ TIMER_NAME = "portfolio-nav-daily.timer"
 EVENING_SERVICE_NAME = "portfolio-futu-evening.service"
 EVENING_TIMER_NAME = "portfolio-futu-evening.timer"
 API_SERVICE_NAME = "portfolio-management-api.service"
+QUALITY_SERVICE_NAME = "portfolio-quality-refresh.service"
+QUALITY_TIMER_NAME = "portfolio-quality-refresh.timer"
 DEFAULT_MORNING_ON_CALENDAR = "Mon..Sat *-*-* 08:10:00 Asia/Shanghai"
 DEFAULT_EVENING_ON_CALENDAR = "Mon..Fri *-*-* 17:10:00 Asia/Shanghai"
+DEFAULT_QUALITY_REFRESH_INTERVAL = "15min"
 SCHEDULE_LOCK_FILE = "/var/lock/portfolio-management-scheduled.lock"
+QUALITY_LOCK_FILE = "/var/lock/portfolio-management-quality.lock"
 DEFAULT_OPTIONS_MONITOR_ENV_FILE = "/etc/options-monitor/options-monitor.env"
 OPTIONS_MONITOR_FEISHU_KEYS = (
     "OM_FEISHU_BOT_APP_ID",
@@ -90,6 +94,12 @@ def render_config_yaml(paths: InstallPaths) -> str:
         "data": {"dir": str(paths.data_dir)},
         "nav": {"disable_runtime_validation": False},
         "service": {"host": "127.0.0.1", "port": 8765, "url": ""},
+        "quality": {
+            "read_token": "",
+            "instance_id": "portfolio-management-prod",
+            "accounts": ["lx", "sy"],
+            "onboarded": False,
+        },
         "calendar": {"holidays": []},
         "report": {
             "account_label": "lx",
@@ -180,6 +190,7 @@ def render_env_file(
             f"PM_DATA_DIR={paths.data_dir}",
             f"PM_REPORTS_DIR={paths.reports_dir}",
             f"PORTFOLIO_PM_BIN={paths.launcher_path}",
+            "PM_QUALITY_READ_TOKEN=",
             "PYTHONUNBUFFERED=1",
             "",
         ])
@@ -266,12 +277,45 @@ WantedBy=multi-user.target
 """
 
 
+def render_quality_service_unit(paths: InstallPaths, *, run_user: str) -> str:
+    return f"""[Unit]
+Description=portfolio-management quality artifact refresh
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User={run_user}
+WorkingDirectory={paths.app_dir}
+Environment=TZ=Asia/Shanghai
+EnvironmentFile={paths.env_file}
+ExecStart=/usr/bin/flock -n {QUALITY_LOCK_FILE} {paths.launcher_path} quality refresh --json
+RuntimeMaxSec=300
+"""
+
+
 def render_timer_unit(*, on_calendar: str, service_name: str, description: str) -> str:
     return f"""[Unit]
 Description={description}
 
 [Timer]
 OnCalendar={on_calendar}
+Persistent=true
+AccuracySec=1min
+Unit={service_name}
+
+[Install]
+WantedBy=timers.target
+"""
+
+
+def render_interval_timer_unit(*, interval: str, service_name: str, description: str) -> str:
+    return f"""[Unit]
+Description={description}
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec={interval}
 Persistent=true
 AccuracySec=1min
 Unit={service_name}
@@ -288,6 +332,8 @@ def _unit_paths(paths: InstallPaths) -> dict[str, Path]:
         "evening_service": paths.systemd_dir / EVENING_SERVICE_NAME,
         "evening_timer": paths.systemd_dir / EVENING_TIMER_NAME,
         "api_service": paths.systemd_dir / API_SERVICE_NAME,
+        "quality_service": paths.systemd_dir / QUALITY_SERVICE_NAME,
+        "quality_timer": paths.systemd_dir / QUALITY_TIMER_NAME,
     }
 
 
@@ -308,6 +354,8 @@ def build_plan(args) -> dict:
             "evening_service": str(units["evening_service"]),
             "evening_timer": str(units["evening_timer"]),
             "api_service": str(units["api_service"]),
+            "quality_service": str(units["quality_service"]),
+            "quality_timer": str(units["quality_timer"]),
             "python_bin": str(paths.python_bin),
             "launcher": str(paths.launcher_path),
         },
@@ -330,6 +378,7 @@ def build_plan(args) -> dict:
         "systemd": {
             "enable_timers": bool(args.enable_timer),
             "enable_api_service": bool(args.enable_api_service),
+            "enable_quality_timer": bool(args.enable_quality_timer),
             "lock_file": SCHEDULE_LOCK_FILE,
             "morning": {
                 "timer": TIMER_NAME,
@@ -347,6 +396,11 @@ def build_plan(args) -> dict:
                 "service": API_SERVICE_NAME,
                 "host": "127.0.0.1",
                 "port": 8765,
+            },
+            "quality": {
+                "timer": QUALITY_TIMER_NAME,
+                "service": QUALITY_SERVICE_NAME,
+                "interval": args.quality_refresh_interval,
             },
         },
         "feishu_receipt_env": {
@@ -433,6 +487,22 @@ def apply_install(args) -> dict:
             mode=0o644,
             overwrite=True,
         ),
+        str(units["quality_service"]): _write_text(
+            units["quality_service"],
+            render_quality_service_unit(paths, run_user=args.run_user),
+            mode=0o644,
+            overwrite=True,
+        ),
+        str(units["quality_timer"]): _write_text(
+            units["quality_timer"],
+            render_interval_timer_unit(
+                interval=args.quality_refresh_interval,
+                service_name=QUALITY_SERVICE_NAME,
+                description="Refresh portfolio-management quality artifact",
+            ),
+            mode=0o644,
+            overwrite=True,
+        ),
     }
 
     systemd_commands = [["systemctl", "daemon-reload"]]
@@ -440,6 +510,8 @@ def apply_install(args) -> dict:
         systemd_commands.append(["systemctl", "enable", "--now", TIMER_NAME, EVENING_TIMER_NAME])
     if args.enable_api_service:
         systemd_commands.append(["systemctl", "enable", "--now", API_SERVICE_NAME])
+    if args.enable_quality_timer:
+        systemd_commands.append(["systemctl", "enable", "--now", QUALITY_TIMER_NAME])
     for command in systemd_commands:
         subprocess.run(command, check=True)
 
@@ -453,6 +525,7 @@ def apply_install(args) -> dict:
         f"{paths.launcher_path} config doctor --json",
         f"systemctl status {TIMER_NAME} {EVENING_TIMER_NAME}",
         f"systemctl status {API_SERVICE_NAME}",
+        f"systemctl status {QUALITY_TIMER_NAME}",
     ]
     return result
 
@@ -510,6 +583,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--enable-api-service",
         action="store_true",
         help="enable and start the loopback-only portfolio HTTP API",
+    )
+    parser.add_argument(
+        "--enable-quality-timer",
+        action="store_true",
+        help="enable the independent 15-minute quality artifact refresh timer",
+    )
+    parser.add_argument(
+        "--quality-refresh-interval",
+        default=DEFAULT_QUALITY_REFRESH_INTERVAL,
+        help="systemd OnUnitActiveSec value for quality refresh",
     )
     return parser
 

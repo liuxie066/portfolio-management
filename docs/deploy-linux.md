@@ -126,6 +126,22 @@ curl -H "Authorization: Bearer $PM_QUALITY_READ_TOKEN" \
 
 安装器始终生成 unit，但只有显式传入 `--enable-api-service` 才会执行 `systemctl enable --now`。unit 固定运行 `scripts/serve.py --host 127.0.0.1 --port 8765`，不使用 `--allow-remote`，也不依赖两个 timer。普通业务接口仍只依赖 loopback 边界；质量接口额外要求独立只读 token。禁止把服务直接绑定或转发到非 loopback 网络。
 
+## 启用质量 artifact 刷新
+
+质量检查独立于 holdings/NAV 写入任务，默认每 15 分钟读取现有控制证据并原子
+发布 artifact：
+
+```bash
+sudo scripts/install.sh --apply --enable-quality-timer
+systemctl status portfolio-quality-refresh.timer
+systemctl list-timers portfolio-quality-refresh.timer
+```
+
+`portfolio-quality-refresh.service` 执行 `pm quality refresh --json`，不会主动
+触发 OpenD 同步或飞书业务写入。安装器始终生成 service/timer，但只有显式传入
+`--enable-quality-timer` 才会启用；可通过
+`--quality-refresh-interval=<systemd duration>` 覆盖默认的 `15min`。
+
 ## 启用定时任务
 
 安装器生成两组北京时间 timer：

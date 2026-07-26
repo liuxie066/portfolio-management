@@ -23,6 +23,7 @@ RUN_USER="${SUDO_USER:-${USER:-portfolio}}"
 APPLY=false
 ENABLE_TIMER=false
 ENABLE_API_SERVICE=false
+ENABLE_QUALITY_TIMER=false
 OVERWRITE_CONFIG=false
 PIP_INDEX_URL_VALUE="${PIP_INDEX_URL:-}"
 SCRIPT_DIR=""
@@ -45,6 +46,7 @@ Options:
   --apply                 Write config/env/systemd/launcher files.
   --enable-timer          Enable and start morning NAV and evening Futu timers.
   --enable-api-service     Enable and start the loopback-only portfolio HTTP API.
+  --enable-quality-timer   Enable the independent 15-minute quality refresh timer.
   --overwrite-config      Replace an existing config.yaml.
   --repo URL              Git repository URL.
   --ref REF               Branch, tag, or commit to checkout (default: main).
@@ -77,6 +79,7 @@ while [[ $# -gt 0 ]]; do
     --apply) APPLY=true; shift ;;
     --enable-timer) ENABLE_TIMER=true; shift ;;
     --enable-api-service) ENABLE_API_SERVICE=true; shift ;;
+    --enable-quality-timer) ENABLE_QUALITY_TIMER=true; shift ;;
     --overwrite-config) OVERWRITE_CONFIG=true; shift ;;
     --repo) REPO_URL="$2"; shift 2 ;;
     --ref) REF="$2"; shift 2 ;;
@@ -207,6 +210,9 @@ run_asset_installer() {
   if [[ "$ENABLE_API_SERVICE" == true ]]; then
     args+=(--enable-api-service)
   fi
+  if [[ "$ENABLE_QUALITY_TIMER" == true ]]; then
+    args+=(--enable-quality-timer)
+  fi
   if [[ "$OVERWRITE_CONFIG" == true ]]; then
     args+=(--overwrite-config)
   fi
@@ -231,4 +237,7 @@ To enable the timer later:
 
 To enable the loopback portfolio API later:
   sudo $APP_DIR/scripts/install.sh --apply --enable-api-service --dir $APP_DIR
+
+To enable quality artifact refresh later:
+  sudo $APP_DIR/scripts/install.sh --apply --enable-quality-timer --dir $APP_DIR
 EOF
