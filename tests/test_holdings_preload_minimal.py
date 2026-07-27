@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from src.app.cash_service import CashService
 from src.feishu_storage import FeishuStorage
 from src.models import Holding, AssetType
 
@@ -165,8 +166,8 @@ def test_upsert_create_after_preload_missing_key_without_refetch():
     assert len(client.list_records_calls) == 1  # preload only
     assert len(client.create_record_calls) == 1
     created_fields = client.create_record_calls[0]["fields"]
-    assert isinstance(created_fields["created_at"], int)
-    assert isinstance(created_fields["updated_at"], int)
+    assert isinstance(created_fields["created_at"], str)
+    assert isinstance(created_fields["updated_at"], str)
 
 
 def test_replace_holding_updates_absolute_quantity_and_descriptor_fields():
@@ -206,4 +207,42 @@ def test_replace_holding_updates_absolute_quantity_and_descriptor_fields():
     assert fields["asset_name"] == "人民币现金"
     assert fields["asset_type"] == "cash"
     assert fields["currency"] == "CNY"
-    assert isinstance(fields["updated_at"], int)
+    assert isinstance(fields["updated_at"], str)
+
+
+def test_sync_mmf_balance_serializes_text_timestamp():
+    client = StubHoldingsClient(
+        initial_records=[
+            {
+                "record_id": "rec_mmf",
+                "fields": {
+                    "asset_id": "CNY-MMF",
+                    "asset_name": "货币基金",
+                    "asset_type": "mmf",
+                    "account": "lx",
+                    "broker": "富途",
+                    "quantity": 644978.88,
+                    "currency": "CNY",
+                    "asset_class": "现金",
+                    "industry": "现金",
+                },
+            }
+        ]
+    )
+    storage = FeishuStorage(client=client)
+    storage.preload_holdings_index(account="lx")
+
+    result = CashService(storage).sync_cash_like_balance(
+        account="lx",
+        asset_id="CNY-MMF",
+        asset_name="货币基金",
+        asset_type=AssetType.MMF,
+        target=746470.86,
+        broker="富途",
+        dry_run=False,
+    )
+
+    assert result["updated"] is True
+    fields = client.update_record_calls[0]["fields"]
+    assert fields["quantity"] == 746470.86
+    assert isinstance(fields["updated_at"], str)

@@ -395,6 +395,7 @@ class HoldingsRepository:
         from ...time_utils import bj_now_naive
 
         now = bj_now_naive()
+        now_text = now.strftime(DATETIME_FORMAT)
         existing = self.get_holding(holding.asset_id, holding.account, holding.broker)
 
         if existing and existing.record_id:
@@ -405,7 +406,7 @@ class HoldingsRepository:
             )
             update_fields = {
                 'quantity': new_quantity,
-                'updated_at': now,
+                'updated_at': now_text,
             }
 
             new_name = holding.asset_name or existing.asset_name
@@ -499,6 +500,7 @@ class HoldingsRepository:
                 preloaded_accounts.append(account)
 
         now = bj_now_naive()
+        now_text = now.strftime(DATETIME_FORMAT)
         update_payloads: List[Dict[str, any]] = []
         update_targets: List[Holding] = []
         create_payloads: List[Dict[str, any]] = []
@@ -527,7 +529,7 @@ class HoldingsRepository:
 
                 update_fields = {
                     'quantity': new_quantity,
-                    'updated_at': now,
+                    'updated_at': now_text,
                 }
                 if mode == 'replace':
                     # Broker snapshots replace the current quantity and average
@@ -609,9 +611,10 @@ class HoldingsRepository:
         if abs(new_quantity) <= 1e-8:
             new_quantity = 0.0
         now = bj_now_naive()
+        now_text = now.strftime(DATETIME_FORMAT)
         update_fields = {
             'quantity': new_quantity,
-            'updated_at': now,
+            'updated_at': now_text,
         }
         feishu_update_fields = self._to_feishu_fields(update_fields, 'holdings')
         try:
@@ -657,9 +660,9 @@ class HoldingsRepository:
         }
 
         if holding.created_at:
-            result['created_at'] = holding.created_at
+            result['created_at'] = holding.created_at.strftime(DATETIME_FORMAT)
         if holding.updated_at:
-            result['updated_at'] = holding.updated_at
+            result['updated_at'] = holding.updated_at.strftime(DATETIME_FORMAT)
 
         return result
 

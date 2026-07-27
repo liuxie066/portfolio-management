@@ -129,7 +129,7 @@ def test_bulk_upsert_additive_preloads_once_per_account_and_batches_updates():
     assert len(client.batch_update_records_calls) == 1
     assert len(client.batch_update_records_calls[0]) == 3
     assert all(
-        isinstance(row['fields']['updated_at'], int)
+        isinstance(row['fields']['updated_at'], str)
         for row in client.batch_update_records_calls[0]
     )
     assert result['updated'] == 3
@@ -185,7 +185,7 @@ def test_bulk_upsert_replace_mixed_update_create_updates_caches():
     assert len(client.batch_update_records_calls[0]) == 1
     assert isinstance(
         client.batch_update_records_calls[0][0]['fields']['updated_at'],
-        int,
+        str,
     )
     assert len(client.batch_create_records_calls) == 1
     assert len(client.batch_create_records_calls[0]) == 1
