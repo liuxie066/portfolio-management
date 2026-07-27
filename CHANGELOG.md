@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.30 - 2026-07-27
+
+- Restored Futu MMF synchronization by serializing holdings `created_at` and `updated_at` values as `YYYY-MM-DD HH:MM:SS` text, matching the production Feishu holdings schema across single and bulk write paths.
+
 ## 0.1.29 - 2026-07-27
 
 - Accepted the documented Futu account-funds response shape, which omits `acc_id` from the returned DataFrame, while retaining explicit account selection and the independent account-list authority check.
