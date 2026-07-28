@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.31 - 2026-07-28
+
+- Removed `exchange_rate_date`, `exchange_rate_source`, and `exchange_rate_evidence_type` from the production Feishu `cash_flow` contract, projections, migrations, and models; retained FX evidence only in local operation state.
+- Added fail-closed FX confirmation/readback handling, idempotent legacy evidence migration, and explicit refusal of provider FX applies that lack the application confirmation workflow.
+- Made real NAV success and failure receipts durable through a SQLite outbox with atomic dispatcher claims, bounded retry leases, and a five-minute systemd retry timer.
+- Preserved per-account failure stages in consolidated NAV receipts and prevented immediate duplicate sends when remote delivery succeeded but local terminal-state persistence became unknown.
+- Hardened Linux installation ownership for operation-state data and reports, with schema v1-to-v2 migration and regression coverage for concurrency, restart, permissions, and failure delivery.
+
 ## 0.1.30 - 2026-07-27
 
 - Restored Futu MMF synchronization by serializing holdings `created_at` and `updated_at` values as `YYYY-MM-DD HH:MM:SS` text, matching the production Feishu holdings schema across single and bulk write paths.
