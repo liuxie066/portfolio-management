@@ -36,7 +36,8 @@ python scripts/migrate_schema.py cash-flow-effects --apply --confirm
 python scripts/migrate_schema.py check-live --strict
 ```
 
-The helper creates only missing `broker`, `exchange_rate_date`,
-`exchange_rate_source`, and `exchange_rate_evidence_type` fields. It never
-changes an incompatible existing field. Operator-view layout remains a manual
+The helper creates only a missing `broker` field. It never creates
+`exchange_rate_date`, `exchange_rate_source`, or
+`exchange_rate_evidence_type`; the strict schema check reports those names as
+forbidden if they appear in Feishu. Operator-view layout remains a manual
 Feishu configuration step.

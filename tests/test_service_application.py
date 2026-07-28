@@ -975,7 +975,7 @@ def test_portfolio_service_receipt_failure_does_not_change_sync_success(monkeypa
     assert result["receipt"]["success"] is False
 
 
-def test_portfolio_service_daily_nav_job_sends_one_receipt(monkeypatch):
+def test_portfolio_service_daily_nav_job_sends_one_receipt(monkeypatch, tmp_path):
     calls = []
 
     class FakeDailyNavJobService:
@@ -997,6 +997,7 @@ def test_portfolio_service_daily_nav_job_sends_one_receipt(monkeypatch):
             return {"success": True, "status": "sent"}
 
     import src.app as app_module
+    from src.app.operation_state_store import OperationStateStore
 
     monkeypatch.setattr(app_module, "DailyNavJobService", FakeDailyNavJobService)
     result = PortfolioService(
@@ -1004,6 +1005,7 @@ def test_portfolio_service_daily_nav_job_sends_one_receipt(monkeypatch):
         portfolio=SimpleNamespace(reporting_service=object()),
         default_account="lx",
         nav_receipt_service=FakeReceiptService(),
+        operation_state_store=OperationStateStore(tmp_path / "operations.sqlite3"),
     ).daily_nav_job(
         accounts="lx,hb,sy",
         dry_run=False,
@@ -1012,7 +1014,11 @@ def test_portfolio_service_daily_nav_job_sends_one_receipt(monkeypatch):
     )
 
     assert result["success"] is True
-    assert result["receipt"] == {"success": True, "status": "sent"}
+    assert result["receipt"] == {
+        "success": True,
+        "status": "sent",
+        "receipt_key": "nav:run-nav-receipt",
+    }
     assert calls[1][0] == "run"
     assert calls[1][1]["accounts"] == "lx,hb,sy"
     assert calls[2][0] == "receipt"
@@ -1020,7 +1026,10 @@ def test_portfolio_service_daily_nav_job_sends_one_receipt(monkeypatch):
     assert calls[2][1]["confirm"] is True
 
 
-def test_portfolio_service_nav_receipt_failure_does_not_change_job_success(monkeypatch):
+def test_portfolio_service_nav_receipt_failure_does_not_change_job_success(
+    monkeypatch,
+    tmp_path,
+):
     class FakeDailyNavJobService:
         def __init__(self, **_kwargs):
             pass
@@ -1033,6 +1042,7 @@ def test_portfolio_service_nav_receipt_failure_does_not_change_job_success(monke
             return {"success": False, "status": "failed", "error": "send failed"}
 
     import src.app as app_module
+    from src.app.operation_state_store import OperationStateStore
 
     monkeypatch.setattr(app_module, "DailyNavJobService", FakeDailyNavJobService)
     result = PortfolioService(
@@ -1040,10 +1050,95 @@ def test_portfolio_service_nav_receipt_failure_does_not_change_job_success(monke
         portfolio=SimpleNamespace(reporting_service=object()),
         default_account="lx",
         nav_receipt_service=FailedReceiptService(),
+        operation_state_store=OperationStateStore(tmp_path / "operations.sqlite3"),
     ).daily_nav_job(dry_run=False, confirm=True)
 
     assert result["success"] is True
     assert result["receipt"]["success"] is False
+
+
+def test_portfolio_service_converts_job_exception_and_sends_failure_receipt(
+    monkeypatch,
+    tmp_path,
+):
+    sent = []
+
+    class FailingDailyNavJobService:
+        def __init__(self, **_kwargs):
+            raise RuntimeError("job construction failed")
+
+    class ReceiptService:
+        def send(self, payload):
+            sent.append(dict(payload))
+            return {"success": True, "status": "sent", "message_id": "msg_fail"}
+
+    import src.app as app_module
+    from src.app.operation_state_store import OperationStateStore
+
+    monkeypatch.setattr(app_module, "DailyNavJobService", FailingDailyNavJobService)
+    result = PortfolioService(
+        storage=object(),
+        portfolio=SimpleNamespace(reporting_service=object()),
+        default_account="lx",
+        nav_receipt_service=ReceiptService(),
+        operation_state_store=OperationStateStore(tmp_path / "operations.sqlite3"),
+    ).daily_nav_job(
+        nav_date="2026-07-27",
+        accounts="lx,sy",
+        dry_run=False,
+        confirm=True,
+        run_id="run-failed",
+    )
+
+    assert result["success"] is False
+    assert result["failure"]["stage"] == "daily_nav_job"
+    assert result["receipt"]["status"] == "sent"
+    assert sent[0]["error"] == "job construction failed"
+
+
+def test_portfolio_service_does_not_resend_when_outbox_mark_is_unknown(
+    monkeypatch,
+    tmp_path,
+):
+    sent = []
+
+    class FakeDailyNavJobService:
+        def __init__(self, **_kwargs):
+            pass
+
+        def run(self, **_kwargs):
+            return {"success": False, "status": "failed", "items": []}
+
+    class ReceiptService:
+        def send(self, payload):
+            sent.append(dict(payload))
+            return {"success": True, "status": "sent", "message_id": "msg_once"}
+
+    from src.app.operation_state_store import OperationStateStore
+
+    class MarkFailingStore(OperationStateStore):
+        def mark_nav_receipt(self, *_args, **_kwargs):
+            raise OSError("disk unavailable after send")
+
+    import src.app as app_module
+
+    monkeypatch.setattr(app_module, "DailyNavJobService", FakeDailyNavJobService)
+    result = PortfolioService(
+        storage=object(),
+        portfolio=SimpleNamespace(reporting_service=object()),
+        default_account="lx",
+        nav_receipt_service=ReceiptService(),
+        operation_state_store=MarkFailingStore(tmp_path / "operations.sqlite3"),
+    ).daily_nav_job(
+        dry_run=False,
+        confirm=True,
+        run_id="run-mark-unknown",
+    )
+
+    assert len(sent) == 1
+    assert result["receipt"]["status"] == "unknown"
+    assert result["receipt"]["immediate_retry_suppressed"] is True
+    assert result["receipt"]["receipt_key"] == "nav:run-mark-unknown"
 
 
 def test_portfolio_service_get_capital_facts_uses_capital_facts_service(monkeypatch):

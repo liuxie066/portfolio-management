@@ -30,12 +30,16 @@ CASH_FLOW_TIMER_NAME = "portfolio-cash-flow-scan.timer"
 API_SERVICE_NAME = "portfolio-management-api.service"
 QUALITY_SERVICE_NAME = "portfolio-quality-refresh.service"
 QUALITY_TIMER_NAME = "portfolio-quality-refresh.timer"
+RECEIPT_SERVICE_NAME = "portfolio-receipt-dispatch.service"
+RECEIPT_TIMER_NAME = "portfolio-receipt-dispatch.timer"
 DEFAULT_MORNING_ON_CALENDAR = "Mon..Sat *-*-* 08:10:00 Asia/Shanghai"
 DEFAULT_EVENING_ON_CALENDAR = "Mon..Fri *-*-* 17:10:00 Asia/Shanghai"
 DEFAULT_QUALITY_REFRESH_INTERVAL = "15min"
+DEFAULT_RECEIPT_DISPATCH_INTERVAL = "5min"
 DEFAULT_CASH_FLOW_ON_CALENDAR = "*-*-* *:00/15:00 Asia/Shanghai"
 SCHEDULE_LOCK_FILE = "/var/lock/portfolio-management-scheduled.lock"
 QUALITY_LOCK_FILE = "/var/lock/portfolio-management-quality.lock"
+RECEIPT_LOCK_FILE = "/var/lock/portfolio-management-receipts.lock"
 DEFAULT_OPTIONS_MONITOR_ENV_FILE = "/etc/options-monitor/options-monitor.env"
 OPTIONS_MONITOR_FEISHU_KEYS = (
     "OM_FEISHU_BOT_APP_ID",
@@ -328,6 +332,23 @@ RuntimeMaxSec=300
 """
 
 
+def render_receipt_service_unit(paths: InstallPaths, *, run_user: str) -> str:
+    return f"""[Unit]
+Description=portfolio-management durable receipt dispatcher
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User={run_user}
+WorkingDirectory={paths.app_dir}
+Environment=TZ=Asia/Shanghai
+EnvironmentFile={paths.env_file}
+ExecStart=/usr/bin/flock -n {RECEIPT_LOCK_FILE} {paths.launcher_path} receipts dispatch --limit 100 --confirm --json
+RuntimeMaxSec=60
+"""
+
+
 def render_timer_unit(*, on_calendar: str, service_name: str, description: str) -> str:
     return f"""[Unit]
 Description={description}
@@ -370,6 +391,8 @@ def _unit_paths(paths: InstallPaths) -> dict[str, Path]:
         "api_service": paths.systemd_dir / API_SERVICE_NAME,
         "quality_service": paths.systemd_dir / QUALITY_SERVICE_NAME,
         "quality_timer": paths.systemd_dir / QUALITY_TIMER_NAME,
+        "receipt_service": paths.systemd_dir / RECEIPT_SERVICE_NAME,
+        "receipt_timer": paths.systemd_dir / RECEIPT_TIMER_NAME,
     }
 
 
@@ -394,6 +417,8 @@ def build_plan(args) -> dict:
             "api_service": str(units["api_service"]),
             "quality_service": str(units["quality_service"]),
             "quality_timer": str(units["quality_timer"]),
+            "receipt_service": str(units["receipt_service"]),
+            "receipt_timer": str(units["receipt_timer"]),
             "python_bin": str(paths.python_bin),
             "launcher": str(paths.launcher_path),
         },
@@ -446,6 +471,11 @@ def build_plan(args) -> dict:
                 "service": QUALITY_SERVICE_NAME,
                 "interval": args.quality_refresh_interval,
             },
+            "receipts": {
+                "timer": RECEIPT_TIMER_NAME,
+                "service": RECEIPT_SERVICE_NAME,
+                "interval": args.receipt_dispatch_interval,
+            },
         },
         "feishu_receipt_env": {
             "source": str(_as_path(args.options_monitor_env_file)),
@@ -471,6 +501,31 @@ def _mkdirs(paths: Iterable[Path]) -> list[str]:
     return created
 
 
+def _prepare_runtime_ownership(paths: InstallPaths, *, run_user: str) -> list[str]:
+    """Make runtime state writable by the systemd service identity."""
+    if os.geteuid() != 0:
+        return []
+    targets = [paths.data_dir, paths.reports_dir]
+    operation_db = paths.data_dir / "pm_operation_state.sqlite3"
+    targets.extend([
+        candidate
+        for candidate in (
+            operation_db,
+            Path(f"{operation_db}-wal"),
+            Path(f"{operation_db}-shm"),
+        )
+        if candidate.exists()
+    ])
+    commands = []
+    for target in targets:
+        command = ["chown", run_user, str(target)]
+        subprocess.run(command, check=True)
+        commands.append(" ".join(command))
+    for directory in (paths.data_dir, paths.reports_dir):
+        directory.chmod(0o750)
+    return commands
+
+
 def apply_install(args) -> dict:
     paths = build_paths(args)
     units = _unit_paths(paths)
@@ -478,6 +533,7 @@ def apply_install(args) -> dict:
     existing_env = paths.env_file.read_text(encoding="utf-8") if paths.env_file.exists() else None
     rendered_env = render_env_file(paths, receipt_env=receipt_env, existing_content=existing_env)
     _mkdirs([paths.config_dir, paths.data_dir, paths.reports_dir, paths.systemd_dir, paths.launcher_path.parent])
+    ownership_commands = _prepare_runtime_ownership(paths, run_user=args.run_user)
 
     writes = {
         str(paths.config_file): _write_text(
@@ -563,6 +619,22 @@ def apply_install(args) -> dict:
             mode=0o644,
             overwrite=True,
         ),
+        str(units["receipt_service"]): _write_text(
+            units["receipt_service"],
+            render_receipt_service_unit(paths, run_user=args.run_user),
+            mode=0o644,
+            overwrite=True,
+        ),
+        str(units["receipt_timer"]): _write_text(
+            units["receipt_timer"],
+            render_interval_timer_unit(
+                interval=args.receipt_dispatch_interval,
+                service_name=RECEIPT_SERVICE_NAME,
+                description="Retry portfolio-management durable receipts",
+            ),
+            mode=0o644,
+            overwrite=True,
+        ),
     }
 
     systemd_commands = [["systemctl", "daemon-reload"]]
@@ -574,6 +646,7 @@ def apply_install(args) -> dict:
             TIMER_NAME,
             EVENING_TIMER_NAME,
             CASH_FLOW_TIMER_NAME,
+            RECEIPT_TIMER_NAME,
         ])
     if args.enable_api_service:
         systemd_commands.append(["systemctl", "enable", "--now", API_SERVICE_NAME])
@@ -585,12 +658,13 @@ def apply_install(args) -> dict:
     result = build_plan(args)
     result["dry_run"] = False
     result["writes"] = writes
+    result["runtime_ownership"] = ownership_commands
     result["feishu_receipt_env"]["status"] = "imported" if receipt_env else "source_missing"
     result["next_steps"] = [
         f"edit {paths.config_file} and fill Feishu/Futu credentials",
         "fill the explicit futu.profiles mappings and cash_flow.effects.cutover_date",
         f"{paths.launcher_path} config doctor --json",
-        f"systemctl status {TIMER_NAME} {EVENING_TIMER_NAME} {CASH_FLOW_TIMER_NAME}",
+        f"systemctl status {TIMER_NAME} {EVENING_TIMER_NAME} {CASH_FLOW_TIMER_NAME} {RECEIPT_TIMER_NAME}",
         f"systemctl status {API_SERVICE_NAME}",
         f"systemctl status {QUALITY_TIMER_NAME}",
     ]
@@ -665,6 +739,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--quality-refresh-interval",
         default=DEFAULT_QUALITY_REFRESH_INTERVAL,
         help="systemd OnUnitActiveSec value for quality refresh",
+    )
+    parser.add_argument(
+        "--receipt-dispatch-interval",
+        default=DEFAULT_RECEIPT_DISPATCH_INTERVAL,
+        help="systemd OnUnitActiveSec value for durable receipt retry",
     )
     return parser
 

@@ -384,7 +384,7 @@ class FeishuStorage(
                 if key in ['amount', 'cny_amount', 'exchange_rate'] and value is not None and value != '':
                     parsed = self._parse_float(value)
                     result[key] = self._normalize_numeric_field(table, key, parsed) if parsed is not None else None
-                elif key in {'flow_date', 'exchange_rate_date'} and value:
+                elif key == 'flow_date' and value:
                     result[key] = value
                 else:
                     result[key] = value

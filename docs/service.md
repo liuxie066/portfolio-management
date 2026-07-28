@@ -152,7 +152,7 @@ Request:
 }
 ```
 
-Use this for a single account NAV write. `overwrite_existing` defaults to `false` across HTTP, client, application, skill compatibility, portfolio, storage, and CLI layers; set it to `true` only for a deliberate correction. For scheduled production work prefer `daily-nav-job`. A real multi-account job adds one best-effort Feishu `receipt` object to the response; dry-run returns `receipt.status=skipped`.
+Use this for a single account NAV write. `overwrite_existing` defaults to `false` across HTTP, client, application, skill compatibility, portfolio, storage, and CLI layers; set it to `true` only for a deliberate correction. For scheduled production work prefer `daily-nav-job`. A real multi-account job first persists one Feishu receipt in the local outbox, attempts immediate delivery, and returns `receipt.status=sent` or `queued`; dry-run returns `receipt.status=skipped`.
 
 ## Daily NAV Job
 

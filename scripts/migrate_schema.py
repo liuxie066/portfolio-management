@@ -25,6 +25,7 @@ class TableSpec:
     name: str
     required: dict[str, frozenset[str]]
     optional: dict[str, frozenset[str]]
+    forbidden: set[str]
     role: str = "core"
 
 
@@ -84,16 +85,6 @@ def main() -> int:
 
 CASH_FLOW_EFFECT_FIELD_DEFINITIONS = {
     "broker": {"field_name": "broker", "type": 1},
-    "exchange_rate_date": {
-        "field_name": "exchange_rate_date",
-        "type": 5,
-        "property": {"date_formatter": "yyyy-MM-dd", "auto_fill": False},
-    },
-    "exchange_rate_source": {"field_name": "exchange_rate_source", "type": 1},
-    "exchange_rate_evidence_type": {
-        "field_name": "exchange_rate_evidence_type",
-        "type": 1,
-    },
 }
 
 
@@ -187,6 +178,7 @@ def schema_expectations() -> dict:
             "role": spec.role,
             "required": sorted(spec.required),
             "optional": sorted(spec.optional),
+            "forbidden": sorted(spec.forbidden),
             "field_types": {
                 field_name: sorted(accepted)
                 for field_name, accepted in sorted({**spec.required, **spec.optional}.items())
@@ -221,7 +213,12 @@ def parse_docs_schema(path: Path = DOCS_SCHEMA) -> dict[str, TableSpec]:
         heading = heading_re.match(line.strip())
         if heading:
             cur_table = heading.group(1)
-            tables[cur_table] = TableSpec(name=cur_table, required={}, optional={})
+            tables[cur_table] = TableSpec(
+                name=cur_table,
+                required={},
+                optional={},
+                forbidden=set(),
+            )
             mode = None
             continue
 
@@ -240,10 +237,18 @@ def parse_docs_schema(path: Path = DOCS_SCHEMA) -> dict[str, TableSpec]:
         if lowered.startswith("optional fields"):
             mode = "optional"
             continue
+        if lowered.startswith("forbidden fields"):
+            mode = "forbidden"
+            continue
 
         stripped = line.strip()
         if stripped and not stripped.startswith("-"):
             mode = None
+            continue
+
+        forbidden_field = re.match(r"^-\s+`([^`]+)`(?:\s+.*)?$", stripped)
+        if forbidden_field and mode == "forbidden":
+            tables[cur_table].forbidden.add(forbidden_field.group(1).strip())
             continue
 
         field = re.match(r"^-\s+`([^`]+)`\s+\(([^)]+)\)", stripped)
@@ -322,6 +327,7 @@ def run_schema_check(strict: bool = False) -> dict[str, Any]:
                 "error": str(e),
                 "required": sorted(spec.required),
                 "optional": sorted(spec.optional),
+                "forbidden": sorted(spec.forbidden),
                 "ok": not blocking,
             }
             report["all_ok"] = False
@@ -339,6 +345,7 @@ def run_schema_check(strict: bool = False) -> dict[str, Any]:
         live_fields = set(live_by_name)
 
         missing_required = sorted(set(spec.required) - live_fields)
+        forbidden_present = sorted(spec.forbidden & live_fields)
         extra_fields = sorted(live_fields - (set(spec.required) | set(spec.optional)))
         required_type_mismatches = [
             {
@@ -360,7 +367,11 @@ def run_schema_check(strict: bool = False) -> dict[str, Any]:
             for field_name, accepted in sorted(spec.optional.items())
             if field_name in live_by_name and not _live_field_matches(live_by_name[field_name], accepted)
         ]
-        ok = not missing_required and (not strict or not required_type_mismatches)
+        ok = (
+            not missing_required
+            and not forbidden_present
+            and (not strict or not required_type_mismatches)
+        )
 
         report["tables"][table_name] = {
             "app_token": app_token,
@@ -369,8 +380,10 @@ def run_schema_check(strict: bool = False) -> dict[str, Any]:
             "blocking": blocking,
             "required": sorted(spec.required),
             "optional": sorted(spec.optional),
+            "forbidden": sorted(spec.forbidden),
             "live_fields": sorted(live_fields),
             "missing_required": missing_required,
+            "forbidden_present": forbidden_present,
             "extra_fields": extra_fields,
             "required_type_mismatches": required_type_mismatches,
             "optional_type_mismatches": optional_type_mismatches,

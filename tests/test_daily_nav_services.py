@@ -778,6 +778,43 @@ def test_daily_nav_job_blocks_cash_flow_pending():
     assert result["items"][0]["status"] == "cash_flow_pending"
 
 
+def test_daily_nav_job_converts_cash_flow_exception_and_continues_accounts():
+    class Storage:
+        def reconcile_cash_flows(self, **kwargs):
+            if kwargs["account"] == "alice":
+                raise RuntimeError("FieldNameNotFound")
+            return {"success": True, "change_count": 0, "error_count": 0}
+
+    class Runner:
+        def __init__(self, account):
+            self.account = account
+
+        def run(self, **_kwargs):
+            return {"success": True, "status": "dry_run", "account": self.account}
+
+    result = DailyNavJobService(
+        storage=Storage(),
+        portfolio=SimpleNamespace(reporting_service=object(), compensation=None),
+        calendar=BusinessCalendarService(),
+        account_runner_factory=Runner,
+    ).run(
+        nav_date="2026-05-21",
+        accounts="alice,bob",
+        dry_run=True,
+        run_id="run-cash-flow-error",
+    )
+
+    assert result["success"] is False
+    assert result["status"] == "partial"
+    assert result["items"][0]["stage"] == "cash_flow_reconcile"
+    assert result["items"][0]["failure"] == {
+        "stage": "cash_flow_reconcile",
+        "exception_type": "RuntimeError",
+        "message": "FieldNameNotFound",
+    }
+    assert result["items"][1]["success"] is True
+
+
 def test_daily_nav_job_never_applies_cash_flow_reconcile_implicitly():
     calls = []
 

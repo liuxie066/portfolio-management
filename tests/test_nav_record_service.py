@@ -8,6 +8,7 @@ from skill_api import PortfolioSkill
 from src.app.compensation_service import PartialWriteError
 from src.app.nav_finality import NavWriteContext
 from src.app.nav_record_service import NavRecordService
+from src.app.operation_state_store import OperationStateStore
 from src.models import NAVHistory, PortfolioValuation
 from src.maintenance.nav_history_repair import backfill
 from src.portfolio import PortfolioManager
@@ -49,6 +50,56 @@ def _manager(storage):
     manager._record_compensation = Mock()
     manager._print_nav_summary = Mock()
     return manager
+
+
+def test_nav_cash_flow_gate_requires_local_fx_confirmation(tmp_path):
+    storage = Mock()
+    storage.reconcile_cash_flows.return_value = {
+        "success": True,
+        "change_count": 0,
+        "error_count": 0,
+        "rows": [
+            {
+                "record_id": "cf_usd",
+                "flow_date": "2026-07-01",
+                "source_hash": "hash_1",
+                "exchange_rate": 7.2,
+                "cny_amount": 72.0,
+                "requires_fx_confirmation": True,
+                "status": "ok",
+            }
+        ],
+    }
+    operation_store = OperationStateStore(tmp_path / "operations.sqlite3")
+    service = NavRecordService(
+        manager=SimpleNamespace(),
+        storage=storage,
+        operation_state_store=operation_store,
+    )
+    service._configured_effect_service = lambda: None
+
+    with pytest.raises(ValueError, match="未经本地确认"):
+        service._assert_cash_flow_ready_for_write(
+            account="a",
+            nav_date=date(2026, 7, 1),
+        )
+
+    operation_store.record_fx_confirmation(
+        confirmation_id="fx_1",
+        record_id="cf_usd",
+        source_hash="hash_1",
+        exchange_rate="7.20",
+        exchange_rate_date="2026-07-01",
+        exchange_rate_source="provider:example",
+        exchange_rate_evidence_type="provider",
+        cny_amount="72.00",
+        confirmation={"operator": "tester"},
+    )
+
+    service._assert_cash_flow_ready_for_write(
+        account="a",
+        nav_date=date(2026, 7, 1),
+    )
 
 
 def test_nav_record_service_records_nav_through_manager_helpers():

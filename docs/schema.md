@@ -125,9 +125,6 @@ Manual rule:
 System fields:
 - `flow_type` - derived from amount sign (`DEPOSIT` / `WITHDRAW`)
 - `exchange_rate` - derived when `currency != CNY`
-- `exchange_rate_date` - historical evidence date; must equal `flow_date`
-- `exchange_rate_source` - stable provider or traceable evidence source
-- `exchange_rate_evidence_type` - `provider`, `manual_supplement`, or `cny_identity`
 - `cny_amount` - derived from `amount * exchange_rate`
 - `dedup_key` - generated for duplicate protection
 - `source` - `manual`, `system`, `broker_sync`, or repair source
@@ -144,12 +141,17 @@ Required fields:
 
 Optional fields:
 - `exchange_rate` (number) - system
-- `exchange_rate_date` (date) - system
-- `exchange_rate_source` (text) - system
-- `exchange_rate_evidence_type` (text/select) - system
 - `source` (text) - system
 - `remark` (text) - manual
 - `updated_at` (text/datetime) - system
+
+Forbidden fields:
+- `exchange_rate_date`
+- `exchange_rate_source`
+- `exchange_rate_evidence_type`
+
+Historical FX evidence is technical workflow state stored in local SQLite. It
+must never be added to or queried from the Feishu `cash_flow` table.
 
 Allowed `flow_type` values: `DEPOSIT`, `WITHDRAW`.
 

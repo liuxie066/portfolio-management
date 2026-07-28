@@ -138,11 +138,11 @@ Cash Flow 主要入口是飞书多维表手工录入。系统只接受带 broker
 预览确认。正式 NAV 同时要求 generated FX fields 与 holding effects 完成。
 完整操作和激活步骤见 `docs/cash-flow-effects-runbook.md`。
 
-生产 installer 生成三组独立 timer：周一至周六 `08:10 Asia/Shanghai` 先观测
+生产 installer 生成四组独立 timer：周一至周六 `08:10 Asia/Shanghai` 先观测
 lx/sy Futu CASH 并同步 MMF/股票/ETF，再单次执行
 `daily-job --accounts lx,hb,sy`；周一至周五 `17:10` 重复 Futu 观测/同步但不
-写 NAV；Cash Flow scanner 每 15 分钟运行一次。完整 Futu 同步位于外层调度
-脚本，不属于 `daily-job`。
+写 NAV；Cash Flow scanner 每 15 分钟运行一次；NAV 回执 dispatcher 每 5
+分钟重试本地 outbox。完整 Futu 同步位于外层调度脚本，不属于 `daily-job`。
 
 写入保护：
 

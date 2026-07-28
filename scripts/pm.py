@@ -41,6 +41,7 @@ import json
 import sys
 from datetime import date
 from pathlib import Path
+from uuid import uuid4
 
 # Ensure repo root is on sys.path for direct local imports.
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -425,12 +426,13 @@ def cmd_cash_flow_reconcile(args):
 
     def direct():
         from src.feishu_storage import FeishuStorage
-        from src.app.cash_flow_effect_store import CashFlowEffectStore
         from src.app.cash_flow_effect_service import CashFlowEffectService
+        from src.app.operation_state_store import OperationStateStore
+        from src.models import make_cf_dedup_key
 
-        effect_store = None
+        operation_store = None
         if manual_evidence and bool(args.apply):
-            effect_store = CashFlowEffectStore()
+            operation_store = OperationStateStore()
         storage = FeishuStorage()
         result = storage.reconcile_cash_flows(
             account=getattr(args, "account", None),
@@ -452,15 +454,28 @@ def cmd_cash_flow_reconcile(args):
                     "manual FX confirmation requires exactly one valid cash_flow row"
                 )
             row = rows[0]
-            confirmation_id = effect_store.record_fx_confirmation(
+            evidence = dict(row.get("fx_evidence") or {})
+            if evidence.get("exchange_rate_evidence_type") != "manual_supplement":
+                raise RuntimeError("manual FX confirmation lacks local evidence payload")
+            readback = storage.get_cash_flow(str(row["record_id"]))
+            if (
+                readback is None
+                or str(readback.exchange_rate) != str(float(row["exchange_rate"]))
+                or str(readback.cny_amount) != str(float(row["cny_amount"]))
+                or make_cf_dedup_key(readback) != str(row["source_hash"])
+            ):
+                raise RuntimeError(
+                    "manual FX confirmation refused: Feishu readback does not "
+                    "match the applied reconciliation"
+                )
+            confirmation_id = operation_store.record_fx_confirmation(
+                confirmation_id=uuid4().hex,
                 record_id=str(row["record_id"]),
                 source_hash=str(row["source_hash"]),
                 exchange_rate=str(row["exchange_rate"]),
-                exchange_rate_date=str(row["exchange_rate_date"]),
-                exchange_rate_source=str(row["exchange_rate_source"]),
-                exchange_rate_evidence_type=str(
-                    row["exchange_rate_evidence_type"]
-                ),
+                exchange_rate_date=str(evidence["exchange_rate_date"]),
+                exchange_rate_source=str(evidence["exchange_rate_source"]),
+                exchange_rate_evidence_type=str(evidence["exchange_rate_evidence_type"]),
                 cny_amount=str(row["cny_amount"]),
                 confirmation=CashFlowEffectService._operator_context(),
             )
@@ -471,6 +486,22 @@ def cmd_cash_flow_reconcile(args):
     res = _call_backend(args, direct)
     _emit_cash_flow_reconcile(res, args.json)
     return res
+
+
+def cmd_cash_flow_fx_import_legacy(args):
+    if not bool(args.confirm):
+        raise SystemExit("cash-flow fx-evidence import-legacy requires --confirm")
+    from src.app.cash_flow_effect_store import CashFlowEffectStore
+    from src.app.operation_state_store import OperationStateStore
+
+    legacy_path = args.legacy_db or CashFlowEffectStore.resolve_db_path()
+    result = {
+        "success": True,
+        "legacy_db": str(legacy_path),
+        **OperationStateStore().import_legacy_fx_confirmations(legacy_path),
+    }
+    _dump(result, bool(args.json))
+    return result
 
 
 def _cash_flow_effect_components():
@@ -1073,6 +1104,16 @@ def cmd_init_nav(args):
     return res
 
 
+def cmd_receipts_dispatch(args):
+    if not bool(args.confirm):
+        raise SystemExit("receipts dispatch requires --confirm")
+    from src.app.nav_receipt_outbox_service import NavReceiptOutboxService
+
+    result = NavReceiptOutboxService().dispatch_pending(limit=int(args.limit))
+    _dump(result, bool(args.json))
+    return result
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="pm", description="portfolio-management CLI")
     p.add_argument("--json", action="store_true", help="output JSON")
@@ -1173,6 +1214,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_quality_refresh.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
     p_quality_refresh.set_defaults(func=cmd_quality_refresh)
 
+    p_receipts = sp.add_parser("receipts", help="durable notification delivery")
+    receipts_sub = p_receipts.add_subparsers(dest="receipts_cmd", required=True)
+    p_receipts_dispatch = receipts_sub.add_parser(
+        "dispatch",
+        help="retry due NAV receipt outbox rows",
+    )
+    p_receipts_dispatch.add_argument("--limit", type=int, default=100)
+    p_receipts_dispatch.add_argument("--confirm", action="store_true")
+    p_receipts_dispatch.add_argument(
+        "--json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="output JSON",
+    )
+    p_receipts_dispatch.set_defaults(func=cmd_receipts_dispatch)
+
     p_hold = sp.add_parser("holdings", help="list holdings")
     p_hold.add_argument("--include-price", action="store_true", help="include price fields (may be slow)")
     p_hold.add_argument("--account", default=argparse.SUPPRESS, help="account to operate on; defaults to config/PORTFOLIO_ACCOUNT")
@@ -1230,6 +1287,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_cash_flow_reconcile.add_argument("--confirm", action="store_true", help="required with --apply")
     p_cash_flow_reconcile.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
     p_cash_flow_reconcile.set_defaults(func=cmd_cash_flow_reconcile)
+
+    p_cash_flow_fx = cash_flow_sub.add_parser(
+        "fx-evidence",
+        help="manage local FX confirmation evidence",
+    )
+    cash_flow_fx_sub = p_cash_flow_fx.add_subparsers(
+        dest="cash_flow_fx_cmd",
+        required=True,
+    )
+    p_cash_flow_fx_import = cash_flow_fx_sub.add_parser(
+        "import-legacy",
+        help="idempotently import confirmations from an old effects database",
+    )
+    p_cash_flow_fx_import.add_argument("--legacy-db", default=None)
+    p_cash_flow_fx_import.add_argument("--confirm", action="store_true")
+    p_cash_flow_fx_import.add_argument(
+        "--json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+    )
+    p_cash_flow_fx_import.set_defaults(func=cmd_cash_flow_fx_import_legacy)
 
     p_cash_flow_review = cash_flow_sub.add_parser(
         "review",

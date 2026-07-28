@@ -12,6 +12,14 @@ delivery. The existing durable compensation log owns compensation task state.
 2. Configure one persistent `data.dir`, `cash_flow.effects.db_path`, immutable
    `cash_flow.effects.cutover_date`, `futu.profiles`, and the existing
    `feishu.receipt.*` values.
+   On upgrade, confirmations in the default `cash_flow_effects.sqlite3` are
+   imported idempotently into `pm_operation_state.sqlite3` by NAV preflight.
+   For a non-default legacy DB path, import it before enabling timers:
+
+   ```bash
+   pm cash-flow fx-evidence import-legacy \
+     --legacy-db /persistent/path/cash_flow_effects.sqlite3 --confirm --json
+   ```
 3. Preview and apply the Feishu schema migration:
 
    ```bash
@@ -114,7 +122,7 @@ pm cash-flow effects backup \
 
 Recovery is forward-only:
 
-1. Stop all three timers and the PM API.
+1. Stop all four timers and the PM API.
 2. Preserve the failed database and its `-wal`/`-shm` companions.
 3. Restore a verified online-backup artifact to the exact configured
    `cash_flow.effects.db_path` while no PM process is running.

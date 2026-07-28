@@ -213,7 +213,9 @@ class NavHistoryReceiptService:
             return f"⏭ {account}｜{label}{suffix}"
 
         error = item.get("error") or "unknown error"
-        return f"❌ {account}｜{status or 'failed'}｜{error}"
+        stage = str(item.get("stage") or "").strip()
+        stage_text = f"｜阶段 {stage}" if stage else ""
+        return f"❌ {account}｜{status or 'failed'}{stage_text}｜{error}"
 
     @staticmethod
     def _warning_summary(items: list[dict[str, Any]]) -> tuple[Optional[str], list[str]]:

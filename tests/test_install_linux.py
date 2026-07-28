@@ -23,7 +23,7 @@ def _args(tmp_path: Path, *extra: str):
     ])
 
 
-def test_install_linux_plan_uses_yaml_config_and_three_timers(tmp_path):
+def test_install_linux_plan_uses_yaml_config_and_durable_receipt_timer(tmp_path):
     payload = install_linux.build_plan(_args(tmp_path))
 
     assert payload["success"] is True
@@ -60,6 +60,11 @@ def test_install_linux_plan_uses_yaml_config_and_three_timers(tmp_path):
         "timer": install_linux.QUALITY_TIMER_NAME,
         "service": install_linux.QUALITY_SERVICE_NAME,
         "interval": "15min",
+    }
+    assert payload["systemd"]["receipts"] == {
+        "timer": install_linux.RECEIPT_TIMER_NAME,
+        "service": install_linux.RECEIPT_SERVICE_NAME,
+        "interval": "5min",
     }
     assert "daily_job_args" not in payload
 
@@ -108,6 +113,8 @@ def test_install_linux_apply_writes_files_without_overwriting_existing_config(tm
         install_linux.API_SERVICE_NAME,
         install_linux.QUALITY_SERVICE_NAME,
         install_linux.QUALITY_TIMER_NAME,
+        install_linux.RECEIPT_SERVICE_NAME,
+        install_linux.RECEIPT_TIMER_NAME,
     ):
         assert (paths.systemd_dir / unit_name).exists()
     assert commands == [["systemctl", "daemon-reload"]]
@@ -128,6 +135,7 @@ def test_install_linux_enable_starts_all_timers(tmp_path, monkeypatch):
             install_linux.TIMER_NAME,
             install_linux.EVENING_TIMER_NAME,
             install_linux.CASH_FLOW_TIMER_NAME,
+            install_linux.RECEIPT_TIMER_NAME,
         ],
     ]
 
@@ -189,6 +197,57 @@ def test_install_linux_quality_units_are_read_only_scoped_and_every_15_minutes(t
     assert "OnUnitActiveSec=15min" in timer
     assert f"Unit={install_linux.QUALITY_SERVICE_NAME}" in timer
     assert "WantedBy=timers.target" in timer
+
+
+def test_install_linux_receipt_units_retry_durable_outbox_every_five_minutes(tmp_path):
+    paths = install_linux.build_paths(_args(tmp_path))
+    service = install_linux.render_receipt_service_unit(
+        paths,
+        run_user="portfolio",
+    )
+    timer = install_linux.render_interval_timer_unit(
+        interval="5min",
+        service_name=install_linux.RECEIPT_SERVICE_NAME,
+        description="receipts",
+    )
+
+    assert (
+        f"ExecStart=/usr/bin/flock -n {install_linux.RECEIPT_LOCK_FILE} "
+        f"{paths.launcher_path} receipts dispatch --limit 100 --confirm --json"
+    ) in service
+    assert "RuntimeMaxSec=60" in service
+    assert "OnUnitActiveSec=5min" in timer
+    assert f"Unit={install_linux.RECEIPT_SERVICE_NAME}" in timer
+
+
+def test_install_linux_root_apply_assigns_runtime_dirs_to_service_user(
+    tmp_path,
+    monkeypatch,
+):
+    paths = install_linux.build_paths(_args(tmp_path))
+    paths.data_dir.mkdir(parents=True)
+    paths.reports_dir.mkdir(parents=True)
+    operation_db = paths.data_dir / "pm_operation_state.sqlite3"
+    operation_db.write_text("", encoding="utf-8")
+    commands = []
+    monkeypatch.setattr(install_linux.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        install_linux.subprocess,
+        "run",
+        lambda command, check: commands.append(command),
+    )
+
+    rendered = install_linux._prepare_runtime_ownership(
+        paths,
+        run_user="portfolio",
+    )
+
+    assert ["chown", "portfolio", str(paths.data_dir)] in commands
+    assert ["chown", "portfolio", str(paths.reports_dir)] in commands
+    assert ["chown", "portfolio", str(operation_db)] in commands
+    assert paths.data_dir.stat().st_mode & 0o777 == 0o750
+    assert paths.reports_dir.stat().st_mode & 0o777 == 0o750
+    assert rendered == [" ".join(command) for command in commands]
 
 
 def test_install_linux_apply_imports_only_three_options_monitor_feishu_values(tmp_path, monkeypatch):
@@ -364,6 +423,6 @@ def test_install_shell_help_is_available():
     assert "--enable-timer" in result.stdout
     assert "--enable-api-service" in result.stdout
     assert "--enable-quality-timer" in result.stdout
-    assert "evening Futu timers" in result.stdout
+    assert "receipt timers" in result.stdout
     assert "--sync-futu-cash-mmf" not in result.stdout
     assert "OM_FEISHU_BOT_APP_ID" in result.stdout

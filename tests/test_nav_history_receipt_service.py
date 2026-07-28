@@ -355,3 +355,26 @@ def test_nav_receipt_formats_top_level_skip_without_account_items():
     assert "状态｜⏭ 无需写入" in text
     assert "结果｜写入 0，跳过 1，失败 0" in text
     assert "Run ID｜run-skip" in text
+
+
+def test_nav_receipt_includes_structured_failure_stage():
+    text = NavHistoryReceiptService.build_message(
+        {
+            "success": False,
+            "status": "failed",
+            "date": "2026-07-27",
+            "run_id": "run-failed",
+            "items": [
+                {
+                    "success": False,
+                    "status": "failed",
+                    "account": "lx",
+                    "stage": "cash_flow_reconcile",
+                    "error": "FieldNameNotFound",
+                }
+            ],
+        }
+    )
+
+    assert "阶段 cash_flow_reconcile" in text
+    assert "FieldNameNotFound" in text

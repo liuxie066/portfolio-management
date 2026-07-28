@@ -153,7 +153,8 @@ flowchart TB
 7. Build one priced valuation snapshot per account.
 8. Record NAV and then persist `holdings_snapshot`.
 9. Return per-account status and summary.
-10. `PortfolioService` sends one best-effort consolidated NAV receipt for a real job.
+10. `PortfolioService` persists one consolidated NAV receipt before immediate
+    delivery; the independent dispatcher retries failed delivery.
 
 Production Futu accounts run `pm futu sync` as an independent step before
 `daily-job`. This observes per-currency CASH and updates MMF, STOCK/ETF
@@ -167,7 +168,7 @@ date. The embedded daily-job option has the same observe-only CASH semantics.
 - `CashFlowEffectService` owns durable CASH discovery, preview/confirmation,
   compensation, and the NAV gate.
 - `FutuSyncReceiptService` owns the best-effort Feishu receipt after a real Futu write; delivery failure is reported separately from sync success.
-- `NavHistoryReceiptService` owns the one-message multi-account NAV receipt after a real `daily-job`; delivery failure is reported separately from NAV success.
+- `NavHistoryReceiptService` renders and sends the one-message multi-account NAV receipt; `NavReceiptOutboxService` persists it first and retries delivery independently from NAV success.
 - `scripts/portfolio_scheduled_job.sh` owns production ordering: lx/sy Futu sync first, then the morning multi-account NAV job.
 - `AccountNavRecorderService` owns snapshot build, NAV write, and holdings
   snapshot persistence; its embedded Futu path observes CASH and syncs MMF.

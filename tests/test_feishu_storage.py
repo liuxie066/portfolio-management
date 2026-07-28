@@ -857,9 +857,6 @@ class TestFeishuStorageCashFlowOperations:
         assert result['rows'][0]['updates'] == {
             'flow_type': 'DEPOSIT',
             'exchange_rate': 1.0,
-            'exchange_rate_date': date(2025, 3, 14),
-            'exchange_rate_source': 'currency_identity',
-            'exchange_rate_evidence_type': 'cny_identity',
             'cny_amount': 100000.0,
             'dedup_key': expected_key,
             'source': 'manual',
@@ -867,6 +864,11 @@ class TestFeishuStorageCashFlowOperations:
         self.mock_client.batch_update_records.assert_not_called()
         self.mock_client.list_records.assert_called_once()
         assert self.mock_client.list_records.call_args.kwargs['field_names'] == self.storage.CASH_FLOW_RECONCILE_FIELDS
+        assert not {
+            'exchange_rate_date',
+            'exchange_rate_source',
+            'exchange_rate_evidence_type',
+        } & set(self.storage.CASH_FLOW_RECONCILE_FIELDS)
 
     def test_reconcile_cash_flows_falls_back_when_updated_at_missing(self):
         """live cash_flow 表没有 updated_at 时，reconcile 应降级投影字段继续读。"""
@@ -918,6 +920,28 @@ class TestFeishuStorageCashFlowOperations:
         assert updates['exchange_rate'] == 7.2
         assert updates['cny_amount'] == 72.0
         assert updates['flow_type'] == 'DEPOSIT'
+        assert result['rows'][0]['fx_evidence'] == {
+            'exchange_rate_date': '2025-03-14',
+            'exchange_rate_source': 'injected_historical_rate',
+            'exchange_rate_evidence_type': 'provider',
+        }
+        assert not {
+            'exchange_rate_date',
+            'exchange_rate_source',
+            'exchange_rate_evidence_type',
+        } & set(updates)
+
+    def test_reconcile_cash_flows_refuses_repository_level_provider_apply(self):
+        with pytest.raises(
+            ValueError,
+            match="provider FX apply requires the application confirmation workflow",
+        ):
+            self.storage.reconcile_cash_flows(
+                account="测试账户",
+                dry_run=False,
+                fx_rates={"USDCNY": {"rate": 7.2, "date": "2025-03-14", "source": "test"}},
+            )
+        self.mock_client.batch_update_records.assert_not_called()
 
     def test_reconcile_cash_flows_recomputes_system_fields_after_manual_amount_edit(self):
         """已补齐行被手工改 amount 后，reconcile 应保留汇率并重算系统字段。"""

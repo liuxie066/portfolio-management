@@ -44,7 +44,7 @@ Usage:
 
 Options:
   --apply                 Write config/env/systemd/launcher files.
-  --enable-timer          Enable and start morning NAV and evening Futu timers.
+  --enable-timer          Enable morning NAV, evening Futu, Cash Flow, and receipt timers.
   --enable-api-service     Enable and start the loopback-only portfolio HTTP API.
   --enable-quality-timer   Enable the independent 15-minute quality refresh timer.
   --overwrite-config      Replace an existing config.yaml.

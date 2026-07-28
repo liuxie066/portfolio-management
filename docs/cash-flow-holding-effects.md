@@ -105,17 +105,16 @@ ${PM_DATA_DIR}/cash_flow_effects.sqlite3
 `cny_amount` 和 `exchange_rate` 仍服务于 NAV/报告的人民币计价，不参与
 同币种 CASH 目标计算。
 
-为使历史汇率证据可审计，在 `cash_flow` 增加系统生成字段：
-
-- `exchange_rate_date`：汇率适用日期；非 CNY 必须等于 `flow_date`。
-- `exchange_rate_source`：provider/资料来源的稳定标识，不能只写“manual”。
-- `exchange_rate_evidence_type`：`provider`、`manual_supplement` 或
-  `cny_identity`。
+历史汇率证据属于本地技术工作流状态，不属于飞书 `cash_flow` 业务契约。
+`exchange_rate_date`、`exchange_rate_source` 和
+`exchange_rate_evidence_type` 禁止添加到飞书表，也禁止出现在飞书查询或写入
+projection 中；它们只保存在 `${PM_DATA_DIR}/pm_operation_state.sqlite3`。
 
 人工补证只在历史 provider 无法取得 `flow_date` 汇率时允许。用户必须显式提供
 rate、rate date 和可追溯 source，再通过独立
-`pm cash-flow reconcile --apply --confirm` 写回。缺任一字段、date 不匹配
-flow_date、source 含糊或确认记录不存在时，generated-field gate 继续阻断。
+`pm cash-flow reconcile --apply --confirm` 写入 `exchange_rate` 和
+`cny_amount`，readback 成功后再保存本地证据。缺任一证据、date 不匹配
+flow_date、source 含糊或本地确认记录不存在时，generated-field gate 继续阻断。
 补证入口按单条记录执行：
 
 ```bash
@@ -232,7 +231,7 @@ fingerprint 使用规范 Decimal 和版本化 canonical JSON。初次 activation
 明确的 `record_only` baseline 接受操作或受控 recovery 能更新
 `last_confirmed_*`。普通 scan 只能更新 observation，不能暗中接受新 baseline。
 
-### 5.6 `cash_flow_fx_confirmations`
+### 5.6 `pm_operation_state.cash_flow_fx_confirmations`
 
 generated fields 的 append-only 确认证据：
 
@@ -247,9 +246,16 @@ generated fields 的 append-only 确认证据：
 - `confirmation_json`
 - `confirmed_at`
 
-`confirmation_json` 与第 13 节相同，只保存未认证的本机 CLI 上下文。飞书中
+该表位于独立、自动初始化的 `pm_operation_state.sqlite3`，不依赖 Cash Flow
+effects cutover。`confirmation_json` 与第 13 节相同，只保存未认证的本机 CLI 上下文。飞书中
 generated fields 后续被修改时，旧 `source_hash` 的确认不得继续使用；
 重新 reconcile 和确认后才可通过 gate。
+
+默认 effects DB 路径升级时，旧确认会在 NAV preflight 中幂等迁移。
+自定义旧库路径必须先执行
+`pm cash-flow fx-evidence import-legacy --legacy-db PATH --confirm`，再启用 NAV
+timer。repository 级 provider `fx_rates` 只允许 dry-run；没有 application
+readback 与本地确认编排时拒绝真实 apply。
 
 ### 5.7 `cash_flow_effect_receipts`
 

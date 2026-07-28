@@ -199,6 +199,96 @@ class DailyNavJobService:
             summary[status] = summary.get(status, 0) + 1
         return summary
 
+    def _run_account(
+        self,
+        *,
+        target_account: str,
+        resolved_nav_date: date,
+        dry_run: bool,
+        confirm: bool,
+        overwrite_existing: bool,
+        price_timeout: int,
+        use_bulk_persist: bool,
+        sync_futu_cash_mmf: bool,
+        resolved_sync_futu_dry_run: bool,
+        resolved_run_id: str,
+        run_quote_pool: RunQuotePool,
+    ) -> Dict[str, Any]:
+        stage = "duplicate_audit"
+        try:
+            duplicate_audit = self._audit_duplicates(target_account)
+            if duplicate_audit:
+                return {
+                    "status": "nav_history_duplicate",
+                    "success": False,
+                    "account": target_account,
+                    "date": resolved_nav_date.isoformat(),
+                    "error": "nav_history has duplicate account/date records; repair before NAV write",
+                    "duplicate_audit": duplicate_audit,
+                }
+
+            stage = "cash_flow_reconcile"
+            cash_flow_blocker = self._cash_flow_blocker(target_account)
+            if cash_flow_blocker:
+                cash_flow_blocker.setdefault("date", resolved_nav_date.isoformat())
+                return cash_flow_blocker
+
+            stage = "existing_nav_check"
+            if not overwrite_existing:
+                existing_item = self._existing_nav_item(
+                    target_account,
+                    resolved_nav_date,
+                )
+                if existing_item:
+                    return existing_item
+
+            stage = "account_nav"
+            item_run_id = f"{resolved_run_id}:{target_account}"
+            write_context = NavWriteContext(
+                status="final",
+                writer="daily-nav-job",
+                write_reason="canonical_daily_nav_job",
+                nav_date=resolved_nav_date,
+                run_id=item_run_id,
+            )
+            result = self._account_runner(target_account).run(
+                nav_date=resolved_nav_date,
+                price_timeout=price_timeout,
+                dry_run=dry_run,
+                confirm=confirm,
+                overwrite_existing=overwrite_existing,
+                use_bulk_persist=use_bulk_persist,
+                sync_futu_cash_mmf=sync_futu_cash_mmf,
+                sync_futu_dry_run=resolved_sync_futu_dry_run,
+                run_id=item_run_id,
+                nav_write_context=write_context,
+                run_quote_pool=run_quote_pool,
+            )
+            result.setdefault("account", target_account)
+            result.setdefault("date", resolved_nav_date.isoformat())
+            result.setdefault(
+                "status",
+                "dry_run"
+                if dry_run and result.get("success")
+                else ("written" if result.get("success") else "failed"),
+            )
+            return result
+        except Exception as exc:
+            error = str(exc) or exc.__class__.__name__
+            return {
+                "status": "failed",
+                "success": False,
+                "account": target_account,
+                "date": resolved_nav_date.isoformat(),
+                "stage": stage,
+                "error": error,
+                "failure": {
+                    "stage": stage,
+                    "exception_type": exc.__class__.__name__,
+                    "message": error,
+                },
+            }
+
     def run(
         self,
         *,
@@ -284,58 +374,21 @@ class DailyNavJobService:
             else (False if sync_futu_dry_run is None else sync_futu_dry_run)
         )
         for target_account in target_accounts:
-            duplicate_audit = self._audit_duplicates(target_account)
-            if duplicate_audit:
-                items.append({
-                    "status": "nav_history_duplicate",
-                    "success": False,
-                    "account": target_account,
-                    "date": resolved_nav_date.isoformat(),
-                    "error": "nav_history has duplicate account/date records; repair before NAV write",
-                    "duplicate_audit": duplicate_audit,
-                })
-                continue
-
-            cash_flow_blocker = self._cash_flow_blocker(target_account)
-            if cash_flow_blocker:
-                cash_flow_blocker.setdefault("date", resolved_nav_date.isoformat())
-                items.append(cash_flow_blocker)
-                continue
-
-            if not overwrite_existing:
-                existing_item = self._existing_nav_item(target_account, resolved_nav_date)
-                if existing_item:
-                    items.append(existing_item)
-                    continue
-
-            item_run_id = f"{resolved_run_id}:{target_account}"
-            write_context = NavWriteContext(
-                status="final",
-                writer="daily-nav-job",
-                write_reason="canonical_daily_nav_job",
-                nav_date=resolved_nav_date,
-                run_id=item_run_id,
+            items.append(
+                self._run_account(
+                    target_account=target_account,
+                    resolved_nav_date=resolved_nav_date,
+                    dry_run=dry_run,
+                    confirm=confirm,
+                    overwrite_existing=overwrite_existing,
+                    price_timeout=price_timeout,
+                    use_bulk_persist=use_bulk_persist,
+                    sync_futu_cash_mmf=sync_futu_cash_mmf,
+                    resolved_sync_futu_dry_run=resolved_sync_futu_dry_run,
+                    resolved_run_id=resolved_run_id,
+                    run_quote_pool=run_quote_pool,
+                )
             )
-            result = self._account_runner(target_account).run(
-                nav_date=resolved_nav_date,
-                price_timeout=price_timeout,
-                dry_run=dry_run,
-                confirm=confirm,
-                overwrite_existing=overwrite_existing,
-                use_bulk_persist=use_bulk_persist,
-                sync_futu_cash_mmf=sync_futu_cash_mmf,
-                sync_futu_dry_run=resolved_sync_futu_dry_run,
-                run_id=item_run_id,
-                nav_write_context=write_context,
-                run_quote_pool=run_quote_pool,
-            )
-            result.setdefault("account", target_account)
-            result.setdefault("date", resolved_nav_date.isoformat())
-            result.setdefault(
-                "status",
-                "dry_run" if dry_run and result.get("success") else ("written" if result.get("success") else "failed"),
-            )
-            items.append(result)
 
         summary = self._summarize(items)
         blocking_statuses = {

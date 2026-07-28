@@ -25,6 +25,7 @@ class PortfolioService:
         read_service_factory: Optional[Any] = None,
         futu_receipt_service: Optional[Any] = None,
         nav_receipt_service: Optional[Any] = None,
+        operation_state_store: Optional[Any] = None,
         quality_service: Optional[Any] = None,
         default_account: Optional[str] = None,
     ):
@@ -36,6 +37,7 @@ class PortfolioService:
         self._read_service_factory = read_service_factory
         self._futu_receipt_service = futu_receipt_service
         self._nav_receipt_service = nav_receipt_service
+        self._operation_state_store = operation_state_store
         self._quality_service = quality_service
         self._default_account = default_account
 
@@ -664,32 +666,89 @@ class PortfolioService:
         force_non_business_day: bool = False,
         run_id: Optional[str] = None,
     ) -> Dict[str, Any]:
+        from src.app.business_calendar_service import BusinessCalendarService
         from src.app import DailyNavJobService
         from src.app.nav_history_receipt_service import NavHistoryReceiptService
-
-        result = DailyNavJobService(
-            storage=self.storage,
-            portfolio=self.portfolio,
-            default_account=self._resolve_account(None),
-            read_service_factory=self._read_service_factory,
-        ).run(
-            nav_date=nav_date,
-            run_date=run_date,
-            accounts=accounts,
-            account=account,
-            price_timeout=price_timeout,
-            dry_run=dry_run,
-            confirm=confirm,
-            overwrite_existing=overwrite_existing,
-            use_bulk_persist=use_bulk_persist,
-            sync_futu_cash_mmf=sync_futu_cash_mmf,
-            sync_futu_dry_run=sync_futu_dry_run,
-            force_non_business_day=force_non_business_day,
-            run_id=run_id,
+        from src.app.nav_receipt_outbox_service import (
+            NavReceiptOutboxService,
+            ReceiptDispatchStateUnknown,
         )
+        from src.run_id import new_run_id
+
+        resolved_run_id = run_id or new_run_id("daily-nav-job", account or "multi")
+        try:
+            result = DailyNavJobService(
+                storage=self.storage,
+                portfolio=self.portfolio,
+                default_account=self._resolve_account(None),
+                read_service_factory=self._read_service_factory,
+            ).run(
+                nav_date=nav_date,
+                run_date=run_date,
+                accounts=accounts,
+                account=account,
+                price_timeout=price_timeout,
+                dry_run=dry_run,
+                confirm=confirm,
+                overwrite_existing=overwrite_existing,
+                use_bulk_persist=use_bulk_persist,
+                sync_futu_cash_mmf=sync_futu_cash_mmf,
+                sync_futu_dry_run=sync_futu_dry_run,
+                force_non_business_day=force_non_business_day,
+                run_id=resolved_run_id,
+            )
+        except Exception as exc:
+            error = str(exc) or exc.__class__.__name__
+            try:
+                resolved_date = (
+                    str(nav_date)[:10]
+                    if nav_date is not None and str(nav_date) != "auto"
+                    else BusinessCalendarService.from_config()
+                    .default_nav_date(run_date=run_date)
+                    .isoformat()
+                )
+            except Exception:
+                resolved_date = str(nav_date or "unknown")
+            result = {
+                "success": False,
+                "status": "failed",
+                "date": resolved_date,
+                "run_id": resolved_run_id,
+                "dry_run": dry_run,
+                "confirm": confirm,
+                "items": [],
+                "summary": {"failed": 1},
+                "error": error,
+                "failure": {
+                    "stage": "daily_nav_job",
+                    "exception_type": exc.__class__.__name__,
+                    "message": error,
+                },
+            }
         result = dict(result)
         result.setdefault("dry_run", dry_run)
         result.setdefault("confirm", confirm)
-        receipt_service = self._nav_receipt_service or NavHistoryReceiptService()
-        result["receipt"] = receipt_service.send(result)
+        result.setdefault("run_id", resolved_run_id)
+        receipt_sender = self._nav_receipt_service or NavHistoryReceiptService()
+        if bool(result.get("dry_run", True)):
+            result["receipt"] = receipt_sender.send(result)
+            return result
+        try:
+            result["receipt"] = NavReceiptOutboxService(
+                store=self._operation_state_store,
+                sender=receipt_sender,
+            ).enqueue_and_dispatch(result)
+        except ReceiptDispatchStateUnknown as exc:
+            result["receipt"] = {
+                **exc.delivery,
+                "success": False,
+                "status": "unknown",
+                "receipt_key": exc.receipt_key,
+                "outbox_error": str(exc),
+                "immediate_retry_suppressed": True,
+            }
+        except Exception as exc:
+            fallback = dict(receipt_sender.send(result))
+            fallback["outbox_error"] = str(exc) or exc.__class__.__name__
+            result["receipt"] = fallback
         return result

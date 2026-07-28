@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import json
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any, Optional
 
 from src import config
@@ -27,10 +28,12 @@ class NavRecordService:
         manager: Any,
         storage: Any,
         cash_flow_effect_service: Any = None,
+        operation_state_store: Any = None,
     ):
         self.manager = manager
         self.storage = storage
         self._cash_flow_effect_service = cash_flow_effect_service
+        self._operation_state_store = operation_state_store
 
     def _load_navs(self, account: str) -> list:
         preload = getattr(self.storage, "preload_nav_index", None)
@@ -118,37 +121,40 @@ class NavRecordService:
             if isinstance(result, dict) and isinstance(result.get("rows"), list)
             else []
         )
-        manual_rows = [
+        foreign_rows = [
             row
             for row in result_rows
             if row.get("status") != "error"
-            and row.get("exchange_rate_evidence_type") == "manual_supplement"
+            and row.get("requires_fx_confirmation")
         ]
-        if manual_rows and effect_service is None:
-            raise ValueError(
-                "NAV 写入拒绝：manual FX evidence 缺少 SQLite 确认记录"
-            )
-        if effect_service is not None:
-            for row in manual_rows:
-                confirmation = effect_service.store.latest_fx_confirmation(
+        if foreign_rows:
+            from src.app.operation_state_store import OperationStateStore
+
+            operation_store = self._operation_state_store or OperationStateStore()
+            operation_store.import_default_legacy_fx_confirmations()
+            for row in foreign_rows:
+                confirmation = operation_store.latest_fx_confirmation(
                     str(row.get("record_id") or "")
                 )
-                expected = {
-                    "source_hash": str(row.get("source_hash") or ""),
-                    "exchange_rate": str(row.get("exchange_rate")),
-                    "exchange_rate_date": str(row.get("exchange_rate_date")),
-                    "exchange_rate_source": str(row.get("exchange_rate_source")),
-                    "exchange_rate_evidence_type": str(
-                        row.get("exchange_rate_evidence_type")
-                    ),
-                    "cny_amount": str(row.get("cny_amount")),
-                }
-                if not confirmation or any(
-                    str(confirmation.get(key)) != value
-                    for key, value in expected.items()
-                ):
+                valid = bool(confirmation)
+                if confirmation:
+                    valid = (
+                        str(confirmation.get("source_hash"))
+                        == str(row.get("source_hash") or "")
+                        and Decimal(str(confirmation.get("exchange_rate")))
+                        == Decimal(str(row.get("exchange_rate")))
+                        and Decimal(str(confirmation.get("cny_amount")))
+                        == Decimal(str(row.get("cny_amount")))
+                        and str(confirmation.get("exchange_rate_date"))
+                        == str(row.get("flow_date"))
+                        and bool(str(confirmation.get("exchange_rate_source") or "").strip())
+                        and confirmation.get("exchange_rate_evidence_type")
+                        in {"provider", "manual_supplement"}
+                    )
+                if not valid:
                     raise ValueError(
-                        "NAV 写入拒绝：manual FX evidence 未经独立确认或已失效: "
+                        "NAV 写入拒绝：外币 cash_flow FX evidence "
+                        "未经本地确认或已失效: "
                         f"record_id={row.get('record_id')}"
                     )
         if effect_service is None:

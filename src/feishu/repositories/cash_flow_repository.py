@@ -18,15 +18,13 @@ class CashFlowRepository:
 
     CASH_FLOW_PROJECTION_FIELDS: List[str] = [
         'flow_date', 'account', 'broker', 'amount', 'currency', 'cny_amount',
-        'exchange_rate', 'exchange_rate_date', 'exchange_rate_source',
-        'exchange_rate_evidence_type', 'flow_type', 'updated_at',
+        'exchange_rate', 'flow_type', 'updated_at',
     ]
 
     CASH_FLOW_RECONCILE_FIELDS: List[str] = [
         'flow_date', 'account', 'broker', 'amount', 'currency', 'cny_amount',
-        'exchange_rate', 'exchange_rate_date', 'exchange_rate_source',
-        'exchange_rate_evidence_type', 'flow_type', 'dedup_key', 'source',
-        'remark', 'updated_at',
+        'exchange_rate', 'flow_type', 'dedup_key', 'source', 'remark',
+        'updated_at',
     ]
 
     def add_cash_flow(self, cf: CashFlow) -> CashFlow:
@@ -286,6 +284,11 @@ class CashFlowRepository:
         method derives blank system fields without recalculating populated CNY
         amounts, so historical FX decisions are not churned by a later run.
         """
+        if not dry_run and fx_rates:
+            raise ValueError(
+                "provider FX apply requires the application confirmation workflow; "
+                "repository-level apply is refused"
+            )
         requested_record_id = record_id
         conditions = []
         if account:
@@ -350,9 +353,7 @@ class CashFlowRepository:
             currency = parsed['currency']
             cny_amount = fields.get('cny_amount')
             exchange_rate = fields.get('exchange_rate')
-            exchange_rate_date = fields.get('exchange_rate_date')
-            exchange_rate_source = fields.get('exchange_rate_source')
-            exchange_rate_evidence_type = fields.get('exchange_rate_evidence_type')
+            fx_evidence: Optional[Dict[str, str]] = None
             expected_flow_type = 'DEPOSIT' if amount >= 0 else 'WITHDRAW'
             updates: Dict[str, Any] = {}
             warnings: List[str] = []
@@ -369,74 +370,63 @@ class CashFlowRepository:
             try:
                 if currency == 'CNY':
                     exchange_rate = 1.0
-                    exchange_rate_date = flow_date
-                    exchange_rate_source = "currency_identity"
-                    exchange_rate_evidence_type = "cny_identity"
                 elif (
                     requested_record_id
                     and str(row_record_id) == str(requested_record_id)
                     and manual_exchange_rate is not None
                 ):
                     exchange_rate = float(manual_exchange_rate)
-                    exchange_rate_date = rate_date
-                    exchange_rate_source = rate_source
-                    exchange_rate_evidence_type = "manual_supplement"
+                    fx_evidence = {
+                        "exchange_rate_date": rate_date.isoformat(),
+                        "exchange_rate_source": str(rate_source),
+                        "exchange_rate_evidence_type": "manual_supplement",
+                    }
                 elif exchange_rate is None:
                     key = f"{currency}CNY"
                     evidence = rate_cache.get(key)
                     if isinstance(evidence, dict):
                         exchange_rate = evidence.get("rate")
-                        exchange_rate_date = evidence.get("date") or flow_date
-                        exchange_rate_source = evidence.get("source")
+                        evidence_date = evidence.get("date") or flow_date
+                        evidence_source = evidence.get("source")
                     elif evidence is not None:
                         exchange_rate = evidence
-                        exchange_rate_date = flow_date
-                        exchange_rate_source = "injected_historical_rate"
+                        evidence_date = flow_date
+                        evidence_source = "injected_historical_rate"
                     if exchange_rate is None:
                         raise ValueError(
                             f"historical FX evidence required for {currency} on {flow_date.isoformat()}"
                         )
-                    exchange_rate_evidence_type = "provider"
+                    if isinstance(evidence_date, (int, float)):
+                        evidence_date = datetime.fromtimestamp(
+                            evidence_date / 1000,
+                            tz=self.FEISHU_DATE_TZ,
+                        ).date()
+                    elif isinstance(evidence_date, str):
+                        evidence_date = datetime.strptime(
+                            evidence_date[:10], '%Y-%m-%d'
+                        ).date()
+                    evidence_source = str(evidence_source or "").strip()
+                    if evidence_date != flow_date:
+                        raise ValueError(
+                            "exchange_rate_date must equal cash_flow flow_date: "
+                            f"rate_date={evidence_date}, flow_date={flow_date}"
+                        )
+                    if not evidence_source:
+                        raise ValueError("exchange_rate_source is required")
+                    fx_evidence = {
+                        "exchange_rate_date": evidence_date.isoformat(),
+                        "exchange_rate_source": evidence_source,
+                        "exchange_rate_evidence_type": "provider",
+                    }
 
                 if Decimal(str(exchange_rate)) <= 0:
                     raise ValueError("exchange_rate must be positive")
-                normalized_rate_date = exchange_rate_date
-                if isinstance(normalized_rate_date, (int, float)):
-                    normalized_rate_date = datetime.fromtimestamp(
-                        normalized_rate_date / 1000,
-                        tz=self.FEISHU_DATE_TZ,
-                    ).date()
-                elif isinstance(normalized_rate_date, str):
-                    normalized_rate_date = datetime.strptime(
-                        normalized_rate_date[:10], '%Y-%m-%d'
-                    ).date()
-                if normalized_rate_date != flow_date:
-                    raise ValueError(
-                        "exchange_rate_date must equal cash_flow flow_date: "
-                        f"rate_date={normalized_rate_date}, flow_date={flow_date}"
-                    )
-                exchange_rate_date = normalized_rate_date
-                exchange_rate_source = str(exchange_rate_source or "").strip()
-                if not exchange_rate_source:
-                    raise ValueError("exchange_rate_source is required")
-                if exchange_rate_evidence_type not in {
-                    "provider", "manual_supplement", "cny_identity"
-                }:
-                    raise ValueError("exchange_rate_evidence_type is invalid")
-
-                generated_values = {
-                    "exchange_rate": exchange_rate,
-                    "exchange_rate_date": exchange_rate_date,
-                    "exchange_rate_source": exchange_rate_source,
-                    "exchange_rate_evidence_type": exchange_rate_evidence_type,
-                }
-                for field_name, expected_value in generated_values.items():
-                    current_value = fields.get(field_name)
-                    if field_name == "exchange_rate":
-                        if current_value is None or Decimal(str(current_value)) != Decimal(str(expected_value)):
-                            updates[field_name] = expected_value
-                    elif current_value != expected_value:
-                        updates[field_name] = expected_value
+                if (
+                    fields.get("exchange_rate") is None
+                    or Decimal(str(fields.get("exchange_rate")))
+                    != Decimal(str(exchange_rate))
+                ):
+                    updates["exchange_rate"] = exchange_rate
 
                 expected_cny_amount = self._quantize_money(Decimal(str(amount)) * Decimal(str(exchange_rate)))
                 if cny_amount is None or self._quantize_money(cny_amount) != expected_cny_amount:
@@ -462,9 +452,6 @@ class CashFlowRepository:
                 currency=currency,
                 cny_amount=cny_amount,
                 exchange_rate=exchange_rate,
-                exchange_rate_date=exchange_rate_date,
-                exchange_rate_source=exchange_rate_source,
-                exchange_rate_evidence_type=exchange_rate_evidence_type,
                 flow_type=expected_flow_type,
                 source=fields.get('source'),
                 remark=fields.get('remark'),
@@ -484,14 +471,14 @@ class CashFlowRepository:
                 'currency': currency,
                 'amount': amount,
                 'exchange_rate': exchange_rate,
-                'exchange_rate_date': exchange_rate_date.strftime('%Y-%m-%d'),
-                'exchange_rate_source': exchange_rate_source,
-                'exchange_rate_evidence_type': exchange_rate_evidence_type,
                 'cny_amount': float(cny_amount),
                 'source_hash': expected_dedup_key,
+                'requires_fx_confirmation': currency != 'CNY',
                 'status': 'pending' if updates else 'ok',
                 'updates': updates,
             }
+            if fx_evidence is not None:
+                row['fx_evidence'] = fx_evidence
             if warnings:
                 row['warnings'] = warnings
             rows.append(row)
@@ -595,9 +582,6 @@ class CashFlowRepository:
             'currency': cf.currency,
             'cny_amount': cf.cny_amount,
             'exchange_rate': cf.exchange_rate,
-            'exchange_rate_date': cf.exchange_rate_date,
-            'exchange_rate_source': cf.exchange_rate_source,
-            'exchange_rate_evidence_type': cf.exchange_rate_evidence_type,
             'flow_type': flow_type,
             'source': cf.source,
             'remark': cf.remark,
@@ -613,14 +597,6 @@ class CashFlowRepository:
             flow_date = datetime.fromtimestamp(flow_date / 1000, tz=self.FEISHU_DATE_TZ).date()
         elif isinstance(flow_date, str):
             flow_date = datetime.strptime(flow_date, '%Y-%m-%d').date()
-        exchange_rate_date = data.get('exchange_rate_date')
-        if isinstance(exchange_rate_date, (int, float)):
-            exchange_rate_date = datetime.fromtimestamp(
-                exchange_rate_date / 1000, tz=self.FEISHU_DATE_TZ
-            ).date()
-        elif isinstance(exchange_rate_date, str):
-            exchange_rate_date = datetime.strptime(exchange_rate_date[:10], '%Y-%m-%d').date()
-
         return CashFlow(
             record_id=data.get('record_id'),
             flow_date=flow_date,
@@ -630,9 +606,6 @@ class CashFlowRepository:
             currency=data.get('currency', 'CNY'),
             cny_amount=float(data.get('cny_amount')) if data.get('cny_amount') is not None else None,
             exchange_rate=float(data.get('exchange_rate')) if data.get('exchange_rate') is not None else None,
-            exchange_rate_date=exchange_rate_date,
-            exchange_rate_source=data.get('exchange_rate_source'),
-            exchange_rate_evidence_type=data.get('exchange_rate_evidence_type'),
             flow_type=str(data.get('flow_type', 'DEPOSIT')).upper(),
             source=data.get('source'),
             remark=data.get('remark'),

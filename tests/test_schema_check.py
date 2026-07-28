@@ -108,6 +108,44 @@ def test_parse_docs_schema_normalizes_json_text_family(tmp_path):
     assert spec.optional["details"] == frozenset({"text", "json-text"})
 
 
+def test_schema_check_rejects_forbidden_fields(tmp_path, monkeypatch):
+    schema_path = tmp_path / "schema.md"
+    schema_path.write_text(
+        SCHEMA_TEXT
+        + """
+Forbidden fields:
+- `exchange_rate_source`
+""",
+        encoding="utf-8",
+    )
+
+    class FakeClient:
+        def _get_table_config(self, _table_name):
+            return "base", "tbl"
+
+        def _request(self, _method, _endpoint, **_kwargs):
+            return {
+                "items": [
+                    {"field_name": "asset_id", "type": 1},
+                    {"field_name": "quantity", "type": 2},
+                    {"field_name": "exchange_rate_source", "type": 1},
+                ],
+                "has_more": False,
+            }
+
+    monkeypatch.setattr(migrate_schema, "DOCS_SCHEMA", schema_path)
+    monkeypatch.setattr(migrate_schema, "FeishuClient", FakeClient)
+
+    result = migrate_schema.run_schema_check(strict=False)
+    assert result["ok"] is False
+    assert result["tables"]["holdings"]["forbidden_present"] == [
+        "exchange_rate_source"
+    ]
+    with pytest.raises(SystemExit) as exc_info:
+        migrate_schema.run_schema_check(strict=True)
+    assert exc_info.value.code == 2
+
+
 def test_cash_flow_effect_schema_migration_is_dry_run_then_confirmed_apply():
     class FakeClient:
         def __init__(self):
@@ -121,8 +159,6 @@ def test_cash_flow_effect_schema_migration_is_dry_run_then_confirmed_apply():
             if method == "GET":
                 return {
                     "items": [
-                        {"field_name": "broker", "type": 1},
-                        {"field_name": "exchange_rate_date", "type": 5},
                     ],
                     "has_more": False,
                 }
@@ -132,10 +168,7 @@ def test_cash_flow_effect_schema_migration_is_dry_run_then_confirmed_apply():
     client = FakeClient()
     preview = migrate_schema.migrate_cash_flow_effect_fields(client=client)
     assert preview["dry_run"] is True
-    assert preview["missing"] == [
-        "exchange_rate_source",
-        "exchange_rate_evidence_type",
-    ]
+    assert preview["missing"] == ["broker"]
     assert client.created == []
 
     applied = migrate_schema.migrate_cash_flow_effect_fields(
@@ -144,10 +177,7 @@ def test_cash_flow_effect_schema_migration_is_dry_run_then_confirmed_apply():
         client=client,
     )
     assert applied["success"] is True
-    assert [item["field_name"] for item in client.created] == [
-        "exchange_rate_source",
-        "exchange_rate_evidence_type",
-    ]
+    assert [item["field_name"] for item in client.created] == ["broker"]
 
 
 def test_cash_flow_effect_schema_migration_blocks_incompatible_existing_field():

@@ -123,7 +123,12 @@ def test_docs_schema_field_parser_ignores_non_field_backticks():
     assert "flow_type" in specs["cash_flow"].required
     assert "direction" not in specs["cash_flow"].required
     assert "broker" in specs["cash_flow"].required
-    assert "exchange_rate_date" in specs["cash_flow"].optional
+    assert "exchange_rate_date" not in specs["cash_flow"].optional
+    assert specs["cash_flow"].forbidden == {
+        "exchange_rate_date",
+        "exchange_rate_source",
+        "exchange_rate_evidence_type",
+    }
     assert "total_value" in specs["nav_history"].required
     assert "exchange_fund" not in specs["holdings"].optional
     assert "otc_fund" not in specs["holdings"].optional

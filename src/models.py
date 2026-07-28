@@ -245,9 +245,6 @@ class CashFlow(BaseModel):
     currency: str = Field(..., description="币种")
     cny_amount: Optional[float] = None
     exchange_rate: Optional[float] = None
-    exchange_rate_date: Optional[date] = None
-    exchange_rate_source: Optional[str] = None
-    exchange_rate_evidence_type: Optional[str] = None
     flow_type: str = Field(..., description="DEPOSIT/WITHDRAW")
     source: Optional[str] = None
     remark: Optional[str] = None

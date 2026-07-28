@@ -30,6 +30,8 @@ sudo scripts/install.sh --apply
 - 创建 `.venv` 并安装 `requirements.txt`。
 - 生成稳定启动命令 `/usr/local/bin/pm`。
 - 调用 `scripts/install_linux.py` 写入 config/env/systemd 文件。
+- 将 runtime data/reports 目录交给 `--run-user`，确保该用户可创建和恢复
+  `pm_operation_state.sqlite3`；数据库文件自身保持 `0600`。
 
 如果希望安装脚本自己从 GitHub 拉取指定版本：
 
@@ -158,20 +160,21 @@ systemctl list-timers portfolio-quality-refresh.timer
 
 ## 启用定时任务
 
-安装器生成三组北京时间 timer：
+安装器生成四组北京时间 timer：
 
 - `portfolio-nav-daily.timer`：周一至周六 `08:10`，先同步 lx/sy holdings，再记录 lx/hb/sy NAV。
 - `portfolio-futu-evening.timer`：周一至周五 `17:10`，只同步 lx/sy holdings。
 - `portfolio-cash-flow-scan.timer`：每 15 分钟完整读取 Feishu cash flow 和
   CASH holdings，只发现 effect、更新 SQLite 并发送回执。
+- `portfolio-receipt-dispatch.timer`：每 5 分钟重试到期的 NAV 回执 outbox。
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now portfolio-nav-daily.timer portfolio-futu-evening.timer portfolio-cash-flow-scan.timer
-systemctl list-timers portfolio-nav-daily.timer portfolio-futu-evening.timer portfolio-cash-flow-scan.timer
+sudo systemctl enable --now portfolio-nav-daily.timer portfolio-futu-evening.timer portfolio-cash-flow-scan.timer portfolio-receipt-dispatch.timer
+systemctl list-timers portfolio-nav-daily.timer portfolio-futu-evening.timer portfolio-cash-flow-scan.timer portfolio-receipt-dispatch.timer
 ```
 
-周六早间同步用于捕获周五晚间美股成交，然后记录周五 NAV。周一早间通常会因周五 NAV 已存在而幂等跳过，也能在周六任务失败时提供一次补偿机会。三个 timer 都使用 `Persistent=true`。
+周六早间同步用于捕获周五晚间美股成交，然后记录周五 NAV。周一早间通常会因周五 NAV 已存在而幂等跳过，也能在周六任务失败时提供一次补偿机会。四个 timer 都使用 `Persistent=true`。
 
 手动触发属于真实 holdings/NAV 写入操作。确认后可分别执行：
 
@@ -179,7 +182,8 @@ systemctl list-timers portfolio-nav-daily.timer portfolio-futu-evening.timer por
 sudo systemctl start portfolio-nav-daily.service
 sudo systemctl start portfolio-futu-evening.service
 sudo systemctl start portfolio-cash-flow-scan.service
-sudo journalctl -u portfolio-nav-daily.service -u portfolio-futu-evening.service -u portfolio-cash-flow-scan.service -n 200 --no-pager
+sudo systemctl start portfolio-receipt-dispatch.service
+sudo journalctl -u portfolio-nav-daily.service -u portfolio-futu-evening.service -u portfolio-cash-flow-scan.service -u portfolio-receipt-dispatch.service -n 200 --no-pager
 ```
 
 定时任务由版本化的 `scripts/portfolio_scheduled_job.sh` 编排。早间模式依次执行 lx、sy 完整 Futu 同步，再单次执行：
