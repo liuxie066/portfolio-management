@@ -4,7 +4,6 @@ from __future__ import annotations
 import logging
 import json
 from datetime import date, datetime
-from decimal import Decimal
 from typing import Any, Optional
 
 from src import config
@@ -128,6 +127,9 @@ class NavRecordService:
             and row.get("requires_fx_confirmation")
         ]
         if foreign_rows:
+            from src.app.cash_flow_fx_confirmation import (
+                evaluate_cash_flow_fx_confirmation,
+            )
             from src.app.operation_state_store import OperationStateStore
 
             operation_store = self._operation_state_store or OperationStateStore()
@@ -136,26 +138,13 @@ class NavRecordService:
                 confirmation = operation_store.latest_fx_confirmation(
                     str(row.get("record_id") or "")
                 )
-                valid = bool(confirmation)
-                if confirmation:
-                    valid = (
-                        str(confirmation.get("source_hash"))
-                        == str(row.get("source_hash") or "")
-                        and Decimal(str(confirmation.get("exchange_rate")))
-                        == Decimal(str(row.get("exchange_rate")))
-                        and Decimal(str(confirmation.get("cny_amount")))
-                        == Decimal(str(row.get("cny_amount")))
-                        and str(confirmation.get("exchange_rate_date"))
-                        == str(row.get("flow_date"))
-                        and bool(str(confirmation.get("exchange_rate_source") or "").strip())
-                        and confirmation.get("exchange_rate_evidence_type")
-                        in {"provider", "manual_supplement"}
-                    )
-                if not valid:
+                evaluation = evaluate_cash_flow_fx_confirmation(row, confirmation)
+                if not evaluation["valid"]:
                     raise ValueError(
                         "NAV 写入拒绝：外币 cash_flow FX evidence "
                         "未经本地确认或已失效: "
-                        f"record_id={row.get('record_id')}"
+                        f"record_id={row.get('record_id')}, "
+                        f"reason={evaluation['reason_code']}"
                     )
         if effect_service is None:
             return

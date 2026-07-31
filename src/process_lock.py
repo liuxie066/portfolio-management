@@ -26,6 +26,13 @@ def holding_record_lock_key(record_id: str) -> str:
     return f"holding-record-write:{normalized}"
 
 
+def cash_flow_record_lock_key(record_id: str) -> str:
+    normalized = str(record_id or "").strip()
+    if not normalized:
+        raise ValueError("cash flow record lock requires record_id")
+    return f"cash-flow-record-write:{normalized}"
+
+
 @contextmanager
 def process_lock(key: str, *, data_dir: Path | None = None) -> Iterator[None]:
     """Hold an exclusive same-host lock for a logical key."""

@@ -5,6 +5,7 @@ import threading
 
 import pytest
 
+from src.app.cash_flow_event_completion_service import CashFlowEventCompletionService
 from src.app.cash_flow_event_inbox_service import CashFlowEventInboxService
 from src.app.cash_flow_event_service import CASH_FLOW_EVENT_TYPE, CashFlowEventTarget
 from src.app.operation_state_store import OperationStateStore
@@ -33,7 +34,14 @@ def _payload(event_id="evt-cf-1", *, actions=None, table_id="tbl_cash_flow"):
     }
 
 
-def _service(tmp_path, *, handler=None, clock=None, monotonic=None):
+def _service(
+    tmp_path,
+    *,
+    handler=None,
+    clock=None,
+    monotonic=None,
+    terminal_failure_receipt_factory=None,
+):
     now = clock or [datetime(2026, 7, 31, 23, 30)]
     store = OperationStateStore(
         tmp_path / "operations.sqlite3",
@@ -45,6 +53,7 @@ def _service(tmp_path, *, handler=None, clock=None, monotonic=None):
     return CashFlowEventInboxService(
         store=store,
         record_handler=handler,
+        terminal_failure_receipt_factory=terminal_failure_receipt_factory,
         target=TARGET,
         **kwargs,
     )
@@ -143,6 +152,47 @@ def test_worker_retries_handler_failure_and_recovers_after_due_time(tmp_path):
 
     assert recovered["success"] is True
     assert service.store.get_cash_flow_event("evt-cf-1")["state"] == "processed"
+
+
+def test_fourth_handler_failure_atomically_enqueues_attention_and_stops(tmp_path):
+    clock = [datetime(2026, 7, 31, 23, 30)]
+
+    def fail(**_kwargs):
+        raise TimeoutError("persistent Feishu read failure")
+
+    service = _service(
+        tmp_path,
+        handler=fail,
+        clock=clock,
+        terminal_failure_receipt_factory=(
+            CashFlowEventCompletionService.terminal_failure_receipts
+        ),
+    )
+    service.accept(_payload())
+
+    for retry_minutes in (1, 5, 15):
+        result = service.process_due()
+        assert result["failed"] == 1
+        assert result["processed"] == 0
+        clock[0] += timedelta(minutes=retry_minutes)
+
+    terminal = service.process_due()
+    event = service.store.get_cash_flow_event("evt-cf-1")
+
+    assert terminal["success"] is True
+    assert terminal["processed"] == 1
+    assert terminal["failed"] == 0
+    assert event["state"] == "processed"
+    assert event["attempt_count"] == 4
+    assert event["outcome"]["status"] == "attention_required"
+    assert len(event["outcome"]["receipt_keys"]) == 1
+    receipt = service.store.get_operation_receipt(
+        event["outcome"]["receipt_keys"][0]
+    )
+    assert receipt["receipt_type"] == "cash_flow_reconcile_attention_required"
+    assert receipt["payload"]["reason_code"] == "event_processing_failed"
+    clock[0] += timedelta(days=1)
+    assert service.process_due()["claimed"] == 0
 
 
 def test_read_only_status_does_not_create_operation_state(tmp_path):

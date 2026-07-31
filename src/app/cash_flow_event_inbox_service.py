@@ -16,18 +16,25 @@ from .cash_flow_event_service import (
 from .operation_state_store import OperationStateStore
 
 
+MAX_CASH_FLOW_EVENT_ATTEMPTS = 4
+
+
 class CashFlowEventInboxService:
     def __init__(
         self,
         *,
         store: Optional[OperationStateStore] = None,
         record_handler: Optional[Callable[..., Dict[str, Any]]] = None,
+        terminal_failure_receipt_factory: Optional[
+            Callable[..., list[Dict[str, Any]]]
+        ] = None,
         target: Optional[CashFlowEventTarget] = None,
         receiver_budget_seconds: float = 2.0,
         monotonic: Any = time.monotonic,
     ) -> None:
         self.store = store or OperationStateStore()
         self.record_handler = record_handler
+        self.terminal_failure_receipt_factory = terminal_failure_receipt_factory
         self.target = target or CashFlowEventTarget.from_config()
         self.receiver_budget_seconds = float(receiver_budget_seconds)
         self.monotonic = monotonic
@@ -76,19 +83,59 @@ class CashFlowEventInboxService:
                 results.append(self._process_claimed(event))
             except Exception as exc:
                 error = str(exc) or exc.__class__.__name__
-                self.store.mark_cash_flow_event_failed(
+                next_attempt = int(event.get("attempt_count") or 0) + 1
+                terminal_receipts = None
+                terminal_outcome = None
+                if next_attempt >= MAX_CASH_FLOW_EVENT_ATTEMPTS:
+                    if self.terminal_failure_receipt_factory is None:
+                        raise RuntimeError(
+                            "terminal cash flow event receipt factory is not configured"
+                        ) from exc
+                    terminal_receipts = self.terminal_failure_receipt_factory(
+                        event=event,
+                        error=error,
+                    )
+                    terminal_outcome = {
+                        "status": "attention_required",
+                        "reason_code": "event_processing_failed",
+                        "record_ids": sorted(
+                            {
+                                str(item.get("record_id") or "")
+                                for item in event.get("action_list") or ()
+                                if str(item.get("action") or "")
+                                in ACTIONABLE_CASH_FLOW_ACTIONS
+                                and str(item.get("record_id") or "")
+                            }
+                        ),
+                        "error": error,
+                    }
+                failure = self.store.mark_cash_flow_event_failed(
                     event_id=event["event_id"],
                     claim_id=event["claim_id"],
                     error=error,
+                    max_attempts=MAX_CASH_FLOW_EVENT_ATTEMPTS,
+                    terminal_outcome=terminal_outcome,
+                    terminal_receipts=terminal_receipts,
                 )
-                results.append(
-                    {
-                        "event_id": event["event_id"],
-                        "success": False,
-                        "status": "failed_retryable",
-                        "error": error,
-                    }
-                )
+                if failure["state"] == "processed":
+                    results.append(
+                        {
+                            "event_id": event["event_id"],
+                            "success": True,
+                            "status": "processed",
+                            "outcome": failure["outcome"],
+                        }
+                    )
+                else:
+                    results.append(
+                        {
+                            "event_id": event["event_id"],
+                            "success": False,
+                            "status": "failed_retryable",
+                            "attempt_count": failure["attempt_count"],
+                            "error": error,
+                        }
+                    )
         return {
             "success": all(item.get("success") for item in results),
             "claimed": len(claimed),
@@ -165,4 +212,4 @@ class CashFlowEventInboxService:
             stop_event.wait(max(float(poll_seconds), 0.1))
 
 
-__all__ = ["CashFlowEventInboxService"]
+__all__ = ["CashFlowEventInboxService", "MAX_CASH_FLOW_EVENT_ATTEMPTS"]

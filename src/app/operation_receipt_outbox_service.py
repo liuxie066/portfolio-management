@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, Optional
 from uuid import uuid4
 
+from .cash_flow_receipt_service import CashFlowReceiptService
 from .holdings_receipt_service import HoldingsReceiptService
 from .operation_state_store import OperationStateStore
 
@@ -16,18 +17,32 @@ class OperationReceiptOutboxService:
         store: Optional[OperationStateStore] = None,
         renderers: Optional[Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]]] = None,
         holdings_sender: Optional[HoldingsReceiptService] = None,
+        cash_flow_sender: Optional[CashFlowReceiptService] = None,
     ) -> None:
         self.store = store or OperationStateStore()
-        sender = holdings_sender or HoldingsReceiptService()
-        self.renderers = renderers or {
+        holding_sender = holdings_sender or HoldingsReceiptService()
+        flow_sender = cash_flow_sender or CashFlowReceiptService()
+        default_renderers = {
             receipt_type: (
-                lambda payload, resolved_type=receipt_type: sender.send(
+                lambda payload, resolved_type=receipt_type: holding_sender.send(
                     resolved_type,
                     payload,
                 )
             )
-            for receipt_type in sender.SUPPORTED_TYPES
+            for receipt_type in holding_sender.SUPPORTED_TYPES
         }
+        default_renderers.update(
+            {
+                receipt_type: (
+                    lambda payload, resolved_type=receipt_type: flow_sender.send(
+                        resolved_type,
+                        payload,
+                    )
+                )
+                for receipt_type in flow_sender.SUPPORTED_TYPES
+            }
+        )
+        self.renderers = renderers or default_renderers
 
     def dispatch_pending(
         self,

@@ -708,6 +708,7 @@ class OperationStateStore:
         now: str,
     ) -> bool:
         if receipt_type not in {
+            "cash_flow_reconcile_attention_required",
             "holding_case_discovered",
             "holding_case_closed",
             "holding_case_attention_required",
@@ -2166,6 +2167,7 @@ class OperationStateStore:
 
         now = self.now_factory().isoformat()
         enqueued_receipt_keys: list[str] = []
+        receipt_keys = [str(item["receipt_key"]) for item in list(receipts or ())]
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             claimed = conn.execute(
@@ -2188,6 +2190,7 @@ class OperationStateStore:
                 if inserted:
                     enqueued_receipt_keys.append(str(receipt["receipt_key"]))
             persisted_outcome = dict(outcome)
+            persisted_outcome["receipt_keys"] = receipt_keys
             persisted_outcome["enqueued_receipt_keys"] = enqueued_receipt_keys
             cursor = conn.execute(
                 """
@@ -2330,9 +2333,13 @@ class OperationStateStore:
         event_id: str,
         claim_id: str,
         error: str,
-    ) -> None:
+        max_attempts: int = 0,
+        terminal_outcome: Optional[Dict[str, Any]] = None,
+        terminal_receipts: Optional[list[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
         now_dt = self.now_factory()
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 """
                 SELECT attempt_count FROM cash_flow_event_inbox
@@ -2343,6 +2350,56 @@ class OperationStateStore:
             if not row:
                 raise KeyError(f"cash flow event claim not found: {event_id}")
             attempt = int(row[0]) + 1
+            if max_attempts and attempt >= int(max_attempts):
+                receipts = list(terminal_receipts or ())
+                if not receipts:
+                    raise ValueError(
+                        "terminal cash flow event failure requires an attention receipt"
+                    )
+                enqueued_receipt_keys = []
+                receipt_keys = []
+                now = now_dt.isoformat()
+                for receipt in receipts:
+                    receipt_key = str(receipt["receipt_key"])
+                    receipt_keys.append(receipt_key)
+                    inserted = self._insert_operation_receipt_tx(
+                        conn,
+                        receipt_key=receipt_key,
+                        receipt_type=str(receipt["receipt_type"]),
+                        payload=dict(receipt["payload"]),
+                        now=now,
+                    )
+                    if inserted:
+                        enqueued_receipt_keys.append(receipt_key)
+                persisted_outcome = dict(terminal_outcome or {})
+                persisted_outcome.setdefault("status", "attention_required")
+                persisted_outcome["attempt_count"] = attempt
+                persisted_outcome["receipt_keys"] = receipt_keys
+                persisted_outcome["enqueued_receipt_keys"] = enqueued_receipt_keys
+                cursor = conn.execute(
+                    """
+                    UPDATE cash_flow_event_inbox
+                    SET state = 'processed', attempt_count = ?, outcome_json = ?,
+                        claim_id = NULL, claimed_at = NULL, last_error = ?,
+                        updated_at = ?
+                    WHERE event_id = ? AND state = 'claimed' AND claim_id = ?
+                    """,
+                    (
+                        attempt,
+                        _canonical_json(persisted_outcome),
+                        error,
+                        now,
+                        event_id,
+                        claim_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise KeyError(f"cash flow event claim not found: {event_id}")
+                return {
+                    "state": "processed",
+                    "attempt_count": attempt,
+                    "outcome": persisted_outcome,
+                }
             retry_index = min(attempt - 1, len(_RETRY_MINUTES) - 1)
             next_attempt = now_dt + timedelta(minutes=_RETRY_MINUTES[retry_index])
             conn.execute(
@@ -2362,6 +2419,11 @@ class OperationStateStore:
                     claim_id,
                 ),
             )
+        return {
+            "state": "failed_retryable",
+            "attempt_count": attempt,
+            "next_attempt_at": next_attempt.isoformat(),
+        }
 
     def get_cash_flow_event(self, event_id: str) -> Optional[Dict[str, Any]]:
         with self._connect() as conn:

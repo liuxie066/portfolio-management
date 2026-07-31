@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+from src.app.cash_flow_event_completion_service import (
+    CASH_FLOW_ATTENTION_RECEIPT_TYPE,
+)
+from src.app.cash_flow_receipt_service import CashFlowReceiptService
 from src.app.holdings_receipt_service import HoldingsReceiptService
 from src.app.operation_receipt_outbox_service import (
     OperationReceiptDispatchStateUnknown,
@@ -155,6 +159,60 @@ def test_holdings_receipt_renderer_includes_frozen_manual_actions():
     assert "冲突需要人工" not in discovery
     assert "pm holdings recover --case-key case-1 --confirm" in attention
     assert "禁止自动重试" in attention
+
+
+def test_cash_flow_receipt_routes_through_shared_outbox_and_renders_action(tmp_path):
+    store = OperationStateStore(tmp_path / "operations.sqlite3")
+    payload = {
+        "record_id": "rec-cf-1",
+        "account": "lx",
+        "reason_code": "fx_confirmation_missing",
+        "error": "foreign cash-flow FX evidence is missing or stale",
+        "manual_inputs": {
+            "flow_date": "2026-07-31",
+            "account": "lx",
+            "broker": "manual",
+            "amount": "100",
+            "currency": "USD",
+        },
+        "action": {
+            "command": (
+                "pm cash-flow reconcile --record-id rec-cf-1 --apply --confirm"
+            )
+        },
+    }
+    store.enqueue_operation_receipt(
+        receipt_key="cash-flow-receipt-1",
+        receipt_type=CASH_FLOW_ATTENTION_RECEIPT_TYPE,
+        payload=payload,
+    )
+    seen = []
+
+    class _Sender:
+        SUPPORTED_TYPES = {CASH_FLOW_ATTENTION_RECEIPT_TYPE}
+
+        def send(self, receipt_type, frozen_payload):
+            seen.append((receipt_type, frozen_payload))
+            return {
+                "success": True,
+                "delivery_state": "accepted",
+                "message_id": "msg-cf-1",
+            }
+
+    result = OperationReceiptOutboxService(
+        store=store,
+        cash_flow_sender=_Sender(),
+    ).dispatch_pending()
+    message = CashFlowReceiptService.build_message(
+        CASH_FLOW_ATTENTION_RECEIPT_TYPE,
+        payload,
+    )
+
+    assert result["sent"] == 1
+    assert seen == [(CASH_FLOW_ATTENTION_RECEIPT_TYPE, payload)]
+    assert "fx_confirmation_missing" in message
+    assert "pm cash-flow reconcile --record-id rec-cf-1 --apply --confirm" in message
+    assert store.get_operation_receipt("cash-flow-receipt-1")["status"] == "sent"
 
 
 def test_send_success_then_local_mark_failure_ages_to_unknown(tmp_path):
