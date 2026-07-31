@@ -14,6 +14,7 @@ from src.time_utils import bj_now_naive
 
 SCHEMA_VERSION = "2"
 HOLDINGS_WORKFLOW_SCHEMA_VERSION = "1"
+CASH_FLOW_EVENT_SCHEMA_VERSION = "1"
 _RETRY_MINUTES = (1, 5, 15, 60)
 _CLAIM_LEASE_MINUTES = 5
 
@@ -117,21 +118,33 @@ class OperationStateStore:
                 """
             ).fetchone()
             if meta_exists:
-                feature_row = conn.execute(
-                    "SELECT value FROM operation_meta WHERE key = ?",
-                    ("holdings_workflow_schema_version",),
-                ).fetchone()
-                if feature_row is not None:
+                for key, supported, label in (
+                    (
+                        "holdings_workflow_schema_version",
+                        HOLDINGS_WORKFLOW_SCHEMA_VERSION,
+                        "holdings workflow",
+                    ),
+                    (
+                        "cash_flow_event_schema_version",
+                        CASH_FLOW_EVENT_SCHEMA_VERSION,
+                        "cash flow event",
+                    ),
+                ):
+                    feature_row = conn.execute(
+                        "SELECT value FROM operation_meta WHERE key = ?",
+                        (key,),
+                    ).fetchone()
+                    if feature_row is None:
+                        continue
                     try:
                         feature_version = int(feature_row[0])
                     except (TypeError, ValueError) as exc:
                         raise RuntimeError(
-                            "invalid holdings workflow schema version: "
-                            f"{feature_row[0]}"
+                            f"invalid {label} schema version: {feature_row[0]}"
                         ) from exc
-                    if feature_version > int(HOLDINGS_WORKFLOW_SCHEMA_VERSION):
+                    if feature_version > int(supported):
                         raise RuntimeError(
-                            "unsupported newer holdings workflow schema version: "
+                            f"unsupported newer {label} schema version: "
                             f"{feature_version}"
                         )
             conn.executescript(
@@ -230,6 +243,26 @@ class OperationStateStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_holding_event_inbox_due
                 ON holding_event_inbox(state, next_attempt_at);
+                CREATE TABLE IF NOT EXISTS cash_flow_event_inbox (
+                    event_id TEXT PRIMARY KEY,
+                    event_type TEXT NOT NULL,
+                    file_token TEXT NOT NULL,
+                    table_id TEXT NOT NULL,
+                    revision TEXT,
+                    action_list_json TEXT NOT NULL,
+                    payload_digest TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    next_attempt_at TEXT NOT NULL,
+                    claim_id TEXT,
+                    claimed_at TEXT,
+                    outcome_json TEXT,
+                    last_error TEXT,
+                    received_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_cash_flow_event_inbox_due
+                ON cash_flow_event_inbox(state, next_attempt_at);
                 CREATE TABLE IF NOT EXISTS operation_receipt_outbox (
                     receipt_key TEXT PRIMARY KEY,
                     receipt_type TEXT NOT NULL,
@@ -284,6 +317,13 @@ class OperationStateStore:
                 """,
                 ("holdings_workflow_schema_version", HOLDINGS_WORKFLOW_SCHEMA_VERSION),
             )
+            conn.execute(
+                """
+                INSERT INTO operation_meta(key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                ("cash_flow_event_schema_version", CASH_FLOW_EVENT_SCHEMA_VERSION),
+            )
 
     def _validate(self) -> None:
         try:
@@ -309,6 +349,18 @@ class OperationStateStore:
                     raise RuntimeError(
                         "unsupported holdings workflow schema version: "
                         f"{feature_row[0] if feature_row else None}"
+                    )
+                cash_flow_event_row = conn.execute(
+                    "SELECT value FROM operation_meta WHERE key = ?",
+                    ("cash_flow_event_schema_version",),
+                ).fetchone()
+                if (
+                    not cash_flow_event_row
+                    or cash_flow_event_row[0] != CASH_FLOW_EVENT_SCHEMA_VERSION
+                ):
+                    raise RuntimeError(
+                        "unsupported cash flow event schema version: "
+                        f"{cash_flow_event_row[0] if cash_flow_event_row else None}"
                     )
         except sqlite3.DatabaseError as exc:
             raise RuntimeError(
@@ -2099,6 +2151,293 @@ class OperationStateStore:
         """Return local inbox evidence without asserting remote health."""
 
         return self.inspect_holding_event_status(self.db_path)
+
+    # ---------- Cash-flow event inbox ----------
+
+    def complete_cash_flow_event(
+        self,
+        *,
+        event_id: str,
+        claim_id: str,
+        outcome: Dict[str, Any],
+        receipts: Optional[list[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Commit a cash-flow event outcome and its receipts together."""
+
+        now = self.now_factory().isoformat()
+        enqueued_receipt_keys: list[str] = []
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            claimed = conn.execute(
+                """
+                SELECT 1 FROM cash_flow_event_inbox
+                WHERE event_id = ? AND state = 'claimed' AND claim_id = ?
+                """,
+                (event_id, claim_id),
+            ).fetchone()
+            if not claimed:
+                raise KeyError(f"cash flow event claim not found: {event_id}")
+            for receipt in list(receipts or ()):
+                inserted = self._insert_operation_receipt_tx(
+                    conn,
+                    receipt_key=str(receipt["receipt_key"]),
+                    receipt_type=str(receipt["receipt_type"]),
+                    payload=dict(receipt["payload"]),
+                    now=now,
+                )
+                if inserted:
+                    enqueued_receipt_keys.append(str(receipt["receipt_key"]))
+            persisted_outcome = dict(outcome)
+            persisted_outcome["enqueued_receipt_keys"] = enqueued_receipt_keys
+            cursor = conn.execute(
+                """
+                UPDATE cash_flow_event_inbox
+                SET state = 'processed', outcome_json = ?, claim_id = NULL,
+                    claimed_at = NULL, last_error = NULL, updated_at = ?
+                WHERE event_id = ? AND state = 'claimed' AND claim_id = ?
+                """,
+                (
+                    _canonical_json(persisted_outcome),
+                    now,
+                    event_id,
+                    claim_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"cash flow event claim not found: {event_id}")
+        return persisted_outcome
+
+    def accept_cash_flow_event(
+        self,
+        *,
+        event_id: str,
+        event_type: str,
+        file_token: str,
+        table_id: str,
+        revision: Optional[str],
+        action_list: list[Dict[str, Any]],
+        payload_digest: str,
+    ) -> bool:
+        now = self.now_factory().isoformat()
+        action_json = _canonical_json(action_list)
+        with self._connect_inbox_accept() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO cash_flow_event_inbox(
+                    event_id, event_type, file_token, table_id, revision,
+                    action_list_json, payload_digest, state, next_attempt_at,
+                    received_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+                """,
+                (
+                    event_id,
+                    event_type,
+                    file_token,
+                    table_id,
+                    revision,
+                    action_json,
+                    payload_digest,
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            existing = conn.execute(
+                """
+                SELECT event_type, file_token, table_id, revision,
+                       action_list_json, payload_digest
+                FROM cash_flow_event_inbox WHERE event_id = ?
+                """,
+                (event_id,),
+            ).fetchone()
+            expected = (
+                event_type,
+                file_token,
+                table_id,
+                revision,
+                action_json,
+                payload_digest,
+            )
+            actual = tuple(existing) if existing else None
+            if actual != expected:
+                raise ValueError(
+                    f"cash flow event id collision with different payload: {event_id}"
+                )
+        return cursor.rowcount == 1
+
+    def claim_cash_flow_events(
+        self,
+        *,
+        limit: int = 100,
+        claim_id: Optional[str] = None,
+    ) -> list[Dict[str, Any]]:
+        now_dt = self.now_factory()
+        now = now_dt.isoformat()
+        lease_cutoff = (now_dt - timedelta(minutes=_CLAIM_LEASE_MINUTES)).isoformat()
+        resolved_claim_id = claim_id or uuid4().hex
+        claimed: list[sqlite3.Row] = []
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                UPDATE cash_flow_event_inbox
+                SET state = 'failed_retryable', claim_id = NULL, claimed_at = NULL,
+                    last_error = COALESCE(last_error, 'worker claim expired'),
+                    next_attempt_at = ?, updated_at = ?
+                WHERE state = 'claimed' AND claimed_at <= ?
+                """,
+                (now, now, lease_cutoff),
+            )
+            rows = conn.execute(
+                """
+                SELECT * FROM cash_flow_event_inbox
+                WHERE state IN ('pending', 'failed_retryable')
+                  AND next_attempt_at <= ?
+                ORDER BY received_at LIMIT ?
+                """,
+                (now, int(limit)),
+            ).fetchall()
+            for row in rows:
+                cursor = conn.execute(
+                    """
+                    UPDATE cash_flow_event_inbox
+                    SET state = 'claimed', claim_id = ?, claimed_at = ?, updated_at = ?
+                    WHERE event_id = ? AND state IN ('pending', 'failed_retryable')
+                    """,
+                    (resolved_claim_id, now, now, row["event_id"]),
+                )
+                if cursor.rowcount == 1:
+                    claimed.append(row)
+        result = []
+        for row in claimed:
+            item = dict(row)
+            item["action_list"] = json.loads(item.pop("action_list_json"))
+            item["outcome"] = (
+                json.loads(item.pop("outcome_json"))
+                if item.get("outcome_json") is not None
+                else None
+            )
+            item["state"] = "claimed"
+            item["claim_id"] = resolved_claim_id
+            item["claimed_at"] = now
+            result.append(item)
+        return result
+
+    def mark_cash_flow_event_failed(
+        self,
+        *,
+        event_id: str,
+        claim_id: str,
+        error: str,
+    ) -> None:
+        now_dt = self.now_factory()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT attempt_count FROM cash_flow_event_inbox
+                WHERE event_id = ? AND state = 'claimed' AND claim_id = ?
+                """,
+                (event_id, claim_id),
+            ).fetchone()
+            if not row:
+                raise KeyError(f"cash flow event claim not found: {event_id}")
+            attempt = int(row[0]) + 1
+            retry_index = min(attempt - 1, len(_RETRY_MINUTES) - 1)
+            next_attempt = now_dt + timedelta(minutes=_RETRY_MINUTES[retry_index])
+            conn.execute(
+                """
+                UPDATE cash_flow_event_inbox
+                SET state = 'failed_retryable', attempt_count = ?,
+                    next_attempt_at = ?, claim_id = NULL, claimed_at = NULL,
+                    last_error = ?, updated_at = ?
+                WHERE event_id = ? AND state = 'claimed' AND claim_id = ?
+                """,
+                (
+                    attempt,
+                    next_attempt.isoformat(),
+                    error,
+                    now_dt.isoformat(),
+                    event_id,
+                    claim_id,
+                ),
+            )
+
+    def get_cash_flow_event(self, event_id: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM cash_flow_event_inbox WHERE event_id = ?",
+                (event_id,),
+            ).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        item["action_list"] = json.loads(item.pop("action_list_json"))
+        raw_outcome = item.pop("outcome_json")
+        item["outcome"] = json.loads(raw_outcome) if raw_outcome else None
+        return item
+
+    @classmethod
+    def inspect_cash_flow_event_status(
+        cls,
+        db_path: Optional[str | Path] = None,
+    ) -> Dict[str, Any]:
+        """Read cash-flow inbox evidence without creating local state."""
+
+        path = cls.resolve_db_path_read_only(db_path)
+        if not path.exists():
+            return {
+                "db_path": str(path),
+                "initialized": False,
+                "counts": {},
+                "latest": None,
+            }
+        try:
+            connection_uri = f"{path.resolve().as_uri()}?mode=ro"
+            conn = sqlite3.connect(connection_uri, uri=True, timeout=1)
+            conn.row_factory = sqlite3.Row
+            table = conn.execute(
+                """
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table' AND name = 'cash_flow_event_inbox'
+                """
+            ).fetchone()
+            if not table:
+                return {
+                    "db_path": str(path),
+                    "initialized": False,
+                    "counts": {},
+                    "latest": None,
+                }
+            rows = conn.execute(
+                """
+                SELECT state, COUNT(*) AS count
+                FROM cash_flow_event_inbox GROUP BY state ORDER BY state
+                """
+            ).fetchall()
+            latest = conn.execute(
+                """
+                SELECT event_id, state, received_at, updated_at, last_error
+                FROM cash_flow_event_inbox
+                ORDER BY received_at DESC LIMIT 1
+                """
+            ).fetchone()
+            return {
+                "db_path": str(path),
+                "initialized": True,
+                "counts": {str(row["state"]): int(row["count"]) for row in rows},
+                "latest": dict(latest) if latest else None,
+            }
+        except sqlite3.DatabaseError as exc:
+            raise RuntimeError(
+                f"cash flow event inbox status read failed: {path}: {exc}"
+            ) from exc
+        finally:
+            if "conn" in locals():
+                conn.close()
+
+    def cash_flow_event_status(self) -> Dict[str, Any]:
+        return self.inspect_cash_flow_event_status(self.db_path)
 
     # ---------- Typed operation receipt outbox ----------
 
