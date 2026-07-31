@@ -279,7 +279,7 @@ class LocalHoldingsIndexCache:
 
     存储结构：
     {
-      "version": 1,
+      "version": 2,
       "items": {
         "asset:account:broker": {
           "record_id": "rec_xxx",
@@ -294,7 +294,7 @@ class LocalHoldingsIndexCache:
     }
     """
 
-    VERSION = 1
+    VERSION = 2
 
     def __init__(self, cache_file: Optional[Path] = None):
         self.cache_file = cache_file or _cache_file('holdings_index.json')
@@ -310,12 +310,15 @@ class LocalHoldingsIndexCache:
         try:
             with open(self.cache_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            if isinstance(data, dict) and isinstance(data.get('items'), dict):
+            if (
+                isinstance(data, dict)
+                and data.get('version') == self.VERSION
+                and isinstance(data.get('items'), dict)
+            ):
                 self._cache = data['items']
-            elif isinstance(data, dict):
-                # 兼容旧格式：直接是 key->item
-                self._cache = data
             else:
+                # Legacy/unversioned/v1 data may contain synthesized defaults.
+                # Ignore it; a successful fresh preload will replace it.
                 self._cache = {}
         except FileNotFoundError:
             self._cache = {}

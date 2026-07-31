@@ -21,6 +21,9 @@ _BLOCKING_STATUSES = {
     "nav_history_duplicate",
     "recovery_required",
     "existing_nav_not_final",
+    "holdings_confirmation_required",
+    "holdings_evidence_unavailable",
+    "holdings_preflight_failed",
 }
 _PRICE_SUMMARY_RE = re.compile(
     r"^\[价格汇总\]\s*"
@@ -185,6 +188,18 @@ class NavHistoryReceiptService:
     def _item_row(cls, item: dict[str, Any]) -> str:
         account = item.get("account") or "-"
         status = str(item.get("status") or "")
+        holdings_snapshot = item.get("holdings_snapshot") or {}
+        holdings_digest = (
+            item.get("holdings_digest")
+            or holdings_snapshot.get("normalized_holdings_digest")
+            or item.get("normalized_holdings_digest")
+            or item.get("raw_record_digest")
+        )
+        digest_text = (
+            f"｜Holdings {str(holdings_digest)[:12]}"
+            if holdings_digest
+            else ""
+        )
         if status == "written":
             report = item.get("report") or {}
             overview = report.get("overview") or {}
@@ -200,7 +215,7 @@ class NavHistoryReceiptService:
             cash_flow = _as_float(report.get("cash_flow"))
             if cash_flow not in (None, 0.0):
                 row += f"｜资金变动 {_format_signed_money(cash_flow)}"
-            return row
+            return row + digest_text
 
         if status.startswith("skipped_"):
             label = "NAV 已存在" if status == "skipped_existing_nav" else status
@@ -210,12 +225,15 @@ class NavHistoryReceiptService:
             if item.get("total_value") is not None:
                 details.append(f"总资产 {_format_money(item.get('total_value'))}")
             suffix = f"｜{'｜'.join(details)}" if details else ""
-            return f"⏭ {account}｜{label}{suffix}"
+            return f"⏭ {account}｜{label}{suffix}{digest_text}"
 
         error = item.get("error") or "unknown error"
         stage = str(item.get("stage") or "").strip()
         stage_text = f"｜阶段 {stage}" if stage else ""
-        return f"❌ {account}｜{status or 'failed'}{stage_text}｜{error}"
+        return (
+            f"❌ {account}｜{status or 'failed'}{stage_text}｜{error}"
+            f"{digest_text}"
+        )
 
     @staticmethod
     def _warning_summary(items: list[dict[str, Any]]) -> tuple[Optional[str], list[str]]:

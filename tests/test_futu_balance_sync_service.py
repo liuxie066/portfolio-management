@@ -441,6 +441,26 @@ def test_position_snapshot_uses_average_cost_not_diluted_or_deprecated_cost():
 
     assert snapshot.average_cost == 100.25
     assert snapshot.asset_id == "FUTU"
+    assert snapshot.currency_explicit is True
+
+
+def test_position_snapshot_marks_market_currency_fallback_as_non_authoritative():
+    provider = FutuOpenApiBalanceProvider()
+
+    snapshot = provider._position_snapshot(
+        {
+            "code": "HK.00700",
+            "stock_name": "Tencent",
+            "qty": 10,
+            "average_cost": 300,
+            "currency": "",
+            "position_side": "LONG",
+        },
+        "STOCK",
+    )
+
+    assert snapshot.currency == "HKD"
+    assert snapshot.currency_explicit is False
 
 
 def test_sync_portfolio_detects_cost_only_change_and_preserves_manual_metadata():

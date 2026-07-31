@@ -1,0 +1,18 @@
+"""Protocol-level constants shared by exact Feishu Bitable event handlers."""
+
+BITABLE_RECORD_CHANGED_EVENT_TYPE = "drive.file.bitable_record_changed_v1"
+BITABLE_SUBSCRIPTION_EVENT_TYPE = "bitable_record_changed_v1"
+BITABLE_FILE_TYPE = "bitable"
+MAX_EVENT_PAYLOAD_BYTES = 1_000_000
+MAX_EVENT_ACTIONS = 500
+MAX_EVENT_IDENTIFIER_LENGTH = 256
+
+
+__all__ = [
+    "BITABLE_FILE_TYPE",
+    "BITABLE_RECORD_CHANGED_EVENT_TYPE",
+    "BITABLE_SUBSCRIPTION_EVENT_TYPE",
+    "MAX_EVENT_ACTIONS",
+    "MAX_EVENT_IDENTIFIER_LENGTH",
+    "MAX_EVENT_PAYLOAD_BYTES",
+]

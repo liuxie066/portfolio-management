@@ -3,7 +3,7 @@ from queue import Empty
 
 import pytest
 
-from src.process_lock import process_lock
+from src.process_lock import cash_flow_record_lock_key, process_lock
 
 
 def _hold_lock(data_dir, events, release):
@@ -41,3 +41,11 @@ def test_process_lock_serializes_separate_processes(tmp_path):
     second.join(timeout=5)
     assert first.exitcode == 0
     assert second.exitcode == 0
+
+
+def test_cash_flow_record_lock_key_is_exact_and_rejects_empty_identity():
+    assert cash_flow_record_lock_key(" rec-cf-1 ") == (
+        "cash-flow-record-write:rec-cf-1"
+    )
+    with pytest.raises(ValueError, match="requires record_id"):
+        cash_flow_record_lock_key(" ")

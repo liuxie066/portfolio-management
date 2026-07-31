@@ -1,6 +1,7 @@
 """Account discovery and multi-account read orchestration."""
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from src.time_utils import bj_now_naive
@@ -160,7 +161,12 @@ class AccountService:
             result["warnings"] = warnings
         return result
 
-    def list_nav_accounts(self, *, include_default: bool = False) -> Dict[str, Any]:
+    def list_nav_accounts(
+        self,
+        *,
+        include_default: bool = False,
+        strict_raw: bool = False,
+    ) -> Dict[str, Any]:
         """List accounts that should participate in daily NAV jobs.
 
         This is intentionally narrower than ``list_accounts``: trade history and
@@ -170,6 +176,54 @@ class AccountService:
         """
         accounts = set()
         warnings = []
+
+        if strict_raw:
+            get_raw = getattr(self.storage, "get_raw_holdings", None)
+            if not callable(get_raw):
+                return {
+                    "success": False,
+                    "status": "holdings_source_unavailable",
+                    "error": "storage does not support complete raw holdings discovery",
+                    "accounts": [],
+                    "source": "holdings_raw",
+                }
+            try:
+                records = list(get_raw())
+            except Exception as exc:
+                return {
+                    "success": False,
+                    "status": "holdings_source_unavailable",
+                    "error": str(exc) or exc.__class__.__name__,
+                    "accounts": [],
+                    "source": "holdings_raw",
+                }
+            for record in records:
+                fields = record.raw_fields
+                record_accounts = {
+                    account
+                    for account in iter_account_values(fields.get("account"))
+                    if account
+                }
+                if not record_accounts:
+                    continue
+                raw_quantity = fields.get("quantity")
+                try:
+                    quantity = Decimal(str(raw_quantity).replace(",", "").strip())
+                    quantity_valid = quantity.is_finite()
+                except (InvalidOperation, AttributeError, TypeError, ValueError):
+                    quantity_valid = False
+                    quantity = Decimal("0")
+                if not quantity_valid or quantity != 0:
+                    accounts.update(record_accounts)
+            if include_default and self.default_account:
+                accounts.add(self.default_account)
+            return {
+                "success": True,
+                "default_account": self.default_account,
+                "accounts": sorted(accounts),
+                "count": len(accounts),
+                "source": "holdings_raw",
+            }
 
         try:
             get_holdings_fn = getattr(self.storage, "get_holdings")

@@ -1,0 +1,316 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime
+
+import pytest
+
+from src.app.holdings_validation import (
+    FutuAccountEvidence,
+    FutuPositionEvidence,
+    HoldingsEvidenceBundle,
+    HoldingsValidator,
+)
+from src.domain.holdings import RawHoldingRecord
+
+
+def _record(record_id: str = "rec_1", **overrides):
+    fields = {
+        "asset_id": "AAPL",
+        "asset_name": "Apple",
+        "asset_type": "us_stock",
+        "account": "lx",
+        "broker": "IBKR",
+        "quantity": 10,
+        "currency": "USD",
+    }
+    fields.update(overrides)
+    return RawHoldingRecord(
+        record_id=record_id,
+        raw_fields=fields,
+        fetched_at=datetime.now(UTC),
+    )
+
+
+def _outcome(report, field):
+    return next(item for item in report.records[0].outcomes if item.field == field)
+
+
+def _futu_bundle(*positions):
+    return HoldingsEvidenceBundle(
+        futu_by_account={
+            "lx": FutuAccountEvidence(
+                account="lx",
+                source="futu-openapi",
+                source_snapshot_id="snap-1",
+                source_as_of="2026-07-31T12:00:00Z",
+                positions=tuple(positions),
+            )
+        }
+    )
+
+
+def test_blank_us_currency_is_proposed_from_asset_type_never_defaulted():
+    report = HoldingsValidator().validate([_record(currency="")])
+
+    currency = _outcome(report, "currency")
+    assert currency.status == "missing_completable"
+    assert currency.proposed == "USD"
+    assert currency.authority == "asset_type_policy"
+    assert currency.authority_id == "asset_type:us_stock"
+    assert report.blocking_count == 1
+
+
+@pytest.mark.parametrize(
+    ("asset_type", "asset_id", "expected_status", "expected_currency"),
+    [
+        ("a_stock", "000001", "missing_completable", "CNY"),
+        ("cn_fund", "000001", "missing_completable", "CNY"),
+        ("otc_fund", "FUND-1", "missing_completable", "CNY"),
+        ("us_stock", "AAPL", "missing_completable", "USD"),
+        ("us_fund", "VTI", "missing_completable", "USD"),
+        ("hk_stock", "00700", "missing_manual", None),
+        ("exchange_fund", "SPY.US", "missing_completable", "USD"),
+        ("exchange_fund", "510300.SH", "missing_completable", "CNY"),
+        ("exchange_fund", "02800.HK", "missing_manual", None),
+        ("crypto", "BTC", "missing_manual", None),
+    ],
+)
+def test_currency_resolver_asset_type_matrix(
+    asset_type,
+    asset_id,
+    expected_status,
+    expected_currency,
+):
+    report = HoldingsValidator().validate(
+        [_record(asset_type=asset_type, asset_id=asset_id, currency="")]
+    )
+
+    currency = _outcome(report, "currency")
+    assert currency.status == expected_status
+    assert currency.proposed == expected_currency
+
+
+@pytest.mark.parametrize(
+    ("asset_type", "asset_id", "expected"),
+    [
+        ("cash", "CNY-CASH", "CNY"),
+        ("cash", "USD-CASH", "USD"),
+        ("mmf", "HKD-MMF", "HKD"),
+    ],
+)
+def test_cash_and_mmf_currency_requires_asset_id_prefix(asset_type, asset_id, expected):
+    report = HoldingsValidator().validate(
+        [_record(asset_type=asset_type, asset_id=asset_id, currency="")]
+    )
+    assert _outcome(report, "currency").proposed == expected
+
+
+def test_cash_without_currency_prefix_stays_manual():
+    report = HoldingsValidator().validate(
+        [_record(asset_type="cash", asset_id="CASH", currency="")]
+    )
+    assert _outcome(report, "currency").status == "missing_manual"
+
+
+def test_exact_futu_currency_overrides_hk_heuristic_and_detects_conflict():
+    position = FutuPositionEvidence(
+        asset_id="00700",
+        raw_code="HK.00700",
+        asset_name="Tencent",
+        security_type="STOCK",
+        market="HK",
+        currency="CNY",
+        currency_explicit=True,
+    )
+    report = HoldingsValidator().validate(
+        [_record(asset_id="00700", asset_type="hk_stock", broker="富途", currency="HKD")],
+        evidence=_futu_bundle(position),
+    )
+
+    currency = _outcome(report, "currency")
+    assert currency.status == "conflict"
+    assert currency.current == "HKD"
+    assert currency.proposed == "CNY"
+    assert currency.authority == "futu_explicit"
+
+
+def test_market_defaulted_futu_currency_is_not_completion_authority():
+    position = FutuPositionEvidence(
+        asset_id="00700",
+        raw_code="HK.00700",
+        asset_name="Tencent",
+        security_type="STOCK",
+        market="HK",
+        currency="HKD",
+        currency_explicit=False,
+    )
+    report = HoldingsValidator().validate(
+        [_record(asset_id="00700", asset_type="hk_stock", broker="富途", currency="")],
+        evidence=_futu_bundle(position),
+    )
+
+    assert _outcome(report, "currency").status == "missing_manual"
+
+
+def test_futu_evidence_requires_explicit_market_qualifiers_to_agree():
+    position = FutuPositionEvidence(
+        asset_id="AAPL",
+        raw_code="US.AAPL",
+        asset_name="Apple",
+        security_type="STOCK",
+        market="US",
+        currency="USD",
+        currency_explicit=True,
+    )
+
+    conflicting = HoldingsValidator().validate(
+        [_record(asset_id="AAPL.HK", broker="富途", currency="")],
+        evidence=_futu_bundle(position),
+    )
+    same_market = HoldingsValidator().validate(
+        [_record(asset_id="AAPL.US", broker="富途", currency="")],
+        evidence=_futu_bundle(position),
+    )
+
+    assert _outcome(conflicting, "currency").status == "missing_completable"
+    assert _outcome(conflicting, "currency").authority == "asset_type_policy"
+    assert _outcome(same_market, "currency").authority == "futu_explicit"
+
+
+def test_unqualified_futu_symbol_with_multiple_markets_is_ambiguous():
+    report = HoldingsValidator().validate(
+        [_record(asset_id="ABC", asset_type="hk_stock", broker="富途", currency="")],
+        evidence=_futu_bundle(
+            FutuPositionEvidence("ABC", "US.ABC", "ABC US", "STOCK", "US", "USD", True),
+            FutuPositionEvidence("ABC", "HK.ABC", "ABC HK", "STOCK", "HK", "HKD", True),
+        ),
+    )
+
+    assert _outcome(report, "currency").status == "missing_manual"
+    assert _outcome(report, "currency").reason_code == "FUTU_POSITION_AMBIGUOUS"
+
+
+def test_disputed_asset_type_cannot_authorize_currency_completion():
+    position = FutuPositionEvidence(
+        asset_id="AAPL",
+        raw_code="US.AAPL",
+        asset_name="Apple",
+        security_type="STOCK",
+        market="US",
+        currency="USD",
+        currency_explicit=True,
+    )
+    report = HoldingsValidator().validate(
+        [_record(asset_type="a_stock", broker="富途", currency="")],
+        evidence=_futu_bundle(position),
+    )
+
+    assert _outcome(report, "asset_type").status == "conflict"
+    assert _outcome(report, "currency").status == "missing_manual"
+
+
+def test_missing_quantity_differs_from_zero_and_nonfinite_is_invalid():
+    missing = HoldingsValidator().validate([_record(quantity="")])
+    zero = HoldingsValidator().validate([_record(quantity=0)])
+    nonfinite = HoldingsValidator().validate([_record(quantity="NaN")])
+
+    assert _outcome(missing, "quantity").status == "missing_manual"
+    assert _outcome(zero, "quantity").status == "valid"
+    assert _outcome(zero, "quantity").reason_code == "QUANTITY_ZERO_VALID"
+    assert _outcome(nonfinite, "quantity").status == "invalid"
+
+
+def test_duplicate_identity_and_missing_account_are_scoped_integrity_issues():
+    report = HoldingsValidator().validate(
+        [
+            _record("rec_1"),
+            _record("rec_2"),
+            _record("rec_orphan", asset_id="MSFT", account=""),
+        ]
+    )
+
+    assert [issue.kind for issue in report.records[0].issues] == ["duplicate_identity"]
+    assert [issue.kind for issue in report.records[1].issues] == ["duplicate_identity"]
+    assert [issue.kind for issue in report.records[2].issues] == ["orphan"]
+    assert report.blocking_count == 3
+
+
+def test_valid_raw_record_builds_typed_holding_without_defaults():
+    report = HoldingsValidator().validate([_record()])
+    record = report.records[0]
+
+    assert record.valid_for_typed_holding is True
+    holding = record.to_holding()
+    assert holding.currency == "USD"
+    assert holding.quantity == 10
+    assert holding.broker == "IBKR"
+
+
+def test_typed_holding_uses_the_same_normalized_asset_type_as_validation():
+    record = HoldingsValidator().validate([_record(asset_type="US_STOCK")]).records[0]
+
+    assert record.valid_for_typed_holding is True
+    assert record.to_holding().asset_type.value == "us_stock"
+
+
+def test_record_digest_normalizes_semantically_equivalent_field_values():
+    first = HoldingsValidator().validate(
+        [
+            _record(
+                asset_id=" AAPL ",
+                asset_type="US_STOCK",
+                quantity=10,
+                avg_cost="150.00",
+                currency=" usd ",
+                tag=["core"],
+            )
+        ]
+    ).records[0]
+    second = HoldingsValidator().validate(
+        [
+            _record(
+                asset_id="AAPL",
+                asset_type="us_stock",
+                quantity="10.0",
+                avg_cost=150,
+                currency="USD",
+                tag='["core"]',
+            )
+        ]
+    ).records[0]
+    changed = HoldingsValidator().validate(
+        [
+            _record(
+                quantity=11,
+                avg_cost=150,
+                tag=["core"],
+            )
+        ]
+    ).records[0]
+
+    assert first.record_digest == second.record_digest
+    assert first.record_digest != changed.record_digest
+
+
+def test_validation_reports_transport_metadata_as_nonblocking_outcomes():
+    report = HoldingsValidator().validate(
+        [_record(created_at="2026-07-31 12:00:00", updated_at="")]
+    )
+
+    assert _outcome(report, "created_at").status == "valid"
+    assert _outcome(report, "updated_at").status == "optional_missing"
+
+
+def test_invalid_transport_timestamp_is_a_nonblocking_warning():
+    report = HoldingsValidator().validate([_record(updated_at="not-a-timestamp")])
+
+    outcome = _outcome(report, "updated_at")
+    assert outcome.status == "invalid"
+    assert outcome.blocks_official_nav is False
+
+
+def test_record_digest_normalizes_negative_zero():
+    negative_zero = HoldingsValidator().validate([_record(quantity="-0")]).records[0]
+    zero = HoldingsValidator().validate([_record(quantity=0)]).records[0]
+
+    assert negative_zero.record_digest == zero.record_digest

@@ -120,7 +120,12 @@ Manual rule:
 - `amount` is positive for deposit and negative for withdrawal.
 - `broker` is mandatory and explicitly routes the same-currency CASH identity.
 - Manual users do not fill exchange-rate, CNY, flow-type, dedup, or source fields.
-- After manual insertion or edit, run `pm cash-flow reconcile` to preview generated fields, then `pm cash-flow reconcile --apply --confirm` to write them.
+- When the combined Feishu event listener is activated, a fresh exact-record
+  worker automatically completes deterministic generated fields for valid CNY
+  rows. Foreign rows are completed automatically only when their existing local
+  FX confirmation still matches exactly; otherwise a durable receipt requires
+  operator confirmation. `pm cash-flow reconcile --record-id ... --apply
+  --confirm` remains the recovery and FX-confirmation workflow.
 
 System fields:
 - `flow_type` - derived from amount sign (`DEPOSIT` / `WITHDRAW`)

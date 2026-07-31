@@ -378,3 +378,44 @@ def test_nav_receipt_includes_structured_failure_stage():
 
     assert "阶段 cash_flow_reconcile" in text
     assert "FieldNameNotFound" in text
+
+
+def test_nav_receipt_renders_holdings_digest_for_written_and_blocked_items():
+    text = NavHistoryReceiptService.build_message(
+        {
+            "success": False,
+            "status": "partial",
+            "date": "2026-07-31",
+            "run_id": "run-holdings",
+            "items": [
+                {
+                    "success": True,
+                    "status": "written",
+                    "account": "lx",
+                    "holdings_digest": "abcdef1234567890",
+                    "report": {
+                        "nav": 1,
+                        "total_value": 100,
+                        "pnl": 0,
+                        "ytd_nav_change": 0,
+                        "overview": {
+                            "stock_ratio": 0,
+                            "fund_ratio": 0,
+                            "cash_ratio": 1,
+                        },
+                    },
+                },
+                {
+                    "success": False,
+                    "status": "holdings_confirmation_required",
+                    "account": "sy",
+                    "raw_record_digest": "123456abcdef7890",
+                    "error": "manual confirmation required",
+                },
+            ],
+        }
+    )
+
+    assert "Holdings abcdef123456" in text
+    assert "Holdings 123456abcdef" in text
+    assert "holdings_confirmation_required" in text

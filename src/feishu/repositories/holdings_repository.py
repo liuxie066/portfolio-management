@@ -1,10 +1,23 @@
 """Repository for the Feishu holdings table."""
-from datetime import datetime
+from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
+import json
+from math import isfinite
 from typing import Dict, List, Optional
 
+from ...domain.holdings import RawHoldingRecord
 from ...models import (
     Holding, AssetType, AssetClass, Industry, DATETIME_FORMAT,
 )
+
+
+class HoldingsIntegrityError(ValueError):
+    """Fresh holdings rows could not be converted without inventing facts."""
+
+    def __init__(self, errors: List[Dict[str, str]]):
+        self.errors = list(errors)
+        record_ids = ", ".join(sorted({item["record_id"] for item in errors}))
+        super().__init__(f"invalid holdings records: {record_ids}")
 
 
 class HoldingsRepository:
@@ -28,6 +41,7 @@ class HoldingsRepository:
 
     def _snapshot_for_persistent_cache(self, holding: Holding) -> Dict[str, any]:
         return {
+            'validation_policy_version': 'holdings-validation.v1',
             'record_id': holding.record_id,
             'asset_id': holding.asset_id,
             'asset_name': holding.asset_name,
@@ -52,24 +66,18 @@ class HoldingsRepository:
         for bk, fields in entries.items():
             if not fields or not fields.get('record_id'):
                 continue
+            if fields.get('validation_policy_version') != 'holdings-validation.v1':
+                continue
+            try:
+                holding = self._dict_to_holding(fields)
+            except (TypeError, ValueError):
+                continue
             asset_id = fields.get('asset_id', '')
             account = fields.get('account', '')
             broker = fields.get('broker') or ''
             cache_key = self._get_holding_cache_key(asset_id, account, broker or None)
-            self._holding_id_cache[cache_key] = fields['record_id']
-
-            mem_fields = dict(fields)
-            mem_fields.setdefault('asset_name', '')
-            mem_fields.setdefault('asset_type', None)
-            mem_fields.setdefault('quantity', 0)
-            mem_fields.setdefault('avg_cost', None)
-            mem_fields.setdefault('currency', 'CNY')
-            mem_fields.setdefault('asset_class', None)
-            mem_fields.setdefault('industry', None)
-            mem_fields.setdefault('tag', [])
-            mem_fields.setdefault('created_at', None)
-            mem_fields.setdefault('updated_at', None)
-            self._holding_fields_cache[cache_key] = mem_fields
+            self._holding_id_cache[cache_key] = holding.record_id
+            self._holding_fields_cache[cache_key] = dict(fields)
 
     def _flush_persistent_holdings_index(self):
         """将内存持仓索引刷写到本地缓存。"""
@@ -95,6 +103,7 @@ class HoldingsRepository:
 
     def _put_holding_cache(self, holding: Holding, *, flush_persistent: bool = False):
         """Store holding into all cache layers (memory + persistent)."""
+        self._validate_writable_holding(holding)
         if not holding.record_id:
             return
 
@@ -145,46 +154,178 @@ class HoldingsRepository:
 
     def preload_holdings_index(self, account: Optional[str] = None) -> Dict[str, any]:
         """预加载持仓索引到内存和本地缓存。"""
-        conditions = []
-        if account:
-            conditions.append(f'CurrentValue.[account] = "{self._escape_filter_value(account)}"')
-        filter_str = ' AND '.join(conditions) if conditions else None
-        records = self.client.list_records(
-            'holdings',
-            filter_str=filter_str,
-            field_names=self.HOLDING_PROJECTION_FIELDS,
-        )
+        records = self.get_raw_holdings(account=account)
+        converted = self._convert_raw_holdings(records)
 
-        count = 0
-        complete_projection = True
-        for record in records:
-            fields = self._from_feishu_fields(record.get('fields') or {}, 'holdings')
-            if not fields.get('asset_id'):
-                complete_projection = False
-            if account and not fields.get('account'):
-                fields['account'] = account
-            fields['record_id'] = record['record_id']
-            holding = self._dict_to_holding(fields)
+        keys_to_remove = [
+            key
+            for key, fields in self._holding_fields_cache.items()
+            if account is None or fields.get('account') == account
+        ]
+        for key in keys_to_remove:
+            self._holding_id_cache.pop(key, None)
+            self._holding_fields_cache.pop(key, None)
+            self._local_holdings_index_cache.delete(key)
+        for holding in converted:
             self._put_holding_cache(holding)
-            count += 1
-
-        if account and complete_projection:
-            self._holdings_index_loaded_accounts.add(account)
-        elif not account and complete_projection:
-            self._holdings_index_loaded_all = True
-
         self._flush_persistent_holdings_index()
+
+        if account:
+            self._holdings_index_loaded_accounts.add(account)
+        else:
+            self._holdings_index_loaded_all = True
 
         return {
             'account': account or 'all',
-            'loaded': count,
+            'loaded': len(converted),
             'source': 'feishu',
         }
+
+    def _convert_raw_holdings(
+        self,
+        records: List[RawHoldingRecord],
+    ) -> List[Holding]:
+        """Convert a complete raw slice or report every integrity error."""
+
+        converted: List[Holding] = []
+        errors: List[Dict[str, str]] = []
+        identities: Dict[tuple[str, str, str], List[str]] = {}
+        for record in records:
+            raw_identity = tuple(
+                str(record.raw_fields.get(field) or '').strip()
+                for field in ('asset_id', 'account', 'broker')
+            )
+            if all(raw_identity):
+                identities.setdefault(raw_identity, []).append(record.record_id)
+            fields = dict(record.raw_fields)
+            fields['record_id'] = record.record_id
+            try:
+                converted.append(self._dict_to_holding(fields))
+            except (TypeError, ValueError) as exc:
+                errors.append({"record_id": record.record_id, "error": str(exc)})
+        for identity, record_ids in identities.items():
+            if len(record_ids) < 2:
+                continue
+            message = (
+                "duplicate holding identity: "
+                f"asset_id={identity[0]}, account={identity[1]}, broker={identity[2]}"
+            )
+            for duplicate_record_id in record_ids:
+                errors.append({"record_id": duplicate_record_id, "error": message})
+        if errors:
+            raise HoldingsIntegrityError(errors)
+        return converted
+
+    def get_raw_holdings(
+        self,
+        *,
+        account: Optional[str] = None,
+        record_id: Optional[str] = None,
+    ) -> List[RawHoldingRecord]:
+        """Read complete untyped Feishu rows without applying query defaults."""
+
+        requested_account = str(account).strip() if account is not None else None
+        requested_record_id = str(record_id).strip() if record_id is not None else None
+        if account is not None and not requested_account:
+            raise ValueError("account must not be blank")
+        if record_id is not None and not requested_record_id:
+            raise ValueError("record_id must not be blank")
+        if requested_account is not None and requested_record_id is not None:
+            raise ValueError("account and record_id are mutually exclusive")
+        fetched_at = datetime.now(UTC)
+        if requested_record_id is not None:
+            record = self.client.get_record_strict('holdings', requested_record_id)
+            records = [record]
+        else:
+            filter_str = (
+                f'CurrentValue.[account] = "{self._escape_filter_value(requested_account)}"'
+                if requested_account is not None
+                else None
+            )
+            records = self.client.list_records(
+                'holdings',
+                filter_str=filter_str,
+                field_names=self.HOLDING_PROJECTION_FIELDS,
+            )
+        raw_records: List[RawHoldingRecord] = []
+        for record in records:
+            resolved_record_id = str((record or {}).get('record_id') or '').strip()
+            fields = (record or {}).get('fields')
+            if not resolved_record_id or not isinstance(fields, dict):
+                raise RuntimeError("holdings source returned an incomplete record")
+            if requested_record_id is not None and resolved_record_id != requested_record_id:
+                raise RuntimeError(
+                    "holdings source returned a different record: "
+                    f"requested={requested_record_id}, returned={resolved_record_id}"
+                )
+            if requested_account is not None:
+                returned_account = str(fields.get('account') or '').strip()
+                if returned_account != requested_account:
+                    raise RuntimeError(
+                        "holdings source returned a record outside the requested account: "
+                        f"record_id={resolved_record_id}, requested={requested_account}, "
+                        f"returned={returned_account or '<missing>'}"
+                    )
+            raw_records.append(
+                RawHoldingRecord(
+                    record_id=resolved_record_id,
+                    raw_fields=dict(fields),
+                    source='feishu',
+                    fetched_at=fetched_at,
+                )
+            )
+        return raw_records
+
+    def patch_holding_record(
+        self,
+        *,
+        record_id: str,
+        fields: Dict[str, object],
+    ) -> RawHoldingRecord:
+        """Narrow absolute patch used only by confirmed reconciliation flows."""
+
+        from ...time_utils import bj_now_naive
+
+        resolved_record_id = str(record_id or '').strip()
+        if not resolved_record_id:
+            raise ValueError("record_id is required")
+        allowed = {'asset_name', 'asset_type', 'currency', 'asset_class'}
+        supplied = {str(key): value for key, value in dict(fields).items()}
+        if not supplied:
+            raise ValueError("holding patch requires at least one target field")
+        unsupported = sorted(set(supplied) - allowed)
+        if unsupported:
+            raise ValueError(
+                "unsupported holdings reconciliation fields: "
+                + ", ".join(unsupported)
+            )
+        if any(value is None or (isinstance(value, str) and not value.strip()) for value in supplied.values()):
+            raise ValueError("holdings reconciliation patch cannot write blank values")
+        update_fields = {
+            **supplied,
+            'updated_at': bj_now_naive().strftime(DATETIME_FORMAT),
+        }
+        feishu_fields = self._to_feishu_fields(update_fields, 'holdings')
+        try:
+            self.client.update_record('holdings', resolved_record_id, feishu_fields)
+        finally:
+            self._invalidate_holding_cache_by_record_id(
+                resolved_record_id,
+                flush_persistent=True,
+            )
+        records = self.get_raw_holdings(record_id=resolved_record_id)
+        if len(records) != 1:
+            raise RuntimeError(
+                f"holding patch readback did not return one record: {resolved_record_id}"
+            )
+        return records[0]
 
     # ========== holdings CRUD ==========
 
     def get_holding(self, asset_id: str, account: str, broker: Optional[str] = None) -> Optional[Holding]:
         """获取单个持仓（优先使用内存索引与快照）"""
+        if not str(asset_id or '').strip() or not str(account or '').strip():
+            raise ValueError("asset_id and account are required")
         cached_holding = self._get_holding_from_cache(asset_id, account, broker)
         if not cached_holding and broker is None:
             cached_holding = self._get_holding_from_cache_any_market(asset_id, account)
@@ -201,51 +342,7 @@ class HoldingsRepository:
 
         if self._holdings_index_loaded_all or (account in self._holdings_index_loaded_accounts):
             return None
-
-        if broker:
-            filter_str = (
-                f'CurrentValue.[asset_id] = "{self._escape_filter_value(asset_id)}" '
-                f'AND CurrentValue.[account] = "{self._escape_filter_value(account)}" '
-                f'AND CurrentValue.[broker] = "{self._escape_filter_value(broker)}"'
-            )
-        else:
-            filter_str = (
-                f'CurrentValue.[asset_id] = "{self._escape_filter_value(asset_id)}" '
-                f'AND CurrentValue.[account] = "{self._escape_filter_value(account)}"'
-            )
-
-        records = self.client.list_records(
-            'holdings',
-            filter_str=filter_str,
-            field_names=self.HOLDING_PROJECTION_FIELDS,
-        )
-        if not records:
-            return None
-
-        selected = records[0]
-        if not broker:
-            for record in records:
-                if not (record.get('fields') or {}).get('broker'):
-                    selected = record
-                    break
-
-        fields = self._from_feishu_fields(selected.get('fields') or {}, 'holdings')
-        if asset_id and not fields.get('asset_id'):
-            fields['asset_id'] = asset_id
-        if account and not fields.get('account'):
-            fields['account'] = account
-        if broker is not None and fields.get('broker') is None:
-            fields['broker'] = broker
-        fields['record_id'] = selected['record_id']
-        holding = self._dict_to_holding(fields)
-        self._put_holding_cache(holding)
-
-        if broker is None and holding.broker:
-            default_key = self._get_holding_cache_key(asset_id, account, None)
-            self._holding_id_cache[default_key] = holding.record_id
-            self._holding_fields_cache[default_key] = dict(self._holding_fields_cache[self._get_holding_cache_key(asset_id, account, holding.broker)])
-
-        return holding
+        return None
 
     def get_holding_fresh(self, asset_id: str, account: str, broker: str) -> Optional[Holding]:
         """Read one exact holding identity from Feishu, bypassing every cache.
@@ -273,12 +370,28 @@ class HoldingsRepository:
         if not records:
             return None
 
-        fields = self._from_feishu_fields(records[0].get('fields') or {}, 'holdings')
-        fields.setdefault('asset_id', asset_id)
-        fields.setdefault('account', account)
-        fields.setdefault('broker', broker)
-        fields['record_id'] = records[0]['record_id']
-        holding = self._dict_to_holding(fields)
+        raw = records[0]
+        raw_fields = raw.get('fields')
+        resolved_record_id = str(raw.get('record_id') or '').strip()
+        if not resolved_record_id or not isinstance(raw_fields, dict) or any(
+            str(raw_fields.get(field_name) or '').strip() != expected
+            for field_name, expected in (
+                ('asset_id', str(asset_id).strip()),
+                ('account', str(account).strip()),
+                ('broker', str(broker).strip()),
+            )
+        ):
+            raise RuntimeError("exact holding read returned an identity mismatch")
+        holding = self._convert_raw_holdings(
+            [
+                RawHoldingRecord(
+                    record_id=resolved_record_id,
+                    raw_fields=dict(raw_fields),
+                    source='feishu',
+                    fetched_at=datetime.now(UTC),
+                )
+            ]
+        )[0]
         self._put_holding_cache(holding)
         return holding
 
@@ -290,35 +403,15 @@ class HoldingsRepository:
         include_empty: bool = True,
     ) -> List[Holding]:
         """Read a complete holdings slice directly from Feishu."""
-        conditions = []
-        if account:
-            conditions.append(
-                f'CurrentValue.[account] = "{self._escape_filter_value(account)}"'
-            )
-        if asset_type:
-            conditions.append(
-                f'CurrentValue.[asset_type] = "{self._escape_filter_value(asset_type)}"'
-            )
-        records = self.client.list_records(
-            'holdings',
-            filter_str=' AND '.join(conditions) if conditions else None,
-            field_names=self.HOLDING_PROJECTION_FIELDS,
-        )
-        holdings: List[Holding] = []
-        seen: set[tuple[str, str, str]] = set()
-        for record in records:
-            fields = self._from_feishu_fields(record.get('fields') or {}, 'holdings')
-            fields['record_id'] = record['record_id']
-            holding = self._dict_to_holding(fields)
-            identity = (holding.asset_id, holding.account, holding.broker or "")
-            if identity in seen:
-                raise RuntimeError(
-                    "duplicate holding identity: "
-                    f"asset_id={identity[0]}, account={identity[1]}, broker={identity[2]}"
-                )
-            seen.add(identity)
+        converted = self._convert_raw_holdings(self.get_raw_holdings(account=account))
+        for holding in converted:
+            identity = (holding.asset_id, holding.account, holding.broker)
             self._invalidate_holding_cache(*identity)
             self._put_holding_cache(holding)
+        holdings: List[Holding] = []
+        for holding in converted:
+            if asset_type and holding.asset_type.value != str(asset_type).strip().lower():
+                continue
             if not include_empty and holding.quantity == 0:
                 continue
             if (
@@ -333,59 +426,23 @@ class HoldingsRepository:
 
     def get_holdings(self, account: Optional[str] = None, asset_type: Optional[str] = None, include_empty: bool = False) -> List[Holding]:
         """获取持仓列表（优先使用内存缓存索引）"""
-        # 当缓存已加载且无 asset_type 过滤时，直接从缓存返回
-        cache_hit = (
-            not asset_type
-            and (
-                self._holdings_index_loaded_all
-                or (account and account in self._holdings_index_loaded_accounts)
-            )
+        loaded = self._holdings_index_loaded_all or (
+            account is not None and account in self._holdings_index_loaded_accounts
         )
-        if cache_hit:
-            holdings = []
-            for cache_key, fields in self._holding_fields_cache.items():
-                if account and fields.get('account') != account:
-                    continue
-                holding = self._dict_to_holding(fields)
-                if not include_empty and holding.quantity == 0:
-                    continue
-                if not include_empty and holding.quantity < 0 and holding.asset_type != AssetType.CASH:
-                    continue
-                holdings.append(holding)
-            holdings.sort(key=lambda h: (h.asset_type.value if h.asset_type else '', h.asset_id))
-            return holdings
-
-        conditions = []
-        if account:
-            conditions.append(f'CurrentValue.[account] = "{self._escape_filter_value(account)}"')
-        if asset_type:
-            conditions.append(f'CurrentValue.[asset_type] = "{self._escape_filter_value(asset_type)}"')
-        filter_str = ' AND '.join(conditions) if conditions else None
-        records = self.client.list_records(
-            'holdings',
-            filter_str=filter_str,
-            field_names=self.HOLDING_PROJECTION_FIELDS,
-        )
-
+        if not loaded:
+            self.preload_holdings_index(account=account)
         holdings = []
-        for record in records:
-            fields = self._from_feishu_fields(record.get('fields') or {}, 'holdings')
-            if account and not fields.get('account'):
-                fields['account'] = account
-            fields['record_id'] = record['record_id']
+        for fields in self._holding_fields_cache.values():
+            if account and fields.get('account') != account:
+                continue
             holding = self._dict_to_holding(fields)
-            self._put_holding_cache(holding)
+            if asset_type and holding.asset_type.value != str(asset_type).strip().lower():
+                continue
             if not include_empty and holding.quantity == 0:
                 continue
             if not include_empty and holding.quantity < 0 and holding.asset_type != AssetType.CASH:
                 continue
             holdings.append(holding)
-
-        if not asset_type:
-            if account:
-                self._holdings_index_loaded_accounts.add(account)
-            else:
-                self._holdings_index_loaded_all = True
 
         holdings.sort(key=lambda h: (h.asset_type.value if h.asset_type else '', h.asset_id))
         return holdings
@@ -394,6 +451,7 @@ class HoldingsRepository:
         """插入或更新持仓（优先使用预加载索引与内存快照）"""
         from ...time_utils import bj_now_naive
 
+        self._validate_writable_holding(holding)
         now = bj_now_naive()
         now_text = now.strftime(DATETIME_FORMAT)
         existing = self.get_holding(holding.asset_id, holding.account, holding.broker)
@@ -449,6 +507,7 @@ class HoldingsRepository:
         """
         from ...time_utils import bj_now_naive
 
+        self._validate_writable_holding(holding)
         now = bj_now_naive()
         existing = self.get_holding(holding.asset_id, holding.account, holding.broker)
 
@@ -486,6 +545,9 @@ class HoldingsRepository:
 
         if not holdings:
             return {'mode': mode, 'updated': 0, 'created': 0, 'preloaded_accounts': []}
+
+        for holding in holdings:
+            self._validate_writable_holding(holding)
 
         preloaded_accounts: List[str] = []
         if mode == 'additive':
@@ -620,7 +682,7 @@ class HoldingsRepository:
         try:
             self.client.update_record('holdings', holding.record_id, feishu_update_fields)
         except Exception:
-            self._invalidate_holding_cache(asset_id, account, broker, flush_persistent=True)
+            self._invalidate_holding_cache(asset_id, account, holding.broker, flush_persistent=True)
             raise
 
         holding.quantity = new_quantity
@@ -634,7 +696,7 @@ class HoldingsRepository:
         if holding and holding.record_id and abs(holding.quantity) <= 1e-8:
             if not self.client.delete_record('holdings', holding.record_id):
                 raise RuntimeError(f"Feishu holding delete was not confirmed: record_id={holding.record_id}")
-            self._invalidate_holding_cache(asset_id, account, broker, flush_persistent=True)
+            self._invalidate_holding_cache(asset_id, account, holding.broker, flush_persistent=True)
 
     def delete_holding_by_record_id(self, record_id: str) -> bool:
         """通过记录ID删除持仓"""
@@ -666,36 +728,117 @@ class HoldingsRepository:
 
         return result
 
+    @staticmethod
+    def _validate_writable_holding(holding: Holding) -> None:
+        missing = [
+            field_name
+            for field_name in ('asset_id', 'account', 'broker', 'currency')
+            if not str(getattr(holding, field_name, '') or '').strip()
+        ]
+        if missing:
+            raise ValueError(
+                "missing required holdings fields: " + ", ".join(sorted(missing))
+            )
+        currency = str(holding.currency).strip().upper()
+        if not currency.isascii() or not currency.isalpha() or not 3 <= len(currency) <= 5:
+            raise ValueError(f"invalid currency: {holding.currency}")
+        if not isfinite(float(holding.quantity)):
+            raise ValueError(f"invalid quantity: {holding.quantity}")
+        if holding.avg_cost is not None and not isfinite(float(holding.avg_cost)):
+            raise ValueError(f"invalid avg_cost: {holding.avg_cost}")
+
     def _dict_to_holding(self, data: Dict) -> Holding:
-        """字典转 Holding"""
-        created_at = None
-        updated_at = None
+        """Convert already validated fields without manufacturing defaults."""
+        required_text = ('asset_id', 'asset_type', 'account', 'broker', 'currency')
+        missing = [
+            field
+            for field in required_text
+            if data.get(field) is None or not str(data.get(field)).strip()
+        ]
+        if data.get('quantity') is None or (
+            isinstance(data.get('quantity'), str) and not data.get('quantity').strip()
+        ):
+            missing.append('quantity')
+        if missing:
+            raise ValueError("missing required holdings fields: " + ", ".join(sorted(missing)))
 
-        if data.get('created_at'):
-            try:
-                created_at = datetime.strptime(data['created_at'], DATETIME_FORMAT)
-            except (ValueError, TypeError):
-                pass
-
-        if data.get('updated_at'):
-            try:
-                updated_at = datetime.strptime(data['updated_at'], DATETIME_FORMAT)
-            except (ValueError, TypeError):
-                pass
+        try:
+            asset_type = AssetType(str(data['asset_type']).strip().lower())
+        except ValueError as exc:
+            raise ValueError(f"invalid asset_type: {data.get('asset_type')}") from exc
+        quantity = self._strict_holding_number(data['quantity'], field_name='quantity')
+        currency = str(data['currency']).strip().upper()
+        if not currency.isascii() or not currency.isalpha() or not 3 <= len(currency) <= 5:
+            raise ValueError(f"invalid currency: {data.get('currency')}")
+        avg_cost = (
+            self._strict_holding_number(data.get('avg_cost'), field_name='avg_cost')
+            if data.get('avg_cost') not in (None, '')
+            else None
+        )
+        tag = self._strict_holding_tag(data.get('tag'))
+        created_at = self._strict_holding_timestamp(
+            data.get('created_at'), field_name='created_at'
+        )
+        updated_at = self._strict_holding_timestamp(
+            data.get('updated_at'), field_name='updated_at'
+        )
 
         return Holding(
             record_id=data.get('record_id'),
-            asset_id=data.get('asset_id', ''),
-            asset_name=data.get('asset_name', ''),
-            asset_type=AssetType(data.get('asset_type')) if data.get('asset_type') else AssetType.OTHER,
-            broker=data.get('broker') or None,
-            account=data.get('account', ''),
-            quantity=float(data.get('quantity', 0)),
-            avg_cost=float(data.get('avg_cost')) if data.get('avg_cost') is not None else None,
-            currency=data.get('currency', 'CNY'),
+            asset_id=str(data['asset_id']).strip(),
+            asset_name=str(data.get('asset_name') or ''),
+            asset_type=asset_type,
+            broker=str(data['broker']).strip(),
+            account=str(data['account']).strip(),
+            quantity=quantity,
+            avg_cost=avg_cost,
+            currency=currency,
             asset_class=AssetClass(data.get('asset_class')) if data.get('asset_class') else None,
             industry=Industry(data.get('industry')) if data.get('industry') else None,
-            tag=data.get('tag', []),
+            tag=tag,
             created_at=created_at,
             updated_at=updated_at
         )
+
+    @staticmethod
+    def _strict_holding_number(value, *, field_name: str) -> float:
+        if isinstance(value, bool):
+            raise ValueError(f"invalid {field_name}: {value}")
+        try:
+            parsed = Decimal(str(value).replace(',', '').strip())
+        except (InvalidOperation, AttributeError, TypeError, ValueError) as exc:
+            raise ValueError(f"invalid {field_name}: {value}") from exc
+        if not parsed.is_finite():
+            raise ValueError(f"invalid {field_name}: {value}")
+        try:
+            result = float(parsed)
+        except (OverflowError, ValueError) as exc:
+            raise ValueError(f"invalid {field_name}: {value}") from exc
+        if not isfinite(result):
+            raise ValueError(f"invalid {field_name}: {value}")
+        return result
+
+    @staticmethod
+    def _strict_holding_tag(value) -> List[str]:
+        if value in (None, ''):
+            return []
+        candidate = value
+        if isinstance(candidate, str):
+            try:
+                candidate = json.loads(candidate)
+            except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                raise ValueError("invalid tag") from exc
+        if not isinstance(candidate, list) or not all(
+            isinstance(item, str) for item in candidate
+        ):
+            raise ValueError("invalid tag")
+        return list(candidate)
+
+    @staticmethod
+    def _strict_holding_timestamp(value, *, field_name: str) -> Optional[datetime]:
+        if value in (None, ''):
+            return None
+        try:
+            return datetime.strptime(str(value).strip(), DATETIME_FORMAT)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid {field_name}: {value}") from exc

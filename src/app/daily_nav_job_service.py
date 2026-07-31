@@ -30,6 +30,7 @@ class DailyNavJobService:
         read_service_factory: Optional[Callable[..., Any]] = None,
         calendar: Optional[BusinessCalendarService] = None,
         account_runner_factory: Optional[Callable[[str], Any]] = None,
+        holdings_preflight: Any = None,
     ):
         self.storage = storage
         self.portfolio = portfolio
@@ -37,6 +38,16 @@ class DailyNavJobService:
         self.read_service_factory = read_service_factory
         self.calendar = calendar or BusinessCalendarService.from_config()
         self.account_runner_factory = account_runner_factory
+        self._holdings_preflight_instance = holdings_preflight
+
+    def _holdings_preflight(self) -> Any:
+        if self._holdings_preflight_instance is None:
+            from src.app import HoldingsNavPreflightService
+
+            self._holdings_preflight_instance = HoldingsNavPreflightService(
+                storage=self.storage
+            )
+        return self._holdings_preflight_instance
 
     def _read_service(self, account: str) -> Any:
         if self.read_service_factory is not None:
@@ -67,6 +78,7 @@ class DailyNavJobService:
             storage=self.storage,
             portfolio=self.portfolio,
             read_service=self._read_service(account),
+            holdings_preflight=self._holdings_preflight(),
         )
 
     def _resolve_accounts(self, accounts: Any = None, account: Optional[str] = None) -> Dict[str, Any]:
@@ -78,7 +90,7 @@ class DailyNavJobService:
         discovery = AccountService(
             storage=self.storage,
             default_account=self.default_account,
-        ).list_nav_accounts(include_default=False)
+        ).list_nav_accounts(include_default=False, strict_raw=True)
         if not discovery.get("success"):
             return discovery
         return {
@@ -214,35 +226,8 @@ class DailyNavJobService:
         resolved_run_id: str,
         run_quote_pool: RunQuotePool,
     ) -> Dict[str, Any]:
-        stage = "duplicate_audit"
+        stage = "account_nav"
         try:
-            duplicate_audit = self._audit_duplicates(target_account)
-            if duplicate_audit:
-                return {
-                    "status": "nav_history_duplicate",
-                    "success": False,
-                    "account": target_account,
-                    "date": resolved_nav_date.isoformat(),
-                    "error": "nav_history has duplicate account/date records; repair before NAV write",
-                    "duplicate_audit": duplicate_audit,
-                }
-
-            stage = "cash_flow_reconcile"
-            cash_flow_blocker = self._cash_flow_blocker(target_account)
-            if cash_flow_blocker:
-                cash_flow_blocker.setdefault("date", resolved_nav_date.isoformat())
-                return cash_flow_blocker
-
-            stage = "existing_nav_check"
-            if not overwrite_existing:
-                existing_item = self._existing_nav_item(
-                    target_account,
-                    resolved_nav_date,
-                )
-                if existing_item:
-                    return existing_item
-
-            stage = "account_nav"
             item_run_id = f"{resolved_run_id}:{target_account}"
             write_context = NavWriteContext(
                 status="final",
@@ -273,6 +258,53 @@ class DailyNavJobService:
                 else ("written" if result.get("success") else "failed"),
             )
             return result
+        except Exception as exc:
+            error = str(exc) or exc.__class__.__name__
+            return {
+                "status": "failed",
+                "success": False,
+                "account": target_account,
+                "date": resolved_nav_date.isoformat(),
+                "stage": stage,
+                "error": error,
+                "failure": {
+                    "stage": stage,
+                    "exception_type": exc.__class__.__name__,
+                    "message": error,
+                },
+            }
+
+    def _precheck_account(
+        self,
+        *,
+        target_account: str,
+        resolved_nav_date: date,
+        overwrite_existing: bool,
+    ) -> Optional[Dict[str, Any]]:
+        stage = "duplicate_audit"
+        try:
+            duplicate_audit = self._audit_duplicates(target_account)
+            if duplicate_audit:
+                return {
+                    "status": "nav_history_duplicate",
+                    "success": False,
+                    "account": target_account,
+                    "date": resolved_nav_date.isoformat(),
+                    "error": "nav_history has duplicate account/date records; repair before NAV write",
+                    "duplicate_audit": duplicate_audit,
+                }
+            stage = "cash_flow_reconcile"
+            cash_flow_blocker = self._cash_flow_blocker(target_account)
+            if cash_flow_blocker:
+                cash_flow_blocker.setdefault("date", resolved_nav_date.isoformat())
+                return cash_flow_blocker
+            stage = "existing_nav_check"
+            if not overwrite_existing:
+                return self._existing_nav_item(
+                    target_account,
+                    resolved_nav_date,
+                )
+            return None
         except Exception as exc:
             error = str(exc) or exc.__class__.__name__
             return {
@@ -343,7 +375,7 @@ class DailyNavJobService:
         if not account_result.get("success"):
             return {
                 "success": False,
-                "status": "failed",
+                "status": account_result.get("status") or "failed",
                 "date": resolved_nav_date.isoformat(),
                 "run_id": resolved_run_id,
                 "error": account_result.get("error") or "failed to resolve accounts",
@@ -366,29 +398,70 @@ class DailyNavJobService:
                 "summary": {"skipped_no_accounts": 1},
             }
 
-        items: list[Dict[str, Any]] = []
+        items_by_account: Dict[str, Dict[str, Any]] = {}
+        ready_accounts: list[str] = []
+        for target_account in target_accounts:
+            precheck = self._precheck_account(
+                target_account=target_account,
+                resolved_nav_date=resolved_nav_date,
+                overwrite_existing=overwrite_existing,
+            )
+            if precheck is None:
+                ready_accounts.append(target_account)
+            else:
+                items_by_account[target_account] = precheck
+
         run_quote_pool = RunQuotePool()
         resolved_sync_futu_dry_run = (
             True
             if dry_run
             else (False if sync_futu_dry_run is None else sync_futu_dry_run)
         )
-        for target_account in target_accounts:
-            items.append(
-                self._run_account(
-                    target_account=target_account,
-                    resolved_nav_date=resolved_nav_date,
+        if ready_accounts:
+            global_trigger = {
+                "mode": "daily_nav_global_preflight",
+                "nav_date": resolved_nav_date.isoformat(),
+                "run_id": resolved_run_id,
+                "accounts": list(ready_accounts),
+            }
+            try:
+                global_preflight = self._holdings_preflight().scan_global_orphans(
                     dry_run=dry_run,
                     confirm=confirm,
-                    overwrite_existing=overwrite_existing,
-                    price_timeout=price_timeout,
-                    use_bulk_persist=use_bulk_persist,
-                    sync_futu_cash_mmf=sync_futu_cash_mmf,
-                    resolved_sync_futu_dry_run=resolved_sync_futu_dry_run,
-                    resolved_run_id=resolved_run_id,
-                    run_quote_pool=run_quote_pool,
+                    trigger=global_trigger,
                 )
-            )
+            except Exception as exc:
+                global_preflight = {
+                    "success": False,
+                    "status": "holdings_preflight_failed",
+                    "scope": "global",
+                    "global_blocker": True,
+                    "error": str(exc) or exc.__class__.__name__,
+                }
+            if not global_preflight.get("success"):
+                for target_account in ready_accounts:
+                    items_by_account[target_account] = {
+                        **global_preflight,
+                        "account": target_account,
+                        "date": resolved_nav_date.isoformat(),
+                    }
+            else:
+                for target_account in ready_accounts:
+                    items_by_account[target_account] = self._run_account(
+                        target_account=target_account,
+                        resolved_nav_date=resolved_nav_date,
+                        dry_run=dry_run,
+                        confirm=confirm,
+                        overwrite_existing=overwrite_existing,
+                        price_timeout=price_timeout,
+                        use_bulk_persist=use_bulk_persist,
+                        sync_futu_cash_mmf=sync_futu_cash_mmf,
+                        resolved_sync_futu_dry_run=resolved_sync_futu_dry_run,
+                        resolved_run_id=resolved_run_id,
+                        run_quote_pool=run_quote_pool,
+                    )
+
+        items = [items_by_account[target_account] for target_account in target_accounts]
 
         summary = self._summarize(items)
         blocking_statuses = {
@@ -399,6 +472,9 @@ class DailyNavJobService:
             "nav_history_duplicate",
             "recovery_required",
             "existing_nav_not_final",
+            "holdings_confirmation_required",
+            "holdings_evidence_unavailable",
+            "holdings_preflight_failed",
         }
         has_blocker = any(str(item.get("status")) in blocking_statuses or item.get("success") is False for item in items)
         if not has_blocker:

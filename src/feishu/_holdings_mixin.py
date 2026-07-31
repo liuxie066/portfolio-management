@@ -2,6 +2,7 @@
 
 from typing import Any, Dict, List, Optional
 
+from ..domain.holdings import RawHoldingRecord
 from ..models import Holding
 from .repositories.holdings_repository import HoldingsRepository
 
@@ -76,6 +77,25 @@ class HoldingsMixin:
 
     def preload_holdings_index(self, account: Optional[str] = None) -> Dict[str, Any]:
         return self.holdings.preload_holdings_index(account=account)
+
+    def get_raw_holdings(
+        self,
+        *,
+        account: Optional[str] = None,
+        record_id: Optional[str] = None,
+    ) -> List[RawHoldingRecord]:
+        return self.holdings.get_raw_holdings(account=account, record_id=record_id)
+
+    def patch_holding_record(
+        self,
+        *,
+        record_id: str,
+        fields: Dict[str, object],
+    ) -> RawHoldingRecord:
+        return self.holdings.patch_holding_record(
+            record_id=record_id,
+            fields=fields,
+        )
 
     def get_holding(
         self,

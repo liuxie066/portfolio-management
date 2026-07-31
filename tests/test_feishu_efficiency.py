@@ -19,6 +19,7 @@ def test_get_holdings_uses_cache_when_loaded():
             'asset_name': '平安银行',
             'asset_type': 'a_stock',
             'account': 'a',
+            'broker': 'manual',
             'quantity': 100.0,
             'currency': 'CNY',
             'record_id': 'rec1',
@@ -28,6 +29,7 @@ def test_get_holdings_uses_cache_when_loaded():
             'asset_name': '万科A',
             'asset_type': 'a_stock',
             'account': 'a',
+            'broker': 'manual',
             'quantity': 0.0,  # empty holding
             'currency': 'CNY',
             'record_id': 'rec2',
@@ -55,11 +57,13 @@ def test_get_holdings_includes_empty_when_requested():
     mixin._holding_fields_cache = {
         ('000001', 'a', None): {
             'asset_id': '000001', 'asset_name': '平安银行', 'asset_type': 'a_stock',
-            'account': 'a', 'quantity': 100.0, 'currency': 'CNY', 'record_id': 'rec1',
+            'account': 'a', 'broker': 'manual', 'quantity': 100.0,
+            'currency': 'CNY', 'record_id': 'rec1',
         },
         ('000002', 'a', None): {
             'asset_id': '000002', 'asset_name': '万科A', 'asset_type': 'a_stock',
-            'account': 'a', 'quantity': 0.0, 'currency': 'CNY', 'record_id': 'rec2',
+            'account': 'a', 'broker': 'manual', 'quantity': 0.0,
+            'currency': 'CNY', 'record_id': 'rec2',
         },
     }
     mixin._holding_id_cache = {}
@@ -81,6 +85,7 @@ def test_get_holdings_falls_through_when_cache_not_loaded():
     mixin._holding_id_cache = {}
     mixin.client = Mock()
     mixin.client.list_records.return_value = []
+    mixin._local_holdings_index_cache = Mock()
     mixin.HOLDING_PROJECTION_FIELDS = ['asset_id', 'asset_name']
     mixin._escape_filter_value = lambda v: v
 
@@ -92,8 +97,8 @@ def test_get_holdings_falls_through_when_cache_not_loaded():
     assert 'a' in mixin._holdings_index_loaded_accounts
 
 
-def test_get_holdings_with_asset_type_bypasses_cache():
-    """get_holdings with asset_type filter should always call API."""
+def test_get_holdings_with_asset_type_filters_complete_cache():
+    """A complete cache can serve an asset_type filter without another API read."""
     from src.feishu._holdings_mixin import HoldingsMixin
 
     mixin = HoldingsMixin.__new__(HoldingsMixin)
@@ -108,8 +113,8 @@ def test_get_holdings_with_asset_type_bypasses_cache():
 
     holdings = mixin.get_holdings(asset_type='a_stock')
 
-    # asset_type filter forces API call even when cache is loaded
-    mixin.client.list_records.assert_called_once()
+    mixin.client.list_records.assert_not_called()
+    assert holdings == []
 
 
 def test_get_transactions_pushes_date_filter_to_server():

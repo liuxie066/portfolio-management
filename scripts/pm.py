@@ -39,6 +39,7 @@ import contextlib
 import os
 import json
 import sys
+import threading
 from datetime import date
 from pathlib import Path
 from uuid import uuid4
@@ -337,6 +338,338 @@ def cmd_holdings(args):
     res = _service_or_fallback(args, via_service, direct, allow_fallback=True)
     _dump(res, args.json)
     return res
+
+
+def cmd_holdings_reconcile(args):
+    """Fresh holdings validation with separately confirmed workflow actions."""
+
+    from src.app.holdings_reconciliation_service import HoldingsReconciliationService
+    from src.app.holdings_workflow_service import HoldingsWorkflowService, operator_context
+    from src.service.application import PortfolioService
+
+    notify = bool(getattr(args, "notify", False))
+    apply = bool(getattr(args, "apply", False))
+    if (notify or apply) and not bool(getattr(args, "confirm", False)):
+        raise SystemExit("holdings workflow mutation requires --confirm")
+    record_id = getattr(args, "record_id", None)
+    account = getattr(args, "account", None)
+    if apply and not record_id:
+        raise SystemExit("holdings apply requires exactly one --record-id")
+    if apply and account:
+        raise SystemExit("holdings apply does not support account or all-record scope")
+    application = PortfolioService()
+    reconciliation = HoldingsReconciliationService(storage=application.storage)
+    workflow = (
+        HoldingsWorkflowService(
+            storage=application.storage,
+            reconciliation=reconciliation,
+        )
+        if notify or apply
+        else None
+    )
+    result = _call_backend(
+        args,
+        lambda: (
+            workflow.apply_missing(
+                record_id=record_id,
+                confirmed_operator=operator_context(command_mode="holdings_reconcile_apply"),
+            )
+            if apply
+            else workflow.notify(
+                account=account,
+                record_id=record_id,
+                trigger={"mode": "manual_notify"},
+            )
+            if notify
+            else reconciliation.reconcile(account=account, record_id=record_id)
+        ),
+    )
+    _dump(result, bool(getattr(args, "json", False)))
+    return result
+
+
+def cmd_holdings_cases(args):
+    from src.app.holdings_workflow_service import HoldingsWorkflowService
+    from src.service.application import PortfolioService
+
+    workflow = HoldingsWorkflowService(storage=PortfolioService().storage)
+    case_key = getattr(args, "case_key", None)
+    result = (
+        workflow.show_case(case_key)
+        if case_key
+        else workflow.list_cases(
+            account=getattr(args, "account", None),
+            state=getattr(args, "state", None),
+        )
+    )
+    _dump(result, bool(getattr(args, "json", False)))
+    return result
+
+
+def cmd_holdings_resolve(args):
+    if not bool(args.confirm):
+        raise SystemExit("holdings resolve requires --confirm")
+    from src.app.holdings_workflow_service import HoldingsWorkflowService, operator_context
+    from src.service.application import PortfolioService
+
+    result = HoldingsWorkflowService(storage=PortfolioService().storage).resolve(
+        case_key=args.case_key,
+        decision=args.decision,
+        reason=args.reason,
+        confirmed_operator=operator_context(command_mode="holdings_resolve"),
+    )
+    _dump(result, bool(getattr(args, "json", False)))
+    return result
+
+
+def cmd_holdings_recover(args):
+    if not bool(args.confirm):
+        raise SystemExit("holdings recover requires --confirm")
+    from src.app.holdings_workflow_service import HoldingsWorkflowService, operator_context
+    from src.service.application import PortfolioService
+
+    result = HoldingsWorkflowService(storage=PortfolioService().storage).recover(
+        case_key=args.case_key,
+        confirmed_operator=operator_context(command_mode="holdings_recover"),
+    )
+    _dump(result, bool(getattr(args, "json", False)))
+    return result
+
+
+def cmd_holdings_events_status(args):
+    from src import config
+    from src.app.holdings_event_service import HoldingsEventTarget
+    from src.app.operation_state_store import OperationStateStore
+    from src.feishu.holdings_event_adapter import FeishuHoldingsEventAdapter
+
+    target = HoldingsEventTarget.from_config()
+    sdk_available = FeishuHoldingsEventAdapter.sdk_available()
+    app_secret_configured = bool(config.get("feishu.app_secret"))
+    result = {
+        "success": bool(sdk_available and app_secret_configured),
+        "read_only": True,
+        "target": target.as_dict(),
+        "credentials": {
+            "app_id_configured": True,
+            "app_secret_configured": app_secret_configured,
+        },
+        "sdk_available": sdk_available,
+        "local_inbox": OperationStateStore.inspect_holding_event_status(),
+        "remote_subscription_verified": False,
+        "listener_connection_verified": False,
+        "note": "local/config status only; no Feishu request was made",
+    }
+    _dump(result, bool(getattr(args, "json", False)))
+    return result
+
+
+def cmd_holdings_events_subscribe(args):
+    if not bool(args.confirm):
+        raise SystemExit("holdings events subscribe requires --confirm")
+    from src.feishu.holdings_event_adapter import FeishuHoldingsEventAdapter
+
+    result = FeishuHoldingsEventAdapter().subscribe()
+    _dump(result, bool(getattr(args, "json", False)))
+    return result
+
+
+def cmd_holdings_events_listen(args):
+    if not bool(args.confirm):
+        raise SystemExit("holdings events listen requires --confirm")
+    from src.app.holding_event_inbox_service import HoldingEventInboxService
+    from src.feishu.holdings_event_adapter import FeishuHoldingsEventAdapter
+    from src.service.application import PortfolioService
+
+    inbox = HoldingEventInboxService(storage=PortfolioService().storage)
+    adapter = FeishuHoldingsEventAdapter(target=inbox.target)
+    stop_event = threading.Event()
+    worker = threading.Thread(
+        target=inbox.run_worker_loop,
+        kwargs={
+            "stop_event": stop_event,
+            "poll_seconds": float(args.poll_seconds),
+            "limit": int(args.limit),
+        },
+        name="holdings-event-worker",
+        daemon=True,
+    )
+    worker.start()
+    try:
+        adapter.start(inbox.accept)
+    finally:
+        stop_event.set()
+        worker.join(timeout=10)
+    return {"success": True, "status": "stopped"}
+
+
+def _combined_event_targets():
+    from src.app.cash_flow_event_service import CashFlowEventTarget
+    from src.app.holdings_event_service import HoldingsEventTarget
+    from src.feishu.bitable_event_adapter import validate_bitable_targets
+
+    return validate_bitable_targets(
+        (HoldingsEventTarget.from_config(), CashFlowEventTarget.from_config())
+    )
+
+
+def cmd_events_status(args):
+    from src import config
+    from src.app.cash_flow_event_service import CashFlowEventTarget
+    from src.app.holdings_event_service import HoldingsEventTarget
+    from src.app.operation_state_store import OperationStateStore
+    from src.feishu.bitable_event_adapter import (
+        FeishuBitableEventAdapter,
+        validate_bitable_targets,
+    )
+
+    targets = []
+    registry_error = None
+    try:
+        targets = [
+            HoldingsEventTarget.from_config(),
+            CashFlowEventTarget.from_config(),
+        ]
+        validate_bitable_targets(targets)
+    except Exception as exc:
+        registry_error = str(exc) or exc.__class__.__name__
+    sdk_available = FeishuBitableEventAdapter.sdk_available()
+    app_id_configured = bool(str(config.get("feishu.app_id") or "").strip())
+    app_secret_configured = bool(
+        str(config.get("feishu.app_secret") or "").strip()
+    )
+    registry_valid = registry_error is None
+    result = {
+        "success": bool(
+            registry_valid
+            and sdk_available
+            and app_id_configured
+            and app_secret_configured
+        ),
+        "read_only": True,
+        "target_registry": {
+            "valid": registry_valid,
+            "error": registry_error,
+            "targets": [target.as_dict() for target in targets],
+        },
+        "credentials": {
+            "app_id_configured": app_id_configured,
+            "app_secret_configured": app_secret_configured,
+        },
+        "sdk_available": sdk_available,
+        "local_inboxes": {
+            "holdings": OperationStateStore.inspect_holding_event_status(),
+            "cash_flow": OperationStateStore.inspect_cash_flow_event_status(),
+        },
+        "remote_subscription_verified": False,
+        "listener_connection_verified": False,
+        "note": "local/config status only; no Feishu request was made",
+    }
+    _dump(result, bool(getattr(args, "json", False)))
+    return result
+
+
+def cmd_events_subscribe(args):
+    if not bool(args.confirm):
+        raise SystemExit("events subscribe requires --confirm")
+    from src.feishu.bitable_event_adapter import FeishuBitableEventAdapter
+
+    targets = _combined_event_targets()
+    result = FeishuBitableEventAdapter(targets=targets).subscribe()
+    _dump(result, bool(getattr(args, "json", False)))
+    return result
+
+
+def cmd_events_listen(args):
+    if not bool(args.confirm):
+        raise SystemExit("events listen requires --confirm")
+
+    targets = _combined_event_targets()
+
+    from src.app.cash_flow_event_completion_service import (
+        CashFlowEventCompletionService,
+    )
+    from src.app.cash_flow_event_inbox_service import CashFlowEventInboxService
+    from src.app.holding_event_inbox_service import HoldingEventInboxService
+    from src.app.operation_state_store import OperationStateStore
+    from src.feishu.bitable_event_adapter import FeishuBitableEventAdapter
+    from src.service.application import PortfolioService
+
+    holdings_target, cash_flow_target = targets
+    storage = PortfolioService().storage
+    store = OperationStateStore()
+    holdings_inbox = HoldingEventInboxService(
+        storage=storage,
+        store=store,
+        target=holdings_target,
+    )
+    completion = CashFlowEventCompletionService(
+        storage=storage,
+        operation_store=store,
+    )
+    cash_flow_inbox = CashFlowEventInboxService(
+        store=store,
+        record_handler=completion,
+        terminal_failure_receipt_factory=completion.terminal_failure_receipts,
+        target=cash_flow_target,
+    )
+    adapter = FeishuBitableEventAdapter(targets=targets)
+
+    def accept(payload):
+        outcomes = {
+            "holdings": holdings_inbox.accept(payload),
+            "cash_flow": cash_flow_inbox.accept(payload),
+        }
+        accepted_by = [
+            name
+            for name, outcome in outcomes.items()
+            if bool(outcome.get("accepted"))
+        ]
+        if len(accepted_by) > 1:
+            raise RuntimeError(
+                "bitable event was accepted by multiple table handlers"
+            )
+        return {
+            "success": all(outcome.get("success") for outcome in outcomes.values()),
+            "accepted_by": accepted_by,
+            "outcomes": outcomes,
+        }
+
+    stop_event = threading.Event()
+    workers = [
+        threading.Thread(
+            target=holdings_inbox.run_worker_loop,
+            kwargs={
+                "stop_event": stop_event,
+                "poll_seconds": float(args.poll_seconds),
+                "limit": int(args.limit),
+            },
+            name="holdings-event-worker",
+            daemon=True,
+        ),
+        threading.Thread(
+            target=cash_flow_inbox.run_worker_loop,
+            kwargs={
+                "stop_event": stop_event,
+                "poll_seconds": float(args.poll_seconds),
+                "limit": int(args.limit),
+            },
+            name="cash-flow-event-worker",
+            daemon=True,
+        ),
+    ]
+    started_workers = []
+    try:
+        for worker in workers:
+            worker.start()
+            started_workers.append(worker)
+        adapter.start(accept)
+    finally:
+        stop_event.set()
+        for worker in started_workers:
+            worker.join(timeout=10)
+    result = {"success": True, "status": "stopped"}
+    _dump(result, bool(getattr(args, "json", False)))
+    return result
 
 
 def cmd_cash(args):
@@ -1108,8 +1441,42 @@ def cmd_receipts_dispatch(args):
     if not bool(args.confirm):
         raise SystemExit("receipts dispatch requires --confirm")
     from src.app.nav_receipt_outbox_service import NavReceiptOutboxService
+    from src.app.operation_receipt_outbox_service import OperationReceiptOutboxService
 
-    result = NavReceiptOutboxService().dispatch_pending(limit=int(args.limit))
+    branches = {}
+    for name, dispatch in (
+        ("nav", lambda: NavReceiptOutboxService().dispatch_pending(limit=int(args.limit))),
+        (
+            "operations",
+            lambda: OperationReceiptOutboxService().dispatch_pending(limit=int(args.limit)),
+        ),
+    ):
+        try:
+            branches[name] = dispatch()
+        except Exception as exc:
+            branches[name] = {
+                "success": False,
+                "error": str(exc) or exc.__class__.__name__,
+            }
+    result = {
+        "success": all(bool(item.get("success")) for item in branches.values()),
+        "branches": branches,
+    }
+    _dump(result, bool(args.json))
+    return result
+
+
+def cmd_receipts_resolve(args):
+    if not bool(args.confirm):
+        raise SystemExit("receipts resolve requires --confirm")
+    from src.app.holdings_workflow_service import operator_context
+    from src.app.operation_receipt_outbox_service import OperationReceiptOutboxService
+
+    result = OperationReceiptOutboxService().resolve_unknown(
+        receipt_key=args.receipt_key,
+        decision=args.decision,
+        operator_context=operator_context(command_mode="receipts_resolve"),
+    )
     _dump(result, bool(args.json))
     return result
 
@@ -1229,13 +1596,150 @@ def build_parser() -> argparse.ArgumentParser:
         help="output JSON",
     )
     p_receipts_dispatch.set_defaults(func=cmd_receipts_dispatch)
+    p_receipts_resolve = receipts_sub.add_parser(
+        "resolve",
+        help="explicitly resolve an unknown typed receipt delivery",
+    )
+    p_receipts_resolve.add_argument("--receipt-key", required=True)
+    p_receipts_resolve.add_argument(
+        "--decision",
+        required=True,
+        choices=("retry", "mark-sent"),
+    )
+    p_receipts_resolve.add_argument("--confirm", action="store_true")
+    p_receipts_resolve.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS
+    )
+    p_receipts_resolve.set_defaults(func=cmd_receipts_resolve)
 
-    p_hold = sp.add_parser("holdings", help="list holdings")
+    p_events = sp.add_parser(
+        "events",
+        help="combined exact-resource Feishu Bitable event ingress",
+    )
+    events_sub = p_events.add_subparsers(dest="events_cmd", required=True)
+    p_events_status = events_sub.add_parser(
+        "status",
+        help="show combined local/config readiness without a Feishu request",
+    )
+    p_events_status.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS
+    )
+    p_events_status.set_defaults(func=cmd_events_status)
+    p_events_subscribe = events_sub.add_parser(
+        "subscribe",
+        help="create subscriptions for the configured Base documents",
+    )
+    p_events_subscribe.add_argument("--confirm", action="store_true")
+    p_events_subscribe.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS
+    )
+    p_events_subscribe.set_defaults(func=cmd_events_subscribe)
+    p_events_listen = events_sub.add_parser(
+        "listen",
+        help="run one long connection and both leased local workers",
+    )
+    p_events_listen.add_argument("--confirm", action="store_true")
+    p_events_listen.add_argument("--poll-seconds", type=float, default=1.0)
+    p_events_listen.add_argument("--limit", type=int, default=100)
+    p_events_listen.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS
+    )
+    p_events_listen.set_defaults(func=cmd_events_listen)
+
+    p_hold = sp.add_parser("holdings", help="list or validate holdings")
     p_hold.add_argument("--include-price", action="store_true", help="include price fields (may be slow)")
     p_hold.add_argument("--account", default=argparse.SUPPRESS, help="account to operate on; defaults to config/PORTFOLIO_ACCOUNT")
     p_hold.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
     add_service_args(p_hold)
     p_hold.set_defaults(func=cmd_holdings)
+    holdings_sub = p_hold.add_subparsers(dest="holdings_cmd")
+    p_hold_reconcile = holdings_sub.add_parser(
+        "reconcile",
+        help="fresh-read and validate holdings without writes",
+    )
+    reconcile_scope = p_hold_reconcile.add_mutually_exclusive_group()
+    reconcile_scope.add_argument("--account", default=argparse.SUPPRESS)
+    reconcile_scope.add_argument("--record-id", default=None)
+    reconcile_action = p_hold_reconcile.add_mutually_exclusive_group()
+    reconcile_action.add_argument(
+        "--notify",
+        action="store_true",
+        help="persist cases and queue discovery receipts; never write holdings",
+    )
+    reconcile_action.add_argument(
+        "--apply",
+        action="store_true",
+        help="apply eligible missing fields for exactly one record",
+    )
+    p_hold_reconcile.add_argument("--confirm", action="store_true")
+    p_hold_reconcile.add_argument(
+        "--json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="output JSON",
+    )
+    p_hold_reconcile.set_defaults(func=cmd_holdings_reconcile)
+    p_hold_cases = holdings_sub.add_parser("cases", help="list or show durable holdings cases")
+    p_hold_cases.add_argument("--account", default=argparse.SUPPRESS)
+    p_hold_cases.add_argument("--state", default=None)
+    p_hold_cases.add_argument("--case-key", default=None)
+    p_hold_cases.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    p_hold_cases.set_defaults(func=cmd_holdings_cases)
+
+    p_hold_resolve = holdings_sub.add_parser("resolve", help="resolve one conflict case")
+    p_hold_resolve.add_argument("--case-key", required=True)
+    p_hold_resolve.add_argument(
+        "--decision",
+        required=True,
+        choices=("accept-proposed", "keep-current"),
+    )
+    p_hold_resolve.add_argument("--reason", required=True)
+    p_hold_resolve.add_argument("--confirm", action="store_true")
+    p_hold_resolve.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    p_hold_resolve.set_defaults(func=cmd_holdings_resolve)
+
+    p_hold_recover = holdings_sub.add_parser("recover", help="classify one uncertain apply")
+    p_hold_recover.add_argument("--case-key", required=True)
+    p_hold_recover.add_argument("--confirm", action="store_true")
+    p_hold_recover.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    p_hold_recover.set_defaults(func=cmd_holdings_recover)
+
+    p_hold_events = holdings_sub.add_parser(
+        "events",
+        help="exact-resource Feishu holdings event ingress",
+    )
+    hold_events_sub = p_hold_events.add_subparsers(
+        dest="holdings_events_cmd",
+        required=True,
+    )
+    p_hold_events_status = hold_events_sub.add_parser(
+        "status",
+        help="show local/config readiness without a Feishu request",
+    )
+    p_hold_events_status.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS
+    )
+    p_hold_events_status.set_defaults(func=cmd_holdings_events_status)
+    p_hold_events_subscribe = hold_events_sub.add_parser(
+        "subscribe",
+        help="create the exact configured Base document event subscription",
+    )
+    p_hold_events_subscribe.add_argument("--confirm", action="store_true")
+    p_hold_events_subscribe.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS
+    )
+    p_hold_events_subscribe.set_defaults(func=cmd_holdings_events_subscribe)
+    p_hold_events_listen = hold_events_sub.add_parser(
+        "listen",
+        help="run the long connection and leased local worker",
+    )
+    p_hold_events_listen.add_argument("--confirm", action="store_true")
+    p_hold_events_listen.add_argument("--poll-seconds", type=float, default=1.0)
+    p_hold_events_listen.add_argument("--limit", type=int, default=100)
+    p_hold_events_listen.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS
+    )
+    p_hold_events_listen.set_defaults(func=cmd_holdings_events_listen)
 
     p_cash = sp.add_parser("cash", help="show cash positions")
     p_cash.add_argument("--account", default=argparse.SUPPRESS, help="account to operate on; defaults to config/PORTFOLIO_ACCOUNT")

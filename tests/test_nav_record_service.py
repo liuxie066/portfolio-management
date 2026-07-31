@@ -180,6 +180,29 @@ def test_nav_record_service_persists_explicit_daily_job_finality():
     assert result.details["run_id"] == "daily-1:a"
 
 
+def test_nav_record_service_persists_holdings_input_provenance():
+    storage = _storage()
+    manager = _manager(storage)
+    service = NavRecordService(manager=manager, storage=storage)
+    valuation = _valuation()
+    valuation.holdings_provenance = {
+        "account": "a",
+        "raw_record_digest": "raw-1",
+        "normalized_holdings_digest": "normalized-1",
+        "source_fetch_time": "2026-03-19T10:00:00+00:00",
+    }
+
+    result = service.record_nav(
+        account="a",
+        valuation=valuation,
+        nav_date=date(2026, 3, 19),
+        persist=True,
+        dry_run=True,
+    )
+
+    assert result.details["holdings_snapshot"] == valuation.holdings_provenance
+
+
 def test_nav_record_service_rejects_context_date_mismatch():
     storage = _storage()
     manager = _manager(storage)

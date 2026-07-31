@@ -588,3 +588,30 @@ def get_service_url() -> str:
     if configured:
         return str(configured).rstrip("/")
     return f"http://{get_service_host()}:{get_service_port()}"
+
+
+def get_feishu_table_ref(table_name: str) -> tuple[str, str]:
+    """Resolve one configured Base table without creating a network client."""
+
+    resolved_name = str(table_name or "").strip()
+    if not resolved_name:
+        raise ValueError("Feishu table name is required")
+    raw_value = str(get(f"feishu.tables.{resolved_name}") or "").strip()
+    if not raw_value:
+        raise ValueError(f"missing Feishu table configuration: {resolved_name}")
+    if "/" in raw_value:
+        parts = raw_value.split("/")
+        if len(parts) != 2 or not all(part.strip() for part in parts):
+            raise ValueError(
+                f"invalid Feishu table reference for {resolved_name}; "
+                "expected app_token/table_id"
+            )
+        app_token, table_id = (part.strip() for part in parts)
+    else:
+        app_token = str(get("feishu.app_token") or "").strip()
+        table_id = raw_value
+    if not app_token:
+        raise ValueError(
+            f"missing feishu.app_token for table configuration: {resolved_name}"
+        )
+    return app_token, table_id

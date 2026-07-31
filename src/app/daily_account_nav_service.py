@@ -19,11 +19,13 @@ class DailyAccountNavService:
         storage: Any,
         portfolio: Any,
         read_service: Any,
+        holdings_preflight: Any = None,
     ):
         self.account = account
         self.storage = storage
         self.portfolio = portfolio
         self.read_service = read_service
+        self.holdings_preflight = holdings_preflight
 
     def run(
         self,
@@ -53,6 +55,7 @@ class DailyAccountNavService:
             storage=self.storage,
             portfolio=self.portfolio,
             read_service=self.read_service,
+            holdings_preflight=self.holdings_preflight,
         ).record(
             nav_date=nav_date,
             price_timeout=price_timeout,
@@ -124,4 +127,11 @@ class DailyAccountNavService:
             "nav_snapshot": payload_result["nav_snapshot"],
             "stage_timings": stage_timings,
             "futu_sync_result": record_result.get("futu_sync_result"),
+            "holdings_preflight": record_result.get("holdings_preflight"),
+            "holdings_snapshot": record_result.get("holdings_snapshot"),
+            "holdings_digest": (
+                (record_result.get("holdings_snapshot") or {}).get(
+                    "normalized_holdings_digest"
+                )
+            ),
         }

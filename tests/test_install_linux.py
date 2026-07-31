@@ -66,6 +66,11 @@ def test_install_linux_plan_uses_yaml_config_and_durable_receipt_timer(tmp_path)
         "service": install_linux.RECEIPT_SERVICE_NAME,
         "interval": "5min",
     }
+    assert payload["systemd"]["holdings_events"] == {
+        "service": install_linux.HOLDINGS_EVENT_SERVICE_NAME,
+        "enabled": False,
+    }
+    assert payload["systemd"]["enable_holdings_event_service"] is False
     assert "daily_job_args" not in payload
 
 
@@ -115,6 +120,7 @@ def test_install_linux_apply_writes_files_without_overwriting_existing_config(tm
         install_linux.QUALITY_TIMER_NAME,
         install_linux.RECEIPT_SERVICE_NAME,
         install_linux.RECEIPT_TIMER_NAME,
+        install_linux.HOLDINGS_EVENT_SERVICE_NAME,
     ):
         assert (paths.systemd_dir / unit_name).exists()
     assert commands == [["systemctl", "daemon-reload"]]
@@ -162,6 +168,55 @@ def test_install_linux_enable_quality_timer_is_independent(tmp_path, monkeypatch
         ["systemctl", "daemon-reload"],
         ["systemctl", "enable", "--now", install_linux.QUALITY_TIMER_NAME],
     ]
+
+
+def test_install_linux_holdings_event_listener_is_generated_disabled_and_explicit(tmp_path, monkeypatch):
+    paths = install_linux.build_paths(_args(tmp_path))
+    unit = install_linux.render_holdings_event_service_unit(paths, run_user="portfolio")
+
+    assert "events listen --confirm --json" in unit
+    assert "holdings and cash-flow event listener" in unit
+    assert "holdings events listen" not in unit
+    assert "Restart=always" in unit
+    assert "[Install]" in unit
+
+    commands = []
+    monkeypatch.setattr(
+        install_linux.subprocess,
+        "run",
+        lambda command, check: commands.append(command),
+    )
+    payload = install_linux.apply_install(
+        _args(tmp_path, "--apply", "--enable-holdings-event-listener")
+    )
+
+    assert payload["systemd"]["holdings_events"]["enabled"] is True
+    assert commands == [
+        ["systemctl", "daemon-reload"],
+        [
+            "systemctl",
+            "enable",
+            "--now",
+            install_linux.HOLDINGS_EVENT_SERVICE_NAME,
+        ],
+    ]
+
+
+def test_combined_event_listener_docs_preserve_fx_and_holding_effect_boundaries():
+    docs = install_linux.REPO_ROOT / "docs"
+    listener = (docs / "holdings-event-listener-runbook.md").read_text()
+    cash_flow = (docs / "cash-flow-effects-runbook.md").read_text()
+    schema = (docs / "schema.md").read_text()
+    deploy = (docs / "deploy-linux.md").read_text()
+
+    assert "pm events status --json" in listener
+    assert "pm events subscribe --confirm --json" in listener
+    assert "Base document is the\n  subscription boundary" in listener
+    assert "never confirms or applies the separate\n  CASH holding effect" in listener
+    assert "no rate is guessed" in cash_flow
+    assert "manual exact-record reconcile command" in cash_flow
+    assert "existing local\n  FX confirmation still matches exactly" in schema
+    assert "pm events listen --confirm --json" in deploy
 
 
 def test_install_linux_api_service_is_loopback_only_and_long_running(tmp_path):
@@ -423,6 +478,7 @@ def test_install_shell_help_is_available():
     assert "--enable-timer" in result.stdout
     assert "--enable-api-service" in result.stdout
     assert "--enable-quality-timer" in result.stdout
+    assert "--enable-holdings-event-listener" in result.stdout
     assert "receipt timers" in result.stdout
     assert "--sync-futu-cash-mmf" not in result.stdout
     assert "OM_FEISHU_BOT_APP_ID" in result.stdout

@@ -123,6 +123,19 @@ class CashService:
             "updated": updated,
             "fields_changed": fields_changed,
             "field_updates": field_updates,
+            "projected_fields": {
+                **replacement.model_dump(
+                    mode="json",
+                    exclude={
+                        "record_id",
+                        "current_price",
+                        "cny_price",
+                        "market_value_cny",
+                        "weight",
+                    },
+                ),
+                "record_id": getattr(existing, "record_id", None),
+            },
         }
 
     def get_cash_like_holdings(self, account: str):

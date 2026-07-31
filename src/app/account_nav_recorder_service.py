@@ -55,11 +55,13 @@ class AccountNavRecorderService:
         storage: Any,
         portfolio: Any,
         read_service: Any,
+        holdings_preflight: Any = None,
     ):
         self.account = account
         self.storage = storage
         self.portfolio = portfolio
         self.read_service = read_service
+        self.holdings_preflight = holdings_preflight
 
     def record(
         self,
@@ -94,8 +96,26 @@ class AccountNavRecorderService:
                 "confirm": confirm,
             }
 
+        if (
+            self.holdings_preflight is not None
+            and not dry_run
+            and sync_futu_cash_mmf
+            and sync_futu_dry_run is True
+        ):
+            return {
+                "success": False,
+                "status": "holdings_preflight_failed",
+                "error": "formal NAV cannot consume a Futu dry-run projection",
+                "account": self.account,
+                "date": today.isoformat(),
+                "run_id": resolved_run_id,
+                "dry_run": dry_run,
+                "confirm": confirm,
+            }
+
         try:
             futu_sync_result = None
+            project_futu_dry_run = False
             if sync_futu_cash_mmf:
                 resolved_sync_futu_dry_run = (
                     True
@@ -108,6 +128,7 @@ class AccountNavRecorderService:
                 )
                 if not futu_sync_result.get("success"):
                     return _set_run_id(futu_sync_result, resolved_run_id)
+                project_futu_dry_run = bool(resolved_sync_futu_dry_run)
                 if not resolved_sync_futu_dry_run:
                     from src.app.cash_flow_effect_service import (
                         observe_futu_cash_result,
@@ -120,11 +141,57 @@ class AccountNavRecorderService:
                         cash_result=futu_sync_result,
                     )
 
+            holdings_preflight_result = None
+            if self.holdings_preflight is not None:
+                if snapshot is not None:
+                    raise ValueError(
+                        "official holdings preflight does not accept a caller snapshot"
+                    )
+                holdings_preflight_result = self.holdings_preflight.prepare_account(
+                    account=self.account,
+                    dry_run=dry_run,
+                    confirm=confirm,
+                    trigger={
+                        "mode": "daily_nav_preflight",
+                        "account": self.account,
+                        "nav_date": today.isoformat(),
+                        "run_id": resolved_run_id,
+                    },
+                    futu_sync_result=futu_sync_result,
+                    project_futu_dry_run=project_futu_dry_run,
+                )
+                if not holdings_preflight_result.get("success"):
+                    failure = {
+                        key: value
+                        for key, value in holdings_preflight_result.items()
+                        if key != "validated_snapshot"
+                    }
+                    failure.update(
+                        {
+                            "account": self.account,
+                            "date": today.isoformat(),
+                            "run_id": resolved_run_id,
+                            "dry_run": dry_run,
+                            "confirm": confirm,
+                            "futu_sync_result": futu_sync_result,
+                        }
+                    )
+                    return failure
+
             if snapshot is None:
                 t_snapshot = _now_ms()
                 snapshot_kwargs = {"price_timeout_seconds": price_timeout}
                 if run_quote_pool is not None:
                     snapshot_kwargs["run_quote_pool"] = run_quote_pool
+                if holdings_preflight_result is not None:
+                    validated = holdings_preflight_result["validated_snapshot"]
+                    snapshot_kwargs.update(
+                        {
+                            "holdings": validated.to_valuation_holdings(),
+                            "holdings_provenance": validated.provenance(),
+                            "holdings_warnings": list(validated.warnings),
+                        }
+                    )
                 snapshot = self.read_service.build_snapshot(**snapshot_kwargs)
                 snapshot_ms = _now_ms() - t_snapshot
             else:
@@ -168,6 +235,12 @@ class AccountNavRecorderService:
                 "snapshot_time": snapshot.get("snapshot_time"),
                 "dry_run": dry_run,
             }
+            holdings_snapshot = dict(snapshot.get("holdings_snapshot") or {})
+            if holdings_snapshot:
+                nav_result["holdings_snapshot"] = holdings_snapshot
+                nav_result["holdings_digest"] = holdings_snapshot.get(
+                    "normalized_holdings_digest"
+                )
             warnings = getattr(snapshot["valuation"], "warnings", None)
             if warnings:
                 nav_result["warnings"] = warnings
@@ -199,6 +272,16 @@ class AccountNavRecorderService:
                     "record_nav_ms": record_nav_ms,
                 },
                 "futu_sync_result": futu_sync_result,
+                "holdings_preflight": (
+                    {
+                        key: value
+                        for key, value in holdings_preflight_result.items()
+                        if key != "validated_snapshot"
+                    }
+                    if holdings_preflight_result is not None
+                    else None
+                ),
+                "holdings_snapshot": holdings_snapshot,
             }
         except Exception as e:
             return {

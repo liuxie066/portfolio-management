@@ -32,6 +32,7 @@ QUALITY_SERVICE_NAME = "portfolio-quality-refresh.service"
 QUALITY_TIMER_NAME = "portfolio-quality-refresh.timer"
 RECEIPT_SERVICE_NAME = "portfolio-receipt-dispatch.service"
 RECEIPT_TIMER_NAME = "portfolio-receipt-dispatch.timer"
+HOLDINGS_EVENT_SERVICE_NAME = "portfolio-holdings-event-listener.service"
 DEFAULT_MORNING_ON_CALENDAR = "Mon..Sat *-*-* 08:10:00 Asia/Shanghai"
 DEFAULT_EVENING_ON_CALENDAR = "Mon..Fri *-*-* 17:10:00 Asia/Shanghai"
 DEFAULT_QUALITY_REFRESH_INTERVAL = "15min"
@@ -349,6 +350,27 @@ RuntimeMaxSec=60
 """
 
 
+def render_holdings_event_service_unit(paths: InstallPaths, *, run_user: str) -> str:
+    return f"""[Unit]
+Description=portfolio-management Feishu holdings and cash-flow event listener
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User={run_user}
+WorkingDirectory={paths.app_dir}
+Environment=TZ=Asia/Shanghai
+EnvironmentFile={paths.env_file}
+ExecStart={paths.launcher_path} events listen --confirm --json
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
 def render_timer_unit(*, on_calendar: str, service_name: str, description: str) -> str:
     return f"""[Unit]
 Description={description}
@@ -393,6 +415,7 @@ def _unit_paths(paths: InstallPaths) -> dict[str, Path]:
         "quality_timer": paths.systemd_dir / QUALITY_TIMER_NAME,
         "receipt_service": paths.systemd_dir / RECEIPT_SERVICE_NAME,
         "receipt_timer": paths.systemd_dir / RECEIPT_TIMER_NAME,
+        "holdings_event_service": paths.systemd_dir / HOLDINGS_EVENT_SERVICE_NAME,
     }
 
 
@@ -419,6 +442,7 @@ def build_plan(args) -> dict:
             "quality_timer": str(units["quality_timer"]),
             "receipt_service": str(units["receipt_service"]),
             "receipt_timer": str(units["receipt_timer"]),
+            "holdings_event_service": str(units["holdings_event_service"]),
             "python_bin": str(paths.python_bin),
             "launcher": str(paths.launcher_path),
         },
@@ -442,6 +466,7 @@ def build_plan(args) -> dict:
             "enable_timers": bool(args.enable_timer),
             "enable_api_service": bool(args.enable_api_service),
             "enable_quality_timer": bool(args.enable_quality_timer),
+            "enable_holdings_event_service": bool(args.enable_holdings_event_listener),
             "lock_file": SCHEDULE_LOCK_FILE,
             "morning": {
                 "timer": TIMER_NAME,
@@ -475,6 +500,10 @@ def build_plan(args) -> dict:
                 "timer": RECEIPT_TIMER_NAME,
                 "service": RECEIPT_SERVICE_NAME,
                 "interval": args.receipt_dispatch_interval,
+            },
+            "holdings_events": {
+                "service": HOLDINGS_EVENT_SERVICE_NAME,
+                "enabled": bool(args.enable_holdings_event_listener),
             },
         },
         "feishu_receipt_env": {
@@ -635,6 +664,12 @@ def apply_install(args) -> dict:
             mode=0o644,
             overwrite=True,
         ),
+        str(units["holdings_event_service"]): _write_text(
+            units["holdings_event_service"],
+            render_holdings_event_service_unit(paths, run_user=args.run_user),
+            mode=0o644,
+            overwrite=True,
+        ),
     }
 
     systemd_commands = [["systemctl", "daemon-reload"]]
@@ -652,6 +687,10 @@ def apply_install(args) -> dict:
         systemd_commands.append(["systemctl", "enable", "--now", API_SERVICE_NAME])
     if args.enable_quality_timer:
         systemd_commands.append(["systemctl", "enable", "--now", QUALITY_TIMER_NAME])
+    if args.enable_holdings_event_listener:
+        systemd_commands.append(
+            ["systemctl", "enable", "--now", HOLDINGS_EVENT_SERVICE_NAME]
+        )
     for command in systemd_commands:
         subprocess.run(command, check=True)
 
@@ -667,6 +706,7 @@ def apply_install(args) -> dict:
         f"systemctl status {TIMER_NAME} {EVENING_TIMER_NAME} {CASH_FLOW_TIMER_NAME} {RECEIPT_TIMER_NAME}",
         f"systemctl status {API_SERVICE_NAME}",
         f"systemctl status {QUALITY_TIMER_NAME}",
+        f"systemctl status {HOLDINGS_EVENT_SERVICE_NAME}",
     ]
     return result
 
@@ -744,6 +784,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--receipt-dispatch-interval",
         default=DEFAULT_RECEIPT_DISPATCH_INTERVAL,
         help="systemd OnUnitActiveSec value for durable receipt retry",
+    )
+    parser.add_argument(
+        "--enable-holdings-event-listener",
+        action="store_true",
+        help=(
+            "enable the Feishu holdings long-connection service; requires a "
+            "separately completed Feishu activation preflight"
+        ),
     )
     return parser
 
