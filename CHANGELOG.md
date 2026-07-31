@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.32 - 2026-08-01
+
+- Added asset-type-driven holdings validation and completion for `currency` and `current`, with durable conflict receipts and exact-record human confirmation before ambiguous corrections.
+- Added durable Feishu Bitable event ingress, holdings reconciliation state, and fail-closed NAV preflight so newly added or edited holdings are validated before valuation.
+- Added one combined long-connection listener for configured holdings and cash-flow tables, with strict target routing, event collision detection, exact-record fresh reads, retryable inboxes, and receipt outboxes.
+- Added automatic completion of repository-owned cash-flow generated fields for valid CNY rows, while requiring exact-record confirmed FX evidence for foreign-currency rows and keeping CASH holding effects separate.
+- Added the official Feishu event SDK and installer-owned listener unit, which remains disabled until the separate Base subscription and activation preflight succeeds.
+
 ## 0.1.31 - 2026-07-28
 
 - Removed `exchange_rate_date`, `exchange_rate_source`, and `exchange_rate_evidence_type` from the production Feishu `cash_flow` contract, projections, migrations, and models; retained FX evidence only in local operation state.
