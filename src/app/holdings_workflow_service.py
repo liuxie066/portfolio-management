@@ -93,6 +93,53 @@ class HoldingsWorkflowService:
         payload.update({"read_only": False, "workflow": workflow})
         return payload
 
+    def plan_event_notification(
+        self,
+        *,
+        record_id: str,
+        trigger: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Fresh-read one record and build a transaction-ready event outcome."""
+
+        resolved_record_id = str(record_id or "").strip()
+        if not resolved_record_id:
+            raise ValueError("event notification requires one record id")
+        evaluation = self.reconciliation.evaluate(record_id=resolved_record_id)
+        records = list(evaluation.report.records)
+        if not records:
+            return {
+                "record_id": resolved_record_id,
+                "cases": [],
+                "discovery_receipts": [],
+                "active_case_keys": [],
+                "record_digest": "",
+                "current_identity": {},
+                "prove_external": False,
+                "trigger": dict(trigger),
+                "validation": self.reconciliation.reconcile_payload(evaluation),
+                "record_status": "stale_record_missing",
+            }
+        validation = self._single_validation(evaluation, resolved_record_id)
+        cases = self._cases_for_record(validation, evaluation)
+        account = str(validation.raw.raw_fields.get("account") or "").strip()
+        evidence_complete = not evaluation.report.evidence_errors or (
+            account not in evaluation.report.evidence_errors
+        )
+        return {
+            "record_id": resolved_record_id,
+            "cases": cases,
+            "discovery_receipts": [
+                self._discovery_receipt(item, trigger=trigger) for item in cases
+            ],
+            "active_case_keys": [item["case_key"] for item in cases],
+            "record_digest": validation.record_digest,
+            "current_identity": self._raw_identity(validation.raw.raw_fields),
+            "prove_external": evidence_complete,
+            "trigger": dict(trigger),
+            "validation": self.reconciliation.reconcile_payload(evaluation),
+            "record_status": "validated",
+        }
+
     def list_cases(
         self,
         *,
@@ -692,7 +739,12 @@ class HoldingsWorkflowService:
             "reason_code": reason_code,
         }
 
-    def _discovery_receipt(self, case: Dict[str, Any]) -> Dict[str, Any]:
+    def _discovery_receipt(
+        self,
+        case: Dict[str, Any],
+        *,
+        trigger: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         if case["state"] == "pending_apply":
             action = {
                 "description": "确认后只补全该记录仍为空且证据一致的字段",
@@ -718,28 +770,31 @@ class HoldingsWorkflowService:
                     "--notify --confirm"
                 ),
             }
+        payload = {
+            "case_key": case["case_key"],
+            "record_id": case["record_id"],
+            "account": case["account"],
+            "identity": case["identity"],
+            "field": case["field"],
+            "kind": case["kind"],
+            "state": case["state"],
+            "current": case["current"],
+            "proposed": case["proposed"],
+            "authority": case.get("authority"),
+            "authority_id": case.get("authority_id"),
+            "evidence_as_of": (case.get("evidence") or {}).get("source_as_of"),
+            "evidence": case.get("evidence") or {},
+            "blocks_official_nav": case["blocks_official_nav"],
+            "reason_code": case["reason_code"],
+            "action": action,
+        }
+        if trigger:
+            payload["trigger"] = dict(trigger)
         return {
             "case_key": case["case_key"],
             "receipt_key": f"holdings:case:discovered:{case['case_key']}",
             "receipt_type": "holding_case_discovered",
-            "payload": {
-                "case_key": case["case_key"],
-                "record_id": case["record_id"],
-                "account": case["account"],
-                "identity": case["identity"],
-                "field": case["field"],
-                "kind": case["kind"],
-                "state": case["state"],
-                "current": case["current"],
-                "proposed": case["proposed"],
-                "authority": case.get("authority"),
-                "authority_id": case.get("authority_id"),
-                "evidence_as_of": (case.get("evidence") or {}).get("source_as_of"),
-                "evidence": case.get("evidence") or {},
-                "blocks_official_nav": case["blocks_official_nav"],
-                "reason_code": case["reason_code"],
-                "action": action,
-            },
+            "payload": payload,
         }
 
     def _terminal_receipt(

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import pytest
 from pytest import MonkeyPatch
 
 from src import config
@@ -177,6 +178,31 @@ quality:
         finally:
             patch.undo()
             config.reload_config()
+
+
+def test_feishu_table_ref_accepts_qualified_and_shared_app_token(monkeypatch):
+    values = {
+        "feishu.tables.holdings": "base_a/table_a",
+        "feishu.app_token": "shared_base",
+    }
+    monkeypatch.setattr(config, "get", lambda key, default=None: values.get(key, default))
+
+    assert config.get_feishu_table_ref("holdings") == ("base_a", "table_a")
+
+    values["feishu.tables.holdings"] = "table_b"
+    assert config.get_feishu_table_ref("holdings") == ("shared_base", "table_b")
+
+
+def test_feishu_table_ref_fails_closed_on_ambiguous_or_incomplete_config(monkeypatch):
+    values = {"feishu.tables.holdings": "base/table/extra"}
+    monkeypatch.setattr(config, "get", lambda key, default=None: values.get(key, default))
+
+    with pytest.raises(ValueError, match="expected app_token/table_id"):
+        config.get_feishu_table_ref("holdings")
+
+    values["feishu.tables.holdings"] = "table_only"
+    with pytest.raises(ValueError, match="missing feishu.app_token"):
+        config.get_feishu_table_ref("holdings")
 
 
 def test_validate_deploy_config_accepts_complete_yaml_config():

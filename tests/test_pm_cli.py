@@ -155,6 +155,71 @@ def test_pm_holdings_apply_requires_exact_record_and_confirmation_before_backend
             raise AssertionError("expected holdings apply safety rejection")
 
 
+def test_pm_holdings_event_mutations_require_confirmation_before_backend():
+    for argv, expected in (
+        (["holdings", "events", "subscribe"], "subscribe requires --confirm"),
+        (["holdings", "events", "listen"], "listen requires --confirm"),
+    ):
+        try:
+            pm.main(argv)
+        except SystemExit as exc:
+            assert expected in str(exc)
+        else:
+            raise AssertionError("expected holdings event safety rejection")
+
+
+def test_pm_holdings_event_status_is_local_only_and_does_not_claim_remote_health():
+    from src import config as config_module
+    import src.app.holdings_event_service as event_module
+    import src.app.operation_state_store as store_module
+    import src.feishu.holdings_event_adapter as adapter_module
+
+    class Target:
+        @classmethod
+        def from_config(cls):
+            return cls()
+
+        def as_dict(self):
+            return {
+                "app_id": "cli_data",
+                "file_token": "base",
+                "table_id": "table",
+                "event_type": "drive.file.bitable_record_changed_v1",
+            }
+
+    class Store:
+        @classmethod
+        def inspect_holding_event_status(cls):
+            return {"initialized": True, "counts": {}, "latest": None}
+
+    class Adapter:
+        @staticmethod
+        def sdk_available():
+            return True
+
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("status must not construct a network adapter")
+
+    patch = MonkeyPatch()
+    stdout = io.StringIO()
+    try:
+        patch.setattr(event_module, "HoldingsEventTarget", Target)
+        patch.setattr(store_module, "OperationStateStore", Store)
+        patch.setattr(adapter_module, "FeishuHoldingsEventAdapter", Adapter)
+        patch.setattr(config_module, "get", lambda key, default=None: "secret")
+        with redirect_stdout(stdout):
+            assert pm.main(["holdings", "events", "status", "--json"]) == 0
+    finally:
+        patch.undo()
+
+    result = json.loads(stdout.getvalue())
+    assert result["sdk_available"] is True
+    assert result["read_only"] is True
+    assert result["remote_subscription_verified"] is False
+    assert result["listener_connection_verified"] is False
+    assert "no Feishu request" in result["note"]
+
+
 def test_pm_receipts_dispatch_attempts_typed_branch_when_nav_branch_raises():
     import src.app.nav_receipt_outbox_service as nav_module
     import src.app.operation_receipt_outbox_service as operation_module

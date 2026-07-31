@@ -39,6 +39,7 @@ import contextlib
 import os
 import json
 import sys
+import threading
 from datetime import date
 from pathlib import Path
 from uuid import uuid4
@@ -433,6 +434,72 @@ def cmd_holdings_recover(args):
     )
     _dump(result, bool(getattr(args, "json", False)))
     return result
+
+
+def cmd_holdings_events_status(args):
+    from src import config
+    from src.app.holdings_event_service import HoldingsEventTarget
+    from src.app.operation_state_store import OperationStateStore
+    from src.feishu.holdings_event_adapter import FeishuHoldingsEventAdapter
+
+    target = HoldingsEventTarget.from_config()
+    sdk_available = FeishuHoldingsEventAdapter.sdk_available()
+    app_secret_configured = bool(config.get("feishu.app_secret"))
+    result = {
+        "success": bool(sdk_available and app_secret_configured),
+        "read_only": True,
+        "target": target.as_dict(),
+        "credentials": {
+            "app_id_configured": True,
+            "app_secret_configured": app_secret_configured,
+        },
+        "sdk_available": sdk_available,
+        "local_inbox": OperationStateStore.inspect_holding_event_status(),
+        "remote_subscription_verified": False,
+        "listener_connection_verified": False,
+        "note": "local/config status only; no Feishu request was made",
+    }
+    _dump(result, bool(getattr(args, "json", False)))
+    return result
+
+
+def cmd_holdings_events_subscribe(args):
+    if not bool(args.confirm):
+        raise SystemExit("holdings events subscribe requires --confirm")
+    from src.feishu.holdings_event_adapter import FeishuHoldingsEventAdapter
+
+    result = FeishuHoldingsEventAdapter().subscribe()
+    _dump(result, bool(getattr(args, "json", False)))
+    return result
+
+
+def cmd_holdings_events_listen(args):
+    if not bool(args.confirm):
+        raise SystemExit("holdings events listen requires --confirm")
+    from src.app.holding_event_inbox_service import HoldingEventInboxService
+    from src.feishu.holdings_event_adapter import FeishuHoldingsEventAdapter
+    from src.service.application import PortfolioService
+
+    inbox = HoldingEventInboxService(storage=PortfolioService().storage)
+    adapter = FeishuHoldingsEventAdapter(target=inbox.target)
+    stop_event = threading.Event()
+    worker = threading.Thread(
+        target=inbox.run_worker_loop,
+        kwargs={
+            "stop_event": stop_event,
+            "poll_seconds": float(args.poll_seconds),
+            "limit": int(args.limit),
+        },
+        name="holdings-event-worker",
+        daemon=True,
+    )
+    worker.start()
+    try:
+        adapter.start(inbox.accept)
+    finally:
+        stop_event.set()
+        worker.join(timeout=10)
+    return {"success": True, "status": "stopped"}
 
 
 def cmd_cash(args):
@@ -1432,6 +1499,43 @@ def build_parser() -> argparse.ArgumentParser:
     p_hold_recover.add_argument("--confirm", action="store_true")
     p_hold_recover.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     p_hold_recover.set_defaults(func=cmd_holdings_recover)
+
+    p_hold_events = holdings_sub.add_parser(
+        "events",
+        help="exact-resource Feishu holdings event ingress",
+    )
+    hold_events_sub = p_hold_events.add_subparsers(
+        dest="holdings_events_cmd",
+        required=True,
+    )
+    p_hold_events_status = hold_events_sub.add_parser(
+        "status",
+        help="show local/config readiness without a Feishu request",
+    )
+    p_hold_events_status.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS
+    )
+    p_hold_events_status.set_defaults(func=cmd_holdings_events_status)
+    p_hold_events_subscribe = hold_events_sub.add_parser(
+        "subscribe",
+        help="create the exact configured Base document event subscription",
+    )
+    p_hold_events_subscribe.add_argument("--confirm", action="store_true")
+    p_hold_events_subscribe.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS
+    )
+    p_hold_events_subscribe.set_defaults(func=cmd_holdings_events_subscribe)
+    p_hold_events_listen = hold_events_sub.add_parser(
+        "listen",
+        help="run the long connection and leased local worker",
+    )
+    p_hold_events_listen.add_argument("--confirm", action="store_true")
+    p_hold_events_listen.add_argument("--poll-seconds", type=float, default=1.0)
+    p_hold_events_listen.add_argument("--limit", type=int, default=100)
+    p_hold_events_listen.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS
+    )
+    p_hold_events_listen.set_defaults(func=cmd_holdings_events_listen)
 
     p_cash = sp.add_parser("cash", help="show cash positions")
     p_cash.add_argument("--account", default=argparse.SUPPRESS, help="account to operate on; defaults to config/PORTFOLIO_ACCOUNT")

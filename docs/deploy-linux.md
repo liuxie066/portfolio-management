@@ -72,6 +72,7 @@ sudo python3 scripts/install_linux.py --apply
 - `/etc/systemd/system/portfolio-cash-flow-scan.service`
 - `/etc/systemd/system/portfolio-cash-flow-scan.timer`
 - `/etc/systemd/system/portfolio-management-api.service`
+- `/etc/systemd/system/portfolio-holdings-event-listener.service`
 
 如果已有 `config.yaml`，默认保留不覆盖；确需重建模板时显式加 `--overwrite-config`。
 
@@ -217,6 +218,12 @@ feishu:
 `options-monitor.env`。源文件存在但三项缺失或为空时，部署会在写文件前失败。
 
 `pm config doctor --require-futu --json` 会检查三项最终解析结果。Futu 真实写入成功或失败都会分别发送回执；多账户 NAV 任务会再发送一条汇总回执。dry-run 不发送。飞书应用需要具备发送消息权限，并能向该 `open_id` 发起单聊。
+
+## Holdings 变更事件入口
+
+安装器会生成 `portfolio-holdings-event-listener.service`，但默认不启用。
+完整的飞书侧配置、精确文档订阅、canary 和回滚步骤见
+`docs/holdings-event-listener-runbook.md`。不得仅因 unit 已生成就启用服务。
 
 核心保护：
 
