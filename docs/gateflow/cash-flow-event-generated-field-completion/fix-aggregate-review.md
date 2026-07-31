@@ -40,4 +40,3 @@ event IDs, timestamps, or generated-field noise to receipt identity.
 ## Next entry point
 
 `aggregate re-review`
-

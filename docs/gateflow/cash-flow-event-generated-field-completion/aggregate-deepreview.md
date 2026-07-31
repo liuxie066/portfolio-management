@@ -41,4 +41,3 @@ approved work unit.
 - Current gate: `aggregate deepreview pass`.
 - Next gate: local final closeout, then stop at separately authorized push/PR,
   release, subscription, and deployment boundaries.
-

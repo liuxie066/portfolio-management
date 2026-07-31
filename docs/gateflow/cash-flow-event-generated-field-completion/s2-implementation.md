@@ -88,4 +88,3 @@ git diff --check: passed
 ## Next entry point
 
 `code review`
-

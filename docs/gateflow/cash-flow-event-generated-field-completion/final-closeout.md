@@ -94,4 +94,3 @@ The code work unit is complete locally. The next user-controlled action is a
 separate `commit and push`/Draft PR authorization. Release, Base subscription,
 listener activation, live canary, and deployment remain later independent
 boundaries.
-
