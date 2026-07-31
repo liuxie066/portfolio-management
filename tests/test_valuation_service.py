@@ -25,6 +25,36 @@ def test_valuation_service_empty_holdings():
     assert result.holdings == []
 
 
+def test_valuation_service_uses_explicit_holdings_without_storage_reread():
+    storage = Mock()
+    storage.get_total_shares.return_value = 10
+    fetcher = Mock()
+    fetcher.fetch_batch.return_value = {}
+    supplied = [
+        Holding(
+            asset_id="CNY-CASH",
+            asset_name="人民币现金",
+            asset_type=AssetType.CASH,
+            account="a",
+            broker="IBKR",
+            quantity=10,
+            currency="CNY",
+            asset_class=AssetClass.CASH,
+        )
+    ]
+    service = ValuationService(
+        manager=_manager(storage, fetcher),
+        storage=storage,
+        price_fetcher=fetcher,
+    )
+
+    result = service.calculate_valuation("a", holdings=supplied)
+
+    storage.get_holdings.assert_not_called()
+    assert result.total_value_cny == 10
+    assert result.holdings is supplied or result.holdings[0] is supplied[0]
+
+
 def test_valuation_service_values_holdings_with_prices():
     storage = Mock()
     fetcher = Mock()

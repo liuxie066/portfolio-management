@@ -1021,6 +1021,80 @@ class OperationStateStore:
             ).fetchone()
         return self._decode_case_row(row) if row else None
 
+    @classmethod
+    def get_holding_cases_read_only(
+        cls,
+        case_keys: list[str],
+        *,
+        db_path: Optional[str | Path] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Read existing cases without initializing or migrating local state."""
+
+        keys = [str(key) for key in dict.fromkeys(case_keys) if str(key).strip()]
+        if not keys:
+            return {}
+        path = cls.resolve_db_path_read_only(db_path)
+        if not path.exists():
+            return {}
+        uri = f"{path.resolve().as_uri()}?mode=ro"
+        with sqlite3.connect(uri, uri=True, timeout=10) as conn:
+            conn.row_factory = sqlite3.Row
+            table = conn.execute(
+                """
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table' AND name = 'holding_reconciliation_cases'
+                """
+            ).fetchone()
+            if table is None:
+                return {}
+            rows = conn.execute(
+                """
+                SELECT * FROM holding_reconciliation_cases
+                WHERE case_key IN ({})
+                """.format(",".join("?" for _ in keys)),
+                keys,
+            ).fetchall()
+        return {
+            str(row["case_key"]): cls._decode_case_row(row)
+            for row in rows
+        }
+
+    @classmethod
+    def list_holding_cases_read_only(
+        cls,
+        *,
+        account: Optional[str] = None,
+        state: Optional[str] = None,
+        db_path: Optional[str | Path] = None,
+    ) -> list[Dict[str, Any]]:
+        """List existing cases without creating or migrating local state."""
+
+        path = cls.resolve_db_path_read_only(db_path)
+        if not path.exists():
+            return []
+        uri = f"{path.resolve().as_uri()}?mode=ro"
+        with sqlite3.connect(uri, uri=True, timeout=10) as conn:
+            conn.row_factory = sqlite3.Row
+            table = conn.execute(
+                """
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table' AND name = 'holding_reconciliation_cases'
+                """
+            ).fetchone()
+            if table is None:
+                return []
+            query = "SELECT * FROM holding_reconciliation_cases WHERE 1 = 1"
+            params: list[Any] = []
+            if account is not None:
+                query += " AND account = ?"
+                params.append(account)
+            if state is not None:
+                query += " AND state = ?"
+                params.append(state)
+            query += " ORDER BY created_at DESC, case_key"
+            rows = conn.execute(query, params).fetchall()
+        return [cls._decode_case_row(row) for row in rows]
+
     def list_holding_cases(
         self,
         *,

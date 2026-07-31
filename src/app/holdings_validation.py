@@ -290,12 +290,44 @@ class RecordValidation:
         by_field = {item.field: item for item in self.outcomes}
         return all(by_field.get(name) is not None and by_field[name].status == "valid" for name in REQUIRED_FIELDS)
 
-    def to_holding(self) -> Holding:
-        if not self.valid_for_typed_holding:
+    def to_holding(
+        self,
+        *,
+        confirmed_conflict_fields: Iterable[str] = (),
+    ) -> Holding:
+        confirmed = {str(field) for field in confirmed_conflict_fields}
+        by_field = {item.field: item for item in self.outcomes}
+        required_valid = all(
+            by_field.get(name) is not None
+            and (
+                by_field[name].status == "valid"
+                or (
+                    by_field[name].status == "conflict"
+                    and name in confirmed
+                )
+            )
+            for name in REQUIRED_FIELDS
+        )
+        if self.issues or not required_valid:
             raise ValueError(f"holding record is not fully valid: {self.raw.record_id}")
         fields = self.raw.canonical_fields()
+        outcome_by_field = by_field
         quantity = _decimal(fields.get("quantity"))
-        avg_cost = _decimal(fields.get("avg_cost"))
+        avg_cost = (
+            _decimal(fields.get("avg_cost"))
+            if outcome_by_field["avg_cost"].status == "valid"
+            else None
+        )
+        asset_class_value = (
+            _text(fields.get("asset_class"))
+            if outcome_by_field["asset_class"].status in {"valid", "conflict"}
+            else None
+        )
+        industry_value = (
+            _text(fields.get("industry"))
+            if outcome_by_field["industry"].status == "valid"
+            else None
+        )
         return Holding(
             record_id=self.raw.record_id,
             asset_id=str(_text(fields.get("asset_id")) or ""),
@@ -307,16 +339,30 @@ class RecordValidation:
             avg_cost=float(avg_cost) if avg_cost is not None else None,
             currency=str(_text(fields.get("currency")) or "").upper(),
             asset_class=(
-                AssetClass(str(_text(fields.get("asset_class"))))
-                if _text(fields.get("asset_class"))
+                AssetClass(str(asset_class_value))
+                if asset_class_value
                 else None
             ),
             industry=(
-                Industry(str(_text(fields.get("industry"))))
-                if _text(fields.get("industry"))
+                Industry(str(industry_value))
+                if industry_value
                 else None
             ),
-            tag=list(fields.get("tag") or []) if isinstance(fields.get("tag"), list) else [],
+            tag=(
+                list(fields.get("tag") or [])
+                if outcome_by_field["tag"].status == "valid"
+                else []
+            ),
+            created_at=(
+                fields.get("created_at")
+                if outcome_by_field["created_at"].status == "valid"
+                else None
+            ),
+            updated_at=(
+                fields.get("updated_at")
+                if outcome_by_field["updated_at"].status == "valid"
+                else None
+            ),
         )
 
     @property

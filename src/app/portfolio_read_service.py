@@ -198,23 +198,35 @@ class PortfolioReadService:
         *,
         price_timeout_seconds: Optional[int] = None,
         run_quote_pool: Any = None,
+        holdings: Optional[list[Any]] = None,
+        holdings_provenance: Optional[Dict[str, Any]] = None,
+        holdings_warnings: Optional[list[str]] = None,
     ) -> Dict[str, Any]:
-        if price_timeout_seconds is None:
-            if run_quote_pool is None:
-                valuation = self.portfolio.calculate_valuation(self.account)
-            else:
-                valuation = self.portfolio.calculate_valuation(
-                    self.account,
-                    run_quote_pool=run_quote_pool,
+        valuation_kwargs: Dict[str, Any] = {}
+        if price_timeout_seconds is not None:
+            valuation_kwargs["price_timeout_seconds"] = price_timeout_seconds
+        if run_quote_pool is not None:
+            valuation_kwargs["run_quote_pool"] = run_quote_pool
+        if holdings is not None:
+            valuation_kwargs["holdings"] = holdings
+        valuation = self.portfolio.calculate_valuation(
+            self.account,
+            **valuation_kwargs,
+        )
+        if holdings_provenance is not None:
+            valuation.holdings_provenance = dict(holdings_provenance)
+        if holdings_warnings:
+            valuation.warnings = list(
+                dict.fromkeys(
+                    [
+                        *(str(item) for item in holdings_warnings),
+                        *(str(item) for item in (valuation.warnings or [])),
+                    ]
                 )
-        else:
-            valuation_kwargs = {"price_timeout_seconds": price_timeout_seconds}
-            if run_quote_pool is not None:
-                valuation_kwargs["run_quote_pool"] = run_quote_pool
-            valuation = self.portfolio.calculate_valuation(self.account, **valuation_kwargs)
-        holdings = valuation.holdings or []
+            )
+        valuation_holdings = valuation.holdings or []
         holdings_list = []
-        for h in holdings:
+        for h in valuation_holdings:
             holdings_list.append({
                 "code": h.asset_id,
                 "name": h.asset_name,
@@ -234,6 +246,7 @@ class PortfolioReadService:
         return {
             "snapshot_time": bj_now_naive().isoformat(),
             "valuation": valuation,
+            "holdings_snapshot": dict(holdings_provenance or {}),
             "holdings_data": {
                 "success": True,
                 "holdings": holdings_list,

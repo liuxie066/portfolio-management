@@ -17,7 +17,9 @@ from .holdings_reconciliation_service import (
     HoldingsReconciliationService,
 )
 from .holdings_validation import (
+    CURRENCY_POLICY_VERSION,
     RecordValidation,
+    VALIDATION_POLICY_VERSION,
     canonical_record_payload,
     record_digest,
 )
@@ -67,11 +69,19 @@ class HoldingsWorkflowService:
         lock_factory: Any = process_lock,
     ) -> None:
         self.storage = storage
-        self.store = store or OperationStateStore()
+        self._store = store
         self.reconciliation = reconciliation or HoldingsReconciliationService(
             storage=storage
         )
         self.lock_factory = lock_factory
+
+    @property
+    def store(self) -> OperationStateStore:
+        """Initialize durable state only when a mutating/read-state path needs it."""
+
+        if self._store is None:
+            self._store = OperationStateStore()
+        return self._store
 
     def notify(
         self,
@@ -138,6 +148,302 @@ class HoldingsWorkflowService:
             "trigger": dict(trigger),
             "validation": self.reconciliation.reconcile_payload(evaluation),
             "record_status": "validated",
+        }
+
+    def plan_evaluation(
+        self,
+        evaluation: HoldingsReconciliationEvaluation,
+        *,
+        trigger: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Build one transaction-ready workflow plan without mutating state."""
+
+        cases = [
+            case
+            for validation in evaluation.report.records
+            for case in self._cases_for_record(validation, evaluation)
+        ]
+        stored = self._stored_cases_read_only(
+            [case["case_key"] for case in cases]
+        )
+        confirmed_case_keys = []
+        for case in cases:
+            durable = stored.get(case["case_key"])
+            if not durable or durable.get("state") != "resolved_keep":
+                continue
+            resolution = dict(durable.get("resolution") or {})
+            if resolution.get("confirmation_scope") == self._confirmation_scope(case):
+                confirmed_case_keys.append(case["case_key"])
+        return {
+            "cases": cases,
+            "discovery_receipts": [
+                self._discovery_receipt(case, trigger=trigger) for case in cases
+            ],
+            "case_keys": [case["case_key"] for case in cases],
+            "blocking_case_keys": [
+                case["case_key"]
+                for case in cases
+                if case.get("blocks_official_nav")
+                and case["case_key"] not in confirmed_case_keys
+            ],
+            "confirmed_case_keys": confirmed_case_keys,
+            "trigger": dict(trigger),
+        }
+
+    def materialize_plan(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        """Atomically materialize every case and receipt in a prepared plan."""
+
+        return self.store.materialize_holding_cases(
+            cases=list(plan.get("cases") or []),
+            discovery_receipts=list(plan.get("discovery_receipts") or []),
+            trigger=dict(plan.get("trigger") or {}),
+        )
+
+    def materialize_preflight_plan(
+        self,
+        plan: Dict[str, Any],
+        evaluation: HoldingsReconciliationEvaluation,
+    ) -> Dict[str, Any]:
+        """Materialize current cases and prove repaired account cases closed."""
+
+        combined = self.materialize_plan(plan)
+        active_by_record: Dict[str, list[str]] = {}
+        for case in list(plan.get("cases") or []):
+            active_by_record.setdefault(str(case["record_id"]), []).append(
+                str(case["case_key"])
+            )
+        for validation in evaluation.report.records:
+            raw_account = str(
+                validation.raw.raw_fields.get("account") or ""
+            ).strip()
+            if raw_account in evaluation.report.evidence_errors:
+                continue
+            closed = self.store.resolve_holding_cases_external(
+                record_id=validation.raw.record_id,
+                active_case_keys=active_by_record.get(
+                    validation.raw.record_id,
+                    [],
+                ),
+                record_digest=validation.record_digest,
+                current_identity=self._raw_identity(validation.raw.raw_fields),
+                trigger=dict(plan.get("trigger") or {}),
+            )
+            for key, values in closed.items():
+                combined.setdefault(key, []).extend(values)
+        return combined
+
+    def prove_global_orphans_absent(
+        self,
+        *,
+        trigger: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Close prior synthetic global orphan cases after a fresh empty scan."""
+
+        return self.store.resolve_holding_cases_external(
+            record_id="__global_orphan_holdings__",
+            active_case_keys=[],
+            record_digest=_digest([]),
+            current_identity={"asset_id": None, "account": None, "broker": None},
+            trigger=dict(trigger),
+        )
+
+    def apply_outage_manual_confirmations(
+        self,
+        plan: Dict[str, Any],
+        evaluation: HoldingsReconciliationEvaluation,
+    ) -> Dict[str, Any]:
+        """Give exact durable manual decisions precedence during Futu outage."""
+
+        outage_accounts = set(evaluation.report.evidence_errors)
+        if not outage_accounts:
+            return plan
+        records = {
+            validation.raw.record_id: validation.raw
+            for validation in evaluation.report.records
+        }
+        durable_cases: list[Dict[str, Any]] = []
+        for account in sorted(outage_accounts):
+            if self._store is not None:
+                durable_cases.extend(
+                    self._store.list_holding_cases(
+                        account=account,
+                        state="resolved_keep",
+                    )
+                )
+            else:
+                durable_cases.extend(
+                    OperationStateStore.list_holding_cases_read_only(
+                        account=account,
+                        state="resolved_keep",
+                    )
+                )
+
+        confirmed_fields: Dict[str, set[str]] = {}
+        confirmed_case_keys: list[str] = []
+        for case in durable_cases:
+            raw = records.get(str(case.get("record_id") or ""))
+            if raw is None or not str(case.get("authority_id") or "").startswith(
+                "futu:"
+            ):
+                continue
+            field = str(case.get("field") or "")
+            expected_policy = VALIDATION_POLICY_VERSION
+            if field == "currency":
+                expected_policy += f"+{CURRENCY_POLICY_VERSION}"
+            if case.get("policy_version") != expected_policy:
+                continue
+            identity = self._raw_identity(raw.raw_fields)
+            if identity != dict(case.get("identity") or {}):
+                continue
+            canonical = canonical_record_payload(raw.raw_fields)
+            precondition = _digest(
+                {
+                    "record_id": raw.record_id,
+                    "identity": identity,
+                    "field": field,
+                    "current": canonical.get(field),
+                    "authority_inputs": {
+                        key: canonical.get(key)
+                        for key in ("asset_id", "asset_type", "account", "broker")
+                    },
+                }
+            )
+            resolution = dict(case.get("resolution") or {})
+            if (
+                precondition != case.get("case_precondition_digest")
+                or resolution.get("confirmation_scope")
+                != self._confirmation_scope(case)
+            ):
+                continue
+            confirmed_fields.setdefault(raw.record_id, set()).add(field)
+            confirmed_case_keys.append(str(case["case_key"]))
+
+        if not confirmed_fields:
+            return plan
+        cases = [
+            case
+            for case in list(plan.get("cases") or [])
+            if str(case.get("field") or "")
+            not in confirmed_fields.get(str(case.get("record_id") or ""), set())
+        ]
+        filtered = dict(plan)
+        filtered.update(
+            {
+                "cases": cases,
+                "discovery_receipts": [
+                    self._discovery_receipt(case, trigger=plan.get("trigger"))
+                    for case in cases
+                ],
+                "case_keys": [case["case_key"] for case in cases],
+                "blocking_case_keys": [
+                    case["case_key"]
+                    for case in cases
+                    if case.get("blocks_official_nav")
+                ],
+                "confirmed_case_keys": list(
+                    dict.fromkeys(
+                        [
+                            *(plan.get("confirmed_case_keys") or []),
+                            *confirmed_case_keys,
+                        ]
+                    )
+                ),
+                "confirmed_fields": {
+                    record_id: sorted(fields)
+                    for record_id, fields in confirmed_fields.items()
+                },
+            }
+        )
+        return filtered
+
+    def _stored_cases_read_only(
+        self,
+        case_keys: list[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        if self._store is not None:
+            return {
+                case_key: stored
+                for case_key in case_keys
+                if (stored := self._store.get_holding_case(case_key)) is not None
+            }
+        return OperationStateStore.get_holding_cases_read_only(case_keys)
+
+    def plan_global_orphans(
+        self,
+        records: Iterable[Any],
+        *,
+        trigger: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Collapse all missing-account rows into one global NAV blocker."""
+
+        orphan_facts = sorted(
+            (
+                {
+                    "record_id": str(record.record_id),
+                    "record_digest": record_digest(record.raw_fields),
+                }
+                for record in records
+                if not str(record.raw_fields.get("account") or "").strip()
+            ),
+            key=lambda item: item["record_id"],
+        )
+        if not orphan_facts:
+            return {
+                "cases": [],
+                "discovery_receipts": [],
+                "case_keys": [],
+                "blocking_case_keys": [],
+                "trigger": dict(trigger),
+            }
+
+        aggregate_digest = _digest(orphan_facts)
+        identity = {"asset_id": None, "account": None, "broker": None}
+        current = {"orphan_records": orphan_facts}
+        precondition = _digest(
+            {
+                "scope": "global",
+                "field": "account",
+                "current": current,
+            }
+        )
+        case_key = _digest(
+            {
+                "contract_version": CASE_CONTRACT_VERSION,
+                "scope": "global",
+                "field": "account",
+                "kind": "orphan_global",
+                "current": current,
+                "policy_version": VALIDATION_POLICY_VERSION,
+            }
+        )
+        case = {
+            "case_key": case_key,
+            "record_id": "__global_orphan_holdings__",
+            "account": None,
+            "field": "__global__:account",
+            "kind": "orphan_global",
+            "blocks_official_nav": True,
+            "policy_version": VALIDATION_POLICY_VERSION,
+            "authority": None,
+            "authority_id": None,
+            "current": current,
+            "proposed": None,
+            "record_digest": aggregate_digest,
+            "case_precondition_digest": precondition,
+            "latest_evidence_instance_id": None,
+            "evidence": {},
+            "state": "pending_manual_edit",
+            "identity": identity,
+            "reason_code": "ACCOUNT_ORPHAN_GLOBAL_BLOCKER",
+        }
+        return {
+            "cases": [case],
+            "discovery_receipts": [
+                self._discovery_receipt(case, trigger=trigger)
+            ],
+            "case_keys": [case_key],
+            "blocking_case_keys": [case_key],
+            "trigger": dict(trigger),
         }
 
     def list_cases(
@@ -567,7 +873,6 @@ class HoldingsWorkflowService:
             "patch_error": patch_error,
             "workflow": workflow,
         }
-
     def _materialize_evaluation(
         self,
         evaluation: HoldingsReconciliationEvaluation,
@@ -745,7 +1050,12 @@ class HoldingsWorkflowService:
         *,
         trigger: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        if case["state"] == "pending_apply":
+        if case["kind"] == "orphan_global":
+            action = {
+                "description": "请在 holdings 表补齐缺失账户后重新证明",
+                "command": "pm holdings reconcile --notify --confirm",
+            }
+        elif case["state"] == "pending_apply":
             action = {
                 "description": "确认后只补全该记录仍为空且证据一致的字段",
                 "command": (

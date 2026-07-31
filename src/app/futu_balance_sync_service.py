@@ -108,6 +108,7 @@ class FutuBalanceSyncItem:
     updated: bool
     fields_changed: bool
     field_updates: Dict[str, Any]
+    projected_fields: Dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -1297,6 +1298,7 @@ class FutuBalanceSyncService:
             updated=synced["updated"],
             fields_changed=bool(synced.get("fields_changed")),
             field_updates=dict(synced.get("field_updates") or {}),
+            projected_fields=dict(synced.get("projected_fields") or {}),
         )]
 
     @staticmethod

@@ -71,6 +71,22 @@ class HoldingsReconciliationService:
         if account and record_id:
             raise ValueError("account and record_id are mutually exclusive")
         records = self.storage.get_raw_holdings(account=account, record_id=record_id)
+        return self.evaluate_records(
+            records,
+            account=account,
+            record_id=record_id,
+        )
+
+    def evaluate_records(
+        self,
+        records: Any,
+        *,
+        account: Optional[str] = None,
+        record_id: Optional[str] = None,
+    ) -> HoldingsReconciliationEvaluation:
+        """Validate an already frozen complete source slice."""
+
+        records = list(records)
         futu_accounts = sorted(
             {
                 str((record.raw_fields.get("account") or "")).strip()

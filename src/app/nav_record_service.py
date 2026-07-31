@@ -285,6 +285,8 @@ class NavRecordService:
         details = dict(nav_record.details or {})
         details["finality"] = resolved_context.to_details()
         details["valuation_quality"] = valuation_quality
+        if valuation.holdings_provenance:
+            details["holdings_snapshot"] = dict(valuation.holdings_provenance)
         if resolved_context.run_id:
             details["run_id"] = resolved_context.run_id
         nav_record.details = details

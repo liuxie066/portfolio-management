@@ -9,6 +9,7 @@ from src.app.daily_account_nav_service import DailyAccountNavService
 from src.app.daily_nav_job_service import DailyNavJobService
 from src.app.daily_report_payload_service import DailyReportPayloadService
 from src.app.nav_initialization_service import NavInitializationService
+from src.domain.holdings import RawHoldingRecord
 from src.models import AssetType
 
 
@@ -48,6 +49,11 @@ def _nav_record(account: str = "alice", nav_date: date = date(2026, 5, 22)):
         ytd_pnl=2.0,
         details={},
     )
+
+
+class _PassingGlobalHoldingsPreflight:
+    def scan_global_orphans(self, **_kwargs):
+        return {"success": True, "status": "valid", "scope": "global"}
 
 
 def test_business_calendar_skips_weekend_and_configured_holiday():
@@ -466,6 +472,7 @@ def test_daily_nav_job_auto_date_uses_previous_business_day():
         portfolio=SimpleNamespace(reporting_service=object()),
         calendar=BusinessCalendarService(),
         account_runner_factory=FakeRunner,
+        holdings_preflight=_PassingGlobalHoldingsPreflight(),
     ).run(
         run_date="2026-05-25",
         account="alice",
@@ -728,6 +735,7 @@ def test_daily_nav_job_preserves_account_runner_partial_status():
         portfolio=SimpleNamespace(reporting_service=object()),
         calendar=BusinessCalendarService(),
         account_runner_factory=FakeRunner,
+        holdings_preflight=_PassingGlobalHoldingsPreflight(),
     ).run(nav_date="2026-05-22", account="alice")
 
     assert result["success"] is False
@@ -739,7 +747,7 @@ def test_daily_nav_job_preserves_account_runner_partial_status():
 
 def test_daily_nav_job_skips_when_discovery_finds_no_accounts():
     class FakeStorage:
-        def get_holdings(self, **_kwargs):
+        def get_raw_holdings(self, **_kwargs):
             return []
 
     result = DailyNavJobService(
@@ -753,6 +761,119 @@ def test_daily_nav_job_skips_when_discovery_finds_no_accounts():
     assert result["status"] == "skipped_no_accounts"
     assert result["summary"] == {"skipped_no_accounts": 1}
     assert result["items"] == []
+
+
+def test_daily_nav_job_discovers_invalid_raw_row_instead_of_skipping_account():
+    class FakeStorage:
+        def get_raw_holdings(self, **_kwargs):
+            return [
+                RawHoldingRecord(
+                    record_id="rec-invalid",
+                    raw_fields={"account": "alice", "quantity": "not-a-number"},
+                )
+            ]
+
+        def audit_nav_history_duplicates(self, account=None):
+            return {"success": True, "duplicate_group_count": 0}
+
+        def reconcile_cash_flows(self, **_kwargs):
+            return {"success": True, "change_count": 0, "error_count": 0}
+
+        def get_nav_on_date(self, account, nav_date):
+            return None
+
+    class BlockingPreflight:
+        def scan_global_orphans(self, **_kwargs):
+            return {"success": True, "status": "valid", "scope": "global"}
+
+    calls = []
+
+    class FakeRunner:
+        def __init__(self, account):
+            calls.append(account)
+
+        def run(self, **_kwargs):
+            return {
+                "success": False,
+                "status": "holdings_confirmation_required",
+                "account": calls[-1],
+            }
+
+    result = DailyNavJobService(
+        storage=FakeStorage(),
+        portfolio=SimpleNamespace(reporting_service=object()),
+        calendar=BusinessCalendarService(),
+        account_runner_factory=FakeRunner,
+        holdings_preflight=BlockingPreflight(),
+    ).run(nav_date="2026-05-22")
+
+    assert calls == ["alice"]
+    assert result["success"] is False
+    assert result["status"] == "failed"
+    assert result["summary"] == {"holdings_confirmation_required": 1}
+
+
+def test_daily_nav_job_raw_discovery_failure_never_becomes_no_accounts():
+    class FakeStorage:
+        def get_raw_holdings(self, **_kwargs):
+            raise RuntimeError("holdings pagination incomplete")
+
+    result = DailyNavJobService(
+        storage=FakeStorage(),
+        portfolio=SimpleNamespace(reporting_service=object()),
+        calendar=BusinessCalendarService(),
+        account_runner_factory=lambda _account: (_ for _ in ()).throw(
+            AssertionError("runner should not run")
+        ),
+    ).run(nav_date="2026-05-22")
+
+    assert result["success"] is False
+    assert result["status"] == "holdings_source_unavailable"
+    assert "pagination incomplete" in result["error"]
+
+
+def test_daily_nav_job_raw_discovery_ignores_valid_zero_but_keeps_missing_quantity():
+    class FakeStorage:
+        def get_raw_holdings(self, **_kwargs):
+            return [
+                RawHoldingRecord(
+                    record_id="rec-zero",
+                    raw_fields={"account": "zero", "quantity": 0},
+                ),
+                RawHoldingRecord(
+                    record_id="rec-missing",
+                    raw_fields={"account": "missing"},
+                ),
+            ]
+
+        def audit_nav_history_duplicates(self, account=None):
+            return {"success": True, "duplicate_group_count": 0}
+
+        def reconcile_cash_flows(self, **_kwargs):
+            return {"success": True, "change_count": 0, "error_count": 0}
+
+        def get_nav_on_date(self, account, nav_date):
+            return None
+
+    calls = []
+
+    class FakeRunner:
+        def __init__(self, account):
+            calls.append(account)
+
+        def run(self, **_kwargs):
+            return {"success": True, "status": "recorded", "account": calls[-1]}
+
+    result = DailyNavJobService(
+        storage=FakeStorage(),
+        portfolio=SimpleNamespace(reporting_service=object()),
+        calendar=BusinessCalendarService(),
+        account_runner_factory=FakeRunner,
+        holdings_preflight=_PassingGlobalHoldingsPreflight(),
+    ).run(nav_date="2026-05-22")
+
+    assert result["success"] is True
+    assert calls == ["missing"]
 
 
 def test_daily_nav_job_blocks_cash_flow_pending():
@@ -797,6 +918,7 @@ def test_daily_nav_job_converts_cash_flow_exception_and_continues_accounts():
         portfolio=SimpleNamespace(reporting_service=object(), compensation=None),
         calendar=BusinessCalendarService(),
         account_runner_factory=Runner,
+        holdings_preflight=_PassingGlobalHoldingsPreflight(),
     ).run(
         nav_date="2026-05-21",
         accounts="alice,bob",
@@ -916,6 +1038,7 @@ def test_daily_nav_job_runs_each_account_through_account_runner():
         portfolio=SimpleNamespace(reporting_service=object()),
         calendar=BusinessCalendarService(),
         account_runner_factory=FakeRunner,
+        holdings_preflight=_PassingGlobalHoldingsPreflight(),
     ).run(
         nav_date="2026-05-22",
         accounts=["alice", "bob"],
@@ -985,6 +1108,7 @@ def test_daily_nav_job_shares_quotes_incrementally_across_accounts():
         portfolio=SimpleNamespace(reporting_service=object()),
         calendar=BusinessCalendarService(),
         account_runner_factory=FakeRunner,
+        holdings_preflight=_PassingGlobalHoldingsPreflight(),
     ).run(
         nav_date="2026-05-22",
         accounts=["lx", "sy"],
@@ -1042,6 +1166,7 @@ def test_daily_nav_job_keeps_unique_quote_failure_isolated_to_later_account():
         portfolio=SimpleNamespace(reporting_service=object()),
         calendar=BusinessCalendarService(),
         account_runner_factory=FakeRunner,
+        holdings_preflight=_PassingGlobalHoldingsPreflight(),
     ).run(nav_date="2026-05-22", accounts=["lx", "sy"])
 
     assert result["status"] == "partial"
@@ -1077,6 +1202,7 @@ def test_daily_nav_job_defaults_futu_sync_write_mode_to_job_mode():
         portfolio=SimpleNamespace(reporting_service=object()),
         calendar=BusinessCalendarService(),
         account_runner_factory=FakeRunner,
+        holdings_preflight=_PassingGlobalHoldingsPreflight(),
     ).run(
         nav_date="2026-05-22",
         account="lx",
@@ -1117,6 +1243,7 @@ def test_daily_nav_job_never_writes_futu_sync_during_dry_run():
         portfolio=SimpleNamespace(reporting_service=object()),
         calendar=BusinessCalendarService(),
         account_runner_factory=FakeRunner,
+        holdings_preflight=_PassingGlobalHoldingsPreflight(),
     ).run(
         nav_date="2026-05-22",
         account="lx",
