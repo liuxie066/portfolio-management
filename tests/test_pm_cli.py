@@ -75,6 +75,73 @@ def test_pm_cash_passes_account():
     assert out["account"] == "bob"
 
 
+def test_pm_holdings_without_subcommand_keeps_list_behavior():
+    class FakePortfolioService:
+        def get_holdings(self, **kwargs):
+            return {
+                "success": True,
+                "account": kwargs["account"],
+                "include_price": kwargs["include_price"],
+                "mode": "list",
+            }
+
+    stdout = io.StringIO()
+    with _PortfolioServicePatch(FakePortfolioService), redirect_stdout(stdout):
+        assert pm.main(
+            ["holdings", "--account", "alice", "--no-service", "--json"]
+        ) == 0
+
+    out = json.loads(stdout.getvalue())
+    assert out == {
+        "success": True,
+        "account": "alice",
+        "include_price": False,
+        "mode": "list",
+    }
+
+
+def test_pm_holdings_reconcile_uses_fresh_read_only_service():
+    import src.app.holdings_reconciliation_service as reconciliation_module
+
+    calls = []
+
+    class FakePortfolioService:
+        def __init__(self):
+            self.storage = object()
+
+    class FakeReconciliationService:
+        def __init__(self, *, storage):
+            calls.append(("init", storage))
+
+        def reconcile(self, **kwargs):
+            calls.append(("reconcile", kwargs))
+            return {
+                "success": True,
+                "read_only": True,
+                "scope": kwargs,
+            }
+
+    old_reconciliation = reconciliation_module.HoldingsReconciliationService
+    stdout = io.StringIO()
+    try:
+        reconciliation_module.HoldingsReconciliationService = FakeReconciliationService
+        with _PortfolioServicePatch(FakePortfolioService), redirect_stdout(stdout):
+            assert pm.main(
+                ["holdings", "reconcile", "--account", "alice", "--json"]
+            ) == 0
+    finally:
+        reconciliation_module.HoldingsReconciliationService = old_reconciliation
+
+    out = json.loads(stdout.getvalue())
+    assert out["read_only"] is True
+    assert out["scope"] == {"account": "alice", "record_id": None}
+    assert calls[0][0] == "init"
+    assert calls[1] == (
+        "reconcile",
+        {"account": "alice", "record_id": None},
+    )
+
+
 def test_pm_quality_status_uses_same_published_application_payload():
     expected = {
         "schema_version": "investment.quality_status.v1",

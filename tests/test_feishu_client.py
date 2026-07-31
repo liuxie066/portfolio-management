@@ -347,6 +347,57 @@ class TestFeishuClientRecords:
         assert 'params' in call_args.kwargs
         assert call_args.kwargs['params']['filter'] == 'asset_id = "000001"'
 
+    @patch('src.feishu_client.FeishuClient._request')
+    @patch('src.feishu_client.FeishuClient._get_table_config')
+    def test_list_records_rejects_has_more_without_page_token(self, mock_config, mock_request):
+        mock_config.return_value = ('app_token', 'table_id')
+        mock_request.return_value = {
+            'items': [{'record_id': 'rec1', 'fields': {}}],
+            'has_more': True,
+        }
+
+        client = FeishuClient(app_id='test', app_secret='test')
+
+        with pytest.raises(RuntimeError, match='has_more without page_token'):
+            client.list_records('holdings')
+
+    @patch('src.feishu_client.FeishuClient._request')
+    @patch('src.feishu_client.FeishuClient._get_table_config')
+    def test_list_records_rejects_repeated_page_token(self, mock_config, mock_request):
+        mock_config.return_value = ('app_token', 'table_id')
+        mock_request.side_effect = [
+            {
+                'items': [{'record_id': 'rec1', 'fields': {}}],
+                'has_more': True,
+                'page_token': 'same-token',
+            },
+            {
+                'items': [{'record_id': 'rec2', 'fields': {}}],
+                'has_more': True,
+                'page_token': 'same-token',
+            },
+        ]
+
+        client = FeishuClient(app_id='test', app_secret='test')
+
+        with pytest.raises(RuntimeError, match='repeated page_token'):
+            client.list_records('holdings')
+
+    @patch('src.feishu_client.FeishuClient._request')
+    @patch('src.feishu_client.FeishuClient._get_table_config')
+    def test_list_records_rejects_empty_non_final_page(self, mock_config, mock_request):
+        mock_config.return_value = ('app_token', 'table_id')
+        mock_request.return_value = {
+            'items': [],
+            'has_more': True,
+            'page_token': 'next-token',
+        }
+
+        client = FeishuClient(app_id='test', app_secret='test')
+
+        with pytest.raises(RuntimeError, match='empty non-final page'):
+            client.list_records('holdings')
+
     @patch('src.feishu_client.requests.Session.request')
     @patch('src.feishu_client.FeishuClient._get_headers')
     @patch('src.feishu_client.FeishuClient._get_table_config')

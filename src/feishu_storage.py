@@ -359,7 +359,7 @@ class FeishuStorage(
             # 根据表名和字段名做类型转换
             if table == 'holdings':
                 if key == 'quantity' and value is not None and value != '':
-                    result[key] = self._parse_float(value) or 0.0
+                    result[key] = self._parse_float(value)
                 elif key == 'avg_cost' and value is not None and value != '':
                     parsed = self._parse_float(value)
                     result[key] = self._normalize_numeric_field(table, key, parsed) if parsed is not None else None

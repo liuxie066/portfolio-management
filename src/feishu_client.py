@@ -315,6 +315,7 @@ class FeishuClient:
 
         records = []
         page_token = None
+        seen_page_tokens = set()
 
         while True:
             endpoint = f"/bitable/v1/apps/{app_token}/tables/{table_id}/records"
@@ -329,6 +330,8 @@ class FeishuClient:
 
             data = self._request('GET', endpoint, params=params)
             items = data.get('items', [])
+            if not isinstance(items, list):
+                raise RuntimeError(f"Feishu {table_name} records response items is invalid")
 
             for item in items:
                 record = {
@@ -337,8 +340,24 @@ class FeishuClient:
                 }
                 records.append(record)
 
-            page_token = data.get('page_token')
-            if not page_token or not items:
+            next_page_token = data.get('page_token')
+            has_more = data.get('has_more')
+            if has_more is True and not next_page_token:
+                raise RuntimeError(
+                    f"Feishu {table_name} pagination is incomplete: has_more without page_token"
+                )
+            if next_page_token:
+                if next_page_token in seen_page_tokens:
+                    raise RuntimeError(
+                        f"Feishu {table_name} pagination repeated page_token"
+                    )
+                seen_page_tokens.add(next_page_token)
+            if has_more is True and not items:
+                raise RuntimeError(
+                    f"Feishu {table_name} pagination is incomplete: empty non-final page"
+                )
+            page_token = next_page_token
+            if has_more is False or not page_token:
                 break
 
         return records

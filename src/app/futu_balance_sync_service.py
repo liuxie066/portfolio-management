@@ -60,6 +60,7 @@ class FutuPositionSnapshot:
     market: str
     position_side: str = "LONG"
     raw_code: str = ""
+    currency_explicit: bool = True
 
 
 @dataclass(frozen=True)
@@ -450,6 +451,8 @@ class FutuOpenApiBalanceProvider:
     def _position_snapshot(self, row: dict[str, Any], security_type: Optional[str]) -> FutuPositionSnapshot:
         raw_code = str(row.get("code") or "").strip()
         market = _market_from_code(raw_code, row.get("position_market"))
+        raw_currency = str(row.get("currency") or "").strip().upper()
+        currency_explicit = bool(raw_currency and raw_currency != "N/A")
         return FutuPositionSnapshot(
             asset_id=_normalize_futu_code(raw_code),
             asset_name=str(row.get("stock_name") or _normalize_futu_code(raw_code)),
@@ -460,6 +463,7 @@ class FutuOpenApiBalanceProvider:
             market=market,
             position_side=str(row.get("position_side") or "N/A").upper(),
             raw_code=raw_code,
+            currency_explicit=currency_explicit,
         )
 
     def _open_trade_context(self, futu_sdk: Any) -> Any:
@@ -602,6 +606,17 @@ class FutuBalanceSyncService:
             balances_only=True,
         )
         return self._persist_receipt_if_required(snapshot, result)
+
+    def observe_portfolio(self, *, account: str) -> FutuPortfolioSnapshot:
+        """Return one fresh, validated portfolio observation without any write.
+
+        Holdings validation consumes this contract. It deliberately bypasses
+        sync diffing, process locks, evidence persistence, and receipt delivery.
+        """
+
+        snapshot = self._fetch_portfolio(account)
+        self._validate_authoritative_balances(snapshot)
+        return snapshot
 
     def sync_portfolio(
         self,

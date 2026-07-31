@@ -339,6 +339,24 @@ def cmd_holdings(args):
     return res
 
 
+def cmd_holdings_reconcile(args):
+    """Fresh, local, read-only holdings validation."""
+
+    from src.app.holdings_reconciliation_service import HoldingsReconciliationService
+    from src.service.application import PortfolioService
+
+    application = PortfolioService()
+    result = _call_backend(
+        args,
+        lambda: HoldingsReconciliationService(storage=application.storage).reconcile(
+            account=getattr(args, "account", None),
+            record_id=getattr(args, "record_id", None),
+        ),
+    )
+    _dump(result, bool(getattr(args, "json", False)))
+    return result
+
+
 def cmd_cash(args):
     def via_service(client):
         return client.get_cash(account=_default_account(args.account))
@@ -1230,12 +1248,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_receipts_dispatch.set_defaults(func=cmd_receipts_dispatch)
 
-    p_hold = sp.add_parser("holdings", help="list holdings")
+    p_hold = sp.add_parser("holdings", help="list or validate holdings")
     p_hold.add_argument("--include-price", action="store_true", help="include price fields (may be slow)")
     p_hold.add_argument("--account", default=argparse.SUPPRESS, help="account to operate on; defaults to config/PORTFOLIO_ACCOUNT")
     p_hold.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
     add_service_args(p_hold)
     p_hold.set_defaults(func=cmd_holdings)
+    holdings_sub = p_hold.add_subparsers(dest="holdings_cmd")
+    p_hold_reconcile = holdings_sub.add_parser(
+        "reconcile",
+        help="fresh-read and validate holdings without writes",
+    )
+    reconcile_scope = p_hold_reconcile.add_mutually_exclusive_group()
+    reconcile_scope.add_argument("--account", default=argparse.SUPPRESS)
+    reconcile_scope.add_argument("--record-id", default=None)
+    p_hold_reconcile.add_argument(
+        "--json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="output JSON",
+    )
+    p_hold_reconcile.set_defaults(func=cmd_holdings_reconcile)
 
     p_cash = sp.add_parser("cash", help="show cash positions")
     p_cash.add_argument("--account", default=argparse.SUPPRESS, help="account to operate on; defaults to config/PORTFOLIO_ACCOUNT")

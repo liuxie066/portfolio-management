@@ -245,6 +245,9 @@ class TestFeishuStorageHoldingOperations:
                 'record_id': 'rec_1',
                 'fields': {
                     'asset_id': '000001',
+                    'asset_name': '平安银行',
+                    'asset_type': 'a_stock',
+                    'account': '测试账户',
                     'broker': '华泰',
                     'quantity': '100',
                     'currency': 'CNY'
@@ -254,7 +257,10 @@ class TestFeishuStorageHoldingOperations:
                 'record_id': 'rec_2',
                 'fields': {
                     'asset_id': '000001',
-                    'broker': '',
+                    'asset_name': '平安银行',
+                    'asset_type': 'a_stock',
+                    'account': '测试账户',
+                    'broker': '手工',
                     'quantity': '200',
                     'currency': 'CNY'
                 }
@@ -263,10 +269,10 @@ class TestFeishuStorageHoldingOperations:
 
         result = self.storage.get_holding('000001', '测试账户')
 
-        # 应该返回market为空的记录
+        # 未指定 broker 时返回第一个完整业务主键。
         assert result is not None
-        assert result.record_id == 'rec_2'
-        assert result.broker == ""
+        assert result.record_id == 'rec_1'
+        assert result.broker == "华泰"
 
     def test_get_holding_not_found(self):
         """测试持仓不存在"""
@@ -286,6 +292,7 @@ class TestFeishuStorageHoldingOperations:
                     'asset_name': '平安银行',
                     'asset_type': 'a_stock',
                     'account': '测试账户',
+                    'broker': '手工',
                     'quantity': '1000',
                     'currency': 'CNY'
                 }
@@ -297,6 +304,7 @@ class TestFeishuStorageHoldingOperations:
                     'asset_name': '腾讯控股',
                     'asset_type': 'hk_stock',
                     'account': '测试账户',
+                    'broker': '手工',
                     'quantity': '0',  # 应该被过滤掉
                     'currency': 'HKD'
                 }
@@ -315,6 +323,10 @@ class TestFeishuStorageHoldingOperations:
                 'record_id': 'rec_1',
                 'fields': {
                     'asset_id': '000001',
+                    'asset_name': '平安银行',
+                    'asset_type': 'a_stock',
+                    'account': '测试账户',
+                    'broker': '手工',
                     'quantity': '100',
                     'currency': 'CNY'
                 }
@@ -323,6 +335,10 @@ class TestFeishuStorageHoldingOperations:
                 'record_id': 'rec_2',
                 'fields': {
                     'asset_id': '000002',
+                    'asset_name': '万科',
+                    'asset_type': 'a_stock',
+                    'account': '测试账户',
+                    'broker': '手工',
                     'quantity': '0',
                     'currency': 'CNY'
                 }
@@ -346,6 +362,7 @@ class TestFeishuStorageHoldingOperations:
             asset_name='平安银行',
             asset_type=AssetType.A_STOCK,
             account='测试账户',
+            broker='手工',
             quantity=1000,
             currency='CNY'
         )
@@ -362,6 +379,9 @@ class TestFeishuStorageHoldingOperations:
             'fields': {
                 'asset_id': '000001',
                 'asset_name': '平安',
+                'asset_type': 'a_stock',
+                'account': '测试账户',
+                'broker': '手工',
                 'quantity': '500',
                 'currency': 'CNY'
             }
@@ -376,6 +396,7 @@ class TestFeishuStorageHoldingOperations:
             asset_name='平安银行股份有限公司',
             asset_type=AssetType.A_STOCK,
             account='测试账户',
+            broker='手工',
             quantity=1000,
             currency='CNY'
         )
@@ -393,7 +414,11 @@ class TestFeishuStorageHoldingOperations:
         """测试更新持仓数量"""
         self.mock_client.list_records.return_value = [{
             'record_id': 'rec_123',
-            'fields': {'quantity': '1000', 'currency': 'CNY'}
+            'fields': {
+                'asset_id': '000001', 'asset_name': '平安银行',
+                'asset_type': 'a_stock', 'account': '测试账户',
+                'broker': '手工', 'quantity': '1000', 'currency': 'CNY',
+            }
         }]
 
         self.storage.update_holding_quantity('000001', '测试账户', 500)
@@ -408,7 +433,11 @@ class TestFeishuStorageHoldingOperations:
         """测试持仓为0时删除"""
         self.mock_client.list_records.return_value = [{
             'record_id': 'rec_123',
-            'fields': {'quantity': '0', 'currency': 'CNY'}
+            'fields': {
+                'asset_id': '000001', 'asset_name': '平安银行',
+                'asset_type': 'a_stock', 'account': '测试账户',
+                'broker': '手工', 'quantity': '0', 'currency': 'CNY',
+            }
         }]
 
         self.storage.delete_holding_if_zero('000001', '测试账户')
@@ -419,7 +448,11 @@ class TestFeishuStorageHoldingOperations:
         """测试持仓不为0时不删除"""
         self.mock_client.list_records.return_value = [{
             'record_id': 'rec_123',
-            'fields': {'quantity': '100', 'currency': 'CNY'}
+            'fields': {
+                'asset_id': '000001', 'asset_name': '平安银行',
+                'asset_type': 'a_stock', 'account': '测试账户',
+                'broker': '手工', 'quantity': '100', 'currency': 'CNY',
+            }
         }]
 
         self.storage.delete_holding_if_zero('000001', '测试账户')
@@ -430,7 +463,11 @@ class TestFeishuStorageHoldingOperations:
         """测试极小残值持仓会被视为零并删除"""
         self.mock_client.list_records.return_value = [{
             'record_id': 'rec_123',
-            'fields': {'quantity': '0.0000000001', 'currency': 'CNY'}
+            'fields': {
+                'asset_id': '000001', 'asset_name': '平安银行',
+                'asset_type': 'a_stock', 'account': '测试账户',
+                'broker': '手工', 'quantity': '0.0000000001', 'currency': 'CNY',
+            }
         }]
 
         self.storage.delete_holding_if_zero('000001', '测试账户')
@@ -440,14 +477,18 @@ class TestFeishuStorageHoldingOperations:
     def test_delete_holding_failure_keeps_cached_record(self):
         self.mock_client.list_records.return_value = [{
             'record_id': 'rec_123',
-            'fields': {'quantity': '0', 'currency': 'CNY'}
+            'fields': {
+                'asset_id': '000001', 'asset_name': '平安银行',
+                'asset_type': 'a_stock', 'account': '测试账户',
+                'broker': '手工', 'quantity': '0', 'currency': 'CNY',
+            }
         }]
         self.mock_client.delete_record.side_effect = RuntimeError('delete timeout')
 
         with pytest.raises(RuntimeError, match='delete timeout'):
             self.storage.delete_holding_if_zero('000001', '测试账户')
 
-        cache_key = self.storage._get_holding_cache_key('000001', '测试账户', None)
+        cache_key = self.storage._get_holding_cache_key('000001', '测试账户', '手工')
         assert self.storage._holding_fields_cache[cache_key]['record_id'] == 'rec_123'
 
     def test_delete_holding_by_record_id(self):
