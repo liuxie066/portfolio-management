@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import threading
+from types import SimpleNamespace
 
 from src.app.holding_event_inbox_service import HoldingEventInboxService
 from src.app.holdings_event_service import HOLDINGS_EVENT_TYPE, HoldingsEventTarget
@@ -185,6 +186,78 @@ def test_worker_retries_transient_fresh_read_failure(tmp_path):
     event = service.store.get_holding_event("evt-1")
     assert event["state"] == "failed_retryable"
     assert event["attempt_count"] == 1
+
+
+def test_worker_retries_futu_provider_failure_without_materializing_cases(tmp_path):
+    class FutuStorage(_Storage):
+        def get_raw_holdings(self, *, account=None, record_id=None):
+            rows = super().get_raw_holdings(account=account, record_id=record_id)
+            if not rows:
+                return rows
+            fields = dict(rows[0].raw_fields)
+            fields["broker"] = "富途"
+            return [RawHoldingRecord(rows[0].record_id, fields)]
+
+    current_time = [datetime(2026, 7, 31, 21, 0)]
+    provider_ready = [False]
+
+    def observe(_account):
+        if not provider_ready[0]:
+            raise RuntimeError("OpenD unavailable")
+        return SimpleNamespace(
+            source="futu",
+            source_snapshot_id="snapshot-lx",
+            observed_at_utc="2026-07-31T13:00:00+00:00",
+            profile_fingerprint="profile-lx",
+            account_fingerprint="account-lx",
+            positions=(
+                SimpleNamespace(
+                    asset_id="AAPL.US",
+                    raw_code="US.AAPL",
+                    asset_name="Apple",
+                    security_type="STOCK",
+                    market="US",
+                    currency="USD",
+                    currency_explicit=True,
+                ),
+            ),
+        )
+
+    storage = FutuStorage()
+    store = OperationStateStore(
+        tmp_path / "operations.sqlite3",
+        now_factory=lambda: current_time[0],
+    )
+    workflow = HoldingsWorkflowService(
+        storage=storage,
+        store=store,
+        reconciliation=HoldingsReconciliationService(
+            storage=storage,
+            futu_observer=observe,
+        ),
+    )
+    service = HoldingEventInboxService(
+        storage=storage,
+        store=store,
+        workflow=workflow,
+        target=TARGET,
+    )
+    service.accept(_payload())
+
+    failed = service.process_due()
+
+    assert failed["success"] is False
+    assert "provider evidence unavailable" in failed["results"][0]["error"]
+    assert store.get_holding_event("evt-1")["state"] == "failed_retryable"
+    assert store.list_holding_cases() == []
+
+    provider_ready[0] = True
+    current_time[0] += timedelta(minutes=2)
+    recovered = service.process_due()
+
+    assert recovered["success"] is True
+    assert store.get_holding_event("evt-1")["state"] == "processed"
+    assert len(store.list_holding_cases()) == 1
 
 
 def test_new_event_for_repaired_record_closes_once_then_becomes_semantic_noop(tmp_path):

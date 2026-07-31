@@ -115,6 +115,16 @@ class HoldingsWorkflowService:
         if not resolved_record_id:
             raise ValueError("event notification requires one record id")
         evaluation = self.reconciliation.evaluate(record_id=resolved_record_id)
+        if evaluation.report.evidence_errors:
+            errors = "; ".join(
+                f"{account}: {error}"
+                for account, error in sorted(
+                    evaluation.report.evidence_errors.items()
+                )
+            )
+            raise RuntimeError(
+                f"holding event provider evidence unavailable: {errors}"
+            )
         records = list(evaluation.report.records)
         if not records:
             return {
