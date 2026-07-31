@@ -86,6 +86,17 @@ class HoldingsMixin:
     ) -> List[RawHoldingRecord]:
         return self.holdings.get_raw_holdings(account=account, record_id=record_id)
 
+    def patch_holding_record(
+        self,
+        *,
+        record_id: str,
+        fields: Dict[str, object],
+    ) -> RawHoldingRecord:
+        return self.holdings.patch_holding_record(
+            record_id=record_id,
+            fields=fields,
+        )
+
     def get_holding(
         self,
         asset_id: str,

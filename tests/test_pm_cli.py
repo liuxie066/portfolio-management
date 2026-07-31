@@ -142,6 +142,53 @@ def test_pm_holdings_reconcile_uses_fresh_read_only_service():
     )
 
 
+def test_pm_holdings_apply_requires_exact_record_and_confirmation_before_backend():
+    for argv, expected in (
+        (["holdings", "reconcile", "--record-id", "rec-1", "--apply"], "requires --confirm"),
+        (["holdings", "reconcile", "--apply", "--confirm"], "requires exactly one"),
+    ):
+        try:
+            pm.main(argv)
+        except SystemExit as exc:
+            assert expected in str(exc)
+        else:
+            raise AssertionError("expected holdings apply safety rejection")
+
+
+def test_pm_receipts_dispatch_attempts_typed_branch_when_nav_branch_raises():
+    import src.app.nav_receipt_outbox_service as nav_module
+    import src.app.operation_receipt_outbox_service as operation_module
+
+    calls = []
+
+    class FailingNav:
+        def dispatch_pending(self, **kwargs):
+            calls.append(("nav", kwargs))
+            raise RuntimeError("nav unavailable")
+
+    class Typed:
+        def dispatch_pending(self, **kwargs):
+            calls.append(("operations", kwargs))
+            return {"success": True, "attempted": 1, "sent": 1}
+
+    old_nav = nav_module.NavReceiptOutboxService
+    old_operation = operation_module.OperationReceiptOutboxService
+    stdout = io.StringIO()
+    try:
+        nav_module.NavReceiptOutboxService = FailingNav
+        operation_module.OperationReceiptOutboxService = Typed
+        with redirect_stdout(stdout):
+            assert pm.main(["receipts", "dispatch", "--confirm", "--json"]) == 1
+    finally:
+        nav_module.NavReceiptOutboxService = old_nav
+        operation_module.OperationReceiptOutboxService = old_operation
+
+    result = json.loads(stdout.getvalue())
+    assert result["branches"]["nav"]["success"] is False
+    assert result["branches"]["operations"]["sent"] == 1
+    assert [item[0] for item in calls] == ["nav", "operations"]
+
+
 def test_pm_quality_status_uses_same_published_application_payload():
     expected = {
         "schema_version": "investment.quality_status.v1",

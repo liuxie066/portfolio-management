@@ -19,6 +19,13 @@ def nav_history_lock_key() -> str:
     return "nav-history-write"
 
 
+def holding_record_lock_key(record_id: str) -> str:
+    normalized = str(record_id or "").strip()
+    if not normalized:
+        raise ValueError("holding record lock requires record_id")
+    return f"holding-record-write:{normalized}"
+
+
 @contextmanager
 def process_lock(key: str, *, data_dir: Path | None = None) -> Iterator[None]:
     """Hold an exclusive same-host lock for a logical key."""

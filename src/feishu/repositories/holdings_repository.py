@@ -276,6 +276,50 @@ class HoldingsRepository:
             )
         return raw_records
 
+    def patch_holding_record(
+        self,
+        *,
+        record_id: str,
+        fields: Dict[str, object],
+    ) -> RawHoldingRecord:
+        """Narrow absolute patch used only by confirmed reconciliation flows."""
+
+        from ...time_utils import bj_now_naive
+
+        resolved_record_id = str(record_id or '').strip()
+        if not resolved_record_id:
+            raise ValueError("record_id is required")
+        allowed = {'asset_name', 'asset_type', 'currency', 'asset_class'}
+        supplied = {str(key): value for key, value in dict(fields).items()}
+        if not supplied:
+            raise ValueError("holding patch requires at least one target field")
+        unsupported = sorted(set(supplied) - allowed)
+        if unsupported:
+            raise ValueError(
+                "unsupported holdings reconciliation fields: "
+                + ", ".join(unsupported)
+            )
+        if any(value is None or (isinstance(value, str) and not value.strip()) for value in supplied.values()):
+            raise ValueError("holdings reconciliation patch cannot write blank values")
+        update_fields = {
+            **supplied,
+            'updated_at': bj_now_naive().strftime(DATETIME_FORMAT),
+        }
+        feishu_fields = self._to_feishu_fields(update_fields, 'holdings')
+        try:
+            self.client.update_record('holdings', resolved_record_id, feishu_fields)
+        finally:
+            self._invalidate_holding_cache_by_record_id(
+                resolved_record_id,
+                flush_persistent=True,
+            )
+        records = self.get_raw_holdings(record_id=resolved_record_id)
+        if len(records) != 1:
+            raise RuntimeError(
+                f"holding patch readback did not return one record: {resolved_record_id}"
+            )
+        return records[0]
+
     # ========== holdings CRUD ==========
 
     def get_holding(self, asset_id: str, account: str, broker: Optional[str] = None) -> Optional[Holding]:

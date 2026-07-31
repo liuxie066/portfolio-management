@@ -297,6 +297,45 @@ def test_raw_record_scope_rejects_mismatched_source_record_id():
         raise AssertionError("expected record scope integrity failure")
 
 
+def test_reconciliation_patch_is_narrow_and_fresh_reads_back():
+    client = StubHoldingsClient(
+        initial_records=[
+            {
+                "record_id": "rec_patch",
+                "fields": {
+                    "asset_id": "AAPL",
+                    "asset_name": "Apple",
+                    "asset_type": "us_stock",
+                    "account": "lx",
+                    "broker": "IBKR",
+                    "quantity": 1,
+                    "currency": "",
+                },
+            }
+        ]
+    )
+    storage = FeishuStorage(client=client)
+
+    readback = storage.patch_holding_record(
+        record_id="rec_patch",
+        fields={"currency": "USD"},
+    )
+
+    assert readback.raw_fields["currency"] == "USD"
+    assert client.update_record_calls[0]["fields"]["currency"] == "USD"
+    assert "updated_at" in client.update_record_calls[0]["fields"]
+    assert len(client.update_record_calls[0]["fields"]) == 2
+    try:
+        storage.patch_holding_record(
+            record_id="rec_patch",
+            fields={"quantity": 2},
+        )
+    except ValueError as exc:
+        assert "unsupported" in str(exc)
+    else:
+        raise AssertionError("expected reconciliation patch allowlist failure")
+
+
 def test_upsert_uses_preloaded_cache_for_batch_updates():
     client = StubHoldingsClient(
         initial_records=[

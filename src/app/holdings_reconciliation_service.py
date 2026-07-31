@@ -2,14 +2,24 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from .holdings_validation import (
     FutuAccountEvidence,
     FutuPositionEvidence,
     HoldingsEvidenceBundle,
+    HoldingsValidationReport,
     HoldingsValidator,
 )
+
+
+@dataclass(frozen=True)
+class HoldingsReconciliationEvaluation:
+    report: HoldingsValidationReport
+    account: Optional[str]
+    record_id: Optional[str]
+    evidence_by_account: dict[str, FutuAccountEvidence]
 
 
 class HoldingsReconciliationService:
@@ -32,6 +42,32 @@ class HoldingsReconciliationService:
         account: Optional[str] = None,
         record_id: Optional[str] = None,
     ) -> dict[str, Any]:
+        evaluation = self.evaluate(account=account, record_id=record_id)
+        return self.reconcile_payload(evaluation)
+
+    @staticmethod
+    def reconcile_payload(
+        evaluation: HoldingsReconciliationEvaluation,
+    ) -> dict[str, Any]:
+        payload = evaluation.report.as_dict()
+        payload.update(
+            {
+                "scope": {
+                    "account": evaluation.account,
+                    "record_id": evaluation.record_id,
+                },
+                "source": "feishu",
+                "futu_observation_count": len(evaluation.evidence_by_account),
+            }
+        )
+        return payload
+
+    def evaluate(
+        self,
+        *,
+        account: Optional[str] = None,
+        record_id: Optional[str] = None,
+    ) -> HoldingsReconciliationEvaluation:
         if account and record_id:
             raise ValueError("account and record_id are mutually exclusive")
         records = self.storage.get_raw_holdings(account=account, record_id=record_id)
@@ -61,18 +97,12 @@ class HoldingsReconciliationService:
                 source_errors=evidence_errors,
             ),
         )
-        payload = report.as_dict()
-        payload.update(
-            {
-                "scope": {
-                    "account": account,
-                    "record_id": record_id,
-                },
-                "source": "feishu",
-                "futu_observation_count": len(evidence_by_account),
-            }
+        return HoldingsReconciliationEvaluation(
+            report=report,
+            account=account,
+            record_id=record_id,
+            evidence_by_account=evidence_by_account,
         )
-        return payload
 
     def _observe_futu(self, account: str) -> Any:
         from .futu_balance_sync_service import FutuBalanceSyncService

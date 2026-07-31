@@ -340,18 +340,96 @@ def cmd_holdings(args):
 
 
 def cmd_holdings_reconcile(args):
-    """Fresh, local, read-only holdings validation."""
+    """Fresh holdings validation with separately confirmed workflow actions."""
 
     from src.app.holdings_reconciliation_service import HoldingsReconciliationService
+    from src.app.holdings_workflow_service import HoldingsWorkflowService, operator_context
     from src.service.application import PortfolioService
 
+    notify = bool(getattr(args, "notify", False))
+    apply = bool(getattr(args, "apply", False))
+    if (notify or apply) and not bool(getattr(args, "confirm", False)):
+        raise SystemExit("holdings workflow mutation requires --confirm")
+    record_id = getattr(args, "record_id", None)
+    account = getattr(args, "account", None)
+    if apply and not record_id:
+        raise SystemExit("holdings apply requires exactly one --record-id")
+    if apply and account:
+        raise SystemExit("holdings apply does not support account or all-record scope")
     application = PortfolioService()
+    reconciliation = HoldingsReconciliationService(storage=application.storage)
+    workflow = (
+        HoldingsWorkflowService(
+            storage=application.storage,
+            reconciliation=reconciliation,
+        )
+        if notify or apply
+        else None
+    )
     result = _call_backend(
         args,
-        lambda: HoldingsReconciliationService(storage=application.storage).reconcile(
-            account=getattr(args, "account", None),
-            record_id=getattr(args, "record_id", None),
+        lambda: (
+            workflow.apply_missing(
+                record_id=record_id,
+                confirmed_operator=operator_context(command_mode="holdings_reconcile_apply"),
+            )
+            if apply
+            else workflow.notify(
+                account=account,
+                record_id=record_id,
+                trigger={"mode": "manual_notify"},
+            )
+            if notify
+            else reconciliation.reconcile(account=account, record_id=record_id)
         ),
+    )
+    _dump(result, bool(getattr(args, "json", False)))
+    return result
+
+
+def cmd_holdings_cases(args):
+    from src.app.holdings_workflow_service import HoldingsWorkflowService
+    from src.service.application import PortfolioService
+
+    workflow = HoldingsWorkflowService(storage=PortfolioService().storage)
+    case_key = getattr(args, "case_key", None)
+    result = (
+        workflow.show_case(case_key)
+        if case_key
+        else workflow.list_cases(
+            account=getattr(args, "account", None),
+            state=getattr(args, "state", None),
+        )
+    )
+    _dump(result, bool(getattr(args, "json", False)))
+    return result
+
+
+def cmd_holdings_resolve(args):
+    if not bool(args.confirm):
+        raise SystemExit("holdings resolve requires --confirm")
+    from src.app.holdings_workflow_service import HoldingsWorkflowService, operator_context
+    from src.service.application import PortfolioService
+
+    result = HoldingsWorkflowService(storage=PortfolioService().storage).resolve(
+        case_key=args.case_key,
+        decision=args.decision,
+        reason=args.reason,
+        confirmed_operator=operator_context(command_mode="holdings_resolve"),
+    )
+    _dump(result, bool(getattr(args, "json", False)))
+    return result
+
+
+def cmd_holdings_recover(args):
+    if not bool(args.confirm):
+        raise SystemExit("holdings recover requires --confirm")
+    from src.app.holdings_workflow_service import HoldingsWorkflowService, operator_context
+    from src.service.application import PortfolioService
+
+    result = HoldingsWorkflowService(storage=PortfolioService().storage).recover(
+        case_key=args.case_key,
+        confirmed_operator=operator_context(command_mode="holdings_recover"),
     )
     _dump(result, bool(getattr(args, "json", False)))
     return result
@@ -1126,8 +1204,42 @@ def cmd_receipts_dispatch(args):
     if not bool(args.confirm):
         raise SystemExit("receipts dispatch requires --confirm")
     from src.app.nav_receipt_outbox_service import NavReceiptOutboxService
+    from src.app.operation_receipt_outbox_service import OperationReceiptOutboxService
 
-    result = NavReceiptOutboxService().dispatch_pending(limit=int(args.limit))
+    branches = {}
+    for name, dispatch in (
+        ("nav", lambda: NavReceiptOutboxService().dispatch_pending(limit=int(args.limit))),
+        (
+            "operations",
+            lambda: OperationReceiptOutboxService().dispatch_pending(limit=int(args.limit)),
+        ),
+    ):
+        try:
+            branches[name] = dispatch()
+        except Exception as exc:
+            branches[name] = {
+                "success": False,
+                "error": str(exc) or exc.__class__.__name__,
+            }
+    result = {
+        "success": all(bool(item.get("success")) for item in branches.values()),
+        "branches": branches,
+    }
+    _dump(result, bool(args.json))
+    return result
+
+
+def cmd_receipts_resolve(args):
+    if not bool(args.confirm):
+        raise SystemExit("receipts resolve requires --confirm")
+    from src.app.holdings_workflow_service import operator_context
+    from src.app.operation_receipt_outbox_service import OperationReceiptOutboxService
+
+    result = OperationReceiptOutboxService().resolve_unknown(
+        receipt_key=args.receipt_key,
+        decision=args.decision,
+        operator_context=operator_context(command_mode="receipts_resolve"),
+    )
     _dump(result, bool(args.json))
     return result
 
@@ -1247,6 +1359,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="output JSON",
     )
     p_receipts_dispatch.set_defaults(func=cmd_receipts_dispatch)
+    p_receipts_resolve = receipts_sub.add_parser(
+        "resolve",
+        help="explicitly resolve an unknown typed receipt delivery",
+    )
+    p_receipts_resolve.add_argument("--receipt-key", required=True)
+    p_receipts_resolve.add_argument(
+        "--decision",
+        required=True,
+        choices=("retry", "mark-sent"),
+    )
+    p_receipts_resolve.add_argument("--confirm", action="store_true")
+    p_receipts_resolve.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS
+    )
+    p_receipts_resolve.set_defaults(func=cmd_receipts_resolve)
 
     p_hold = sp.add_parser("holdings", help="list or validate holdings")
     p_hold.add_argument("--include-price", action="store_true", help="include price fields (may be slow)")
@@ -1262,6 +1389,18 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile_scope = p_hold_reconcile.add_mutually_exclusive_group()
     reconcile_scope.add_argument("--account", default=argparse.SUPPRESS)
     reconcile_scope.add_argument("--record-id", default=None)
+    reconcile_action = p_hold_reconcile.add_mutually_exclusive_group()
+    reconcile_action.add_argument(
+        "--notify",
+        action="store_true",
+        help="persist cases and queue discovery receipts; never write holdings",
+    )
+    reconcile_action.add_argument(
+        "--apply",
+        action="store_true",
+        help="apply eligible missing fields for exactly one record",
+    )
+    p_hold_reconcile.add_argument("--confirm", action="store_true")
     p_hold_reconcile.add_argument(
         "--json",
         action="store_true",
@@ -1269,6 +1408,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="output JSON",
     )
     p_hold_reconcile.set_defaults(func=cmd_holdings_reconcile)
+    p_hold_cases = holdings_sub.add_parser("cases", help="list or show durable holdings cases")
+    p_hold_cases.add_argument("--account", default=argparse.SUPPRESS)
+    p_hold_cases.add_argument("--state", default=None)
+    p_hold_cases.add_argument("--case-key", default=None)
+    p_hold_cases.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    p_hold_cases.set_defaults(func=cmd_holdings_cases)
+
+    p_hold_resolve = holdings_sub.add_parser("resolve", help="resolve one conflict case")
+    p_hold_resolve.add_argument("--case-key", required=True)
+    p_hold_resolve.add_argument(
+        "--decision",
+        required=True,
+        choices=("accept-proposed", "keep-current"),
+    )
+    p_hold_resolve.add_argument("--reason", required=True)
+    p_hold_resolve.add_argument("--confirm", action="store_true")
+    p_hold_resolve.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    p_hold_resolve.set_defaults(func=cmd_holdings_resolve)
+
+    p_hold_recover = holdings_sub.add_parser("recover", help="classify one uncertain apply")
+    p_hold_recover.add_argument("--case-key", required=True)
+    p_hold_recover.add_argument("--confirm", action="store_true")
+    p_hold_recover.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    p_hold_recover.set_defaults(func=cmd_holdings_recover)
 
     p_cash = sp.add_parser("cash", help="show cash positions")
     p_cash.add_argument("--account", default=argparse.SUPPRESS, help="account to operate on; defaults to config/PORTFOLIO_ACCOUNT")
