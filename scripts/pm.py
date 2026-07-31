@@ -502,6 +502,176 @@ def cmd_holdings_events_listen(args):
     return {"success": True, "status": "stopped"}
 
 
+def _combined_event_targets():
+    from src.app.cash_flow_event_service import CashFlowEventTarget
+    from src.app.holdings_event_service import HoldingsEventTarget
+    from src.feishu.bitable_event_adapter import validate_bitable_targets
+
+    return validate_bitable_targets(
+        (HoldingsEventTarget.from_config(), CashFlowEventTarget.from_config())
+    )
+
+
+def cmd_events_status(args):
+    from src import config
+    from src.app.cash_flow_event_service import CashFlowEventTarget
+    from src.app.holdings_event_service import HoldingsEventTarget
+    from src.app.operation_state_store import OperationStateStore
+    from src.feishu.bitable_event_adapter import (
+        FeishuBitableEventAdapter,
+        validate_bitable_targets,
+    )
+
+    targets = []
+    registry_error = None
+    try:
+        targets = [
+            HoldingsEventTarget.from_config(),
+            CashFlowEventTarget.from_config(),
+        ]
+        validate_bitable_targets(targets)
+    except Exception as exc:
+        registry_error = str(exc) or exc.__class__.__name__
+    sdk_available = FeishuBitableEventAdapter.sdk_available()
+    app_id_configured = bool(str(config.get("feishu.app_id") or "").strip())
+    app_secret_configured = bool(
+        str(config.get("feishu.app_secret") or "").strip()
+    )
+    registry_valid = registry_error is None
+    result = {
+        "success": bool(
+            registry_valid
+            and sdk_available
+            and app_id_configured
+            and app_secret_configured
+        ),
+        "read_only": True,
+        "target_registry": {
+            "valid": registry_valid,
+            "error": registry_error,
+            "targets": [target.as_dict() for target in targets],
+        },
+        "credentials": {
+            "app_id_configured": app_id_configured,
+            "app_secret_configured": app_secret_configured,
+        },
+        "sdk_available": sdk_available,
+        "local_inboxes": {
+            "holdings": OperationStateStore.inspect_holding_event_status(),
+            "cash_flow": OperationStateStore.inspect_cash_flow_event_status(),
+        },
+        "remote_subscription_verified": False,
+        "listener_connection_verified": False,
+        "note": "local/config status only; no Feishu request was made",
+    }
+    _dump(result, bool(getattr(args, "json", False)))
+    return result
+
+
+def cmd_events_subscribe(args):
+    if not bool(args.confirm):
+        raise SystemExit("events subscribe requires --confirm")
+    from src.feishu.bitable_event_adapter import FeishuBitableEventAdapter
+
+    targets = _combined_event_targets()
+    result = FeishuBitableEventAdapter(targets=targets).subscribe()
+    _dump(result, bool(getattr(args, "json", False)))
+    return result
+
+
+def cmd_events_listen(args):
+    if not bool(args.confirm):
+        raise SystemExit("events listen requires --confirm")
+
+    targets = _combined_event_targets()
+
+    from src.app.cash_flow_event_completion_service import (
+        CashFlowEventCompletionService,
+    )
+    from src.app.cash_flow_event_inbox_service import CashFlowEventInboxService
+    from src.app.holding_event_inbox_service import HoldingEventInboxService
+    from src.app.operation_state_store import OperationStateStore
+    from src.feishu.bitable_event_adapter import FeishuBitableEventAdapter
+    from src.service.application import PortfolioService
+
+    holdings_target, cash_flow_target = targets
+    storage = PortfolioService().storage
+    store = OperationStateStore()
+    holdings_inbox = HoldingEventInboxService(
+        storage=storage,
+        store=store,
+        target=holdings_target,
+    )
+    completion = CashFlowEventCompletionService(
+        storage=storage,
+        operation_store=store,
+    )
+    cash_flow_inbox = CashFlowEventInboxService(
+        store=store,
+        record_handler=completion,
+        terminal_failure_receipt_factory=completion.terminal_failure_receipts,
+        target=cash_flow_target,
+    )
+    adapter = FeishuBitableEventAdapter(targets=targets)
+
+    def accept(payload):
+        outcomes = {
+            "holdings": holdings_inbox.accept(payload),
+            "cash_flow": cash_flow_inbox.accept(payload),
+        }
+        accepted_by = [
+            name
+            for name, outcome in outcomes.items()
+            if bool(outcome.get("accepted"))
+        ]
+        if len(accepted_by) > 1:
+            raise RuntimeError(
+                "bitable event was accepted by multiple table handlers"
+            )
+        return {
+            "success": all(outcome.get("success") for outcome in outcomes.values()),
+            "accepted_by": accepted_by,
+            "outcomes": outcomes,
+        }
+
+    stop_event = threading.Event()
+    workers = [
+        threading.Thread(
+            target=holdings_inbox.run_worker_loop,
+            kwargs={
+                "stop_event": stop_event,
+                "poll_seconds": float(args.poll_seconds),
+                "limit": int(args.limit),
+            },
+            name="holdings-event-worker",
+            daemon=True,
+        ),
+        threading.Thread(
+            target=cash_flow_inbox.run_worker_loop,
+            kwargs={
+                "stop_event": stop_event,
+                "poll_seconds": float(args.poll_seconds),
+                "limit": int(args.limit),
+            },
+            name="cash-flow-event-worker",
+            daemon=True,
+        ),
+    ]
+    started_workers = []
+    try:
+        for worker in workers:
+            worker.start()
+            started_workers.append(worker)
+        adapter.start(accept)
+    finally:
+        stop_event.set()
+        for worker in started_workers:
+            worker.join(timeout=10)
+    result = {"success": True, "status": "stopped"}
+    _dump(result, bool(getattr(args, "json", False)))
+    return result
+
+
 def cmd_cash(args):
     def via_service(client):
         return client.get_cash(account=_default_account(args.account))
@@ -1441,6 +1611,40 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", default=argparse.SUPPRESS
     )
     p_receipts_resolve.set_defaults(func=cmd_receipts_resolve)
+
+    p_events = sp.add_parser(
+        "events",
+        help="combined exact-resource Feishu Bitable event ingress",
+    )
+    events_sub = p_events.add_subparsers(dest="events_cmd", required=True)
+    p_events_status = events_sub.add_parser(
+        "status",
+        help="show combined local/config readiness without a Feishu request",
+    )
+    p_events_status.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS
+    )
+    p_events_status.set_defaults(func=cmd_events_status)
+    p_events_subscribe = events_sub.add_parser(
+        "subscribe",
+        help="create subscriptions for the configured Base documents",
+    )
+    p_events_subscribe.add_argument("--confirm", action="store_true")
+    p_events_subscribe.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS
+    )
+    p_events_subscribe.set_defaults(func=cmd_events_subscribe)
+    p_events_listen = events_sub.add_parser(
+        "listen",
+        help="run one long connection and both leased local workers",
+    )
+    p_events_listen.add_argument("--confirm", action="store_true")
+    p_events_listen.add_argument("--poll-seconds", type=float, default=1.0)
+    p_events_listen.add_argument("--limit", type=int, default=100)
+    p_events_listen.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS
+    )
+    p_events_listen.set_defaults(func=cmd_events_listen)
 
     p_hold = sp.add_parser("holdings", help="list or validate holdings")
     p_hold.add_argument("--include-price", action="store_true", help="include price fields (may be slow)")

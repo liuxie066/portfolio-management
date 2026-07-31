@@ -219,10 +219,13 @@ feishu:
 
 `pm config doctor --require-futu --json` 会检查三项最终解析结果。Futu 真实写入成功或失败都会分别发送回执；多账户 NAV 任务会再发送一条汇总回执。dry-run 不发送。飞书应用需要具备发送消息权限，并能向该 `open_id` 发起单聊。
 
-## Holdings 变更事件入口
+## Holdings 与 Cash Flow 变更事件入口
 
 安装器会生成 `portfolio-holdings-event-listener.service`，但默认不启用。
-完整的飞书侧配置、精确文档订阅、canary 和回滚步骤见
+为了兼容已有安装，unit 名保持不变，但其 `ExecStart` 运行
+`pm events listen --confirm --json`，用一个长连接处理配置的
+`holdings` 和 `cash_flow` 表。完整的飞书侧配置、精确 Base
+文件订阅、table 路由、canary 和回滚步骤见
 `docs/holdings-event-listener-runbook.md`。不得仅因 unit 已生成就启用服务。
 
 核心保护：

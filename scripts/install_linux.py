@@ -352,7 +352,7 @@ RuntimeMaxSec=60
 
 def render_holdings_event_service_unit(paths: InstallPaths, *, run_user: str) -> str:
     return f"""[Unit]
-Description=portfolio-management Feishu holdings event listener
+Description=portfolio-management Feishu holdings and cash-flow event listener
 Wants=network-online.target
 After=network-online.target
 
@@ -362,7 +362,7 @@ User={run_user}
 WorkingDirectory={paths.app_dir}
 Environment=TZ=Asia/Shanghai
 EnvironmentFile={paths.env_file}
-ExecStart={paths.launcher_path} holdings events listen --confirm --json
+ExecStart={paths.launcher_path} events listen --confirm --json
 Restart=always
 RestartSec=5
 

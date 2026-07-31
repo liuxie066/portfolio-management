@@ -168,6 +168,19 @@ def test_pm_holdings_event_mutations_require_confirmation_before_backend():
             raise AssertionError("expected holdings event safety rejection")
 
 
+def test_pm_combined_event_mutations_require_confirmation_before_backend():
+    for argv, expected in (
+        (["events", "subscribe"], "subscribe requires --confirm"),
+        (["events", "listen"], "listen requires --confirm"),
+    ):
+        try:
+            pm.main(argv)
+        except SystemExit as exc:
+            assert expected in str(exc)
+        else:
+            raise AssertionError("expected combined event safety rejection")
+
+
 def test_pm_holdings_event_status_is_local_only_and_does_not_claim_remote_health():
     from src import config as config_module
     import src.app.holdings_event_service as event_module
@@ -218,6 +231,283 @@ def test_pm_holdings_event_status_is_local_only_and_does_not_claim_remote_health
     assert result["remote_subscription_verified"] is False
     assert result["listener_connection_verified"] is False
     assert "no Feishu request" in result["note"]
+
+
+def test_pm_combined_event_status_is_local_only_and_reports_both_inboxes():
+    from src import config as config_module
+    import src.app.cash_flow_event_service as cash_event_module
+    import src.app.holdings_event_service as holdings_event_module
+    import src.app.operation_state_store as store_module
+    import src.feishu.bitable_event_adapter as adapter_module
+
+    class HoldingsTarget:
+        app_id = "cli_data"
+        file_token = "base"
+        table_id = "holdings"
+        event_type = "drive.file.bitable_record_changed_v1"
+
+        @classmethod
+        def from_config(cls):
+            return cls()
+
+        def as_dict(self):
+            return {"kind": "holdings", "table_id": self.table_id}
+
+    class CashFlowTarget:
+        app_id = "cli_data"
+        file_token = "base"
+        table_id = "cash_flow"
+        event_type = "drive.file.bitable_record_changed_v1"
+
+        @classmethod
+        def from_config(cls):
+            return cls()
+
+        def as_dict(self):
+            return {"kind": "cash_flow", "table_id": self.table_id}
+
+    class Store:
+        @classmethod
+        def inspect_holding_event_status(cls):
+            return {"initialized": True, "counts": {"processed": 2}}
+
+        @classmethod
+        def inspect_cash_flow_event_status(cls):
+            return {"initialized": True, "counts": {"pending": 1}}
+
+    class Adapter:
+        @staticmethod
+        def sdk_available():
+            return True
+
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("status must not construct a network adapter")
+
+    patch = MonkeyPatch()
+    stdout = io.StringIO()
+    try:
+        patch.setattr(holdings_event_module, "HoldingsEventTarget", HoldingsTarget)
+        patch.setattr(cash_event_module, "CashFlowEventTarget", CashFlowTarget)
+        patch.setattr(store_module, "OperationStateStore", Store)
+        patch.setattr(adapter_module, "FeishuBitableEventAdapter", Adapter)
+        patch.setattr(config_module, "get", lambda key, default=None: "configured")
+        with redirect_stdout(stdout):
+            assert pm.main(["events", "status", "--json"]) == 0
+    finally:
+        patch.undo()
+
+    result = json.loads(stdout.getvalue())
+    assert result["success"] is True
+    assert result["read_only"] is True
+    assert result["target_registry"]["valid"] is True
+    assert [
+        target["kind"] for target in result["target_registry"]["targets"]
+    ] == ["holdings", "cash_flow"]
+    assert result["local_inboxes"]["holdings"]["counts"] == {"processed": 2}
+    assert result["local_inboxes"]["cash_flow"]["counts"] == {"pending": 1}
+    assert result["remote_subscription_verified"] is False
+    assert result["listener_connection_verified"] is False
+
+
+def test_pm_combined_event_target_collision_is_reported_and_refuses_mutations():
+    from src import config as config_module
+    import src.app.cash_flow_event_service as cash_event_module
+    import src.app.holdings_event_service as holdings_event_module
+    import src.app.operation_state_store as store_module
+    import src.feishu.bitable_event_adapter as adapter_module
+
+    class CollidingTarget:
+        app_id = "cli_data"
+        file_token = "base"
+        table_id = "same_table"
+        event_type = "drive.file.bitable_record_changed_v1"
+
+        @classmethod
+        def from_config(cls):
+            return cls()
+
+        def as_dict(self):
+            return {"table_id": self.table_id}
+
+    class Store:
+        @classmethod
+        def inspect_holding_event_status(cls):
+            return {"initialized": False}
+
+        @classmethod
+        def inspect_cash_flow_event_status(cls):
+            return {"initialized": False}
+
+    class Adapter:
+        @staticmethod
+        def sdk_available():
+            return True
+
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("collision must be rejected before adapter creation")
+
+    patch = MonkeyPatch()
+    stdout = io.StringIO()
+    try:
+        patch.setattr(holdings_event_module, "HoldingsEventTarget", CollidingTarget)
+        patch.setattr(cash_event_module, "CashFlowEventTarget", CollidingTarget)
+        patch.setattr(store_module, "OperationStateStore", Store)
+        patch.setattr(adapter_module, "FeishuBitableEventAdapter", Adapter)
+        patch.setattr(config_module, "get", lambda key, default=None: "configured")
+        with redirect_stdout(stdout):
+            assert pm.main(["events", "status", "--json"]) == 1
+        for argv in (
+            ["events", "subscribe", "--confirm"],
+            ["events", "listen", "--confirm"],
+        ):
+            try:
+                pm.main(argv)
+            except ValueError as exc:
+                assert "target collision" in str(exc)
+            else:
+                raise AssertionError("expected target collision rejection")
+    finally:
+        patch.undo()
+
+    result = json.loads(stdout.getvalue())
+    assert result["success"] is False
+    assert result["target_registry"]["valid"] is False
+    assert "target collision" in result["target_registry"]["error"]
+
+
+def test_pm_combined_listener_fans_out_and_joins_both_workers():
+    import src.app.cash_flow_event_completion_service as completion_module
+    import src.app.cash_flow_event_inbox_service as cash_inbox_module
+    import src.app.cash_flow_event_service as cash_event_module
+    import src.app.holding_event_inbox_service as holdings_inbox_module
+    import src.app.holdings_event_service as holdings_event_module
+    import src.app.operation_state_store as store_module
+    import src.feishu.bitable_event_adapter as adapter_module
+
+    calls = []
+
+    class HoldingsTarget:
+        app_id = "cli_data"
+        file_token = "base"
+        table_id = "holdings"
+        event_type = "drive.file.bitable_record_changed_v1"
+
+        @classmethod
+        def from_config(cls):
+            return cls()
+
+    class CashFlowTarget:
+        app_id = "cli_data"
+        file_token = "base"
+        table_id = "cash_flow"
+        event_type = "drive.file.bitable_record_changed_v1"
+
+        @classmethod
+        def from_config(cls):
+            return cls()
+
+    class Store:
+        pass
+
+    class PortfolioService:
+        def __init__(self):
+            self.storage = "shared-storage"
+
+    class Completion:
+        def __init__(self, *, storage, operation_store):
+            calls.append(("completion", storage, operation_store))
+
+        def __call__(self, **_kwargs):
+            return {"status": "complete"}
+
+        def terminal_failure_receipts(self, **_kwargs):
+            return []
+
+    class _Inbox:
+        table_id = ""
+
+        def __init__(self, *, storage=None, store, target, **kwargs):
+            self.store = store
+            self.target = target
+            calls.append(
+                (
+                    "inbox",
+                    self.table_id,
+                    storage,
+                    store,
+                    sorted(kwargs),
+                )
+            )
+
+        def accept(self, payload):
+            accepted = payload["table_id"] == self.table_id
+            calls.append(("accept", self.table_id, payload["table_id"], accepted))
+            return {
+                "success": True,
+                "accepted": accepted,
+                "filtered": not accepted,
+            }
+
+        def run_worker_loop(self, **_kwargs):
+            raise AssertionError("fake thread must not invoke the worker target")
+
+    class HoldingsInbox(_Inbox):
+        table_id = "holdings"
+
+    class CashFlowInbox(_Inbox):
+        table_id = "cash_flow"
+
+    class Adapter:
+        def __init__(self, *, targets):
+            calls.append(("adapter", [target.table_id for target in targets]))
+
+        def start(self, callback):
+            for table_id in ("holdings", "cash_flow", "unknown"):
+                outcome = callback({"table_id": table_id})
+                calls.append(("fanout", table_id, outcome["accepted_by"]))
+
+    class Thread:
+        def __init__(self, *, target, kwargs, name, daemon):
+            self.name = name
+            calls.append(("thread_init", name, daemon, sorted(kwargs)))
+
+        def start(self):
+            calls.append(("thread_start", self.name))
+
+        def join(self, *, timeout):
+            calls.append(("thread_join", self.name, timeout))
+
+    patch = MonkeyPatch()
+    stdout = io.StringIO()
+    try:
+        patch.setattr(holdings_event_module, "HoldingsEventTarget", HoldingsTarget)
+        patch.setattr(cash_event_module, "CashFlowEventTarget", CashFlowTarget)
+        patch.setattr(store_module, "OperationStateStore", Store)
+        patch.setattr(completion_module, "CashFlowEventCompletionService", Completion)
+        patch.setattr(holdings_inbox_module, "HoldingEventInboxService", HoldingsInbox)
+        patch.setattr(cash_inbox_module, "CashFlowEventInboxService", CashFlowInbox)
+        patch.setattr(adapter_module, "FeishuBitableEventAdapter", Adapter)
+        patch.setattr(pm.threading, "Thread", Thread)
+        with _PortfolioServicePatch(PortfolioService), redirect_stdout(stdout):
+            assert pm.main(["events", "listen", "--confirm", "--json"]) == 0
+    finally:
+        patch.undo()
+
+    assert json.loads(stdout.getvalue()) == {"success": True, "status": "stopped"}
+    assert ("adapter", ["holdings", "cash_flow"]) in calls
+    assert ("fanout", "holdings", ["holdings"]) in calls
+    assert ("fanout", "cash_flow", ["cash_flow"]) in calls
+    assert ("fanout", "unknown", []) in calls
+    assert [item[1] for item in calls if item[0] == "thread_start"] == [
+        "holdings-event-worker",
+        "cash-flow-event-worker",
+    ]
+    assert [item[1] for item in calls if item[0] == "thread_join"] == [
+        "holdings-event-worker",
+        "cash-flow-event-worker",
+    ]
+    stores = [item[3] for item in calls if item[0] == "inbox"]
+    assert len(stores) == 2 and stores[0] is stores[1]
 
 
 def test_pm_receipts_dispatch_attempts_typed_branch_when_nav_branch_raises():

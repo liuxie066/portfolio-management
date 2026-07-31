@@ -174,7 +174,9 @@ def test_install_linux_holdings_event_listener_is_generated_disabled_and_explici
     paths = install_linux.build_paths(_args(tmp_path))
     unit = install_linux.render_holdings_event_service_unit(paths, run_user="portfolio")
 
-    assert "holdings events listen --confirm --json" in unit
+    assert "events listen --confirm --json" in unit
+    assert "holdings and cash-flow event listener" in unit
+    assert "holdings events listen" not in unit
     assert "Restart=always" in unit
     assert "[Install]" in unit
 
@@ -198,6 +200,23 @@ def test_install_linux_holdings_event_listener_is_generated_disabled_and_explici
             install_linux.HOLDINGS_EVENT_SERVICE_NAME,
         ],
     ]
+
+
+def test_combined_event_listener_docs_preserve_fx_and_holding_effect_boundaries():
+    docs = install_linux.REPO_ROOT / "docs"
+    listener = (docs / "holdings-event-listener-runbook.md").read_text()
+    cash_flow = (docs / "cash-flow-effects-runbook.md").read_text()
+    schema = (docs / "schema.md").read_text()
+    deploy = (docs / "deploy-linux.md").read_text()
+
+    assert "pm events status --json" in listener
+    assert "pm events subscribe --confirm --json" in listener
+    assert "Base document is the\n  subscription boundary" in listener
+    assert "never confirms or applies the separate\n  CASH holding effect" in listener
+    assert "no rate is guessed" in cash_flow
+    assert "manual exact-record reconcile command" in cash_flow
+    assert "existing local\n  FX confirmation still matches exactly" in schema
+    assert "pm events listen --confirm --json" in deploy
 
 
 def test_install_linux_api_service_is_loopback_only_and_long_running(tmp_path):

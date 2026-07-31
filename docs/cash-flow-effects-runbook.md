@@ -47,6 +47,20 @@ delivery. The existing durable compensation log owns compensation task state.
      --apply --confirm
    ```
 
+   In a future controlled activation, the combined Bitable listener removes
+   this remembered step for deterministic CNY rows. Before enabling it, run the
+   read-only target preflight, then separately confirm the Base subscription:
+
+   ```bash
+   pm events status --json
+   pm events subscribe --confirm --json
+   ```
+
+   Subscription is Base-file-level; the listener still routes and validates the
+   exact configured `holdings` and `cash_flow` table IDs locally. A target
+   collision is a stop condition. Do not infer subscription or connection
+   health from the local status command.
+
 7. Scan and process every current effect one by one:
 
    ```bash
@@ -66,6 +80,19 @@ delivery. The existing durable compensation log owns compensation task state.
 The operator manually enters only external deposits and withdrawals in Feishu.
 `broker` is mandatory. Internal transfers and FX conversions are not events in
 this workflow.
+
+When `portfolio-holdings-event-listener.service` is explicitly enabled, its
+single long connection covers both configured tables. A `cash_flow` add/edit
+event is only a durable trigger: the worker fresh-reads that exact record. It
+silently completes valid CNY system fields, and may complete a foreign row only
+when the existing local FX confirmation still matches its source hash, date,
+rate, and CNY amount. Invalid input or missing/stale FX evidence creates a
+durable attention receipt; no rate is guessed.
+
+Generated-field completion does not confirm or apply a Cash Flow holding
+effect. Every CASH holding mutation remains under the separate exact effect
+preview/confirmation workflow below. The manual exact-record reconcile command
+remains the recovery path named in attention receipts.
 
 The 15-minute timer, manual review, and NAV preflight all perform complete
 Feishu scans. Only the timer drains discovery/runtime receipts. Review displays
