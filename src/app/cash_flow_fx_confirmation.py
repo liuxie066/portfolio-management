@@ -25,6 +25,10 @@ def evaluate_cash_flow_fx_confirmation(
         }
     confirmation_id = str(confirmation.get("confirmation_id") or "").strip() or None
     comparisons = {
+        "record_id": (
+            str(confirmation.get("record_id") or "").strip(),
+            record_id,
+        ),
         "source_hash": (
             str(confirmation.get("source_hash") or ""),
             str(row.get("source_hash") or ""),
@@ -90,6 +94,7 @@ def frozen_fx_confirmation_identity(
     return {
         "state": "confirmation",
         "confirmation_id": confirmation.get("confirmation_id"),
+        "record_id": confirmation.get("record_id"),
         "source_hash": confirmation.get("source_hash"),
         "exchange_rate": confirmation.get("exchange_rate"),
         "cny_amount": confirmation.get("cny_amount"),

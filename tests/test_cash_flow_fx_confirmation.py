@@ -20,6 +20,7 @@ ROW = {
 def _confirmation(**overrides):
     value = {
         "confirmation_id": "fx-1",
+        "record_id": "rec-fx-1",
         "source_hash": "hash-1",
         "exchange_rate": "7.2",
         "cny_amount": "720",
@@ -45,6 +46,7 @@ def test_fx_confirmation_requires_local_evidence():
 @pytest.mark.parametrize(
     ("overrides", "mismatch_field"),
     [
+        ({"record_id": "rec-other"}, "record_id"),
         ({"source_hash": "hash-old"}, "source_hash"),
         ({"exchange_rate_date": "2026-07-30"}, "exchange_rate_date"),
         ({"exchange_rate": "7.19"}, "exchange_rate_or_cny_amount"),
@@ -88,6 +90,6 @@ def test_frozen_identity_excludes_operator_and_timestamps():
     identity = frozen_fx_confirmation_identity(confirmation)
 
     assert identity["confirmation_id"] == "fx-1"
+    assert identity["record_id"] == "rec-fx-1"
     assert "confirmed_at" not in identity
     assert "confirmation" not in identity
-
