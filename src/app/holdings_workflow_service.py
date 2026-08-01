@@ -12,6 +12,13 @@ from uuid import uuid4
 
 from src.process_lock import account_lock_key, holding_record_lock_key, process_lock
 
+from .holding_case_contract import (
+    PRECONDITION_EXACT,
+    PRECONDITION_LEGACY_MIGRATABLE,
+    build_case_precondition,
+    classify_precondition_transition,
+    confirmation_scope,
+)
 from .holdings_reconciliation_service import (
     HoldingsReconciliationEvaluation,
     HoldingsReconciliationService,
@@ -180,10 +187,7 @@ class HoldingsWorkflowService:
         confirmed_case_keys = []
         for case in cases:
             durable = stored.get(case["case_key"])
-            if not durable or durable.get("state") != "resolved_keep":
-                continue
-            resolution = dict(durable.get("resolution") or {})
-            if resolution.get("confirmation_scope") == self._confirmation_scope(case):
+            if durable and self._durable_keep_matches(durable, case):
                 confirmed_case_keys.append(case["case_key"])
         return {
             "cases": cases,
@@ -309,24 +313,19 @@ class HoldingsWorkflowService:
             if identity != dict(case.get("identity") or {}):
                 continue
             canonical = canonical_record_payload(raw.raw_fields)
-            precondition = _digest(
-                {
-                    "record_id": raw.record_id,
-                    "identity": identity,
-                    "field": field,
-                    "current": canonical.get(field),
-                    "authority_inputs": {
-                        key: canonical.get(key)
-                        for key in ("asset_id", "asset_type", "account", "broker")
-                    },
-                }
-            )
-            resolution = dict(case.get("resolution") or {})
-            if (
-                precondition != case.get("case_precondition_digest")
-                or resolution.get("confirmation_scope")
-                != self._confirmation_scope(case)
-            ):
+            current_case = {
+                **case,
+                "identity": identity,
+                "current": canonical.get(field),
+                **build_case_precondition(
+                    record_id=raw.record_id,
+                    identity=identity,
+                    field=field,
+                    current=canonical.get(field),
+                    canonical_record=canonical,
+                ),
+            }
+            if not self._durable_keep_matches(case, current_case):
                 continue
             confirmed_fields.setdefault(raw.record_id, set()).add(field)
             confirmed_case_keys.append(str(case["case_key"]))
@@ -995,17 +994,13 @@ class HoldingsWorkflowService:
             policy_version += f"+{evaluation.report.currency_policy_version}"
         elif field == "asset_class":
             policy_version += f"+{evaluation.report.asset_class_policy_version}"
-        precondition_payload = {
-            "record_id": validation.raw.record_id,
-            "identity": identity,
-            "field": field,
-            "current": current,
-            "authority_inputs": {
-                key: canonical_record_payload(raw).get(key)
-                for key in ("asset_id", "asset_type", "account", "broker")
-            },
-        }
-        case_precondition_digest = _digest(precondition_payload)
+        precondition = build_case_precondition(
+            record_id=validation.raw.record_id,
+            identity=identity,
+            field=field,
+            current=current,
+            canonical_record=canonical_record_payload(raw),
+        )
         case_key = _digest(
             {
                 "contract_version": CASE_CONTRACT_VERSION,
@@ -1051,7 +1046,7 @@ class HoldingsWorkflowService:
             "current": current,
             "proposed": proposed,
             "record_digest": validation.record_digest,
-            "case_precondition_digest": case_precondition_digest,
+            **precondition,
             "latest_evidence_instance_id": evidence_instance_id,
             "evidence": evidence,
             "state": state,
@@ -1182,14 +1177,7 @@ class HoldingsWorkflowService:
 
     @staticmethod
     def _confirmation_scope(case: Dict[str, Any]) -> str:
-        return _digest(
-            {
-                "case_key": case["case_key"],
-                "case_precondition_digest": case["case_precondition_digest"],
-                "authority_id": case.get("authority_id"),
-                "policy_version": case["policy_version"],
-            }
-        )
+        return confirmation_scope(case)
 
     @staticmethod
     def _apply_resolution_digest(
@@ -1243,14 +1231,23 @@ class HoldingsWorkflowService:
 
     @staticmethod
     def _require_same_scope(stored: Dict[str, Any], current: Dict[str, Any]) -> None:
-        if (
-            stored["case_key"] != current["case_key"]
-            or stored["case_precondition_digest"]
-            != current["case_precondition_digest"]
-            or stored.get("authority_id") != current.get("authority_id")
-            or stored["policy_version"] != current["policy_version"]
-        ):
+        transition = classify_precondition_transition(stored, current)
+        if transition not in {PRECONDITION_EXACT, PRECONDITION_LEGACY_MIGRATABLE}:
             raise ValueError("holding confirmation scope changed; reconcile again")
+
+    @staticmethod
+    def _durable_keep_matches(
+        stored: Dict[str, Any], current: Dict[str, Any]
+    ) -> bool:
+        if stored.get("state") != "resolved_keep":
+            return False
+        transition = classify_precondition_transition(stored, current)
+        if transition == PRECONDITION_LEGACY_MIGRATABLE:
+            return True
+        if transition != PRECONDITION_EXACT:
+            return False
+        resolution = dict(stored.get("resolution") or {})
+        return resolution.get("confirmation_scope") == confirmation_scope(current)
 
     @staticmethod
     def _same_value(left: Any, right: Any) -> bool:

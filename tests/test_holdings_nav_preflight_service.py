@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from datetime import UTC, date, datetime
+import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
+from src.app.holding_case_contract import confirmation_scope
 from src.app.holdings_nav_preflight_service import HoldingsNavPreflightService
 from src.app.account_nav_recorder_service import AccountNavRecorderService
 from src.app.holdings_reconciliation_service import HoldingsReconciliationService
@@ -461,6 +463,158 @@ def test_matching_keep_current_confirmation_unblocks_exact_conflict(tmp_path):
     assert "confirmed keep-current" in " ".join(allowed["warnings"])
 
 
+def test_nav_preflight_preserves_and_migrates_legacy_non_dependent_keep(tmp_path):
+    initial = _raw(
+        "rec_legacy_name",
+        asset_id="AAPL",
+        asset_type="hk_stock",
+        broker="富途",
+        currency="USD",
+        asset_class="美国资产",
+    )
+    initial.raw_fields["asset_name"] = "Manual Apple"
+    storage = RawStorage([initial])
+
+    def observe(_account):
+        return SimpleNamespace(
+            source="futu",
+            source_snapshot_id="snapshot-lx",
+            observed_at_utc="2026-07-31T12:00:00+00:00",
+            profile_fingerprint="profile-lx",
+            account_fingerprint="account-lx",
+            positions=(
+                SimpleNamespace(
+                    asset_id="AAPL.US",
+                    raw_code="US.AAPL",
+                    asset_name="Apple",
+                    security_type="STOCK",
+                    market="US",
+                    currency="USD",
+                    currency_explicit=True,
+                ),
+            ),
+        )
+
+    store = OperationStateStore(tmp_path / "operations.sqlite3")
+    reconciliation = HoldingsReconciliationService(
+        storage=storage,
+        futu_observer=observe,
+    )
+    workflow = HoldingsWorkflowService(
+        storage=storage,
+        store=store,
+        reconciliation=reconciliation,
+        lock_factory=lambda _key: nullcontext(),
+    )
+    service = HoldingsNavPreflightService(
+        storage=storage,
+        reconciliation=reconciliation,
+        workflow=workflow,
+        lock_factory=lambda _key: nullcontext(),
+    )
+    initial_evaluation = reconciliation.evaluate(account="lx")
+    name_case = next(
+        case
+        for case in workflow._cases_for_record(
+            initial_evaluation.report.records[0], initial_evaluation
+        )
+        if case["field"] == "asset_name"
+    )
+    legacy = dict(name_case)
+    legacy["case_precondition_digest"] = name_case[
+        "legacy_case_precondition_digest"
+    ]
+    store.materialize_holding_cases(
+        cases=[legacy],
+        discovery_receipts=[workflow._discovery_receipt(legacy)],
+        trigger={"mode": "seed_legacy_keep"},
+    )
+    legacy_scope = confirmation_scope(legacy)
+    resolution = {
+        "decision": "keep-current",
+        "reason": "operator verified display name",
+        "operator_context": {"username": "tester"},
+        "confirmation_scope": legacy_scope,
+    }
+    store.finalize_holding_cases(
+        outcomes=[
+            {
+                "case_key": legacy["case_key"],
+                "state": "resolved_keep",
+                "event_type": "resolved_keep",
+                "resolution": resolution,
+            }
+        ],
+        receipts=[
+            workflow._terminal_receipt(
+                legacy,
+                state="resolved_keep",
+                resolution=resolution,
+                resolution_digest=legacy_scope,
+            )
+        ],
+    )
+    corrected = _raw(
+        "rec_legacy_name",
+        asset_id="AAPL",
+        asset_type="us_stock",
+        broker="富途",
+        currency="USD",
+        asset_class="美国资产",
+    )
+    corrected.raw_fields["asset_name"] = "Manual Apple"
+    storage.records = [corrected]
+    with store._connect() as conn:
+        receipt_count = conn.execute(
+            "SELECT COUNT(*) FROM operation_receipt_outbox"
+        ).fetchone()[0]
+
+    dry_run = service.prepare_account(
+        account="lx",
+        dry_run=True,
+        confirm=False,
+        trigger={"mode": "daily_nav_preflight"},
+    )
+
+    assert dry_run["success"] is True
+    assert "confirmed keep-current" in " ".join(dry_run["warnings"])
+    assert store.get_holding_case(legacy["case_key"])[
+        "case_precondition_digest"
+    ] == legacy["case_precondition_digest"]
+
+    formal = service.prepare_account(
+        account="lx",
+        dry_run=False,
+        confirm=True,
+        trigger={"mode": "daily_nav_preflight"},
+    )
+
+    durable = store.get_holding_case(legacy["case_key"])
+    assert formal["success"] is True
+    assert durable["state"] == "resolved_keep"
+    assert durable["case_precondition_digest"].startswith(
+        "holdings-precondition.v2:"
+    )
+    assert durable["resolution"]["confirmation_scope"] == confirmation_scope(
+        next(
+            case
+            for case in workflow.plan_evaluation(
+                reconciliation.evaluate(account="lx"),
+                trigger={"mode": "assert"},
+            )["cases"]
+            if case["field"] == "asset_name"
+        )
+    )
+    assert [
+        event["event_type"]
+        for event in store.list_holding_case_events(legacy["case_key"])
+    ].count("precondition_contract_migrated") == 1
+    with store._connect() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM operation_receipt_outbox"
+        ).fetchone()[0] == receipt_count
+
+
 def test_matching_futu_keep_current_survives_later_provider_outage(tmp_path):
     storage = RawStorage(
         [
@@ -529,6 +683,40 @@ def test_matching_futu_keep_current_survives_later_provider_outage(tmp_path):
         reason="operator verified the HK classification",
         confirmed_operator={"username": "tester", "trusted_identity": False},
     )
+    fresh_type_case = next(
+        case
+        for case in workflow.plan_evaluation(
+            reconciliation.evaluate(account="lx"),
+            trigger={"mode": "seed_legacy_outage_keep"},
+        )["cases"]
+        if case["field"] == "asset_type"
+    )
+    legacy_type_case = dict(fresh_type_case)
+    legacy_type_case["case_precondition_digest"] = fresh_type_case[
+        "legacy_case_precondition_digest"
+    ]
+    legacy_resolution = dict(
+        store.get_holding_case(type_case["case_key"])["resolution"]
+    )
+    legacy_resolution["confirmation_scope"] = confirmation_scope(
+        legacy_type_case
+    )
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE holding_reconciliation_cases "
+            "SET case_precondition_digest = ?, resolution_json = ? "
+            "WHERE case_key = ?",
+            (
+                legacy_type_case["case_precondition_digest"],
+                json.dumps(
+                    legacy_resolution,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                type_case["case_key"],
+            ),
+        )
     reconciliation.futu_observer = lambda _account: (_ for _ in ()).throw(
         RuntimeError("OpenD unavailable")
     )
@@ -543,6 +731,9 @@ def test_matching_futu_keep_current_survives_later_provider_outage(tmp_path):
     assert blocked["success"] is False
     assert type_case["authority_id"].startswith("futu:")
     assert allowed["success"] is True
+    assert store.get_holding_case(type_case["case_key"])[
+        "case_precondition_digest"
+    ] == legacy_type_case["case_precondition_digest"]
     assert allowed["validated_snapshot"].rows[0].asset_type == "hk_stock"
     assert "confirmed keep-current during evidence outage" in " ".join(
         allowed["warnings"]

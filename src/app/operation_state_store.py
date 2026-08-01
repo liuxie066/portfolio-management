@@ -11,6 +11,15 @@ from uuid import uuid4
 from src import config
 from src.time_utils import bj_now_naive
 
+from .holding_case_contract import (
+    LEGACY_PRECONDITION_CONTRACT_VERSION,
+    PRECONDITION_CONTRACT_VERSION,
+    PRECONDITION_EXACT,
+    PRECONDITION_LEGACY_MIGRATABLE,
+    classify_precondition_transition,
+    confirmation_scope,
+)
+
 
 SCHEMA_VERSION = "2"
 HOLDINGS_WORKFLOW_SCHEMA_VERSION = "1"
@@ -698,6 +707,64 @@ class OperationStateStore:
             (case_key, event_type, _canonical_json(payload), created_at),
         )
 
+    def _migrate_case_precondition_tx(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        existing: sqlite3.Row,
+        candidate: Dict[str, Any],
+        trigger: Optional[Dict[str, Any]],
+        now: str,
+    ) -> bool:
+        stored = self._decode_case_row(existing)
+        transition = classify_precondition_transition(stored, candidate)
+        if transition == PRECONDITION_EXACT:
+            return False
+        if transition != PRECONDITION_LEGACY_MIGRATABLE:
+            raise ValueError(
+                "holding case key collision with different semantics: "
+                f"{candidate.get('case_key')}"
+            )
+
+        resolution = stored.get("resolution")
+        if stored.get("state") == "resolved_keep":
+            resolution = dict(resolution or {})
+            resolution["confirmation_scope"] = confirmation_scope(candidate)
+        cursor = conn.execute(
+            """
+            UPDATE holding_reconciliation_cases
+            SET case_precondition_digest = ?, resolution_json = ?, updated_at = ?
+            WHERE case_key = ? AND case_precondition_digest = ?
+            """,
+            (
+                candidate["case_precondition_digest"],
+                _canonical_json(resolution) if resolution is not None else None,
+                now,
+                candidate["case_key"],
+                stored["case_precondition_digest"],
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError(
+                "holding case precondition changed during migration: "
+                f"{candidate.get('case_key')}"
+            )
+        self._insert_case_event_tx(
+            conn,
+            case_key=str(candidate["case_key"]),
+            event_type="precondition_contract_migrated",
+            payload={
+                "from_contract": LEGACY_PRECONDITION_CONTRACT_VERSION,
+                "to_contract": PRECONDITION_CONTRACT_VERSION,
+                "from_digest": stored["case_precondition_digest"],
+                "to_digest": candidate["case_precondition_digest"],
+                "state": stored.get("state"),
+                "trigger": dict(trigger or {}),
+            },
+            created_at=now,
+        )
+        return True
+
     @staticmethod
     def _insert_operation_receipt_tx(
         conn: sqlite3.Connection,
@@ -921,6 +988,21 @@ class OperationStateStore:
                         "holding case key collision with different identity: "
                         f"{case_key}"
                     )
+                existing = conn.execute(
+                    "SELECT * FROM holding_reconciliation_cases WHERE case_key = ?",
+                    (case_key,),
+                ).fetchone()
+                self._migrate_case_precondition_tx(
+                    conn,
+                    existing=existing,
+                    candidate=candidate,
+                    trigger=trigger,
+                    now=now,
+                )
+                existing = conn.execute(
+                    "SELECT * FROM holding_reconciliation_cases WHERE case_key = ?",
+                    (case_key,),
+                ).fetchone()
                 if any(
                     existing[key] != value
                     for key, value in immutable.items()
@@ -1509,6 +1591,21 @@ class OperationStateStore:
                             "holding case key collision with different identity: "
                             f"{case_key}"
                         )
+                    existing = conn.execute(
+                        "SELECT * FROM holding_reconciliation_cases WHERE case_key = ?",
+                        (case_key,),
+                    ).fetchone()
+                    self._migrate_case_precondition_tx(
+                        conn,
+                        existing=existing,
+                        candidate=candidate,
+                        trigger=trigger,
+                        now=now,
+                    )
+                    existing = conn.execute(
+                        "SELECT * FROM holding_reconciliation_cases WHERE case_key = ?",
+                        (case_key,),
+                    ).fetchone()
                     if any(
                         existing[key] != value
                         for key, value in immutable.items()

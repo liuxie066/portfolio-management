@@ -5,6 +5,10 @@ import sqlite3
 
 import pytest
 
+from src.app.holding_case_contract import (
+    build_case_precondition,
+    confirmation_scope,
+)
 from src.app.operation_state_store import OperationStateStore
 
 
@@ -43,6 +47,62 @@ def _receipt(case):
         "receipt_type": "holding_case_discovered",
         "payload": {"case_key": case["case_key"], "state": case["state"]},
     }
+
+
+def _contract_case_pair(
+    *,
+    field="created_at",
+    current="2026/03/30",
+    state="pending_manual_edit",
+    before_asset_type="us_fund",
+    after_asset_type="exchange_fund",
+):
+    identity = {"asset_id": "SPY", "account": "sy", "broker": "IBKR"}
+    before_record = {**identity, "asset_type": before_asset_type}
+    after_record = {**identity, "asset_type": after_asset_type}
+    before = build_case_precondition(
+        record_id="rec-1",
+        identity=identity,
+        field=field,
+        current=current,
+        canonical_record=before_record,
+    )
+    after = build_case_precondition(
+        record_id="rec-1",
+        identity=identity,
+        field=field,
+        current=current,
+        canonical_record=after_record,
+    )
+    kind = "missing_completable" if state == "pending_apply" else "invalid"
+    base = {
+        **_case(
+            "case-contract",
+            field=field,
+            kind=kind,
+            current=current,
+            proposed="USD" if state == "pending_apply" else None,
+            evidence_id=None,
+        ),
+        "identity": identity,
+        "authority_id": None,
+        "policy_version": "holdings-validation.v1",
+        "state": state,
+    }
+    legacy = {
+        **base,
+        "record_digest": "record-before",
+        "case_precondition_digest": before["legacy_case_precondition_digest"],
+        "legacy_case_precondition_digest": before[
+            "legacy_case_precondition_digest"
+        ],
+    }
+    candidate = {
+        **base,
+        "record_digest": "record-after",
+        **after,
+    }
+    return legacy, candidate
 
 
 def test_holdings_feature_schema_is_additive_and_rejects_newer_version(tmp_path):
@@ -203,6 +263,155 @@ def test_stable_case_refresh_does_not_resend_and_semantic_change_supersedes(tmp_
     assert superseded["superseded_case_keys"] == ["case-1"]
     assert store.get_holding_case("case-1")["state"] == "superseded"
     assert store.get_holding_case("case-2")["state"] == "pending_apply"
+
+
+def test_legacy_timestamp_precondition_migrates_in_place_without_receipt(tmp_path):
+    store = OperationStateStore(tmp_path / "operations.sqlite3")
+    legacy, candidate = _contract_case_pair()
+    store.materialize_holding_cases(
+        cases=[legacy], discovery_receipts=[_receipt(legacy)]
+    )
+
+    migrated = store.materialize_holding_cases(
+        cases=[candidate], discovery_receipts=[_receipt(candidate)]
+    )
+    repeated = store.materialize_holding_cases(
+        cases=[candidate], discovery_receipts=[_receipt(candidate)]
+    )
+
+    durable = store.get_holding_case(candidate["case_key"])
+    events = store.list_holding_case_events(candidate["case_key"])
+    assert durable["state"] == "pending_manual_edit"
+    assert durable["case_precondition_digest"] == candidate[
+        "case_precondition_digest"
+    ]
+    assert migrated["enqueued_receipt_keys"] == []
+    assert repeated["enqueued_receipt_keys"] == []
+    assert [event["event_type"] for event in events].count(
+        "precondition_contract_migrated"
+    ) == 1
+
+
+def test_legacy_resolved_keep_migrates_scope_without_state_or_receipt_change(tmp_path):
+    store = OperationStateStore(tmp_path / "operations.sqlite3")
+    legacy, candidate = _contract_case_pair(state="pending_confirmation")
+    store.materialize_holding_cases(
+        cases=[legacy], discovery_receipts=[_receipt(legacy)]
+    )
+    store.finalize_holding_cases(
+        outcomes=[
+            {
+                "case_key": legacy["case_key"],
+                "state": "resolved_keep",
+                "event_type": "resolved_keep",
+                "resolution": {
+                    "decision": "keep-current",
+                    "reason": "verified",
+                    "confirmation_scope": confirmation_scope(legacy),
+                },
+            }
+        ],
+        receipts=[],
+    )
+
+    result = store.materialize_holding_cases(
+        cases=[candidate], discovery_receipts=[_receipt(candidate)]
+    )
+
+    durable = store.get_holding_case(candidate["case_key"])
+    assert durable["state"] == "resolved_keep"
+    assert durable["resolution"]["reason"] == "verified"
+    assert durable["resolution"]["confirmation_scope"] == confirmation_scope(
+        candidate
+    )
+    assert result["enqueued_receipt_keys"] == []
+
+
+def test_legacy_inflight_precondition_migration_rolls_back(tmp_path):
+    store = OperationStateStore(tmp_path / "operations.sqlite3")
+    legacy, candidate = _contract_case_pair(state="pending_confirmation")
+    store.materialize_holding_cases(
+        cases=[legacy], discovery_receipts=[_receipt(legacy)]
+    )
+    store.prepare_holding_apply(
+        cases=[
+            {
+                "case_key": legacy["case_key"],
+                "case_precondition_digest": legacy["case_precondition_digest"],
+                "allowed_states": ("pending_confirmation",),
+                "target": None,
+                "before": legacy["current"],
+                "decision": "accept-proposed",
+                "reason": "test",
+                "confirmation_scope": confirmation_scope(legacy),
+            }
+        ],
+        apply_attempt_id="attempt-legacy",
+        operator_context={"trusted_identity": False},
+    )
+    events_before = store.list_holding_case_events(legacy["case_key"])
+
+    with pytest.raises(ValueError, match="different semantics"):
+        store.materialize_holding_cases(
+            cases=[candidate], discovery_receipts=[_receipt(candidate)]
+        )
+
+    durable = store.get_holding_case(legacy["case_key"])
+    assert durable["state"] == "applying"
+    assert durable["case_precondition_digest"] == legacy[
+        "case_precondition_digest"
+    ]
+    assert store.list_holding_case_events(legacy["case_key"]) == events_before
+
+
+def test_combined_materialize_and_prepare_migrates_before_applying_atomically(tmp_path):
+    store = OperationStateStore(tmp_path / "operations.sqlite3")
+    legacy, candidate = _contract_case_pair(
+        field="currency",
+        current=None,
+        state="pending_apply",
+        before_asset_type="us_stock",
+        after_asset_type="us_stock",
+    )
+    store.materialize_holding_cases(
+        cases=[legacy], discovery_receipts=[_receipt(legacy)]
+    )
+
+    result = store.materialize_and_prepare_holding_apply(
+        observed_cases=[candidate],
+        discovery_receipts=[_receipt(candidate)],
+        apply_cases=[
+            {
+                "case_key": candidate["case_key"],
+                "case_precondition_digest": candidate[
+                    "case_precondition_digest"
+                ],
+                "allowed_states": ("pending_apply",),
+                "target": "USD",
+                "before": None,
+                "decision": "accept-proposed",
+                "reason": "test",
+                "confirmation_scope": confirmation_scope(candidate),
+            }
+        ],
+        apply_attempt_id="attempt-v2",
+        operator_context={"trusted_identity": False},
+    )
+
+    durable = store.get_holding_case(candidate["case_key"])
+    assert durable["state"] == "applying"
+    assert durable["case_precondition_digest"] == candidate[
+        "case_precondition_digest"
+    ]
+    assert result["enqueued_receipt_keys"] == []
+    assert [
+        event["event_type"]
+        for event in store.list_holding_case_events(candidate["case_key"])
+    ][-3:] == [
+        "precondition_contract_migrated",
+        "evidence_refreshed",
+        "apply_prepared",
+    ]
 
 
 def test_typed_receipt_claim_and_sending_expiry_have_distinct_safety(tmp_path):
