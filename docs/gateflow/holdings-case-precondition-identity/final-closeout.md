@@ -3,7 +3,7 @@
 - Work unit: `holdings-case-precondition-identity`
 - Branch: `codex/fix-holdings-case-precondition-identity`
 - Draft PR: `https://github.com/liuxie066/portfolio-management/pull/41`
-- PR review: `docs/reviews/pr-41-review-20260801-124144.md`
+- PR review: `docs/reviews/pr-41-review-20260801-124909.md`
 - Aggregate review: `docs/reviews/code-review-20260801-105404.md`
 - Status: `draft-PR-pass; implementation work unit closed`
 - Artifact path: `docs/gateflow/holdings-case-precondition-identity/final-closeout.md`
@@ -33,13 +33,16 @@ keep their keys, states, and receipt silence. Repeat processing is idempotent.
 - Accepted plan commit: `ac4d47e`.
 - Accepted implementation commit: `8cc4fa7`.
 - Accepted aggregate DeepReview commit: `d0bf47a`.
-- Accepted PR review commit: `cb2204e`.
+- Accepted pre-sync PR review commit: `cb2204e`.
+- Current-main synchronization and conflict-resolution commit: `cacaf82`.
 - Focused holdings suites: 126 passed.
-- Full repository baseline: 1038 passed.
+- Post-sync integration suites: 117 passed.
+- Full repository baseline on current main: 1047 passed.
 - Python compile and diff checks: passed.
-- GitHub `quality-contract`: passed on the complete source head
-  `d0bf47a1725c8320b76e0de3d5d0324f28582c75`; the later review-only commit did
-  not change source or tests and did not trigger another check.
+- GitHub `quality-contract`: passed in 25 seconds on the synchronized source
+  head `cacaf82b3ecafa7932c3d35c8a23a1885217c875`, run `30684632756`.
+- Draft PR #41 is open, mergeable, and clean against
+  `main@b36c908faff25ebc19b5d6586e75581d9c3947de`.
 - Aggregate and PR-level DeepReview: pass with no findings or blocking open
   questions.
 
@@ -56,6 +59,7 @@ and this closeout artifact.
 - Implementation review findings: none.
 - Aggregate DeepReview findings: none.
 - PR review findings: none.
+- Current-main synchronization re-review findings: none.
 - Deferred findings: none.
 
 ## Remaining Risks and Owners
