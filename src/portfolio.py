@@ -206,7 +206,8 @@ class PortfolioManager:
                    overwrite_existing: bool = False, dry_run: bool = False,
                    use_bulk_persist: bool = False, run_id: Optional[str] = None,
                    nav_write_context: Optional[NavWriteContext] = None,
-                   cash_flow_dataset: Any = None) -> NAVHistory:
+                   cash_flow_dataset: Any = None,
+                   nav_history_snapshot: Optional[tuple[NAVHistory, ...]] = None) -> NAVHistory:
         """
         记录每日净值（按Excel账户净值sheet逻辑）
         计算字段：股票市值、现金结余、账户净值、占比、份额变动、涨幅、资产升值
@@ -226,6 +227,7 @@ class PortfolioManager:
             run_id=run_id,
             nav_write_context=nav_write_context,
             cash_flow_dataset=cash_flow_dataset,
+            nav_history_snapshot=nav_history_snapshot,
         )
 
     def build_cash_flow_dataset(

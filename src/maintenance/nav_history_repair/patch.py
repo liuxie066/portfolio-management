@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Patch Feishu nav_history safely (merge + validate + dry-run).
+"""Patch Feishu nav_history through canonical derived-only maintenance.
 
 This module contains the implementation behind
 ``scripts/nav_history_repair.py patch``.
@@ -7,7 +7,7 @@ This module contains the implementation behind
 Design goals
 - Never overwrite non-target fields with model defaults (e.g., cash_value/stock_value becoming 0).
 - Two-phase workflow: dry-run diff -> apply.
-- Optional mathematical validations; abort apply if any invariant fails.
+- Canonical NAV invariants are mandatory; abort apply if any invariant fails.
 
 Typical usage
   ./.venv/bin/python scripts/nav_history_repair.py patch \
@@ -31,8 +31,8 @@ Patch file format
   mtd_nav_change, ytd_nav_change, mtd_pnl, ytd_pnl
 
 Notes
-- We intentionally patch only a whitelist of fields.
-- We always read existing record first and merge patch fields.
+- We patch only the maintenance whitelist through FieldState envelopes.
+- Fresh base facts remain immutable CAS evidence and are never written.
 """
 
 from __future__ import annotations
@@ -40,44 +40,58 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import shlex
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from src import config
+from src.domain.nav_calculator import NavCalculator
+from src.maintenance.nav_history_repair.common import (
+    BASE_FIELDS,
+    FieldState,
+    FreshNavRow,
+    MAINTENANCE_FIELDS,
+    assert_maintenance_history_evidence,
+    changed_states,
+    maintenance_dependency_evidence,
+    maintenance_target_states,
+    read_fresh_nav_rows,
+    recompute_derived_row,
+    restricted_patch,
+    rows_by_date,
+    state_subset,
+)
 from src.maintenance.nav_history_repair.context import NavRepairContext, create_nav_repair_context
 from src.models import NAVHistory
 from src.process_lock import account_lock_key, process_lock
-
-
-MONEY_EPS = 0.06  # tolerate rounding/quantization noise
-NAV_EPS = 1e-6
-WEIGHT_EPS = 1e-4
 
 
 def _iso_to_date(s: str) -> date:
     return datetime.strptime(s[:10], "%Y-%m-%d").date()
 
 
-def _money_equal(a: Optional[float], b: Optional[float], eps: float = MONEY_EPS) -> bool:
-    if a is None or b is None:
-        return a is None and b is None
-    return abs(float(a) - float(b)) <= eps
+def _money_equal(a: Optional[float], b: Optional[float]) -> bool:
+    return NavCalculator.money_equal(a, b)
 
 
-def _nav_equal(a: Optional[float], b: Optional[float], eps: float = 2e-6) -> bool:
-    if a is None or b is None:
-        return a is None and b is None
-    return abs(float(a) - float(b)) <= eps
+def _nav_equal(a: Optional[float], b: Optional[float]) -> bool:
+    return NavCalculator.nav_equal(a, b)
 
 
-def _weight_equal(a: Optional[float], b: Optional[float], eps: float = WEIGHT_EPS) -> bool:
-    if a is None or b is None:
-        return a is None and b is None
-    return abs(float(a) - float(b)) <= eps
+def _optional_finite_float(value: Any, *, field: str) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"invalid expected {field}: {value!r}") from exc
+    if not math.isfinite(parsed):
+        raise ValueError(f"invalid expected {field}: value must be finite")
+    return parsed
 
 
 @dataclass
@@ -93,6 +107,8 @@ class PatchRow:
     ytd_nav_change: Optional[float] = None
     mtd_pnl: Optional[float] = None
     ytd_pnl: Optional[float] = None
+    gap_cash_flow: Optional[float] = None
+    provided_fields: frozenset[str] = frozenset()
 
 
 def load_patch_rows(patch_file: str, mode: str) -> List[PatchRow]:
@@ -108,18 +124,45 @@ def load_patch_rows(patch_file: str, mode: str) -> List[PatchRow]:
         d = _iso_to_date(r["date"]) if isinstance(r.get("date"), str) else _iso_to_date(str(r.get("date")))
 
         if mode == "strong-consistency-gap":
+            provided = frozenset(str(key) for key in r)
             out.append(
                 PatchRow(
                     d=d,
-                    cash_flow=float(r["gap_cash_flow"]) if r.get("gap_cash_flow") is not None else None,
-                    share_change=float(r["gap_share_change"]) if r.get("gap_share_change") is not None else None,
-                    shares=float(r["shares"]) if r.get("shares") is not None else None,
-                    nav=float(r["nav"]) if r.get("nav") is not None else None,
-                    pnl=float(r["pnl"]) if r.get("pnl") is not None else None,
-                    mtd_nav_change=float(r["mtd_nav_change"]) if r.get("mtd_nav_change") is not None else None,
-                    ytd_nav_change=float(r["ytd_nav_change"]) if r.get("ytd_nav_change") is not None else None,
-                    mtd_pnl=float(r["mtd_pnl"]) if r.get("mtd_pnl") is not None else None,
-                    ytd_pnl=float(r["ytd_pnl"]) if r.get("ytd_pnl") is not None else None,
+                    cash_flow=_optional_finite_float(
+                        r.get("cash_flow"),
+                        field="cash_flow",
+                    ) if r.get("cash_flow") is not None else (
+                        _optional_finite_float(
+                            r.get("daily_cash_flow"),
+                            field="daily_cash_flow",
+                        ) if r.get("daily_cash_flow") is not None else None
+                    ),
+                    share_change=_optional_finite_float(
+                        (
+                            r.get("gap_share_change")
+                            if r.get("gap_share_change") is not None
+                            else r.get("share_change")
+                        ),
+                        field="share_change",
+                    ),
+                    shares=_optional_finite_float(r.get("shares"), field="shares"),
+                    nav=_optional_finite_float(r.get("nav"), field="nav"),
+                    pnl=_optional_finite_float(r.get("pnl"), field="pnl"),
+                    mtd_nav_change=_optional_finite_float(
+                        r.get("mtd_nav_change"),
+                        field="mtd_nav_change",
+                    ),
+                    ytd_nav_change=_optional_finite_float(
+                        r.get("ytd_nav_change"),
+                        field="ytd_nav_change",
+                    ),
+                    mtd_pnl=_optional_finite_float(r.get("mtd_pnl"), field="mtd_pnl"),
+                    ytd_pnl=_optional_finite_float(r.get("ytd_pnl"), field="ytd_pnl"),
+                    gap_cash_flow=_optional_finite_float(
+                        r.get("gap_cash_flow"),
+                        field="gap_cash_flow",
+                    ),
+                    provided_fields=provided,
                 )
             )
         else:
@@ -130,178 +173,6 @@ def load_patch_rows(patch_file: str, mode: str) -> List[PatchRow]:
     if duplicates:
         raise ValueError(f"patch-file contains duplicate dates: {[d.isoformat() for d in duplicates]}")
     return sorted(out, key=lambda row: row.d)
-
-
-def merge_existing(existing: NAVHistory, patch: PatchRow, patch_none: bool = False) -> NAVHistory:
-    """Return a new NAVHistory object, preserving all non-target fields."""
-
-    def pick(old: Any, new: Any) -> Any:
-        if new is None and not patch_none:
-            return old
-        return new
-
-    return NAVHistory(
-        record_id=existing.record_id,
-        date=existing.date,
-        account=existing.account,
-        # keep breakdown + weights + total_value as-is
-        total_value=existing.total_value,
-        cash_value=existing.cash_value,
-        stock_value=existing.stock_value,
-        fund_value=existing.fund_value,
-        cn_stock_value=existing.cn_stock_value,
-        us_stock_value=existing.us_stock_value,
-        hk_stock_value=existing.hk_stock_value,
-        stock_weight=existing.stock_weight,
-        cash_weight=existing.cash_weight,
-        # patch target fields
-        shares=pick(existing.shares, patch.shares),
-        nav=pick(existing.nav, patch.nav),
-        cash_flow=pick(existing.cash_flow, patch.cash_flow),
-        share_change=pick(existing.share_change, patch.share_change),
-        pnl=pick(existing.pnl, patch.pnl),
-        mtd_nav_change=pick(existing.mtd_nav_change, patch.mtd_nav_change),
-        ytd_nav_change=pick(existing.ytd_nav_change, patch.ytd_nav_change),
-        mtd_pnl=pick(existing.mtd_pnl, patch.mtd_pnl),
-        ytd_pnl=pick(existing.ytd_pnl, patch.ytd_pnl),
-        # preserve details unless we explicitly patch it elsewhere
-        details=existing.details,
-    )
-
-
-def validate_math(
-    *,
-    context: NavRepairContext,
-    navs_sorted: List[NAVHistory],
-    idx: int,
-    candidate: NAVHistory,
-    mode: str,
-    validate_level: str = "basic",  # basic|full
-) -> List[str]:
-    """Return list of violations for one candidate record.
-
-    validate_level:
-      - basic: invariants that should always hold for patched fields (safe, low false positives)
-      - full: include breakdown weights + mtd/ytd derivations (stricter; may flag legacy-history inconsistencies)
-    """
-    errs: List[str] = []
-
-    # Invariant A/B: breakdown consistency
-    # We only enforce when breakdown appears to be populated (non-trivial values or weights present),
-    # because legacy history may not store these fields.
-    breakdown_present = (
-        (candidate.cash_value is not None and abs(candidate.cash_value) > MONEY_EPS)
-        or (candidate.stock_value is not None and abs(candidate.stock_value) > MONEY_EPS)
-        or (candidate.fund_value is not None and abs(candidate.fund_value) > MONEY_EPS)
-        or (candidate.stock_weight is not None)
-        or (candidate.cash_weight is not None)
-    )
-
-    # total_value == stock_value + cash_value is a basic accounting identity (when breakdown exists)
-    if breakdown_present:
-        expected_total = (candidate.stock_value or 0.0) + (candidate.cash_value or 0.0)
-        if candidate.total_value is not None and not _money_equal(candidate.total_value, expected_total):
-            errs.append(f"total_value != stock_value + cash_value ({candidate.total_value} != {expected_total})")
-
-    # weights checks are stricter; keep them in full mode
-    if validate_level == "full" and breakdown_present:
-        if candidate.total_value and candidate.total_value > 0 and candidate.stock_weight is not None and candidate.cash_weight is not None:
-            exp_stock_w = (candidate.stock_value or 0.0) / candidate.total_value
-            exp_cash_w = (candidate.cash_value or 0.0) / candidate.total_value
-            if not _weight_equal(candidate.stock_weight, exp_stock_w):
-                errs.append(f"stock_weight mismatch ({candidate.stock_weight} != {exp_stock_w})")
-            if not _weight_equal(candidate.cash_weight, exp_cash_w):
-                errs.append(f"cash_weight mismatch ({candidate.cash_weight} != {exp_cash_w})")
-            if not _weight_equal(candidate.stock_weight + candidate.cash_weight, 1.0):
-                errs.append(f"weights sum != 1 ({candidate.stock_weight + candidate.cash_weight})")
-
-    # Invariant C: nav = total_value / shares
-    if candidate.shares is not None and candidate.nav is not None and candidate.shares > 0 and candidate.total_value is not None:
-        exp_nav = candidate.total_value / candidate.shares
-        if not _nav_equal(candidate.nav, exp_nav):
-            errs.append(f"nav != total_value/shares ({candidate.nav} != {exp_nav})")
-
-    # Invariant D: recurrence + share_change relation (strong-consistency-gap)
-    if mode == "strong-consistency-gap":
-        if idx > 0:
-            prev = navs_sorted[idx - 1]
-            if prev.nav is not None and prev.nav > 0 and prev.shares is not None and candidate.shares is not None:
-                if candidate.cash_flow is not None and candidate.share_change is not None:
-                    # Share change relation is sensitive to rounding of prev.nav.
-                    # Validate via cash terms: share_change * prev_nav ~= cash_flow.
-                    exp_cash = candidate.share_change * prev.nav
-                    # allow small drift due to rounding/quantization
-                    if not _money_equal(candidate.cash_flow, exp_cash, eps=10.0):
-                        errs.append(f"cash_flow != share_change*prev_nav ({candidate.cash_flow} != {exp_cash})")
-
-                    exp_shares = prev.shares + candidate.share_change
-                    # shares quantized to 0.01; tolerate several rounding units
-                    if not _money_equal(candidate.shares, exp_shares, eps=0.30):
-                        errs.append(f"shares != prev_shares + share_change ({candidate.shares} != {exp_shares})")
-
-                # pnl constraint only for consecutive day
-                if (candidate.date - prev.date).days == 1:
-                    if candidate.pnl is None:
-                        errs.append("pnl should not be None for consecutive day")
-                    else:
-                        exp_pnl = candidate.total_value - prev.total_value - (candidate.cash_flow or 0.0)
-                        if not _money_equal(candidate.pnl, exp_pnl):
-                            errs.append(f"pnl mismatch ({candidate.pnl} != {exp_pnl})")
-                else:
-                    # for non-consecutive, pnl should be None (project convention)
-                    if candidate.pnl is not None:
-                        errs.append("pnl should be None when not consecutive day")
-
-        # MTD/YTD are "full" checks; legacy stored values may follow older conventions.
-        if validate_level == "full":
-            all_navs = navs_sorted
-            p = context.portfolio
-            nav_index = p._build_nav_lookup(all_navs)
-
-            pm_base = p._find_prev_month_end_nav(all_navs, candidate.date.year, candidate.date.month, nav_index=nav_index)
-            py_base = p._find_year_end_nav(all_navs, str(candidate.date.year - 1), nav_index=nav_index)
-            mtd_return_base = p._find_mtd_return_base_nav(all_navs, candidate.date, nav_index=nav_index)
-            ytd_return_base = p._find_ytd_return_base_nav(all_navs, candidate.date, nav_index=nav_index)
-
-            if candidate.nav is not None:
-                exp_mtd = p._calc_mtd_nav_change(candidate.nav, mtd_return_base) if mtd_return_base else None
-                exp_ytd = p._calc_ytd_nav_change(candidate.nav, ytd_return_base) if ytd_return_base else None
-                exp_mtd_r = round(exp_mtd, 6) if exp_mtd is not None else None
-                exp_ytd_r = round(exp_ytd, 6) if exp_ytd is not None else None
-                if candidate.mtd_nav_change is not None:
-                    if exp_mtd_r is None:
-                        errs.append("mtd_nav_change patched but month base missing")
-                    elif not _nav_equal(candidate.mtd_nav_change, exp_mtd_r):
-                        errs.append(f"mtd_nav_change mismatch ({candidate.mtd_nav_change} != {exp_mtd_r})")
-                if candidate.ytd_nav_change is not None:
-                    if exp_ytd_r is None:
-                        errs.append("ytd_nav_change patched but year base missing")
-                    elif not _nav_equal(candidate.ytd_nav_change, exp_ytd_r):
-                        errs.append(f"ytd_nav_change mismatch ({candidate.ytd_nav_change} != {exp_ytd_r})")
-
-            monthly_cf = p._get_monthly_cash_flow(candidate.account, candidate.date.year, candidate.date.month) if pm_base else None
-            yearly_cf = p._get_yearly_cash_flow(candidate.account, str(candidate.date.year)) if py_base else None
-
-            if candidate.mtd_pnl is not None:
-                if not (pm_base and monthly_cf is not None):
-                    errs.append("mtd_pnl patched but month base/cash_flow missing")
-                else:
-                    exp_mtd_pnl = p._calc_mtd_pnl(candidate.total_value, pm_base, monthly_cf)
-                    exp_mtd_pnl_r = round(exp_mtd_pnl, 2) if exp_mtd_pnl is not None else None
-                    if exp_mtd_pnl_r is not None and not _money_equal(candidate.mtd_pnl, exp_mtd_pnl_r):
-                        errs.append(f"mtd_pnl mismatch ({candidate.mtd_pnl} != {exp_mtd_pnl_r})")
-
-            if candidate.ytd_pnl is not None:
-                if not (py_base and yearly_cf is not None):
-                    errs.append("ytd_pnl patched but year base/cash_flow missing")
-                else:
-                    exp_ytd_pnl = p._calc_ytd_pnl(candidate.total_value, py_base, yearly_cf)
-                    exp_ytd_pnl_r = round(exp_ytd_pnl, 2) if exp_ytd_pnl is not None else None
-                    if exp_ytd_pnl_r is not None and not _money_equal(candidate.ytd_pnl, exp_ytd_pnl_r):
-                        errs.append(f"ytd_pnl mismatch ({candidate.ytd_pnl} != {exp_ytd_pnl_r})")
-
-    return errs
-
 
 
 PATCH_FIELDS = [
@@ -315,94 +186,214 @@ PATCH_FIELDS = [
     "mtd_pnl",
     "ytd_pnl",
 ]
-NON_TARGET_FIELDS = [
-    "cash_value",
-    "stock_value",
-    "fund_value",
-    "cn_stock_value",
-    "us_stock_value",
-    "hk_stock_value",
-    "total_value",
-]
+VALIDATION_FIELDS = tuple(
+    field for field in MAINTENANCE_FIELDS if field != "details"
+)
 
 
-def _target_fields(nav: NAVHistory) -> Dict[str, Any]:
-    return {field: getattr(nav, field) for field in PATCH_FIELDS}
+def canonical_plan_digest(
+    *,
+    account: str,
+    mode: str,
+    rows: List[Dict[str, Any]],
+    dependency_rows: List[Dict[str, Any]],
+) -> str:
+    """Hash the complete immutable and desired facts for one repair plan."""
+
+    payload = {
+        "account": account,
+        "mode": mode,
+        "rows": rows,
+        "dependency_rows": dependency_rows,
+    }
+    raw = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _with_target_fields(nav: NAVHistory, fields: Dict[str, Any]) -> NAVHistory:
-    payload = nav.model_dump()
-    payload.update({field: fields.get(field) for field in PATCH_FIELDS})
-    return NAVHistory(**payload)
+def _states_from_envelopes(fields: Mapping[str, Mapping[str, Any]]) -> Dict[str, FieldState]:
+    return {
+        field: FieldState.from_envelope(envelope)
+        for field, envelope in fields.items()
+    }
 
 
-def _same_target_fields(nav: NAVHistory, fields: Dict[str, Any]) -> bool:
-    return _target_fields(nav) == {field: fields.get(field) for field in PATCH_FIELDS}
+def _same_row_states(row: FreshNavRow, fields: Dict[str, Any]) -> bool:
+    expected = _states_from_envelopes(fields)
+    return state_subset(row, expected) == expected
+
+
+def _base_state_envelopes(row: FreshNavRow) -> Dict[str, Dict[str, Any]]:
+    return {
+        field: state.envelope()
+        for field, state in state_subset(row, BASE_FIELDS).items()
+    }
+
+
+def _requested_value(patch: PatchRow, field: str) -> tuple[bool, Any]:
+    aliases = {
+        "cash_flow": ("cash_flow", "daily_cash_flow"),
+        "share_change": ("share_change", "gap_share_change"),
+    }
+    keys = aliases.get(field, (field,))
+    if not any(key in patch.provided_fields for key in keys):
+        return False, None
+    return True, getattr(patch, field)
+
+
+def _assert_requested_derived_evidence(patch: PatchRow, candidate: NAVHistory) -> None:
+    errors = []
+    for field in PATCH_FIELDS:
+        provided, expected = _requested_value(patch, field)
+        if not provided:
+            continue
+        actual = getattr(candidate, field)
+        equal = (
+            _nav_equal(actual, expected)
+            if field in {"nav", "mtd_nav_change", "ytd_nav_change"}
+            else _money_equal(actual, expected)
+        )
+        if not equal:
+            errors.append(f"{field}: expected={expected}, canonical={actual}")
+    if "gap_cash_flow" in patch.provided_fields:
+        basis = (candidate.details or {}).get("cash_flow_basis") or {}
+        actual_gap = basis.get("gap_cash_flow")
+        if not _money_equal(actual_gap, patch.gap_cash_flow):
+            errors.append(
+                f"gap_cash_flow: expected={patch.gap_cash_flow}, canonical={actual_gap}"
+            )
+    if errors:
+        raise SystemExit(
+            "historical_evidence_required: requested derived evidence does not "
+            "match the canonical ledger calculation: " + " | ".join(errors)
+        )
 
 
 def _resolve_patch_targets(
     *,
-    navs: List[NAVHistory],
+    context: NavRepairContext,
+    fresh_rows: List[FreshNavRow],
     patches: List[PatchRow],
     account: str,
     mode: str,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[NAVHistory], str]:
-    by_date: Dict[date, List[NAVHistory]] = {}
-    for nav in navs:
-        by_date.setdefault(nav.date, []).append(nav)
+) -> Tuple[
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[NAVHistory],
+    List[Dict[str, Any]],
+    str,
+]:
+    by_date = rows_by_date(fresh_rows)
+    working_navs = [row.nav for row in fresh_rows]
 
     errors = []
-    rows = []
-    merged = []
-    diffs = []
     for patch in patches:
         matches = by_date.get(patch.d) or []
         if len(matches) != 1:
             errors.append({"date": patch.d.isoformat(), "match_count": len(matches)})
-            continue
-        existing = matches[0]
-        if not existing.record_id:
-            errors.append({"date": patch.d.isoformat(), "match_count": 1, "error": "missing record_id"})
-            continue
-        candidate = merge_existing(existing, patch)
-        for field in NON_TARGET_FIELDS:
+        elif not matches[0].record_id:
+            errors.append({
+                "date": patch.d.isoformat(),
+                "match_count": 1,
+                "error": "missing record_id",
+            })
+    if errors:
+        raise SystemExit(
+            "historical_evidence_required: every target date must resolve to "
+            f"exactly one record: {errors}"
+        )
+    try:
+        assert_maintenance_history_evidence(
+            fresh_rows,
+            account=account,
+            target_dates=(patch.d for patch in patches),
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    rows = []
+    diffs = []
+    digest_targets = []
+    for patch in patches:
+        observed = by_date[patch.d][0]
+        existing = observed.nav
+        run_id = f"nav-repair:{account}:{patch.d.isoformat()}"
+        try:
+            candidate, _dataset = recompute_derived_row(
+                context=context,
+                observed=observed,
+                working_navs=working_navs,
+                run_id=run_id,
+            )
+        except Exception as exc:
+            raise SystemExit(
+                f"historical_evidence_required: {patch.d.isoformat()}: {exc}"
+            ) from exc
+        _assert_requested_derived_evidence(patch, candidate)
+        for field in BASE_FIELDS:
             if getattr(existing, field) != getattr(candidate, field):
                 raise SystemExit(f"safety abort: non-target field changed: {patch.d} {field}")
-        original_fields = _target_fields(existing)
-        target_fields = _target_fields(candidate)
+        original_states, target_states = changed_states(observed, candidate)
+        desired_states = maintenance_target_states(observed, candidate)
+        complete_original_states = state_subset(observed, MAINTENANCE_FIELDS)
+        base_fields = _base_state_envelopes(observed)
+        original_fields = {
+            field: state.envelope() for field, state in original_states.items()
+        }
+        target_fields = {
+            field: state.envelope() for field, state in target_states.items()
+        }
         changes = {
             field: {"old": original_fields[field], "new": target_fields[field]}
-            for field in PATCH_FIELDS
-            if original_fields[field] != target_fields[field]
+            for field in target_fields
         }
         rows.append({
             "date": patch.d.isoformat(),
-            "record_id": existing.record_id,
+            "record_id": observed.record_id,
+            "base_fields": base_fields,
             "original_fields": original_fields,
             "target_fields": target_fields,
+            "original_maintenance_fields": {
+                field: state.envelope()
+                for field, state in complete_original_states.items()
+            },
+            "desired_maintenance_fields": {
+                field: state.envelope()
+                for field, state in desired_states.items()
+            },
             "status": "pending",
         })
-        merged.append(candidate)
-        diffs.append({"date": patch.d.isoformat(), "record_id": existing.record_id, "changes": changes})
+        diffs.append({"date": patch.d.isoformat(), "record_id": observed.record_id, "changes": changes})
+        digest_targets.append({
+            "date": patch.d.isoformat(),
+            "record_id": observed.record_id,
+            "base_fields": base_fields,
+            "target_fields": {
+                field: state.envelope()
+                for field, state in desired_states.items()
+            },
+        })
+        working_navs = [
+            candidate if nav.record_id == candidate.record_id else nav
+            for nav in working_navs
+        ]
 
-    if errors:
-        raise SystemExit(f"patch preflight failed: every target date must resolve to exactly one record: {errors}")
+    dependency_rows = maintenance_dependency_evidence(
+        fresh_rows,
+        target_dates=(patch.d for patch in patches),
+    )
 
-    digest_payload = {
-        "account": account,
-        "mode": mode,
-        "rows": [
-            {
-                "date": row["date"],
-                "record_id": row["record_id"],
-                "target_fields": row["target_fields"],
-            }
-            for row in rows
-        ],
-    }
-    digest_raw = json.dumps(digest_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    plan_digest = hashlib.sha256(digest_raw.encode("utf-8")).hexdigest()
-    return rows, diffs, merged, plan_digest
+    plan_digest = canonical_plan_digest(
+        account=account,
+        mode=mode,
+        rows=digest_targets,
+        dependency_rows=dependency_rows,
+    )
+    return rows, diffs, working_navs, dependency_rows, plan_digest
 
 
 def _validation_dates(
@@ -423,13 +414,76 @@ def _validation_dates(
         return patched_dates
 
     selected = set(changed_dates)
-    ordered_dates = [nav.date for nav in series]
+    ordered_dates = sorted({nav.date for nav in series})
     positions = {nav_date: idx for idx, nav_date in enumerate(ordered_dates)}
     for changed_date in changed_dates:
         idx = positions.get(changed_date)
         if idx is not None and idx + 1 < len(ordered_dates):
             selected.add(ordered_dates[idx + 1])
     return selected
+
+
+def _canonical_validation_violations(
+    *,
+    context: NavRepairContext,
+    fresh_rows: List[FreshNavRow],
+    series: List[NAVHistory],
+    rows: List[Dict[str, Any]],
+    validation_dates: set[date],
+) -> List[Dict[str, Any]]:
+    """Validate non-target rows against the canonical post-patch chain."""
+
+    target_dates = {_iso_to_date(row["date"]) for row in rows}
+    by_date = rows_by_date(fresh_rows)
+    violations: List[Dict[str, Any]] = []
+    for validation_date in sorted(validation_dates - target_dates):
+        matches = by_date.get(validation_date) or []
+        if len(matches) != 1:
+            violations.append({
+                "date": validation_date.isoformat(),
+                "error": "validation_target_not_unique",
+                "match_count": len(matches),
+                "record_ids": [match.record_id for match in matches],
+            })
+            continue
+        observed = matches[0]
+        try:
+            candidate, _dataset = recompute_derived_row(
+                context=context,
+                observed=observed,
+                working_navs=series,
+                run_id=(
+                    f"nav-repair-validation:{context.account}:"
+                    f"{validation_date.isoformat()}"
+                ),
+            )
+        except Exception as exc:
+            violations.append({
+                "date": validation_date.isoformat(),
+                "record_id": observed.record_id,
+                "error": "canonical_validation_unavailable",
+                "detail": str(exc),
+            })
+            continue
+
+        expected = maintenance_target_states(observed, candidate)
+        actual = state_subset(observed, VALIDATION_FIELDS)
+        mismatches = {
+            field: {
+                "actual": actual[field].envelope(),
+                "expected": expected[field].envelope(),
+            }
+            for field in VALIDATION_FIELDS
+            if actual[field] != expected[field]
+        }
+        if mismatches:
+            violations.append({
+                "date": validation_date.isoformat(),
+                "record_id": observed.record_id,
+                "error": "canonical_derived_mismatch",
+                "fields": mismatches,
+            })
+    return violations
 
 
 def _append_journal(path: Path, event: Dict[str, Any]) -> None:
@@ -483,9 +537,134 @@ def _read_journal(path: Path) -> Dict[str, Any]:
         raise SystemExit(f"invalid nav repair journal: {path}")
 
     plan = dict(events[0])
+    raw_rows = plan["rows"]
+    if not isinstance(plan.get("dependency_rows"), list):
+        raise SystemExit(
+            "invalid nav repair journal: dependency evidence is required"
+        )
+    record_ids = [str(row.get("record_id") or "") for row in raw_rows]
+    dates = [str(row.get("date") or "") for row in raw_rows]
+    if (
+        any(not record_id for record_id in record_ids)
+        or len(set(record_ids)) != len(record_ids)
+        or any(not item for item in dates)
+        or len(set(dates)) != len(dates)
+    ):
+        raise SystemExit(f"invalid nav repair journal row identity: {path}")
+    for row in raw_rows:
+        if not isinstance(row.get("base_fields"), dict):
+            raise SystemExit(
+                "invalid nav repair journal: immutable base field evidence is required"
+            )
+        if set(row["base_fields"]) != set(BASE_FIELDS):
+            raise SystemExit(
+                "invalid nav repair journal: base field evidence is incomplete"
+            )
+        if not isinstance(row.get("original_fields"), dict) or not isinstance(
+            row.get("target_fields"),
+            dict,
+        ):
+            raise SystemExit(f"invalid nav repair journal field states: {path}")
+        original_complete = row.get("original_maintenance_fields")
+        desired_complete = row.get("desired_maintenance_fields")
+        if (
+            not isinstance(original_complete, dict)
+            or set(original_complete) != set(MAINTENANCE_FIELDS)
+            or not isinstance(desired_complete, dict)
+            or set(desired_complete) != set(MAINTENANCE_FIELDS)
+        ):
+            raise SystemExit(
+                "invalid nav repair journal: complete maintenance states are required"
+            )
+        changed_fields = set(row["original_fields"])
+        if changed_fields != set(row["target_fields"]) or not changed_fields.issubset(
+            MAINTENANCE_FIELDS
+        ):
+            raise SystemExit(
+                "invalid nav repair journal: changed maintenance fields are inconsistent"
+            )
+        for state_group in (
+            row["base_fields"],
+            row["original_fields"],
+            row["target_fields"],
+            original_complete,
+            desired_complete,
+        ):
+            try:
+                _states_from_envelopes(state_group)
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise SystemExit(
+                    f"invalid nav repair journal field envelope: {exc}"
+                ) from exc
+        if any(
+            row["original_fields"][field] != original_complete[field]
+            or row["target_fields"][field] != desired_complete[field]
+            or original_complete[field] == desired_complete[field]
+            for field in changed_fields
+        ) or any(
+            original_complete[field] != desired_complete[field]
+            for field in set(MAINTENANCE_FIELDS) - changed_fields
+        ):
+            raise SystemExit(
+                "invalid nav repair journal: changed and complete states disagree"
+            )
+    for dependency in plan["dependency_rows"]:
+        if (
+            not isinstance(dependency, dict)
+            or not str(dependency.get("record_id") or "").strip()
+            or not str(dependency.get("date") or "").strip()
+            or set(dependency.get("fields") or {}) != {"total_value", "shares", "nav"}
+        ):
+            raise SystemExit(
+                "invalid nav repair journal: dependency row evidence is incomplete"
+            )
+        try:
+            _states_from_envelopes(dependency["fields"])
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise SystemExit(
+                f"invalid nav repair journal dependency envelope: {exc}"
+            ) from exc
+    dependency_ids = [
+        str(item["record_id"])
+        for item in plan["dependency_rows"]
+    ]
+    dependency_dates = [
+        str(item["date"])
+        for item in plan["dependency_rows"]
+    ]
+    if (
+        len(set(dependency_ids)) != len(dependency_ids)
+        or len(set(dependency_dates)) != len(dependency_dates)
+        or any(item.get("account") != plan.get("account") for item in plan["dependency_rows"])
+    ):
+        raise SystemExit(
+            "invalid nav repair journal: dependency identity is inconsistent"
+        )
+    digest_rows = [
+        {
+            "date": row["date"],
+            "record_id": row["record_id"],
+            "base_fields": row["base_fields"],
+            "target_fields": row["desired_maintenance_fields"],
+        }
+        for row in raw_rows
+    ]
+    expected_digest = canonical_plan_digest(
+        account=str(plan.get("account") or ""),
+        mode=str(plan.get("mode") or ""),
+        rows=digest_rows,
+        dependency_rows=plan["dependency_rows"],
+    )
+    if plan.get("plan_digest") != expected_digest:
+        raise SystemExit("invalid nav repair journal: plan digest mismatch")
     rows = {
-        str(row["record_id"]): {**row, "status": "pending", "error": None}
-        for row in plan["rows"]
+        str(row["record_id"]): {
+            **row,
+            "status": "pending",
+            "error": None,
+            "write_attempted": False,
+        }
+        for row in raw_rows
     }
     state = "PLANNED"
     for event in events[1:]:
@@ -497,6 +676,8 @@ def _read_journal(path: Path) -> Dict[str, Any]:
                 raise SystemExit(f"journal row event references unknown record_id: {event.get('record_id')}")
             row["status"] = str(event.get("status") or row["status"])
             row["error"] = event.get("error")
+            if "write_attempted" in event:
+                row["write_attempted"] = bool(event["write_attempted"])
     plan["state"] = state
     plan["rows"] = list(rows.values())
     return plan
@@ -543,6 +724,10 @@ def _result(plan: Dict[str, Any], journal_path: Path, status: str, **extra: Any)
         "pending": [row for row in rows if row["status"] == "pending"],
         "rolled_back": [row for row in rows if row["status"] == "rolled_back"],
         "rollback_failed": [row for row in rows if row["status"] == "rollback_failed"],
+        "partial_write_possible": any(
+            row.get("write_attempted") and row["status"] == "failed"
+            for row in rows
+        ),
         "resume_command": resume_command,
         "rollback_command": rollback_command,
     }
@@ -551,30 +736,52 @@ def _result(plan: Dict[str, Any], journal_path: Path, status: str, **extra: Any)
 
 
 def _apply_failure_status(plan: Dict[str, Any]) -> str:
-    return "partial" if any(row["status"] == "applied" for row in plan["rows"]) else "failed"
+    return (
+        "partial"
+        if any(
+            row["status"] == "applied" or row.get("write_attempted")
+            for row in plan["rows"]
+        )
+        else "failed"
+    )
 
 
-def _current_rows(context: NavRepairContext, plan: Dict[str, Any]) -> Dict[str, NAVHistory]:
-    navs = context.storage.get_nav_history(context.account, days=9999)
-    by_date: Dict[date, List[NAVHistory]] = {}
-    for nav in navs:
-        by_date.setdefault(nav.date, []).append(nav)
+def _current_rows(context: NavRepairContext, plan: Dict[str, Any]) -> Dict[str, FreshNavRow]:
+    fresh_rows = read_fresh_nav_rows(context)
+    target_dates = [_iso_to_date(row["date"]) for row in plan["rows"]]
+    try:
+        assert_maintenance_history_evidence(
+            fresh_rows,
+            account=context.account,
+            target_dates=target_dates,
+        )
+    except ValueError as exc:
+        raise RuntimeError(f"journal dependency preflight failed: {exc}") from exc
+    actual_dependencies = maintenance_dependency_evidence(
+        fresh_rows,
+        target_dates=target_dates,
+    )
+    if actual_dependencies != plan["dependency_rows"]:
+        raise RuntimeError(
+            "journal dependency preflight failed: NAV dependency evidence changed"
+        )
+    by_date = rows_by_date(fresh_rows)
     current = {}
     errors = []
     for row in plan["rows"]:
         row_date = _iso_to_date(row["date"])
         matches = by_date.get(row_date) or []
-        if len(matches) != 1 or str(getattr(matches[0], "record_id", "")) != str(row["record_id"]):
+        if len(matches) != 1 or matches[0].record_id != str(row["record_id"]):
             errors.append({
                 "date": row["date"],
                 "expected_record_id": row["record_id"],
                 "match_count": len(matches),
-                "actual_record_ids": [getattr(match, "record_id", None) for match in matches],
+                "actual_record_ids": [match.record_id for match in matches],
             })
             continue
         current[str(row["record_id"])] = matches[0]
     if errors:
-        raise SystemExit(f"journal preflight failed: {errors}")
+        raise RuntimeError(f"journal preflight failed: {errors}")
     return current
 
 
@@ -588,16 +795,49 @@ def _apply_journal_locked(*, context: NavRepairContext, journal_path: Path, resu
     plan = _read_journal(journal_path)
     if plan["state"] in {"ROLLING_BACK", "ROLLBACK_PARTIAL", "ROLLED_BACK"}:
         raise SystemExit(f"cannot apply journal in state {plan['state']}")
-    current = _current_rows(context, plan)
+    try:
+        current = _current_rows(context, plan)
+    except Exception as exc:
+        row = next(
+            (item for item in plan["rows"] if item["status"] != "applied"),
+            plan["rows"][0],
+        )
+        error = str(exc)
+        _append_journal(journal_path, {
+            "event": "ROW",
+            "record_id": row["record_id"],
+            "date": row["date"],
+            "status": "failed",
+            "error": error,
+        })
+        _append_journal(
+            journal_path,
+            {"event": "STATE", "state": "PARTIAL", "error": error},
+        )
+        failed_plan = _read_journal(journal_path)
+        return _result(
+            failed_plan,
+            journal_path,
+            _apply_failure_status(failed_plan),
+        )
 
     conflict = None
     for row in plan["rows"]:
-        nav = current[str(row["record_id"])]
+        live_row = current[str(row["record_id"])]
+        if not _same_row_states(live_row, row["base_fields"]):
+            conflict = (row, "immutable base fields changed after planning")
+            break
         if row["status"] == "applied":
-            if not _same_target_fields(nav, row["target_fields"]):
-                conflict = (row, "applied row no longer matches target fields")
+            if not _same_row_states(
+                live_row,
+                row["desired_maintenance_fields"],
+            ):
+                conflict = (
+                    row,
+                    "applied row no longer matches complete desired maintenance state",
+                )
                 break
-        elif _same_target_fields(nav, row["target_fields"]):
+        elif _same_row_states(live_row, row["desired_maintenance_fields"]):
             _append_journal(journal_path, {
                 "event": "ROW",
                 "record_id": row["record_id"],
@@ -605,8 +845,14 @@ def _apply_journal_locked(*, context: NavRepairContext, journal_path: Path, resu
                 "status": "applied",
                 "recovered": True,
             })
-        elif not _same_target_fields(nav, row["original_fields"]):
-            conflict = (row, "current row matches neither original nor target fields")
+        elif not _same_row_states(
+            live_row,
+            row["original_maintenance_fields"],
+        ):
+            conflict = (
+                row,
+                "current row matches neither complete original nor desired maintenance state",
+            )
             break
     if conflict:
         row, error = conflict
@@ -626,13 +872,46 @@ def _apply_journal_locked(*, context: NavRepairContext, journal_path: Path, resu
     for row in plan["rows"]:
         if row["status"] == "applied":
             continue
-        nav = current[str(row["record_id"])]
+        write_attempted = False
         try:
-            context.storage.write_nav_record(
-                _with_target_fields(nav, row["target_fields"]),
-                overwrite_existing=True,
+            live_row = current[str(row["record_id"])]
+            if not _same_row_states(live_row, row["base_fields"]):
+                raise RuntimeError("immutable base fields changed before apply")
+            if _same_row_states(live_row, row["desired_maintenance_fields"]):
+                _append_journal(journal_path, {
+                    "event": "ROW",
+                    "record_id": row["record_id"],
+                    "date": row["date"],
+                    "status": "applied",
+                    "recovered": True,
+                })
+                continue
+            if not _same_row_states(
+                live_row,
+                row["original_maintenance_fields"],
+            ):
+                raise RuntimeError(
+                    "current row matches neither complete original nor desired "
+                    "maintenance state before apply"
+                )
+            write_attempted = True
+            restricted_patch(
+                context,
+                record_id=str(row["record_id"]),
+                states=_states_from_envelopes(row["target_fields"]),
                 dry_run=False,
             )
+            current = _current_rows(context, plan)
+            live_row = current[str(row["record_id"])]
+            if not _same_row_states(live_row, row["base_fields"]):
+                raise RuntimeError("immutable base fields changed during apply")
+            if not _same_row_states(
+                live_row,
+                row["desired_maintenance_fields"],
+            ):
+                raise RuntimeError(
+                    "fresh readback does not match complete desired maintenance state"
+                )
         except Exception as exc:
             _append_journal(journal_path, {
                 "event": "ROW",
@@ -640,6 +919,7 @@ def _apply_journal_locked(*, context: NavRepairContext, journal_path: Path, resu
                 "date": row["date"],
                 "status": "failed",
                 "error": str(exc),
+                "write_attempted": write_attempted,
             })
             _append_journal(journal_path, {"event": "STATE", "state": "PARTIAL", "error": str(exc)})
             failed_plan = _read_journal(journal_path)
@@ -671,8 +951,26 @@ def _rollback_journal_locked(*, context: NavRepairContext, journal_path: Path) -
     for row in reversed(plan["rows"]):
         if row["status"] == "rolled_back":
             continue
-        nav = current[str(row["record_id"])]
-        if _same_target_fields(nav, row["original_fields"]):
+        live_row = current[str(row["record_id"])]
+        if not _same_row_states(live_row, row["base_fields"]):
+            error = "immutable base fields changed after planning"
+            _append_journal(journal_path, {
+                "event": "ROW",
+                "record_id": row["record_id"],
+                "date": row["date"],
+                "status": "rollback_failed",
+                "error": error,
+            })
+            _append_journal(
+                journal_path,
+                {"event": "STATE", "state": "ROLLBACK_PARTIAL", "error": error},
+            )
+            return _result(
+                _read_journal(journal_path),
+                journal_path,
+                "rollback_partial",
+            )
+        if _same_row_states(live_row, row["original_maintenance_fields"]):
             _append_journal(journal_path, {
                 "event": "ROW",
                 "record_id": row["record_id"],
@@ -681,8 +979,11 @@ def _rollback_journal_locked(*, context: NavRepairContext, journal_path: Path) -
                 "recovered": True,
             })
             continue
-        if not _same_target_fields(nav, row["target_fields"]):
-            error = "current row matches neither target nor original fields"
+        if not _same_row_states(live_row, row["desired_maintenance_fields"]):
+            error = (
+                "current row matches neither complete desired nor original "
+                "maintenance state"
+            )
             _append_journal(journal_path, {
                 "event": "ROW",
                 "record_id": row["record_id"],
@@ -693,11 +994,24 @@ def _rollback_journal_locked(*, context: NavRepairContext, journal_path: Path) -
             _append_journal(journal_path, {"event": "STATE", "state": "ROLLBACK_PARTIAL", "error": error})
             return _result(_read_journal(journal_path), journal_path, "rollback_partial")
         try:
-            context.storage.write_nav_record(
-                _with_target_fields(nav, row["original_fields"]),
-                overwrite_existing=True,
+            restricted_patch(
+                context,
+                record_id=str(row["record_id"]),
+                states=_states_from_envelopes(row["original_fields"]),
                 dry_run=False,
             )
+            current = _current_rows(context, plan)
+            live_row = current[str(row["record_id"])]
+            if not _same_row_states(live_row, row["base_fields"]):
+                raise RuntimeError("immutable base fields changed during rollback")
+            if not _same_row_states(
+                live_row,
+                row["original_maintenance_fields"],
+            ):
+                raise RuntimeError(
+                    "fresh rollback readback does not match complete original "
+                    "maintenance state"
+                )
         except Exception as exc:
             _append_journal(journal_path, {
                 "event": "ROW",
@@ -736,7 +1050,12 @@ def main(argv=None):
     action.add_argument("--rollback-journal")
     ap.add_argument("--backup-file", default=None, help="where to write backup JSON before apply")
     ap.add_argument("--no-validate", action="store_true")
-    ap.add_argument("--validate-level", choices=["basic", "full"], default="basic")
+    ap.add_argument(
+        "--validate-level",
+        choices=["basic", "full"],
+        default="basic",
+        help="compatibility option; both levels enforce canonical invariants",
+    )
     ap.add_argument("--validate-scope", choices=["changed", "patched", "all"], default="changed")
     args = ap.parse_args(argv)
     return run(args)
@@ -763,11 +1082,16 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     patch_file = getattr(args, "patch_file", None)
     if not patch_file:
         raise SystemExit("--patch-file is required unless --rollback-journal is used")
+    if getattr(args, "no_validate", False):
+        raise SystemExit(
+            "--no-validate is no longer supported: canonical NAV invariants are mandatory"
+        )
     context = create_nav_repair_context(account=getattr(args, "account", None))
     patches = load_patch_rows(patch_file, args.mode)
-    navs = sorted(context.storage.get_nav_history(context.account, days=9999), key=lambda nav: nav.date)
-    rows, diffs, merged, plan_digest = _resolve_patch_targets(
-        navs=navs,
+    fresh_rows = read_fresh_nav_rows(context)
+    rows, diffs, series, dependency_rows, plan_digest = _resolve_patch_targets(
+        context=context,
+        fresh_rows=fresh_rows,
         patches=patches,
         account=context.account,
         mode=args.mode,
@@ -782,25 +1106,18 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             raise SystemExit("resume plan account/mode mismatch")
         return _print_result(_apply_journal(context=context, journal_path=journal_path, resume=True))
 
-    patched_by_date = {candidate.date: candidate for candidate in merged}
-    series = [patched_by_date.get(nav.date, nav) for nav in navs]
-    violations: List[Dict[str, Any]] = []
-    validation_dates = set()
-    if not args.no_validate:
-        validation_dates = _validation_dates(series=series, rows=rows, validate_scope=args.validate_scope)
-        for idx, nav in enumerate(series):
-            if nav.date not in validation_dates:
-                continue
-            errors = validate_math(
-                context=context,
-                navs_sorted=series,
-                idx=idx,
-                candidate=nav,
-                mode=args.mode,
-                validate_level=args.validate_level,
-            )
-            if errors:
-                violations.append({"date": nav.date.isoformat(), "record_id": nav.record_id, "errors": errors})
+    validation_dates = _validation_dates(
+        series=series,
+        rows=rows,
+        validate_scope=args.validate_scope,
+    )
+    violations = _canonical_validation_violations(
+        context=context,
+        fresh_rows=fresh_rows,
+        series=series,
+        rows=rows,
+        validation_dates=validation_dates,
+    )
 
     out_dir = Path("audit")
     out_dir.mkdir(exist_ok=True)
@@ -840,14 +1157,18 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         json.dumps({
             "account": context.account,
             "plan_digest": plan_digest,
+            "dependency_rows": dependency_rows,
             "rows": [
                 {
-                    "date": nav.date.isoformat(),
-                    "record_id": nav.record_id,
-                    "fields": nav.model_dump(mode="json"),
+                    "date": row["date"],
+                    "record_id": row["record_id"],
+                    "base_fields": row["base_fields"],
+                    "original_fields": row["original_fields"],
+                    "original_maintenance_fields": row[
+                        "original_maintenance_fields"
+                    ],
                 }
-                for nav in navs
-                if nav.date in {_iso_to_date(row["date"]) for row in rows}
+                for row in rows
             ],
         }, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -867,6 +1188,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             "patch_file": str(Path(patch_file).resolve()),
             "plan_digest": plan_digest,
             "created_at": datetime.now().isoformat(),
+            "dependency_rows": dependency_rows,
             "rows": rows,
         })
 

@@ -1,63 +1,73 @@
 #!/usr/bin/env python3
-"""Bulk recompute + backfill nav_history derived fields.
-
-This module contains the implementation behind
-``scripts/nav_history_repair.py backfill``.
-
-Design:
-- Recompute target dates with existing PortfolioManager.record_nav(...) logic (persist=False)
-- Persist in one/batched call via FeishuStorage.write_nav_records(...)
-- Supports input JSON (audit/recompute output) OR date range over existing nav_history
-
-Examples:
-  # Dry-run from date range
-  ./.venv/bin/python scripts/nav_history_repair.py backfill --account lx --from 2025-01-01 --to 2025-12-31 --dry-run
-
-  # Apply from audit output
-  ./.venv/bin/python scripts/nav_history_repair.py backfill --account lx --input audit/rebuild_strong_consistency_lx.json --apply
-"""
-
+"""Recompute historical NAV derived fields without rewriting base facts."""
 from __future__ import annotations
 
 import argparse
 import json
+import math
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from src.app.nav_finality import NavWriteContext
-from src.maintenance.nav_history_repair.context import NavRepairContext, create_nav_repair_context
-from src.models import NAVHistory, PortfolioValuation
+from src import config
+from src.domain.nav_calculator import NavCalculator
+from src.maintenance.nav_history_repair import patch as patch_workflow
+from src.maintenance.nav_history_repair.common import (
+    BASE_FIELDS,
+    FreshNavRow,
+    MAINTENANCE_FIELDS,
+    assert_maintenance_history_evidence,
+    changed_states,
+    maintenance_dependency_evidence,
+    maintenance_target_states,
+    read_fresh_nav_rows,
+    recompute_derived_row,
+    rows_by_date,
+    state_subset,
+)
+from src.maintenance.nav_history_repair.context import create_nav_repair_context
+from src.models import NAVHistory
+from src.process_lock import process_lock
 
 
-@dataclass
+@dataclass(frozen=True)
 class BaseNavPoint:
+    """Requested date plus optional expected immutable evidence from input."""
+
     d: date
-    total_value: float
+    total_value: Optional[float] = None
     cash_value: Optional[float] = None
     stock_value: Optional[float] = None
     fund_value: Optional[float] = None
     cn_stock_value: Optional[float] = None
     us_stock_value: Optional[float] = None
     hk_stock_value: Optional[float] = None
+    record_id: Optional[str] = None
+    expected_account: Optional[str] = None
+    provided_fields: frozenset[str] = frozenset()
 
 
-def _to_date(v: Any) -> date:
-    if isinstance(v, date):
-        return v
-    if isinstance(v, (int, float)):
-        return datetime.fromtimestamp(float(v) / 1000).date()
-    return datetime.strptime(str(v)[:10], "%Y-%m-%d").date()
+def _to_date(value: Any) -> date:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(float(value) / 1000).date()
+    return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
 
 
-def _to_float(v: Any, default: Optional[float] = None) -> Optional[float]:
-    if v is None:
-        return default
+def _optional_finite_float(value: Any, *, field: str) -> Optional[float]:
+    if value is None:
+        return None
     try:
-        return float(v)
-    except Exception:
-        return default
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"invalid expected {field}: {value!r}") from exc
+    if not math.isfinite(parsed):
+        raise ValueError(f"invalid expected {field}: value must be finite")
+    return parsed
 
 
 def _load_input_rows(path: str) -> List[Dict[str, Any]]:
@@ -68,237 +78,408 @@ def _load_input_rows(path: str) -> List[Dict[str, Any]]:
         rows = data.get(key)
         if isinstance(rows, list):
             return rows
-    raise ValueError("input json must be a list or contain one of keys: rebuilt/rows/navs/items")
-
-
-def _rows_to_points(rows: List[Dict[str, Any]]) -> List[BaseNavPoint]:
-    out: List[BaseNavPoint] = []
-    for r in rows:
-        d_raw = r.get("date")
-        if not d_raw:
-            continue
-        d = _to_date(d_raw)
-
-        total_value = _to_float(r.get("total_value"))
-        if total_value is None:
-            # best-effort fallback
-            stock_v = _to_float(r.get("stock_value"), 0.0) or 0.0
-            cash_v = _to_float(r.get("cash_value"), 0.0) or 0.0
-            fund_v = _to_float(r.get("fund_value"), 0.0) or 0.0
-            total_value = stock_v + cash_v + fund_v
-
-        out.append(
-            BaseNavPoint(
-                d=d,
-                total_value=float(total_value),
-                cash_value=_to_float(r.get("cash_value")),
-                stock_value=_to_float(r.get("stock_value")),
-                fund_value=_to_float(r.get("fund_value")),
-                cn_stock_value=_to_float(r.get("cn_stock_value")),
-                us_stock_value=_to_float(r.get("us_stock_value")),
-                hk_stock_value=_to_float(r.get("hk_stock_value")),
-            )
-        )
-
-    # de-dup by date (keep last)
-    m = {p.d: p for p in out}
-    return [m[d] for d in sorted(m.keys())]
-
-
-def _existing_points_from_range(context: NavRepairContext, d_from: date, d_to: date) -> List[BaseNavPoint]:
-    navs = context.storage.get_nav_history(context.account, days=9999)
-    points: List[BaseNavPoint] = []
-    for n in navs:
-        if n.date < d_from or n.date > d_to:
-            continue
-        points.append(
-            BaseNavPoint(
-                d=n.date,
-                total_value=float(n.total_value or 0.0),
-                cash_value=n.cash_value,
-                stock_value=n.stock_value,
-                fund_value=n.fund_value,
-                cn_stock_value=n.cn_stock_value,
-                us_stock_value=n.us_stock_value,
-                hk_stock_value=n.hk_stock_value,
-            )
-        )
-    points.sort(key=lambda x: x.d)
-    return points
-
-
-def _build_valuation(account: str, p: BaseNavPoint) -> PortfolioValuation:
-    total = float(p.total_value or 0.0)
-    stock = p.stock_value
-    cash = p.cash_value
-    fund = p.fund_value
-
-    if stock is None and cash is not None:
-        stock = total - float(cash)
-    if cash is None and stock is not None:
-        cash = total - float(stock)
-    if stock is None and cash is None:
-        cash = total
-        stock = 0.0
-    if fund is None:
-        fund = 0.0
-
-    return PortfolioValuation(
-        account=account,
-        total_value_cny=total,
-        cash_value_cny=float(cash or 0.0),
-        stock_value_cny=float(stock or 0.0),
-        fund_value_cny=float(fund or 0.0),
-        cn_asset_value=float(p.cn_stock_value or 0.0),
-        us_asset_value=float(p.us_stock_value or 0.0),
-        hk_asset_value=float(p.hk_stock_value or 0.0),
-        holdings=[],
-        warnings=[],
+    raise ValueError(
+        "input json must be a list or contain one of keys: rebuilt/rows/navs/items"
     )
 
 
+def _rows_to_points(rows: List[Dict[str, Any]]) -> List[BaseNavPoint]:
+    points: list[BaseNavPoint] = []
+    for row_index, raw in enumerate(rows):
+        if not isinstance(raw, dict) or raw.get("date") in (None, ""):
+            raise ValueError(f"input row {row_index} requires date")
+        provided = frozenset(str(key) for key in raw)
+        kwargs = {
+            field: _optional_finite_float(raw.get(field), field=field)
+            for field in BASE_FIELDS
+            if field in raw
+        }
+        points.append(
+            BaseNavPoint(
+                d=_to_date(raw["date"]),
+                **kwargs,
+                record_id=(
+                    str(raw.get("record_id") or "").strip() or None
+                    if "record_id" in raw
+                    else None
+                ),
+                expected_account=(
+                    str(raw.get("account") or "").strip() or None
+                    if "account" in raw
+                    else None
+                ),
+                provided_fields=provided,
+            )
+        )
+    return sorted(points, key=lambda point: point.d)
+
+
 def parse_args(argv=None) -> argparse.Namespace:
-    ap = argparse.ArgumentParser(description="Bulk recompute/backfill nav_history derived fields")
-    ap.add_argument("--account", default="lx")
-    ap.add_argument("--input", help="Input JSON from audit/recompute output")
-    ap.add_argument("--from", dest="d_from", help="YYYY-MM-DD (required if --input absent)")
-    ap.add_argument("--to", dest="d_to", help="YYYY-MM-DD (required if --input absent)")
-    ap.add_argument("--mode", choices=["replace", "upsert"], default="replace")
-    ap.add_argument("--allow-partial", action="store_true")
-    ap.add_argument("--apply", action="store_true", help="Actually write to Feishu")
-    ap.add_argument("--dry-run", action="store_true", help="Force dry-run (explicit no-write)")
-    ap.add_argument("--limit", type=int, default=0, help="Only process first N dates (debug)")
-    args = ap.parse_args(argv)
+    parser = argparse.ArgumentParser(
+        description="Recompute/backfill nav_history derived fields"
+    )
+    parser.add_argument("--account", default="lx")
+    parser.add_argument("--input", help="Input JSON with dates/expected base evidence")
+    parser.add_argument("--from", dest="d_from", help="YYYY-MM-DD")
+    parser.add_argument("--to", dest="d_to", help="YYYY-MM-DD")
+    parser.add_argument("--mode", choices=["replace", "upsert"], default="replace")
+    parser.add_argument("--allow-partial", action="store_true")
+    action = parser.add_mutually_exclusive_group()
+    action.add_argument("--apply", action="store_true")
+    action.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--limit", type=int, default=0)
+    args = parser.parse_args(argv)
     if args.apply and args.dry_run:
         raise ValueError("--apply and --dry-run are mutually exclusive")
     return args
 
 
-def main(argv=None) -> None:
-    args = parse_args(argv)
-    run(args)
+def main(argv=None) -> Dict[str, Any]:
+    return run(parse_args(argv))
 
 
-def run(args: argparse.Namespace) -> None:
+def _emit(payload: Dict[str, Any]) -> Dict[str, Any]:
+    print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+    return payload
+
+
+def _blocked(
+    *,
+    account: str,
+    reasons: list[dict[str, Any]],
+    mode: str,
+) -> Dict[str, Any]:
+    return _emit({
+        "success": False,
+        "status": "historical_evidence_required",
+        "account": account,
+        "mode": mode,
+        "reasons": reasons,
+        "write": {"would_write": 0, "written": 0},
+    })
+
+
+def _assert_expected_base(point: BaseNavPoint, observed: FreshNavRow) -> list[str]:
+    errors: list[str] = []
+    if "record_id" in point.provided_fields and point.record_id != observed.record_id:
+        errors.append(
+            f"record_id expected={point.record_id!r} actual={observed.record_id!r}"
+        )
+    if "account" in point.provided_fields and point.expected_account != observed.nav.account:
+        errors.append(
+            f"account expected={point.expected_account!r} actual={observed.nav.account!r}"
+        )
+    for field in BASE_FIELDS:
+        if field not in point.provided_fields:
+            continue
+        expected = getattr(point, field)
+        actual_state = observed.field_states.get(field)
+        if expected is None:
+            if actual_state is None or actual_state.state != "null":
+                errors.append(
+                    f"{field} expected=null actual={getattr(actual_state, 'state', 'missing')}"
+                )
+        elif actual_state is None or actual_state.state != "value":
+            errors.append(
+                f"{field} expected={expected} actual_state={getattr(actual_state, 'state', 'missing')}"
+            )
+        elif not NavCalculator.money_equal(expected, actual_state.value):
+            errors.append(
+                f"{field} expected={expected} actual={actual_state.value}"
+            )
+    return errors
+
+
+def _replace_working(
+    working: list[NAVHistory],
+    candidate: NAVHistory,
+) -> list[NAVHistory]:
+    return [
+        candidate if nav.record_id == candidate.record_id else nav
+        for nav in working
+    ]
+
+
+def run(args: argparse.Namespace) -> Dict[str, Any]:
     if args.apply and args.dry_run:
         raise ValueError("--apply and --dry-run are mutually exclusive")
+    if getattr(args, "allow_partial", False):
+        raise ValueError(
+            "--allow-partial is not supported for CAS-protected derived maintenance"
+        )
 
     context = create_nav_repair_context(account=args.account)
+    fresh_rows = read_fresh_nav_rows(context)
 
-    # Build base points
     if args.input:
-        rows = _load_input_rows(args.input)
-        points = _rows_to_points(rows)
+        points = _rows_to_points(_load_input_rows(args.input))
     else:
         if not args.d_from or not args.d_to:
             raise ValueError("either --input or (--from and --to) is required")
         d_from = _to_date(args.d_from)
         d_to = _to_date(args.d_to)
-        points = _existing_points_from_range(context, d_from, d_to)
+        points = [
+            BaseNavPoint(d=row.nav.date)
+            for row in fresh_rows
+            if d_from <= row.nav.date <= d_to
+        ]
 
     if args.limit and args.limit > 0:
         points = points[: args.limit]
-
     if not points:
-        print(json.dumps({"success": True, "count": 0, "message": "no points"}, ensure_ascii=False))
-        return
+        return _emit({
+            "success": True,
+            "status": "no_targets",
+            "account": context.account,
+            "count": 0,
+            "write": {"would_write": 0, "written": 0},
+        })
 
-    # Preload once; then mutate in-memory nav index incrementally so later dates depend on recomputed earlier dates.
-    context.storage.preload_nav_index(context.account)
-    idx = context.storage.get_nav_index(context.account)
-    working_navs: List[NAVHistory] = sorted(list(idx.get("_nav_objects") or []), key=lambda n: n.date)
-
-    def _upsert_working(nav: NAVHistory):
-        replaced = False
-        for i, n in enumerate(working_navs):
-            if n.date == nav.date:
-                working_navs[i] = nav
-                replaced = True
-                break
-        if not replaced:
-            working_navs.append(nav)
-            working_navs.sort(key=lambda x: x.date)
-
-    recomputed: List[NAVHistory] = []
-    for p in points:
-        # inject working nav history into in-memory index for this iteration
-        if isinstance(context.storage._nav_index_mem_cache.get(context.account), dict):
-            context.storage._nav_index_mem_cache[context.account]["_nav_objects"] = list(working_navs)
-
-        valuation = _build_valuation(context.account, p)
-        nav = context.portfolio.record_nav(
-            context.account,
-            valuation=valuation,
-            nav_date=p.d,
-            persist=False,
-            overwrite_existing=True,
-            dry_run=True,
-            nav_write_context=NavWriteContext(
-                status="maintenance",
-                writer="nav-repair",
-                write_reason="nav_history_backfill",
-                nav_date=p.d,
-            ),
+    request_dates = [point.d for point in points]
+    duplicate_requests = sorted({
+        item for item in request_dates if request_dates.count(item) > 1
+    })
+    if duplicate_requests:
+        return _blocked(
+            account=context.account,
+            mode=args.mode,
+            reasons=[{
+                "reason": "duplicate_requested_date",
+                "dates": [item.isoformat() for item in duplicate_requests],
+            }],
         )
 
-        # Keep market-value decomposition from input/existing base where available.
-        nav.total_value = float(p.total_value)
-        if p.cash_value is not None:
-            nav.cash_value = float(p.cash_value)
-        if p.stock_value is not None:
-            nav.stock_value = float(p.stock_value)
-        if p.fund_value is not None:
-            nav.fund_value = float(p.fund_value)
-        if p.cn_stock_value is not None:
-            nav.cn_stock_value = float(p.cn_stock_value)
-        if p.us_stock_value is not None:
-            nav.us_stock_value = float(p.us_stock_value)
-        if p.hk_stock_value is not None:
-            nav.hk_stock_value = float(p.hk_stock_value)
+    grouped = rows_by_date(fresh_rows)
+    preflight_errors: list[dict[str, Any]] = []
+    resolved: list[tuple[BaseNavPoint, FreshNavRow]] = []
+    for point in points:
+        matches = grouped.get(point.d) or []
+        if len(matches) != 1:
+            preflight_errors.append({
+                "date": point.d.isoformat(),
+                "reason": "missing_target" if not matches else "duplicate_target",
+                "match_count": len(matches),
+                "record_ids": [match.record_id for match in matches],
+                "mode": args.mode,
+            })
+            continue
+        evidence_errors = _assert_expected_base(point, matches[0])
+        if evidence_errors:
+            preflight_errors.append({
+                "date": point.d.isoformat(),
+                "reason": "base_evidence_drift",
+                "errors": evidence_errors,
+            })
+            continue
+        resolved.append((point, matches[0]))
+    if preflight_errors:
+        return _blocked(
+            account=context.account,
+            mode=args.mode,
+            reasons=preflight_errors,
+        )
+    try:
+        assert_maintenance_history_evidence(
+            fresh_rows,
+            account=context.account,
+            target_dates=(point.d for point, _row in resolved),
+        )
+    except ValueError as exc:
+        return _blocked(
+            account=context.account,
+            mode=args.mode,
+            reasons=[{
+                "reason": "maintenance_history_evidence_invalid",
+                "error": str(exc),
+            }],
+        )
 
-        recomputed.append(nav)
-        _upsert_working(nav)
+    working = [row.nav for row in fresh_rows]
+    plan_rows: list[dict[str, Any]] = []
+    diffs: list[dict[str, Any]] = []
+    candidates: list[NAVHistory] = []
+    digest_targets: list[dict[str, Any]] = []
+    try:
+        for _point, observed in resolved:
+            run_id = (
+                f"nav-repair:{context.account}:{observed.nav.date.isoformat()}"
+            )
+            candidate, _dataset = recompute_derived_row(
+                context=context,
+                observed=observed,
+                working_navs=working,
+                run_id=run_id,
+            )
+            original, target = changed_states(observed, candidate)
+            desired = maintenance_target_states(observed, candidate)
+            complete_original = state_subset(observed, MAINTENANCE_FIELDS)
+            base_fields = {
+                field: state.envelope()
+                for field, state in state_subset(observed, BASE_FIELDS).items()
+            }
+            original_envelopes = {
+                field: state.envelope() for field, state in original.items()
+            }
+            target_envelopes = {
+                field: state.envelope() for field, state in target.items()
+            }
+            plan_rows.append({
+                "date": observed.nav.date.isoformat(),
+                "record_id": observed.record_id,
+                "base_fields": base_fields,
+                "original_fields": original_envelopes,
+                "target_fields": target_envelopes,
+                "original_maintenance_fields": {
+                    field: state.envelope()
+                    for field, state in complete_original.items()
+                },
+                "desired_maintenance_fields": {
+                    field: state.envelope()
+                    for field, state in desired.items()
+                },
+                "status": "pending",
+            })
+            diffs.append({
+                "date": observed.nav.date.isoformat(),
+                "record_id": observed.record_id,
+                "changes": {
+                    field: {
+                        "old": original_envelopes[field],
+                        "new": target_envelopes[field],
+                    }
+                    for field in target_envelopes
+                },
+            })
+            candidates.append(candidate)
+            digest_targets.append({
+                "date": observed.nav.date.isoformat(),
+                "record_id": observed.record_id,
+                "base_fields": base_fields,
+                "target_fields": {
+                    field: state.envelope()
+                    for field, state in desired.items()
+                },
+            })
+            working = _replace_working(working, candidate)
+    except Exception as exc:
+        return _blocked(
+            account=context.account,
+            mode=args.mode,
+            reasons=[{
+                "reason": "canonical_recompute_blocked",
+                "error": str(exc),
+            }],
+        )
 
-    payload = {
-        "success": True,
+    dependency_rows = maintenance_dependency_evidence(
+        fresh_rows,
+        target_dates=(point.d for point, _row in resolved),
+    )
+    plan_digest = patch_workflow.canonical_plan_digest(
+        account=context.account,
+        mode="strong-consistency-gap",
+        rows=digest_targets,
+        dependency_rows=dependency_rows,
+    )
+    changed_count = sum(bool(row["target_fields"]) for row in plan_rows)
+    validation_dates = patch_workflow._validation_dates(
+        series=working,
+        rows=plan_rows,
+        validate_scope="changed",
+    )
+    violations = patch_workflow._canonical_validation_violations(
+        context=context,
+        fresh_rows=fresh_rows,
+        series=working,
+        rows=plan_rows,
+        validation_dates=validation_dates,
+    )
+    payload: Dict[str, Any] = {
+        "success": not violations,
+        "status": (
+            "failed"
+            if violations
+            else ("dry_run" if not args.apply else "planned")
+        ),
         "account": context.account,
-        "count": len(recomputed),
-        "date_from": recomputed[0].date.isoformat(),
-        "date_to": recomputed[-1].date.isoformat(),
+        "count": len(candidates),
+        "changed": changed_count,
+        "date_from": candidates[0].date.isoformat(),
+        "date_to": candidates[-1].date.isoformat(),
         "mode": args.mode,
-        "dry_run": not args.apply,
+        "plan_digest": plan_digest,
+        "validation_dates": sorted(item.isoformat() for item in validation_dates),
+        "violations": violations,
+        "diffs": diffs,
         "sample": [
             {
-                "date": n.date.isoformat(),
-                "nav": n.nav,
-                "shares": n.shares,
-                "cash_flow": n.cash_flow,
-                "pnl": n.pnl,
-                "mtd_nav_change": n.mtd_nav_change,
-                "ytd_nav_change": n.ytd_nav_change,
-                "mtd_pnl": n.mtd_pnl,
-                "ytd_pnl": n.ytd_pnl,
+                "date": nav.date.isoformat(),
+                "nav": nav.nav,
+                "shares": nav.shares,
+                "cash_flow": nav.cash_flow,
+                "gap_cash_flow": (
+                    ((nav.details or {}).get("cash_flow_basis") or {}).get(
+                        "gap_cash_flow"
+                    )
+                ),
+                "pnl": nav.pnl,
             }
-            for n in recomputed[:5]
+            for nav in candidates[:5]
         ],
     }
-
-    if args.apply:
-        write_result = context.storage.write_nav_records(
-            recomputed,
-            mode=args.mode,
-            allow_partial=bool(args.allow_partial),
-            dry_run=False,
-        )
-        payload["write"] = write_result
-    else:
+    if violations:
+        payload["write"] = {"would_patch": 0, "written": 0}
+        return _emit(payload)
+    if not args.apply:
         payload["write"] = {
-            "mode": args.mode,
-            "would_write": len(recomputed),
-            "note": "run with --apply to persist",
+            "would_patch": changed_count,
+            "full_row_writes": 0,
+            "note": "run with --apply to persist derived-only patches",
         }
+        return _emit(payload)
 
-    print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    audit_dir = Path("audit")
+    audit_dir.mkdir(exist_ok=True)
+    request_path = audit_dir / (
+        f"nav_history_backfill_request_{context.account}_{stamp}.json"
+    )
+    request_path.write_text(
+        json.dumps(
+            {"rows": [{"date": point.d.isoformat()} for point in points]},
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    journal_path = (
+        config.get_data_dir()
+        / "nav_repair"
+        / f"{plan_digest[:16]}-{stamp}.jsonl"
+    )
+    with process_lock(f"nav-repair:{journal_path.resolve()}"):
+        if journal_path.exists():
+            raise SystemExit(f"journal already exists: {journal_path}")
+        patch_workflow._append_journal(journal_path, {
+            "event": "STATE",
+            "state": "PLANNED",
+            "account": context.account,
+            "mode": "strong-consistency-gap",
+            "patch_file": str(request_path.resolve()),
+            "plan_digest": plan_digest,
+            "created_at": datetime.now().isoformat(),
+            "dependency_rows": dependency_rows,
+            "rows": plan_rows,
+        })
+    result = patch_workflow._apply_journal(
+        context=context,
+        journal_path=journal_path,
+        resume=False,
+    )
+    payload["success"] = result.get("success", False)
+    payload["status"] = result.get("status")
+    payload["write"] = result
+    return _emit(payload)
 
 
 if __name__ == "__main__":

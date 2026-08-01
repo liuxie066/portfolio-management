@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 
 from src import config
@@ -12,6 +11,7 @@ from src.app.nav_finality import NavWriteContext
 from src.app.quality.evidence import valuation_quality_evidence
 from src.app.quality.policy import assert_official_nav_write_allowed
 from src.app.snapshot_service import snapshot_digest
+from src.domain.nav_calculator import ClosedNavTarget, NavCalculator
 from src.models import NAVHistory, PortfolioValuation
 from src.time_utils import bj_today
 
@@ -117,19 +117,38 @@ class NavRecordService:
         run_id: Optional[str] = None,
         nav_write_context: Optional[NavWriteContext] = None,
         cash_flow_dataset: Any = None,
+        nav_history_snapshot: Optional[tuple[NAVHistory, ...]] = None,
     ) -> NAVHistory:
         today_value = nav_date or bj_today()
         today = today_value.date() if isinstance(today_value, datetime) else today_value
         effective_run_id = str(
             run_id or getattr(nav_write_context, "run_id", None) or ""
         ).strip()
+        if nav_write_context is not None and nav_write_context.nav_date != today:
+            raise ValueError(
+                f"NAV finality nav_date {nav_write_context.nav_date} "
+                f"does not match record date {today}"
+            )
         start_year = config.get_start_year()
-        if persist:
+        maintenance_write = bool(
+            nav_write_context is not None
+            and getattr(nav_write_context, "writer", None) == "nav-repair"
+        )
+        if nav_history_snapshot is not None:
+            if persist or not maintenance_write:
+                raise ValueError(
+                    "explicit NAV history snapshot is restricted to "
+                    "non-persisting nav-repair calculations"
+                )
+            if not isinstance(nav_history_snapshot, tuple):
+                raise TypeError("NAV history snapshot must be an immutable tuple")
+        if cash_flow_dataset is not None or persist or maintenance_write:
             from src.domain.cash_flow_contracts import CashFlowDatasetSnapshot
 
             if not isinstance(cash_flow_dataset, CashFlowDatasetSnapshot):
                 raise ValueError(
-                    "NAV 写入拒绝：persist=True requires CashFlowDatasetSnapshot"
+                    "NAV 写入拒绝：official/maintenance calculation requires "
+                    "CashFlowDatasetSnapshot"
                 )
             cash_flow_dataset.assert_official_scope(
                 account=account,
@@ -139,6 +158,10 @@ class NavRecordService:
             )
         if valuation is None:
             valuation = self.manager.calculate_valuation(account)
+        if valuation.account != account:
+            raise ValueError(
+                f"valuation account mismatch: {valuation.account} != {account}"
+            )
         valuation_quality = valuation_quality_evidence(valuation)
         if persist and not dry_run:
             self._assert_valuation_reliable_for_write(valuation)
@@ -149,13 +172,34 @@ class NavRecordService:
 
         current_year = today.strftime("%Y")
 
-        stock_value = valuation.stock_value_cny + valuation.fund_value_cny
-        cash_value = valuation.cash_value_cny
-        total_value = stock_value + cash_value
-        stock_ratio = stock_value / total_value if total_value > 0 else 0
-        cash_ratio = cash_value / total_value if total_value > 0 else 0
+        valuation_projection = NavCalculator.project_valuation(valuation)
+        canonical_valuation = valuation.model_copy(update={
+            "total_value_cny": float(valuation_projection.total_value),
+            "cash_value_cny": float(valuation_projection.cash_value),
+            "stock_value_cny": float(
+                valuation_projection.non_cash_value
+                - valuation_projection.fund_value
+            ),
+            "fund_value_cny": float(valuation_projection.fund_value),
+            "cn_asset_value": float(valuation_projection.cn_exposure_value),
+            "us_asset_value": float(valuation_projection.us_exposure_value),
+            "hk_asset_value": float(valuation_projection.hk_exposure_value),
+        })
+        stock_value = float(valuation_projection.non_cash_value)
+        cash_value = float(valuation_projection.cash_value)
+        total_value = float(valuation_projection.total_value)
+        stock_ratio = float(valuation_projection.stock_weight)
+        cash_ratio = float(valuation_projection.cash_weight)
 
-        all_navs = self._load_navs(account)
+        if nav_history_snapshot is None:
+            all_navs = self._load_navs(account)
+        else:
+            all_navs = [nav.model_copy(deep=True) for nav in nav_history_snapshot]
+            if any(nav.account != account for nav in all_navs):
+                raise ValueError("NAV history snapshot account mismatch")
+            history_dates = [nav.date for nav in all_navs]
+            if len(set(history_dates)) != len(history_dates):
+                raise ValueError("NAV history snapshot contains duplicate dates")
         nav_index = self.manager._build_nav_lookup(all_navs)
 
         yesterday_nav = self.manager._find_latest_nav_before(all_navs, today, nav_index=nav_index)
@@ -213,7 +257,7 @@ class NavRecordService:
         nav_record = self.manager._build_nav_record(
             today=today,
             account=account,
-            valuation=valuation,
+            valuation=canonical_valuation,
             stock_value=stock_value,
             cash_value=cash_value,
             total_value=total_value,
@@ -244,6 +288,13 @@ class NavRecordService:
         details = dict(nav_record.details or {})
         details["finality"] = resolved_context.to_details()
         details["valuation_quality"] = valuation_quality
+        details["cash_flow_basis"] = NavCalculator.build_cash_flow_basis(
+            nav_date=today,
+            last_nav=last_nav,
+            daily_cash_flow=daily_cash_flow,
+            gap_cash_flow=gap_cash_flow,
+            cash_flow_dataset=cash_flow_dataset,
+        )
         if cash_flow_dataset is not None:
             details["cash_flow_dataset"] = cash_flow_dataset.details()
         if valuation.holdings_provenance:
@@ -252,21 +303,22 @@ class NavRecordService:
             details["run_id"] = resolved_context.run_id
         nav_record.details = details
 
-        if not config.get_bool("nav.disable_runtime_validation", False):
-            self.manager._validate_nav_record(
-                nav_record=nav_record,
-                last_nav=last_nav,
-                prev_month_end_nav=prev_month_end_nav,
-                prev_year_end_nav=prev_year_end_nav,
-                mtd_return_base_nav=mtd_return_base_nav,
-                ytd_return_base_nav=ytd_return_base_nav,
-                daily_cash_flow=daily_cash_flow,
-                monthly_cash_flow=monthly_cash_flow,
-                yearly_cash_flow=yearly_cash_flow,
-                gap_cash_flow=gap_cash_flow,
-                initial_value=calc.get("initial_value"),
-                cumulative_cash_flow=cumulative_cash_flow,
-            )
+        NavCalculator.assert_nav_invariants(
+            nav_record=nav_record,
+            last_nav=last_nav,
+            prev_month_end_nav=prev_month_end_nav,
+            prev_year_end_nav=prev_year_end_nav,
+            mtd_return_base_nav=mtd_return_base_nav,
+            ytd_return_base_nav=ytd_return_base_nav,
+            daily_cash_flow=daily_cash_flow,
+            monthly_cash_flow=monthly_cash_flow,
+            yearly_cash_flow=yearly_cash_flow,
+            gap_cash_flow=gap_cash_flow,
+            initial_value=calc.get("initial_value"),
+            cumulative_cash_flow=cumulative_cash_flow,
+            cash_flow_dataset=cash_flow_dataset,
+            require_finality=True,
+        )
 
         snapshot_rows = []
         if persist:
@@ -408,14 +460,11 @@ class NavRecordService:
             run_id=run_id,
             start_year=config.get_start_year(),
         )
-        try:
-            total = Decimal(str(total_value))
-            cash = Decimal(str(cash_value))
-            stock = Decimal(str(stock_value))
-        except (InvalidOperation, TypeError, ValueError) as exc:
-            raise ValueError("CLOSED NAV values must be finite numbers") from exc
-        if not all(item.is_finite() for item in (total, cash, stock)):
-            raise ValueError("CLOSED NAV values must be finite numbers")
+        target = ClosedNavTarget.build(
+            total_value=total_value,
+            cash_value=cash_value,
+            non_cash_value=stock_value,
+        )
 
         context = nav_write_context or NavWriteContext(
             status="closed",
@@ -424,21 +473,56 @@ class NavRecordService:
             nav_date=nav_date,
             run_id=run_id,
         )
+        if context.nav_date != nav_date:
+            raise ValueError(
+                f"NAV finality nav_date {context.nav_date} does not match record date {nav_date}"
+            )
         context = context.with_runtime(run_id=run_id)
+        all_navs = self._load_navs(account)
+        nav_index = self.manager._build_nav_lookup(all_navs)
+        last_nav = self.manager._find_latest_nav_before(
+            all_navs,
+            nav_date,
+            nav_index=nav_index,
+        )
+        cash_flow_summary = cash_flow_dataset.summary(last_nav=last_nav)
+        daily_cash_flow = cash_flow_summary["daily"]
+        gap_cash_flow = cash_flow_summary["gap"]
+        stock_weight = target.non_cash_value / target.total_value
+        cash_weight = target.cash_value / target.total_value
         nav_record = NAVHistory(
             date=nav_date,
             account=account,
-            total_value=round(float(total), 2),
-            cash_value=round(float(cash), 2),
-            stock_value=round(float(stock), 2),
-            shares=0.0,
-            nav=1.0,
+            total_value=float(target.total_value),
+            cash_value=float(target.cash_value),
+            stock_value=float(target.non_cash_value),
+            stock_weight=float(NavCalculator.quantize_weight(stock_weight)),
+            cash_weight=float(NavCalculator.quantize_weight(cash_weight)),
+            shares=float(target.shares),
+            nav=float(target.nav),
+            cash_flow=float(NavCalculator.quantize_money(daily_cash_flow)),
+            share_change=0.0,
             details={
                 "status": "CLOSED",
                 "finality": context.to_details(),
                 "run_id": run_id,
                 "cash_flow_dataset": cash_flow_dataset.details(),
+                "cash_flow_basis": NavCalculator.build_cash_flow_basis(
+                    nav_date=nav_date,
+                    last_nav=last_nav,
+                    daily_cash_flow=daily_cash_flow,
+                    gap_cash_flow=gap_cash_flow,
+                    cash_flow_dataset=cash_flow_dataset,
+                ),
             },
+        )
+        NavCalculator.assert_nav_invariants(
+            nav_record=nav_record,
+            last_nav=last_nav,
+            daily_cash_flow=daily_cash_flow,
+            gap_cash_flow=gap_cash_flow,
+            cash_flow_dataset=cash_flow_dataset,
+            require_finality=True,
         )
         write_record = getattr(self.storage, "write_nav_record", None)
         if not callable(write_record):

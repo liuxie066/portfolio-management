@@ -1,9 +1,13 @@
 """Tests for code audit fixes — covers CRITICAL, HIGH, and MEDIUM issues."""
+from contextlib import nullcontext
 from datetime import date
-from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from src.models import AssetType, Holding
+import pytest
+
+from src.models import AssetType, Holding, NAVHistory
+from src.feishu.repositories.nav_history_repository import NavHistoryRepository
 
 
 # ── C1: round(None) guard in skill_api ──────────────────────────────
@@ -84,7 +88,6 @@ def test_deduct_cash_succeeds_when_sufficient():
 def test_nav_calculator_warns_when_shares_zero_but_value_positive():
     """M6: The warning code path exists and fires for shares<=0 with value>0."""
     from decimal import Decimal
-    import logging
 
     # Directly test the guarded code pattern from nav_calculator.py L116-122
     shares_dec = Decimal("0")
@@ -193,3 +196,92 @@ def test_escape_filter_value_handles_quotes():
 
     # The method should exist and handle normal values
     assert hasattr(storage, '_escape_filter_value')
+
+
+def test_nav_maintenance_repository_allows_only_derived_field_states():
+    repo = NavHistoryRepository(Mock())
+    repo._patch_nav_fields = Mock(return_value={"record_id": "nav-1"})
+
+    with pytest.raises(ValueError, match="non-derived"):
+        repo.patch_nav_maintenance_fields(
+            "nav-1",
+            {"total_value": {"state": "value", "value": 100.0}},
+        )
+    with pytest.raises(ValueError, match="cannot claim snapshot v2 complete"):
+        repo.patch_nav_maintenance_fields(
+            "nav-1",
+            {
+                "details": {
+                    "state": "value",
+                    "value": {"evidence_version": "v2"},
+                }
+            },
+        )
+
+    with patch(
+        "src.feishu.repositories.nav_history_repository.process_lock",
+        return_value=nullcontext(),
+    ):
+        repo.patch_nav_maintenance_fields(
+            "nav-1",
+            {
+                "nav": {"state": "value", "value": 1.1},
+                "pnl": {"state": "missing"},
+                "details": {
+                    "state": "value",
+                    "value": {"evidence_version": "legacy"},
+                },
+            },
+        )
+
+    repo._patch_nav_fields.assert_called_once_with(
+        "nav-1",
+        {
+            "nav": 1.1,
+            "pnl": None,
+            "details": {"evidence_version": "legacy"},
+        },
+        dry_run=False,
+        allowed_fields=repo.NAV_MAINTENANCE_PATCH_FIELDS,
+    )
+
+
+def test_nav_maintenance_fresh_read_rejects_nonnull_parse_loss():
+    raw_fields = {
+        "date": "2026-03-19",
+        "account": "lx",
+        "total_value": 100.0,
+        "pnl": "not-a-number",
+    }
+    parsed_fields = {
+        "date": "2026-03-19",
+        "account": "lx",
+        "total_value": 100.0,
+        "pnl": None,
+    }
+    storage = SimpleNamespace(
+        client=SimpleNamespace(
+            list_records=lambda *_args, **_kwargs: [{
+                "record_id": "nav-1",
+                "fields": raw_fields,
+            }]
+        ),
+        _escape_filter_value=lambda value: value,
+        _from_feishu_fields=lambda *_args: parsed_fields,
+    )
+    repo = NavHistoryRepository(storage)
+    repo._build_nav_index_payload = Mock(return_value={})
+    repo._store_nav_index_payload = Mock()
+    repo._clear_nav_index_authority = Mock()
+    repo._dict_to_nav = Mock(return_value=NAVHistory(
+        record_id="nav-1",
+        date=date(2026, 3, 19),
+        account="lx",
+        total_value=100.0,
+        pnl=None,
+    ))
+
+    with pytest.raises(ValueError, match="non-null field failed canonical parsing: pnl"):
+        repo.read_nav_maintenance_rows("lx")
+    repo._clear_nav_index_authority.assert_called_once_with("lx")
+    repo._store_nav_index_payload.assert_not_called()

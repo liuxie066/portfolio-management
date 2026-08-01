@@ -306,7 +306,7 @@ class AccountNavRecorderService:
         nav_date: Optional[Any] = None,
         total_value: Any = None,
         cash_value: Any = None,
-        stock_value: Any = 0.0,
+        stock_value: Any = None,
         overwrite_existing: bool = False,
         dry_run: bool = True,
         confirm: bool = False,
@@ -329,19 +329,20 @@ class AccountNavRecorderService:
                 "confirm": confirm,
             }
         try:
-            if total_value is None:
-                if cash_value is None or stock_value is None:
-                    raise ValueError(
-                        "total_value is required (or provide both cash_value and stock_value)"
-                    )
-                total_value = float(cash_value) + float(stock_value)
-            if cash_value is None and stock_value is not None:
-                cash_value = float(total_value) - float(stock_value)
-            if stock_value is None and cash_value is not None:
-                stock_value = float(total_value) - float(cash_value)
-            if cash_value is None and stock_value is None:
-                cash_value = float(total_value)
-                stock_value = 0.0
+            missing_components = [
+                field
+                for field, value in (
+                    ("total_value", total_value),
+                    ("cash_value", cash_value),
+                    ("stock_value", stock_value),
+                )
+                if value is None
+            ]
+            if missing_components:
+                raise ValueError(
+                    "CLOSED NAV requires explicit observed components: "
+                    + ", ".join(missing_components)
+                )
 
             cash_flow_dataset = self.portfolio.build_cash_flow_dataset(
                 account=self.account,

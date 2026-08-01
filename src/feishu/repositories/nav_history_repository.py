@@ -51,6 +51,10 @@ class NavHistoryRepository:
     NAV_INDEX_PROJECTION_FIELDS = NAV_CANONICAL_PROJECTION_FIELDS
 
     NAV_DERIVED_PATCH_FIELDS = {
+        'stock_weight',
+        'cash_weight',
+        'shares',
+        'nav',
         'cash_flow',
         'share_change',
         'pnl',
@@ -59,6 +63,7 @@ class NavHistoryRepository:
         'mtd_pnl',
         'ytd_pnl',
     }
+    NAV_MAINTENANCE_PATCH_FIELDS = NAV_DERIVED_PATCH_FIELDS | {'details'}
 
     def _nav_to_cache_row(
         self,
@@ -1161,6 +1166,79 @@ class NavHistoryRepository:
 
         return matches[0] if matches else None
 
+    def read_nav_maintenance_rows(self, account: str) -> List[Dict[str, Any]]:
+        """Fresh-read complete NAV rows while retaining Missing/Null/Value state."""
+
+        filter_str = f'CurrentValue.[account] = "{self._escape_filter_value(account)}"'
+        try:
+            records = self.client.list_records(
+                'nav_history',
+                filter_str=filter_str,
+                field_names=self.NAV_CANONICAL_PROJECTION_FIELDS,
+            )
+        except Exception as exc:
+            if 'FieldNameNotFound' not in str(exc):
+                raise
+            records = self.client.list_records(
+                'nav_history',
+                filter_str=filter_str,
+                field_names=[
+                    field
+                    for field in self.NAV_CANONICAL_PROJECTION_FIELDS
+                    if field != 'updated_at'
+                ],
+            )
+
+        try:
+            payload = self._build_nav_index_payload(account, records)
+        except NavHistoryReadIntegrityError:
+            self._clear_nav_index_authority(account)
+            raise
+        result: List[Dict[str, Any]] = []
+        failure_record_id: Optional[str] = None
+        failure_row_index = -1
+        try:
+            for row_index, record in enumerate(records):
+                failure_row_index = row_index
+                failure_record_id = record.get('record_id')
+                raw_fields = record.get('fields') or {}
+                fields = self._from_feishu_fields(raw_fields, 'nav_history')
+                fields['record_id'] = record.get('record_id')
+                nav = self._dict_to_nav(fields)
+                states: Dict[str, Dict[str, Any]] = {}
+                for field in self.NAV_CANONICAL_PROJECTION_FIELDS:
+                    if field not in raw_fields:
+                        states[field] = {'state': 'missing'}
+                    elif raw_fields.get(field) in (None, ''):
+                        states[field] = {'state': 'null'}
+                    elif fields.get(field) is None:
+                        raise ValueError(
+                            f'non-null field failed canonical parsing: {field}'
+                        )
+                    else:
+                        states[field] = {
+                            'state': 'value',
+                            'value': fields.get(field),
+                        }
+                result.append({
+                    'nav': nav,
+                    'record_id': nav.record_id,
+                    'date': nav.date,
+                    'field_states': states,
+                })
+        except (TypeError, ValueError) as exc:
+            self._clear_nav_index_authority(account)
+            raise NavHistoryReadIntegrityError(
+                source='feishu_maintenance',
+                account=account,
+                record_id=failure_record_id,
+                row_index=failure_row_index,
+                cause=exc,
+            ) from exc
+        result.sort(key=lambda item: item['date'])
+        self._store_nav_index_payload(account, payload)
+        return result
+
     def _patch_nav_fields(
         self,
         record_id: str,
@@ -1175,10 +1253,12 @@ class NavHistoryRepository:
 
         normalized = {}
         for k, v in fields.items():
-            if k in ('mtd_nav_change', 'ytd_nav_change') and v is not None:
+            if k in ('nav', 'mtd_nav_change', 'ytd_nav_change') and v is not None:
                 normalized[k] = self._quantize_nav(v)
-            elif k in ('mtd_pnl', 'ytd_pnl', 'pnl', 'cash_flow', 'share_change') and v is not None:
+            elif k in ('shares', 'mtd_pnl', 'ytd_pnl', 'pnl', 'cash_flow', 'share_change') and v is not None:
                 normalized[k] = self._quantize_money(v)
+            elif k in ('stock_weight', 'cash_weight') and v is not None:
+                normalized[k] = self._quantize_weight(v)
             else:
                 normalized[k] = v
 
@@ -1198,6 +1278,64 @@ class NavHistoryRepository:
                 fields,
                 dry_run=dry_run,
                 allowed_fields=self.NAV_DERIVED_PATCH_FIELDS,
+            )
+
+    def patch_nav_maintenance_fields(
+        self,
+        record_id: str,
+        field_states: Dict[str, Dict[str, Any]],
+        dry_run: bool = False,
+    ):
+        """Apply one derived/details-only maintenance patch.
+
+        The explicit state envelope keeps an absent field distinct from a
+        present null in the journal and CAS preflight.  Both missing and null
+        are sent as a clear operation because Feishu has no separate update
+        instruction for physical key removal.
+        """
+
+        illegal = sorted(set(field_states) - self.NAV_MAINTENANCE_PATCH_FIELDS)
+        if illegal:
+            raise ValueError(
+                f"nav maintenance patch contains non-derived fields: {illegal}"
+            )
+        fields: Dict[str, Any] = {}
+        for field, envelope in field_states.items():
+            if not isinstance(envelope, dict):
+                raise TypeError(f"nav maintenance field state must be an object: {field}")
+            state = envelope.get('state')
+            if state not in {'missing', 'null', 'value'}:
+                raise ValueError(f"invalid nav maintenance field state: {field}={state}")
+            if state == 'value' and 'value' not in envelope:
+                raise ValueError(f"nav maintenance value state has no value: {field}")
+            value = envelope.get('value') if state == 'value' else None
+            if field == 'details' and isinstance(value, dict):
+                evidence_version = str(value.get('evidence_version') or '').strip().lower()
+                snapshot_evidence = value.get('snapshot_evidence')
+                snapshot_version = (
+                    str((snapshot_evidence or {}).get('version') or '').strip().lower()
+                    if isinstance(snapshot_evidence, dict)
+                    else ''
+                )
+                snapshot_status = (
+                    str((snapshot_evidence or {}).get('status') or '').strip().lower()
+                    if isinstance(snapshot_evidence, dict)
+                    else ''
+                )
+                if evidence_version in {'2', 'v2'} or (
+                    snapshot_version in {'2', 'v2'} and snapshot_status == 'complete'
+                ):
+                    raise ValueError(
+                        'derived-only NAV maintenance cannot claim snapshot v2 complete'
+                    )
+            fields[field] = value
+
+        with process_lock(nav_history_lock_key()):
+            return self._patch_nav_fields(
+                record_id,
+                fields,
+                dry_run=dry_run,
+                allowed_fields=self.NAV_MAINTENANCE_PATCH_FIELDS,
             )
 
     def patch_nav_details(self, record_id: str, details: Dict[str, any], dry_run: bool = False):

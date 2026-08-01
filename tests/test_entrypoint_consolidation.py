@@ -70,6 +70,30 @@ def test_nav_history_repair_returns_nonzero_for_partial_result(monkeypatch):
     assert nav_history_repair.main(["patch", "--patch-file", "audit/x.json", "--apply"]) == 1
 
 
+def test_nav_history_backfill_returns_nonzero_for_missing_evidence(monkeypatch):
+    from src.maintenance.nav_history_repair import backfill
+
+    monkeypatch.setattr(
+        backfill,
+        "run",
+        lambda _args: {
+            "success": False,
+            "status": "historical_evidence_required",
+        },
+    )
+
+    assert nav_history_repair.main([
+        "backfill",
+        "--account",
+        "lx",
+        "--from",
+        "2026-01-01",
+        "--to",
+        "2026-01-01",
+        "--dry-run",
+    ]) == 1
+
+
 def test_nav_history_repair_rejects_unknown_args():
     with pytest.raises(SystemExit) as exc:
         nav_history_repair.main(["patch", "--patch-file", "audit/x.json", "--apply", "--unknown-flag"])

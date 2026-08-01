@@ -5,20 +5,13 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime
 from typing import Any, Mapping, Optional
 
-
-FINALITY_VERSION = 1
-FINALITY_STATUSES = frozenset({"final", "manual", "initial", "closed", "maintenance"})
-FINALITY_WRITERS = frozenset(
-    {"daily-nav-job", "nav-record", "daily-report", "init-nav", "close-nav", "nav-repair"}
+from src.domain.nav_finality_contract import (
+    FINALITY_STATUSES,
+    FINALITY_STATUS_BY_WRITER,
+    FINALITY_VERSION,
+    FINALITY_WRITERS,
+    finality_validation_reason,
 )
-FINALITY_STATUS_BY_WRITER = {
-    "daily-nav-job": frozenset({"final"}),
-    "nav-record": frozenset({"manual"}),
-    "daily-report": frozenset({"manual"}),
-    "init-nav": frozenset({"initial"}),
-    "close-nav": frozenset({"closed"}),
-    "nav-repair": frozenset({"final", "maintenance"}),
-}
 
 
 def _coerce_date(value: Any) -> date:
@@ -116,34 +109,12 @@ def evaluate_nav_finality(
 ) -> NavFinalityDecision:
     """Return whether an existing row is a trustworthy final daily NAV."""
     raw = (details or {}).get("finality")
-    if not isinstance(raw, Mapping):
-        return NavFinalityDecision(False, "missing_finality", None)
-
-    finality = dict(raw)
-    version = finality.get("version")
-    if isinstance(version, bool) or version != FINALITY_VERSION:
-        return NavFinalityDecision(False, "unsupported_finality_version", finality)
-    if finality.get("status") != "final":
-        return NavFinalityDecision(False, "status_not_final", finality)
-    writer = str(finality.get("writer") or "").strip()
-    if not writer:
-        return NavFinalityDecision(False, "missing_writer", finality)
-    if writer not in FINALITY_WRITERS:
-        return NavFinalityDecision(False, "unsupported_writer", finality)
-    if "final" not in FINALITY_STATUS_BY_WRITER[writer]:
-        return NavFinalityDecision(False, "writer_status_mismatch", finality)
-    if not str(finality.get("write_reason") or "").strip():
-        return NavFinalityDecision(False, "missing_write_reason", finality)
-    if "valuation_as_of" not in finality:
-        return NavFinalityDecision(False, "missing_valuation_as_of", finality)
-    try:
-        _normalize_valuation_as_of(finality.get("valuation_as_of"))
-    except (TypeError, ValueError):
-        return NavFinalityDecision(False, "invalid_valuation_as_of", finality)
-    if "run_id" in finality and not str(finality.get("run_id") or "").strip():
-        return NavFinalityDecision(False, "invalid_run_id", finality)
-
-    expected_date = _coerce_date(target_date).isoformat()
-    if str(finality.get("nav_date") or "") != expected_date:
-        return NavFinalityDecision(False, "nav_date_mismatch", finality)
+    finality = dict(raw) if isinstance(raw, Mapping) else None
+    reason = finality_validation_reason(
+        raw,
+        target_date=target_date,
+        expected_status="final",
+    )
+    if reason is not None:
+        return NavFinalityDecision(False, reason, finality)
     return NavFinalityDecision(True, "eligible_final", finality)

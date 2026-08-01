@@ -20,6 +20,14 @@ from src.domain.cash_flow_contracts import (
 )
 from src.models import NAVHistory, PortfolioValuation
 from src.maintenance.nav_history_repair import backfill
+from src.maintenance.nav_history_repair.common import (
+    BASE_FIELDS,
+    MAINTENANCE_FIELDS,
+    FieldState,
+    FreshNavRow,
+    recompute_derived_row,
+)
+from src.maintenance.nav_history_repair.context import NavRepairContext
 from src.portfolio import PortfolioManager
 
 
@@ -188,7 +196,77 @@ def test_nav_record_service_persists_run_id_in_details():
         "write_reason": "direct_nav_record",
         "run_id": "run-nav-1",
     }
-    storage.write_nav_record.assert_called_once_with(result, overwrite_existing=False, dry_run=True)
+    storage.write_nav_record.assert_called_once_with(
+        result,
+        overwrite_existing=False,
+        dry_run=True,
+    )
+
+
+def test_nav_repair_uses_explicit_history_snapshot_without_cache_mutation():
+    storage = _storage()
+    manager = _manager(storage)
+    service = NavRecordService(manager=manager, storage=storage)
+    previous = NAVHistory(
+        record_id="nav-prev",
+        date=date(2026, 3, 18),
+        account="a",
+        total_value=1200.0,
+        cash_value=200.0,
+        stock_value=1000.0,
+        fund_value=100.0,
+        cn_stock_value=1000.0,
+        us_stock_value=0.0,
+        hk_stock_value=0.0,
+        stock_weight=0.833333,
+        cash_weight=0.166667,
+        shares=1000.0,
+        nav=1.2,
+        cash_flow=0.0,
+        share_change=0.0,
+    )
+    run_id = "nav-repair:a:2026-03-19"
+
+    result = service.record_nav(
+        account="a",
+        valuation=_valuation(),
+        nav_date=date(2026, 3, 19),
+        persist=False,
+        dry_run=True,
+        run_id=run_id,
+        cash_flow_dataset=_dataset(
+            storage,
+            date(2026, 3, 19),
+            run_id,
+        ),
+        nav_history_snapshot=(previous,),
+        nav_write_context=NavWriteContext(
+            status="maintenance",
+            writer="nav-repair",
+            write_reason="nav_history_derived_repair",
+            nav_date=date(2026, 3, 19),
+            run_id=run_id,
+        ),
+    )
+
+    assert result.nav == 1.2
+    storage.preload_nav_index.assert_not_called()
+    storage.get_nav_index.assert_not_called()
+
+
+def test_explicit_history_snapshot_is_restricted_to_nav_repair():
+    storage = _storage()
+    manager = _manager(storage)
+    service = NavRecordService(manager=manager, storage=storage)
+
+    with pytest.raises(ValueError, match="restricted to.*nav-repair"):
+        service.record_nav(
+            account="a",
+            valuation=_valuation(),
+            nav_date=date(2026, 3, 19),
+            persist=False,
+            nav_history_snapshot=(),
+        )
 
 
 def test_nav_record_service_persists_explicit_daily_job_finality():
@@ -284,6 +362,30 @@ def test_nav_record_service_requires_complete_matching_dataset():
                 run_id="run-match",
                 cash_flow_dataset=dataset,
             )
+
+    storage.write_nav_record.assert_not_called()
+
+
+def test_nav_record_service_rejects_valuation_account_mismatch():
+    storage = _storage()
+    manager = _manager(storage)
+    service = NavRecordService(manager=manager, storage=storage)
+    valuation = _valuation().model_copy(update={"account": "other"})
+
+    with pytest.raises(ValueError, match="valuation account mismatch"):
+        service.record_nav(
+            account="a",
+            valuation=valuation,
+            nav_date=date(2026, 3, 19),
+            persist=True,
+            dry_run=True,
+            run_id="run-account-mismatch",
+            cash_flow_dataset=_dataset(
+                storage,
+                date(2026, 3, 19),
+                "run-account-mismatch",
+            ),
+        )
 
     storage.write_nav_record.assert_not_called()
 
@@ -596,37 +698,157 @@ def test_portfolio_skill_close_nav_persists_closed_finality():
     assert "write_nav_record" not in inspect.getsource(PortfolioSkill.close_nav)
 
 
-def test_nav_history_backfill_classifies_recomputed_rows_as_maintenance(monkeypatch, capsys):
-    contexts = []
+def test_nav_record_persists_daily_column_and_weekend_gap_basis():
+    storage = _storage()
+    friday = NAVHistory(
+        record_id="nav-friday",
+        date=date(2026, 3, 13),
+        account="a",
+        total_value=1000.0,
+        cash_value=100.0,
+        stock_value=900.0,
+        stock_weight=0.9,
+        cash_weight=0.1,
+        shares=1000.0,
+        nav=1.0,
+        cash_flow=0.0,
+        share_change=0.0,
+        details={"evidence_version": "legacy"},
+    )
+    storage.get_nav_index.return_value = {"_nav_objects": [friday]}
+    weekend_flow = CompletedCashFlowFacts.build(
+        flow_date=date(2026, 3, 14),
+        account="a",
+        broker="bank",
+        amount="100",
+        currency="CNY",
+        exchange_rate="1",
+        cny_amount="100",
+        source="test",
+        record_id="cf-weekend",
+    )
+    storage.get_raw_cash_flows.return_value = [
+        RawCashFlowRecord.from_cash_flow(weekend_flow.to_cash_flow())
+    ]
+    manager = _manager(storage)
+    service = NavRecordService(manager=manager, storage=storage)
+    monday = date(2026, 3, 16)
+    dataset = _dataset(storage, monday, "run-weekend")
 
-    class FakePortfolio:
-        def record_nav(self, account, **kwargs):
-            contexts.append(kwargs["nav_write_context"])
-            return NAVHistory(
-                date=kwargs["nav_date"],
-                account=account,
-                total_value=1200.0,
-                cash_value=200.0,
-                stock_value=1000.0,
-                shares=1000.0,
-                nav=1.2,
-            )
+    result = service.record_nav(
+        account="a",
+        valuation=_valuation(),
+        nav_date=monday,
+        persist=True,
+        dry_run=True,
+        run_id="run-weekend",
+        cash_flow_dataset=dataset,
+    )
 
-    storage = Mock()
-    storage._nav_index_mem_cache = {"a": {}}
-    storage.get_nav_index.return_value = {"_nav_objects": []}
-    context = SimpleNamespace(account="a", storage=storage, portfolio=FakePortfolio())
-    point = backfill.BaseNavPoint(
-        d=date(2026, 3, 19),
+    assert result.cash_flow == 0.0
+    assert result.share_change == 100.0
+    assert result.details["cash_flow_basis"] == {
+        "version": 1,
+        "cash_flow_column_semantics": "daily",
+        "daily_cash_flow": 0.0,
+        "gap_cash_flow": 100.0,
+        "previous_nav_date": "2026-03-13",
+        "gap_window": {
+            "start": "2026-03-13",
+            "end": "2026-03-16",
+            "start_inclusive": False,
+            "end_inclusive": True,
+        },
+        "dataset_contract_version": dataset.contract_version,
+        "dataset_financial_fingerprint": dataset.financial_fingerprint,
+        "dataset_full_fingerprint": dataset.full_fingerprint,
+    }
+
+
+@pytest.mark.parametrize(
+    "values,error",
+    [
+        ({"total_value": "NaN", "cash_value": 1, "stock_value": 0}, "finite"),
+        ({"total_value": 100, "cash_value": 60, "stock_value": 30}, "decomposition"),
+    ],
+)
+def test_closed_nav_blocks_invalid_target_before_repository(values, error):
+    storage = _storage()
+    manager = _manager(storage)
+    service = NavRecordService(manager=manager, storage=storage)
+    dataset = _dataset(storage, date(2026, 3, 19), "close-invalid")
+
+    with pytest.raises(ValueError, match=error):
+        service.record_closed_nav(
+            account="a",
+            nav_date=date(2026, 3, 19),
+            cash_flow_dataset=dataset,
+            run_id="close-invalid",
+            **values,
+        )
+
+    storage.write_nav_record.assert_not_called()
+
+
+def test_portfolio_skill_close_nav_does_not_default_missing_stock_to_zero():
+    skill = PortfolioSkill.__new__(PortfolioSkill)
+    skill.account = "a"
+    skill.storage = _storage()
+    skill.portfolio = _manager(skill.storage)
+
+    result = skill.close_nav(
+        date_str="2026-03-19",
+        total_value=100.0,
+        cash_value=100.0,
+        dry_run=True,
+    )
+
+    assert result["success"] is False
+    assert "stock_value" in result["error"]
+    skill.storage.write_nav_record.assert_not_called()
+
+
+def test_nav_history_backfill_recomputes_without_full_row_write(monkeypatch):
+    storage = SimpleNamespace()
+    context = SimpleNamespace(account="a", storage=storage, portfolio=SimpleNamespace())
+    nav = NAVHistory(
+        record_id="nav-1",
+        date=date(2026, 3, 19),
+        account="a",
         total_value=1200.0,
         cash_value=200.0,
         stock_value=1000.0,
+        fund_value=0.0,
+        cn_stock_value=1000.0,
+        us_stock_value=0.0,
+        hk_stock_value=0.0,
+        stock_weight=0.833333,
+        cash_weight=0.166667,
+        shares=1000.0,
+        nav=1.2,
+        cash_flow=0.0,
+        share_change=0.0,
+        details={"evidence_version": "legacy"},
     )
+    states = {
+        field: (
+            FieldState.null()
+            if getattr(nav, field) is None
+            else FieldState.valued(getattr(nav, field))
+        )
+        for field in (*BASE_FIELDS, *MAINTENANCE_FIELDS)
+    }
+    fresh = FreshNavRow(nav=nav, field_states=states)
+    calls = []
     monkeypatch.setattr(backfill, "create_nav_repair_context", lambda account=None: context)
-    monkeypatch.setattr(backfill, "_existing_points_from_range", lambda *_args: [point])
-    monkeypatch.setattr(backfill, "_build_valuation", lambda *_args: _valuation())
+    monkeypatch.setattr(backfill, "read_fresh_nav_rows", lambda _context: [fresh])
+    monkeypatch.setattr(
+        backfill,
+        "recompute_derived_row",
+        lambda **kwargs: calls.append(kwargs) or (nav.model_copy(deep=True), SimpleNamespace()),
+    )
 
-    backfill.run(
+    result = backfill.run(
         SimpleNamespace(
             account="a",
             apply=False,
@@ -640,8 +862,59 @@ def test_nav_history_backfill_classifies_recomputed_rows_as_maintenance(monkeypa
         )
     )
 
-    assert capsys.readouterr().out
-    assert len(contexts) == 1
-    assert contexts[0].status == "maintenance"
-    assert contexts[0].writer == "nav-repair"
-    assert contexts[0].write_reason == "nav_history_backfill"
+    assert result["success"] is True
+    assert result["write"]["full_row_writes"] == 0
+    assert len(calls) == 1
+    assert calls[0]["run_id"] == "nav-repair:a:2026-03-19"
+
+
+def test_maintenance_recompute_consumes_snapshot_without_publishing_cache():
+    storage = _storage()
+    manager = _manager(storage)
+    nav = NAVHistory(
+        record_id="nav-1",
+        date=date(2026, 3, 19),
+        account="a",
+        total_value=1200.0,
+        cash_value=200.0,
+        stock_value=1000.0,
+        fund_value=100.0,
+        cn_stock_value=1000.0,
+        us_stock_value=0.0,
+        hk_stock_value=0.0,
+        stock_weight=0.833333,
+        cash_weight=0.166667,
+        shares=1200.0,
+        nav=1.0,
+        cash_flow=0.0,
+        share_change=0.0,
+        details={"evidence_version": "legacy"},
+    )
+    states = {
+        field: (
+            FieldState.null()
+            if getattr(nav, field) is None
+            else FieldState.valued(getattr(nav, field))
+        )
+        for field in (*BASE_FIELDS, *MAINTENANCE_FIELDS)
+    }
+    observed = FreshNavRow(nav=nav, field_states=states)
+    context = NavRepairContext(
+        account="a",
+        storage=storage,
+        portfolio=manager,
+    )
+
+    candidate, dataset = recompute_derived_row(
+        context=context,
+        observed=observed,
+        working_navs=[nav],
+        run_id="nav-repair:a:2026-03-19",
+    )
+
+    assert candidate.nav == 1.0
+    assert candidate.details["finality"]["status"] == "maintenance"
+    assert dataset.run_id == "nav-repair:a:2026-03-19"
+    storage.preload_nav_index.assert_not_called()
+    storage.get_nav_index.assert_not_called()
+    storage.write_nav_record.assert_not_called()

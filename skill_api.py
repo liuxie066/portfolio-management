@@ -496,7 +496,7 @@ class PortfolioSkill:
     def close_nav(self, date_str: str = None,
                   total_value: float = None,
                   cash_value: float = None,
-                  stock_value: float = 0.0,
+                  stock_value: float = None,
                   overwrite_existing: bool = False,
                   dry_run: bool = True,
                   confirm: bool = False) -> Dict[str, Any]:
@@ -504,13 +504,13 @@ class PortfolioSkill:
 
         为什么要单独做一个入口：
         - shares=0 是合法业务语义，但必须显式触发，不能靠缺失字段/默认 0 混入。
-        - 该入口不会去拉价格/估值；你提供 total_value（以及可选 cash/stock 拆分），我们按 CLOSED 规则写入。
+        - 该入口不会去拉价格/估值；你必须显式提供 total/cash/stock 三个已观测分量。
 
         约定：
         - shares 固定写 0
         - nav 固定写 1.0
         - details 写入 CLOSED 状态和非最终日结的 finality provenance
-        - 允许 total_value > 0（残余现金等），但建议同时提供 cash_value/stock_value 以保持拆分自洽。
+        - 允许 total_value > 0（残余现金等），且必须与 cash_value + stock_value 精确自洽。
 
         安全约束：默认 dry_run=True；真正写入必须 confirm=True 且 dry_run=False。
         """
@@ -946,7 +946,7 @@ def init_nav_history(date_str: str = None, price_timeout: int = 30, dry_run: boo
 def close_nav(date_str: str = None,
               total_value: float = None,
               cash_value: float = None,
-              stock_value: float = 0.0,
+              stock_value: float = None,
               overwrite_existing: bool = False,
               dry_run: bool = True,
               confirm: bool = False,
