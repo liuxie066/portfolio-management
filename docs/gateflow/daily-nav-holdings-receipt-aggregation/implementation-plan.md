@@ -4,8 +4,8 @@
 - Base: `origin/main@02ce7f8`
 - Branch: `codex/aggregate-daily-nav-holdings-receipts`
 - Design source: confirmed user request and current repository behavior
-- Current gate: `aggregate deepreview accepted`
-- Next entry point: `ready/draft PR`
+- Current gate: `PR review accepted`
+- Next entry point: `draft-PR-pass after remote checks`
 
 ## Goal and motivation
 
