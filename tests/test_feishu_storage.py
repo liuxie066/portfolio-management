@@ -7,6 +7,11 @@ import json
 from src.feishu_storage import FeishuStorage
 from src.feishu.errors import FeishuRecordNotFoundError
 from src.feishu.contracts import TABLE_CONTRACTS, FieldEncoding
+from src.domain.holding_mutations import (
+    HoldingMutationConflictError,
+    HoldingMutationProofError,
+    HoldingTarget,
+)
 from src.models import (
     Holding, Transaction, CashFlow, NAVHistory, PriceCache,
     AssetType, TransactionType, AssetClass, Industry, make_cf_dedup_key
@@ -248,6 +253,46 @@ class TestFeishuStorageHoldingOperations:
         self.mock_client = Mock()
         self.storage = FeishuStorage(client=self.mock_client)
 
+    def _use_remote_records(self, records, *, create_record_id='new_rec_123'):
+        remote = [
+            {'record_id': row['record_id'], 'fields': dict(row.get('fields') or {})}
+            for row in records
+        ]
+
+        def list_records(_table_name, filter_str=None, **_kwargs):
+            account = None
+            if filter_str and 'CurrentValue.[account] = "' in filter_str:
+                account = filter_str.split('CurrentValue.[account] = "', 1)[1].split('"', 1)[0]
+            return [
+                {'record_id': row['record_id'], 'fields': dict(row['fields'])}
+                for row in remote
+                if account is None or row['fields'].get('account') == account
+            ]
+
+        def get_record_strict(_table_name, record_id):
+            row = next(item for item in remote if item['record_id'] == record_id)
+            return {'record_id': row['record_id'], 'fields': dict(row['fields'])}
+
+        def create_record(_table_name, fields):
+            remote.append({'record_id': create_record_id, 'fields': dict(fields)})
+            return {'record_id': create_record_id, 'fields': dict(fields)}
+
+        def update_record(_table_name, record_id, fields):
+            row = next(item for item in remote if item['record_id'] == record_id)
+            row['fields'].update(fields)
+            return {'record_id': record_id, 'fields': dict(row['fields'])}
+
+        def delete_record(_table_name, record_id):
+            remote[:] = [item for item in remote if item['record_id'] != record_id]
+            return True
+
+        self.mock_client.list_records.side_effect = list_records
+        self.mock_client.get_record_strict.side_effect = get_record_strict
+        self.mock_client.create_record.side_effect = create_record
+        self.mock_client.update_record.side_effect = update_record
+        self.mock_client.delete_record.side_effect = delete_record
+        return remote
+
     def test_get_holding_with_market(self):
         """测试获取指定市场的持仓"""
         self.mock_client.list_records.return_value = [{
@@ -299,12 +344,12 @@ class TestFeishuStorageHoldingOperations:
             }
         ]
 
-        result = self.storage.get_holding('000001', '测试账户')
+        with pytest.raises(ValueError, match="requires broker"):
+            self.storage.get_holding('000001', '测试账户')
 
-        # 未指定 broker 时返回第一个完整业务主键。
-        assert result is not None
-        assert result.record_id == 'rec_1'
-        assert result.broker == "华泰"
+        self.mock_client.create_record.assert_not_called()
+        self.mock_client.update_record.assert_not_called()
+        self.mock_client.delete_record.assert_not_called()
 
     def test_get_holding_not_found(self):
         """测试持仓不存在"""
@@ -383,11 +428,7 @@ class TestFeishuStorageHoldingOperations:
 
     def test_upsert_holding_create(self):
         """测试创建新持仓"""
-        self.mock_client.list_records.return_value = []  # 不存在
-        self.mock_client.create_record.return_value = {
-            'record_id': 'new_rec_123',
-            'fields': {}
-        }
+        self._use_remote_records([])
 
         holding = Holding(
             asset_id='000001',
@@ -404,9 +445,36 @@ class TestFeishuStorageHoldingOperations:
         assert result.record_id == 'new_rec_123'
         self.mock_client.create_record.assert_called_once()
 
+    def test_upsert_holding_canonicalizes_identity_payload_result_and_cache(self):
+        self._use_remote_records([])
+
+        result = self.storage.upsert_holding(Holding(
+            asset_id=' AAPL ',
+            asset_name=' Apple ',
+            asset_type=AssetType.US_STOCK,
+            account=' lx ',
+            broker=' IBKR ',
+            quantity=1,
+            currency='usd',
+        ))
+
+        fields = self.mock_client.create_record.call_args.args[1]
+        assert fields['asset_id'] == 'AAPL'
+        assert fields['asset_name'] == 'Apple'
+        assert fields['account'] == 'lx'
+        assert fields['broker'] == 'IBKR'
+        assert fields['currency'] == 'USD'
+        assert result.asset_id == 'AAPL'
+        assert result.account == 'lx'
+        assert result.broker == 'IBKR'
+        assert result.currency == 'USD'
+        key = self.storage._get_holding_cache_key('AAPL', 'lx', 'IBKR')
+        assert set(self.storage._holding_fields_cache) == {key}
+        assert self.storage._holding_fields_cache[key]['currency'] == 'USD'
+
     def test_upsert_holding_update(self):
         """测试更新现有持仓"""
-        self.mock_client.list_records.return_value = [{
+        self._use_remote_records([{
             'record_id': 'existing_rec',
             'fields': {
                 'asset_id': '000001',
@@ -417,11 +485,7 @@ class TestFeishuStorageHoldingOperations:
                 'quantity': '500',
                 'currency': 'CNY'
             }
-        }]
-        self.mock_client.update_record.return_value = {
-            'record_id': 'existing_rec',
-            'fields': {}
-        }
+        }])
 
         holding = Holding(
             asset_id='000001',
@@ -441,18 +505,91 @@ class TestFeishuStorageHoldingOperations:
         assert update_fields['asset_name'] == '平安银行股份有限公司'
         _assert_canonical_holding_date(update_fields['updated_at'])
 
+    def test_replace_holding_rejects_stale_readback_and_invalidates_cache(self):
+        self._use_remote_records([{
+            'record_id': 'existing_rec',
+            'fields': {
+                'asset_id': 'AAPL',
+                'asset_name': 'Apple',
+                'asset_type': 'us_stock',
+                'account': 'lx',
+                'broker': 'IBKR',
+                'quantity': 1,
+                'currency': 'USD',
+            },
+        }])
+        self.mock_client.update_record.side_effect = lambda *_args, **_kwargs: {
+            'record_id': 'existing_rec'
+        }
+
+        with pytest.raises(HoldingMutationProofError, match='readback disagrees'):
+            self.storage.replace_holding(Holding(
+                asset_id='AAPL',
+                asset_name='Apple',
+                asset_type=AssetType.US_STOCK,
+                account='lx',
+                broker='IBKR',
+                quantity=2,
+                currency='USD',
+            ))
+
+        key = self.storage._get_holding_cache_key('AAPL', 'lx', 'IBKR')
+        assert key not in self.storage._holding_fields_cache
+
+    def test_replace_holding_preserves_explicit_clear_intent(self):
+        self._use_remote_records([{
+            'record_id': 'existing_rec',
+            'fields': {
+                'asset_id': 'AAPL',
+                'asset_name': 'Apple',
+                'asset_type': 'us_stock',
+                'account': 'lx',
+                'broker': 'IBKR',
+                'quantity': 1,
+                'avg_cost': 200,
+                'currency': 'USD',
+                'asset_class': '美国资产',
+                'industry': '科技',
+                'tag': json.dumps(['manual'], ensure_ascii=False),
+            },
+        }])
+
+        replaced = self.storage.replace_holding(Holding(
+            asset_id='AAPL',
+            asset_name='Apple',
+            asset_type=AssetType.US_STOCK,
+            account='lx',
+            broker='IBKR',
+            quantity=1,
+            avg_cost=None,
+            currency='USD',
+            asset_class=None,
+            industry=None,
+            tag=[],
+        ))
+
+        fields = self.mock_client.update_record.call_args.args[2]
+        assert fields['avg_cost'] is None
+        assert fields['asset_class'] is None
+        assert fields['industry'] is None
+        assert fields['tag'] == '[]'
+        assert replaced.avg_cost is None
+        assert replaced.asset_class is None
+        assert replaced.industry is None
+        assert replaced.tag == []
+
     def test_update_holding_quantity(self):
         """测试更新持仓数量"""
-        self.mock_client.list_records.return_value = [{
+        self._use_remote_records([{
             'record_id': 'rec_123',
             'fields': {
                 'asset_id': '000001', 'asset_name': '平安银行',
                 'asset_type': 'a_stock', 'account': '测试账户',
                 'broker': '手工', 'quantity': '1000', 'currency': 'CNY',
             }
-        }]
+        }])
 
-        self.storage.update_holding_quantity('000001', '测试账户', 500)
+        self.storage.update_holding_quantity('000001', '测试账户', 500, '手工')
 
         self.mock_client.update_record.assert_called_once()
         call_args = self.mock_client.update_record.call_args
@@ -461,69 +598,98 @@ class TestFeishuStorageHoldingOperations:
 
     def test_delete_holding_if_zero(self):
         """测试持仓为0时删除"""
-        self.mock_client.list_records.return_value = [{
+        self._use_remote_records([{
             'record_id': 'rec_123',
             'fields': {
                 'asset_id': '000001', 'asset_name': '平安银行',
                 'asset_type': 'a_stock', 'account': '测试账户',
                 'broker': '手工', 'quantity': '0', 'currency': 'CNY',
             }
-        }]
+        }])
 
-        self.storage.delete_holding_if_zero('000001', '测试账户')
+        self.storage.delete_holding_if_zero('000001', '测试账户', '手工')
 
         self.mock_client.delete_record.assert_called_once_with('holdings', 'rec_123')
 
     def test_delete_holding_if_not_zero(self):
         """测试持仓不为0时不删除"""
-        self.mock_client.list_records.return_value = [{
+        self._use_remote_records([{
             'record_id': 'rec_123',
             'fields': {
                 'asset_id': '000001', 'asset_name': '平安银行',
                 'asset_type': 'a_stock', 'account': '测试账户',
                 'broker': '手工', 'quantity': '100', 'currency': 'CNY',
             }
-        }]
+        }])
 
-        self.storage.delete_holding_if_zero('000001', '测试账户')
+        self.storage.delete_holding_if_zero('000001', '测试账户', '手工')
 
         self.mock_client.delete_record.assert_not_called()
 
     def test_delete_holding_if_tiny_residual(self):
         """测试极小残值持仓会被视为零并删除"""
-        self.mock_client.list_records.return_value = [{
+        self._use_remote_records([{
             'record_id': 'rec_123',
             'fields': {
                 'asset_id': '000001', 'asset_name': '平安银行',
                 'asset_type': 'a_stock', 'account': '测试账户',
                 'broker': '手工', 'quantity': '0.0000000001', 'currency': 'CNY',
             }
-        }]
+        }])
 
-        self.storage.delete_holding_if_zero('000001', '测试账户')
+        self.storage.delete_holding_if_zero('000001', '测试账户', '手工')
 
         self.mock_client.delete_record.assert_called_once_with('holdings', 'rec_123')
 
-    def test_delete_holding_failure_keeps_cached_record(self):
-        self.mock_client.list_records.return_value = [{
+    def test_target_bound_zero_delete_refuses_reused_business_key(self):
+        remote = self._use_remote_records([{
+            'record_id': 'rec_old',
+            'fields': {
+                'asset_id': '000001', 'asset_name': '平安银行',
+                'asset_type': 'a_stock', 'account': '测试账户',
+                'broker': '手工', 'quantity': '0', 'currency': 'CNY',
+            },
+        }])
+        base = self.storage.get_holding_fresh('000001', '测试账户', '手工')
+        target = HoldingTarget.from_holdings(
+            base=base,
+            target=base,
+            owned_fields={'quantity'},
+        )
+        remote[0]['record_id'] = 'rec_new'
+
+        with pytest.raises(HoldingMutationConflictError, match='record changed'):
+            self.storage.delete_holding_target_if_zero(target)
+
+        self.mock_client.delete_record.assert_not_called()
+
+    def test_delete_holding_failure_does_not_publish_unproved_cache(self):
+        self._use_remote_records([{
             'record_id': 'rec_123',
             'fields': {
                 'asset_id': '000001', 'asset_name': '平安银行',
                 'asset_type': 'a_stock', 'account': '测试账户',
                 'broker': '手工', 'quantity': '0', 'currency': 'CNY',
             }
-        }]
+        }])
         self.mock_client.delete_record.side_effect = RuntimeError('delete timeout')
 
         with pytest.raises(RuntimeError, match='delete timeout'):
-            self.storage.delete_holding_if_zero('000001', '测试账户')
+            self.storage.delete_holding_if_zero('000001', '测试账户', '手工')
 
         cache_key = self.storage._get_holding_cache_key('000001', '测试账户', '手工')
-        assert self.storage._holding_fields_cache[cache_key]['record_id'] == 'rec_123'
+        assert cache_key not in self.storage._holding_fields_cache
 
     def test_delete_holding_by_record_id(self):
         """测试通过记录ID删除持仓"""
-        self.mock_client.delete_record.return_value = True
+        self._use_remote_records([{
+            'record_id': 'rec_123',
+            'fields': {
+                'asset_id': '000001', 'asset_name': '平安银行',
+                'asset_type': 'a_stock', 'account': '测试账户',
+                'broker': '手工', 'quantity': '0', 'currency': 'CNY',
+            },
+        }])
 
         result = self.storage.delete_holding_by_record_id('rec_123')
 

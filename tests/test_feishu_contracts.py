@@ -59,12 +59,20 @@ def test_parse_table_ref_rejects_empty_or_ambiguous_forms(raw):
 
 
 def test_write_validation_rejects_domain_only_select_values_before_transport():
-    common = {"asset_id": "FUND", "account": "lx", "quantity": 1}
+    common = {
+        "asset_id": "FUND",
+        "asset_name": "Fund",
+        "asset_type": "us_fund",
+        "account": "lx",
+        "broker": "IBKR",
+        "quantity": 1,
+        "currency": "USD",
+    }
 
     validate_write_fields(
         "holdings",
         WriteOperation.CREATE,
-        {**common, "asset_type": "us_fund", "industry": "AI"},
+        {**common, "industry": "AI"},
     )
 
     with pytest.raises(ValueError, match="unsupported select value for asset_type"):
@@ -92,14 +100,66 @@ def test_transactions_are_structurally_readable_but_have_no_write_contract():
 
 
 def test_create_rejects_null_while_update_preserves_transport_level_null():
+    required = {
+        "asset_id": "AAPL",
+        "asset_name": "Apple",
+        "asset_type": "us_stock",
+        "account": "lx",
+        "broker": "IBKR",
+        "quantity": 1,
+        "currency": "USD",
+    }
     with pytest.raises(ValueError, match="create fields cannot be null"):
         validate_write_fields(
             "holdings",
             "create",
-            {"asset_id": "AAPL", "account": "lx", "quantity": 1, "avg_cost": None},
+            {**required, "avg_cost": None},
         )
 
     validate_write_fields("holdings", "update", {"avg_cost": None})
+
+
+def test_holdings_write_contract_is_the_identity_and_clearability_source():
+    table = get_table_contract("holdings")
+    create = table.write_contract("create")
+
+    assert create is not None
+    assert set(table.business_key).issubset(create.required_fields)
+    assert create.required_fields == {
+        "asset_id",
+        "asset_name",
+        "asset_type",
+        "account",
+        "broker",
+        "quantity",
+        "currency",
+    }
+    assert {
+        field.name
+        for field in table.fields
+        if field.clearable
+    } == {"avg_cost", "asset_class", "industry"}
+
+    with pytest.raises(ValueError, match="fields cannot be cleared: tag"):
+        validate_write_fields("holdings", "update", {"tag": None})
+    with pytest.raises(ValueError, match="fields cannot be cleared: asset_name"):
+        validate_write_fields("holdings", "update", {"asset_name": "   "})
+    validate_write_fields("holdings", "update", {"tag": "[]"})
+
+    with pytest.raises(ValueError, match="缺少必填字段: asset_name"):
+        validate_write_fields(
+            "holdings",
+            "create",
+            {
+                "asset_id": "AAPL",
+                "asset_name": "   ",
+                "asset_type": "us_stock",
+                "account": "lx",
+                "broker": "IBKR",
+                "quantity": 1,
+                "currency": "USD",
+            },
+        )
 
 
 def test_retired_remote_price_cache_fails_closed():

@@ -7,6 +7,7 @@ from src.app.cash_flow_effect_receipt_service import CashFlowEffectReceiptServic
 from src.app.cash_flow_effect_service import CashFlowEffectService
 from src.app.cash_flow_effect_store import CashFlowEffectStore
 from src.app.futu_balance_sync_service import FutuBalanceSnapshot
+from src.domain.holding_mutations import HoldingTarget
 from src.models import AssetClass, AssetType, CashFlow, Holding
 
 
@@ -45,9 +46,25 @@ class FakeStorage:
         return self.holdings.get((asset_id, account, broker))
 
     def replace_holding(self, holding):
-        replacement = Holding(**holding.model_dump())
-        key = (replacement.asset_id, replacement.account, replacement.broker)
-        current = self.holdings.get(key)
+        if isinstance(holding, HoldingTarget):
+            key = (
+                holding.identity.asset_id,
+                holding.identity.account,
+                holding.identity.broker,
+            )
+            current = self.holdings.get(key)
+            replacement = holding.to_holding(
+                record_id=(
+                    current.record_id
+                    if current is not None
+                    else f"created_{len(self.holdings)}"
+                ),
+                created_at=current.created_at if current is not None else None,
+            )
+        else:
+            replacement = Holding(**holding.model_dump())
+            key = (replacement.asset_id, replacement.account, replacement.broker)
+            current = self.holdings.get(key)
         replacement.record_id = current.record_id if current else f"created_{len(self.holdings)}"
         self.holdings[key] = replacement
         self.replacements.append(replacement)
@@ -73,7 +90,12 @@ class FailOnceStorage(FakeStorage):
         self.failed_once = False
 
     def replace_holding(self, holding):
-        if holding.account == self.fail_account and not self.failed_once:
+        account = (
+            holding.identity.account
+            if isinstance(holding, HoldingTarget)
+            else holding.account
+        )
+        if account == self.fail_account and not self.failed_once:
             self.failed_once = True
             raise RuntimeError("simulated target write failure")
         return super().replace_holding(holding)
@@ -255,6 +277,74 @@ def test_holding_change_after_preview_invalidates_confirmation(tmp_path, monkeyp
 
     assert storage.replacements == []
     assert service.store.get_effect(effect["effect_id"])["state"] == "stale"
+
+
+def test_holding_change_after_hash_recheck_fails_before_applying(
+    tmp_path,
+    monkeypatch,
+):
+    storage = FakeStorage(flows=[_flow()], holdings=[_cash()])
+    service = _service(tmp_path, monkeypatch, storage)
+    service.initialize_fingerprints()
+    effect = next(
+        item for item in service.review(account="lx")["effects"]
+        if item["effect_kind"] == "cash_flow"
+    )
+    preview = service.preview(effect["effect_id"])
+    original_build_preview = service._build_preview
+
+    def build_then_change(*args, **kwargs):
+        recomputed = original_build_preview(*args, **kwargs)
+        storage.holdings[("CNY-CASH", "lx", "某券商")].quantity = 120
+        return recomputed
+
+    monkeypatch.setattr(service, "_build_preview", build_then_change)
+
+    with pytest.raises(ValueError, match="changed after preview hash validation"):
+        service.confirm(
+            effect["effect_id"],
+            preview_hash=preview["preview_hash"],
+            confirm=True,
+        )
+
+    assert storage.replacements == []
+    assert service.store.get_effect(effect["effect_id"])["state"] == "previewed"
+
+
+def test_unowned_manual_metadata_change_is_preserved_during_confirmation(
+    tmp_path,
+    monkeypatch,
+):
+    cash = _cash()
+    cash.tag = ["old"]
+    storage = FakeStorage(flows=[_flow()], holdings=[cash])
+    service = _service(tmp_path, monkeypatch, storage)
+    service.initialize_fingerprints()
+    effect = next(
+        item for item in service.review(account="lx")["effects"]
+        if item["effect_kind"] == "cash_flow"
+    )
+    preview = service.preview(effect["effect_id"])
+    original_build_preview = service._build_preview
+
+    def build_then_change_metadata(*args, **kwargs):
+        recomputed = original_build_preview(*args, **kwargs)
+        storage.holdings[("CNY-CASH", "lx", "某券商")].tag = ["manual-new"]
+        return recomputed
+
+    monkeypatch.setattr(service, "_build_preview", build_then_change_metadata)
+
+    result = service.confirm(
+        effect["effect_id"],
+        preview_hash=preview["preview_hash"],
+        confirm=True,
+    )
+
+    holding = storage.holdings[("CNY-CASH", "lx", "某券商")]
+    assert result["success"] is True
+    assert holding.quantity == 120
+    assert holding.tag == ["manual-new"]
+    assert len(storage.replacements) == 1
 
 
 def test_futu_uses_exact_currency_field_allows_negative_and_warns_on_variance(

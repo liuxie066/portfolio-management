@@ -9,6 +9,20 @@ from src.feishu.errors import FeishuRecordNotFoundError
 from src.feishu_client import FeishuBatchWriteError, FeishuClient
 
 
+def _holding_create_fields(asset_id='000001', quantity=1, **overrides):
+    fields = {
+        'asset_id': str(asset_id),
+        'asset_name': f'Asset {asset_id}',
+        'asset_type': 'us_stock',
+        'account': 'lx',
+        'broker': 'IBKR',
+        'quantity': quantity,
+        'currency': 'USD',
+    }
+    fields.update(overrides)
+    return fields
+
+
 class TestFeishuClientInitialization:
     """测试飞书客户端初始化"""
 
@@ -482,11 +496,13 @@ class TestFeishuClientRecords:
         mock_request.return_value = mock_response
 
         client = FeishuClient(app_id='test', app_secret='test')
-        result = client.create_record('holdings', {
-            'asset_id': '000001',
-            'account': '测试账户',
-            'quantity': 100
-        })
+        result = client.create_record(
+            'holdings',
+            _holding_create_fields(
+                account='测试账户',
+                quantity=100,
+            ),
+        )
 
         assert result['record_id'] == 'new_rec_123'
 
@@ -519,6 +535,24 @@ class TestFeishuClientRecords:
         assert '缺少必填字段: account' in str(single.value)
         assert '缺少必填字段: account' in str(batch.value)
         assert 'row_index=0' in str(batch.value)
+        mock_request.assert_not_called()
+
+    @patch('src.feishu_client.FeishuClient._request')
+    @patch('src.feishu_client.FeishuClient._get_table_config')
+    def test_single_and_batch_create_reject_blank_required_text(
+        self,
+        mock_config,
+        mock_request,
+    ):
+        mock_config.return_value = ('app_token', 'table_id')
+        client = FeishuClient(app_id='test', app_secret='test')
+        fields = _holding_create_fields(asset_name='   ')
+
+        with pytest.raises(ValueError, match='缺少必填字段: asset_name'):
+            client.create_record('holdings', fields)
+        with pytest.raises(ValueError, match='缺少必填字段: asset_name'):
+            client.batch_create_records('holdings', [{'fields': fields}])
+
         mock_request.assert_not_called()
 
     @patch('src.feishu_client.FeishuClient._request')
@@ -635,8 +669,8 @@ class TestFeishuClientBatchOperations:
 
         client = FeishuClient(app_id='test', app_secret='test')
         records = [
-            {'fields': {'asset_id': '000001', 'account': 'lx', 'quantity': 1}},
-            {'fields': {'asset_id': '000002', 'account': 'lx', 'quantity': 2}}
+            {'fields': _holding_create_fields('000001', 1)},
+            {'fields': _holding_create_fields('000002', 2)},
         ]
         results = client.batch_create_records('holdings', records)
 
@@ -721,7 +755,7 @@ class TestFeishuClientBatchOperations:
 
         with pytest.raises(FeishuBatchWriteError) as exc_info:
             client.batch_create_records('holdings', [{
-                'fields': {'asset_id': '000001', 'account': 'lx', 'quantity': 1}
+                'fields': _holding_create_fields('000001', 1)
             }])
 
         assert exc_info.value.operation == 'create'
@@ -737,7 +771,7 @@ class TestFeishuClientBatchOperations:
         mock_request.side_effect = [first_chunk, TimeoutError('read timeout')]
         client = FeishuClient(app_id='test', app_secret='test')
         records = [
-            {'fields': {'asset_id': str(i), 'account': 'lx', 'quantity': i}}
+            {'fields': _holding_create_fields(str(i), i)}
             for i in range(501)
         ]
 

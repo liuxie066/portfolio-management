@@ -37,27 +37,27 @@ def test_cash_service_foreign_cash_holding_entry_is_disabled():
 
 def test_cash_service_deducts_cash_then_mmf():
     storage = Mock()
-    storage.get_holding.side_effect = [
-        Holding(asset_id="CNY-CASH", asset_name="人民币现金", asset_type=AssetType.CASH, account="a", quantity=3000, currency="CNY"),
-        Holding(asset_id="CNY-MMF", asset_name="货币基金", asset_type=AssetType.MMF, account="a", quantity=10000, currency="CNY"),
+    storage.get_holding_fresh.side_effect = [
+        Holding(asset_id="CNY-CASH", asset_name="人民币现金", asset_type=AssetType.CASH, account="a", broker="手工", quantity=3000, currency="CNY"),
+        Holding(asset_id="CNY-MMF", asset_name="货币基金", asset_type=AssetType.MMF, account="a", broker="手工", quantity=10000, currency="CNY"),
     ]
     service = CashService(storage)
 
-    assert service.deduct_cash("a", 5000) is True
+    assert service.deduct_cash("a", 5000, "手工") is True
 
-    assert storage.update_holding_quantity.call_args_list[0].args == ("CNY-CASH", "a", -3000.0)
-    assert storage.update_holding_quantity.call_args_list[1].args == ("CNY-MMF", "a", -2000.0)
+    assert storage.update_holding_quantity.call_args_list[0].args == ("CNY-CASH", "a", -3000.0, "手工")
+    assert storage.update_holding_quantity.call_args_list[1].args == ("CNY-MMF", "a", -2000.0, "手工")
 
 
 def test_cash_service_insufficient_cash_returns_false():
     storage = Mock()
-    storage.get_holding.side_effect = [
-        Holding(asset_id="CNY-CASH", asset_name="人民币现金", asset_type=AssetType.CASH, account="a", quantity=1000, currency="CNY"),
+    storage.get_holding_fresh.side_effect = [
+        Holding(asset_id="CNY-CASH", asset_name="人民币现金", asset_type=AssetType.CASH, account="a", broker="手工", quantity=1000, currency="CNY"),
         None,
     ]
     service = CashService(storage)
 
-    assert service.deduct_cash("a", 5000) is False
+    assert service.deduct_cash("a", 5000, "手工") is False
 
 
 def test_cash_service_add_cash_is_disabled():
@@ -72,8 +72,9 @@ def test_cash_service_add_cash_is_disabled():
 
 def test_cash_service_sync_cash_like_balance_uses_absolute_target_delta():
     storage = Mock()
-    storage.get_holding.return_value = Holding(
+    storage.get_holding_fresh.return_value = Holding(
         asset_id="CNY-MMF",
+        record_id="rec_mmf",
         asset_name="货币基金",
         asset_type=AssetType.MMF,
         account="a",
@@ -97,7 +98,11 @@ def test_cash_service_sync_cash_like_balance_uses_absolute_target_delta():
     assert result["delta"] == 5.01
     assert result["created"] is False
     assert result["updated"] is True
-    storage.update_holding_quantity.assert_called_once_with("CNY-MMF", "a", 5.01, "富途")
+    storage.update_holding_quantity.assert_not_called()
+    mutation = storage.replace_holding.call_args.args[0]
+    assert mutation.identity.broker == "富途"
+    assert mutation.values["quantity"] == 15.01
+    assert mutation.owned_fields == {"quantity", "asset_class", "industry"}
 
 
 def test_cash_service_sync_cash_like_balance_refuses_cash_even_dry_run():

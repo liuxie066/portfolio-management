@@ -10,6 +10,7 @@ import socket
 from typing import Any, Dict, Iterable, Optional
 from uuid import uuid4
 
+from src.domain.holding_mutations import HoldingRepairPatch
 from src.process_lock import account_lock_key, holding_record_lock_key, process_lock
 
 from .holding_case_contract import (
@@ -815,8 +816,10 @@ class HoldingsWorkflowService:
         readback = None
         try:
             readback = self.storage.patch_holding_record(
-                record_id=validation.raw.record_id,
-                fields=field_targets,
+                HoldingRepairPatch.from_raw(
+                    validation.raw,
+                    field_targets,
+                )
             )
         except Exception as exc:
             patch_error = str(exc) or exc.__class__.__name__

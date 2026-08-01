@@ -9,6 +9,7 @@ import pytest
 from src.app.holdings_reconciliation_service import HoldingsReconciliationService
 from src.app.holdings_workflow_service import HoldingsWorkflowService
 from src.app.operation_state_store import OperationStateStore
+from src.domain.holding_mutations import HoldingRepairPatch
 from src.domain.holdings import RawHoldingRecord
 
 
@@ -36,7 +37,10 @@ class _Storage:
             return []
         return [RawHoldingRecord("rec-1", dict(self.fields))]
 
-    def patch_holding_record(self, *, record_id, fields):
+    def patch_holding_record(self, patch):
+        assert isinstance(patch, HoldingRepairPatch)
+        record_id = patch.record_id
+        fields = dict(patch.values)
         self.patch_calls.append((record_id, dict(fields)))
         if self.patch_mode == "timeout_after_apply":
             self.fields.update(fields)

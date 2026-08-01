@@ -32,6 +32,10 @@ from src.domain.nav.performance import (
     calc_since_inception_return,
     calc_year_return,
 )
+from src.domain.holding_mutations import (
+    HOLDING_REQUIRED_VALUE_FIELDS,
+    HoldingTarget,
+)
 from src.service.application import PortfolioService
 from src.write_guard import (
     validate_and_normalize_cash_flow_input,
@@ -692,13 +696,18 @@ class PortfolioSkill:
 
 # ========== 数据库初始化 ==========
 
-def init_db(account: str = DEFAULT_ACCOUNT, initial_cash: float = 0) -> Dict[str, Any]:
+def init_db(
+    account: str = DEFAULT_ACCOUNT,
+    initial_cash: float = 0,
+    broker: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     初始化投资组合数据库（飞书多维表）
 
     Args:
         account: 账户标识，默认 "lx"
         initial_cash: 初始现金金额（可选），默认 0
+        broker: 初始现金所属券商/平台；initial_cash > 0 时必填
 
     Returns:
         {"success": bool, "message": str}
@@ -708,7 +717,7 @@ def init_db(account: str = DEFAULT_ACCOUNT, initial_cash: float = 0) -> Dict[str
         init_db()
 
         # 初始化并设置初始现金 10万元
-        init_db(initial_cash=100000)
+        init_db(initial_cash=100000, broker="手工")
     """
     try:
         storage = FeishuStorage()
@@ -719,19 +728,34 @@ def init_db(account: str = DEFAULT_ACCOUNT, initial_cash: float = 0) -> Dict[str
 
         # 创建初始现金持仓（如果需要）
         if initial_cash > 0:
-            cash_holding = storage.get_holding('CNY-CASH', account)
+            resolved_broker = str(broker or "").strip()
+            if not resolved_broker:
+                raise ValueError("initial_cash > 0 requires an explicit broker")
+            cash_holding = storage.get_holding_fresh(
+                'CNY-CASH',
+                account,
+                resolved_broker,
+            )
             if not cash_holding:
                 holding = Holding(
                     asset_id='CNY-CASH',
                     asset_name='人民币现金',
                     asset_type=AssetType.CASH,
                     account=account,
+                    broker=resolved_broker,
                     quantity=initial_cash,
                     currency='CNY',
                     asset_class=AssetClass.CASH,
                     industry=Industry.CASH
                 )
-                storage.upsert_holding(holding)
+                storage.replace_holding(HoldingTarget.from_holdings(
+                    base=None,
+                    target=holding,
+                    owned_fields=(
+                        set(HOLDING_REQUIRED_VALUE_FIELDS)
+                        | {"asset_class", "industry"}
+                    ),
+                ))
 
         # 检查数据库状态
         holdings = storage.get_holdings(account=account)

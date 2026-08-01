@@ -11,6 +11,14 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
 from src import config
+from src.domain.holding_mutations import (
+    HoldingIdentity,
+    HoldingMutationConflictError,
+    HoldingTarget,
+    canonical_holding,
+    holding_owned_fields_match,
+    holding_state_digest,
+)
 from src.models import Holding
 from src.process_lock import account_lock_key, process_lock
 from src.snapshot_models import HoldingSnapshot
@@ -100,7 +108,7 @@ class CompensationService:
     def serialize_holding(holding: Optional[Holding]) -> Optional[Dict[str, Any]]:
         if holding is None:
             return None
-        data = holding.model_dump(mode="json")
+        data = canonical_holding(holding).model_dump(mode="json")
         return {
             key: data.get(key)
             for key in (
@@ -222,7 +230,13 @@ class CompensationService:
             except Exception as exc:
                 error_type = (
                     "state_conflict"
-                    if isinstance(exc, CompensationStateConflict)
+                    if isinstance(
+                        exc,
+                        (
+                            CompensationStateConflict,
+                            HoldingMutationConflictError,
+                        ),
+                    )
                     else "target_apply_failed"
                 )
                 self._append_status(
@@ -323,10 +337,25 @@ class CompensationService:
             current["supported"] = bool(
                 isinstance(targets, list)
                 and targets
-                and all(isinstance(target, dict) and target.get("type") in SUPPORTED_TARGET_TYPES for target in targets)
+                and all(self._target_is_supported(target) for target in targets)
             )
             current["target_count"] = len(targets) if isinstance(targets, list) else 0
         return folded
+
+    @staticmethod
+    def _target_is_supported(target: Any) -> bool:
+        if not isinstance(target, dict) or target.get("type") not in SUPPORTED_TARGET_TYPES:
+            return False
+        if target.get("type") == "HOLDINGS_SNAPSHOT_TARGET_SET":
+            return True
+        mutation = target.get("mutation")
+        if not isinstance(mutation, dict):
+            return False
+        try:
+            HoldingTarget.from_payload(mutation)
+        except (TypeError, ValueError):
+            return False
+        return True
 
     def _apply_target(self, target: Dict[str, Any]) -> Dict[str, Any]:
         target_type = target.get("type")
@@ -338,10 +367,18 @@ class CompensationService:
 
     def _apply_holding_target(self, target: Dict[str, Any]) -> Dict[str, Any]:
         identity = target.get("identity") or {}
-        current = self.storage.get_holding(
+        canonical_identity = HoldingIdentity(
             identity.get("asset_id"),
             identity.get("account"),
             identity.get("broker"),
+        )
+        mutation = HoldingTarget.from_payload(target.get("mutation") or {})
+        if mutation.identity != canonical_identity:
+            raise ValueError("compensation target identity disagrees with mutation")
+        current = self.storage.get_holding_fresh(
+            canonical_identity.asset_id,
+            canonical_identity.account,
+            canonical_identity.broker,
         )
         current_state = self.serialize_holding(current)
         before = target.get("before")
@@ -350,25 +387,61 @@ class CompensationService:
         if target.get("type") == "HOLDING_ZERO_DELETE":
             if current is None:
                 return {"status": "already_applied"}
-            if abs(float(current.quantity or 0.0)) <= 1e-8:
-                if current.record_id:
-                    self.storage.delete_holding_by_record_id(current.record_id)
-                    return {"status": "applied"}
-                return {"status": "already_applied"}
-            if not self._state_matches(current_state, before):
-                raise CompensationStateConflict(identity, current_state, before, desired)
-            if not current.record_id:
-                raise RuntimeError(f"holding delete target lacks record_id: {identity}")
-            self.storage.delete_holding_by_record_id(current.record_id)
-            return {"status": "applied"}
+            base_matches = (
+                mutation.base_record_id is not None
+                and current.record_id == mutation.base_record_id
+                and holding_state_digest(current) == mutation.base_digest
+                and self._state_matches(current_state, before)
+            )
+            if not base_matches or abs(float(current.quantity or 0.0)) > 1e-8:
+                raise CompensationStateConflict(
+                    canonical_identity.as_dict(),
+                    current_state,
+                    before,
+                    desired,
+                )
+            deleted = self.storage.delete_holding_target_if_zero(mutation)
+            readback = self.storage.get_holding_fresh(
+                canonical_identity.asset_id,
+                canonical_identity.account,
+                canonical_identity.broker,
+            )
+            if readback is not None:
+                raise RuntimeError(
+                    f"holding delete fresh readback still exists: {canonical_identity}"
+                )
+            return {"status": "applied" if deleted else "already_applied"}
 
-        if self._state_matches(current_state, desired):
+        if desired != self.serialize_holding(mutation.to_holding()):
+            raise ValueError("compensation desired state disagrees with mutation")
+        if (
+            current is not None
+            and holding_owned_fields_match(current, mutation)
+        ):
             return {"status": "already_applied"}
         if not self._state_matches(current_state, before):
-            raise CompensationStateConflict(identity, current_state, before, desired)
+            raise CompensationStateConflict(
+                canonical_identity.as_dict(),
+                current_state,
+                before,
+                desired,
+            )
         if not isinstance(desired, dict):
-            raise ValueError(f"holding target must be an object: {identity}")
-        self.storage.replace_holding(Holding(**desired))
+            raise ValueError(f"holding target must be an object: {canonical_identity}")
+        self.storage.replace_holding(mutation)
+        readback = self.storage.get_holding_fresh(
+            canonical_identity.asset_id,
+            canonical_identity.account,
+            canonical_identity.broker,
+        )
+        if (
+            readback is None
+            or not holding_owned_fields_match(readback, mutation)
+        ):
+            raise RuntimeError(
+                "holding compensation fresh readback does not match target: "
+                f"{canonical_identity}"
+            )
         return {"status": "applied"}
 
     def _apply_snapshot_target(self, target: Dict[str, Any]) -> Dict[str, Any]:

@@ -5,6 +5,10 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock
 
 from src.app.compensation_service import CompensationService
+from src.domain.holding_mutations import (
+    HoldingMutationConflictError,
+    HoldingTarget,
+)
 from src.feishu.repositories.nav_history_repository import NavHistoryRepository
 from src.models import AssetType, Holding, NAVHistory
 
@@ -25,26 +29,39 @@ def _holding(quantity):
         asset_name="平安银行",
         asset_type=AssetType.A_STOCK,
         account="a",
+        broker="manual",
         quantity=quantity,
         currency="CNY",
     )
 
 
 def _target(service, before, target):
+    mutation = HoldingTarget.from_holdings(
+        base=before,
+        target=target,
+        owned_fields={"quantity"},
+    )
     return {
         "type": "HOLDING_TARGET_SET",
-        "identity": {"asset_id": "000001", "account": "a", "broker": ""},
+        "identity": {"asset_id": "000001", "account": "a", "broker": "manual"},
         "before": service.serialize_holding(before),
         "target": service.serialize_holding(target),
+        "mutation": mutation.to_payload(),
     }
 
 
 def _storage(current):
     storage = Mock()
     state = {"holding": current}
-    storage.get_holding.side_effect = lambda *_args: state["holding"]
+    storage.get_holding_fresh.side_effect = lambda *_args: state["holding"]
 
-    def replace(holding):
+    def replace(target):
+        assert isinstance(target, HoldingTarget)
+        previous = state["holding"]
+        holding = target.to_holding(
+            record_id=previous.record_id if previous is not None else "holding-1",
+            created_at=previous.created_at if previous is not None else None,
+        )
         state["holding"] = holding
         return holding
 
@@ -138,6 +155,36 @@ def test_retry_after_target_side_effect_is_idempotent(tmp_path):
     storage.replace_holding.assert_not_called()
 
 
+def test_retry_treats_owned_fields_as_complete_and_preserves_manual_metadata(
+    tmp_path,
+):
+    before = _holding(10).model_copy(update={"tag": ["old"]})
+    desired = _holding(5).model_copy(update={"tag": ["old"]})
+    current = _holding(5).model_copy(update={"tag": ["manual-new"]})
+    storage, state = _storage(current)
+    service = CompensationService(
+        storage=storage,
+        queue_file=tmp_path / "compensation.jsonl",
+    )
+    task = service.record(
+        operation_type="SELL_TARGETS_INCOMPLETE",
+        account="a",
+        payload={"targets": [_target(service, before, desired)]},
+        error="crash before resolved",
+    )
+
+    result = service.retry(task.task_id, confirm=True)
+
+    assert result["success"] is True
+    assert result["target_outcomes"] == [{
+        "index": 0,
+        "type": "HOLDING_TARGET_SET",
+        "status": "already_applied",
+    }]
+    assert state["holding"].tag == ["manual-new"]
+    storage.replace_holding.assert_not_called()
+
+
 def test_retry_can_resume_after_target_write_failed_before_mutation(tmp_path):
     before = _holding(10)
     desired = _holding(5)
@@ -166,6 +213,33 @@ def test_retry_can_resume_after_target_write_failed_before_mutation(tmp_path):
     assert resolved["status"] == "RESOLVED"
     assert resolved["retry_count"] == 2
     assert state["holding"].quantity == 5
+
+
+def test_retry_classifies_repository_cas_failure_as_state_conflict(tmp_path):
+    before = _holding(10)
+    desired = _holding(5)
+    storage, state = _storage(before)
+    storage.replace_holding.side_effect = HoldingMutationConflictError(
+        "holding fresh base digest changed"
+    )
+    service = CompensationService(
+        storage=storage,
+        queue_file=tmp_path / "compensation.jsonl",
+    )
+    task = service.record(
+        operation_type="SELL_TARGETS_INCOMPLETE",
+        account="a",
+        payload={"targets": [_target(service, before, desired)]},
+        error="boom",
+    )
+
+    result = service.retry(task.task_id, confirm=True)
+
+    assert result["success"] is False
+    assert result["status"] == "FAILED"
+    assert result["error_type"] == "state_conflict"
+    assert state["holding"].quantity == 10
+    storage.replace_holding.assert_called_once()
 
 
 def test_snapshot_retry_accepts_failed_details_and_is_idempotent_when_complete(tmp_path):
@@ -272,6 +346,85 @@ def test_retry_refuses_state_conflict_without_overwrite(tmp_path):
     assert result["error_type"] == "state_conflict"
     assert state["holding"].quantity == 7
     storage.replace_holding.assert_not_called()
+
+
+def test_zero_delete_retry_refuses_reused_business_key_with_new_record(tmp_path):
+    recorded = _holding(0)
+    replacement = _holding(0).model_copy(update={"record_id": "holding-2"})
+    mutation = HoldingTarget.from_holdings(
+        base=recorded,
+        target=recorded,
+        owned_fields={"quantity"},
+    )
+    storage, _state = _storage(replacement)
+    service = CompensationService(
+        storage=storage,
+        queue_file=tmp_path / "compensation.jsonl",
+    )
+    target = {
+        "type": "HOLDING_ZERO_DELETE",
+        "identity": {"asset_id": "000001", "account": "a", "broker": "manual"},
+        "before": service.serialize_holding(recorded),
+        "target": None,
+        "mutation": mutation.to_payload(),
+    }
+    task = service.record(
+        operation_type="SELL_TARGETS_INCOMPLETE",
+        account="a",
+        payload={"targets": [target]},
+        error="delete completion was interrupted",
+    )
+
+    result = service.retry(task.task_id, confirm=True)
+
+    assert result["success"] is False
+    assert result["error_type"] == "state_conflict"
+    storage.delete_holding_target_if_zero.assert_not_called()
+
+
+def test_zero_delete_retry_passes_bound_target_and_proves_absence(tmp_path):
+    recorded = _holding(0)
+    mutation = HoldingTarget.from_holdings(
+        base=recorded,
+        target=recorded,
+        owned_fields={"quantity"},
+    )
+    storage, state = _storage(recorded)
+
+    def delete_bound_target(target):
+        assert target == mutation
+        state["holding"] = None
+        return True
+
+    storage.delete_holding_target_if_zero.side_effect = delete_bound_target
+    service = CompensationService(
+        storage=storage,
+        queue_file=tmp_path / "compensation.jsonl",
+    )
+    task = service.record(
+        operation_type="SELL_TARGETS_INCOMPLETE",
+        account="a",
+        payload={
+            "targets": [{
+                "type": "HOLDING_ZERO_DELETE",
+                "identity": {
+                    "asset_id": "000001",
+                    "account": "a",
+                    "broker": "manual",
+                },
+                "before": service.serialize_holding(recorded),
+                "target": None,
+                "mutation": mutation.to_payload(),
+            }]
+        },
+        error="delete completion was interrupted",
+    )
+
+    result = service.retry(task.task_id, confirm=True)
+
+    assert result["success"] is True
+    storage.delete_holding_target_if_zero.assert_called_once_with(mutation)
+    assert state["holding"] is None
 
 
 def test_two_concurrent_retries_apply_transition_once(tmp_path):

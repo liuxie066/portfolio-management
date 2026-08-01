@@ -6,6 +6,11 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from src.app.cash_service import CashService
+from src.domain.holding_mutations import (
+    HoldingMutationConflictError,
+    HoldingRepairPatch,
+    HoldingTarget,
+)
 from src.feishu.repositories.holdings_repository import HoldingsIntegrityError
 from src.feishu_storage import FeishuStorage
 from src.models import Holding, AssetType
@@ -75,6 +80,160 @@ class StubHoldingsClient:
         raise ValueError(f"record not found: {record_id}")
 
 
+class StubLocalHoldingsIndexCache:
+    def __init__(self, items: Optional[Dict[str, Dict[str, Any]]] = None):
+        self.items = {key: dict(value) for key, value in (items or {}).items()}
+        self.flush_calls = 0
+
+    def load_all(self) -> Dict[str, Dict[str, Any]]:
+        return {key: dict(value) for key, value in self.items.items()}
+
+    def upsert(self, cache_key: str, payload: Dict[str, Any], _flush: bool = False):
+        self.items[cache_key] = dict(payload)
+
+    def delete(self, cache_key: str, _flush: bool = False):
+        self.items.pop(cache_key, None)
+
+    def flush(self):
+        self.flush_calls += 1
+
+
+def _cached_holding_fields(**overrides) -> Dict[str, Any]:
+    fields = {
+        "validation_policy_version": "holdings-validation.v1",
+        "record_id": "rec_cached",
+        "asset_id": "AAPL",
+        "asset_name": "Apple",
+        "asset_type": "us_stock",
+        "account": "lx",
+        "broker": "IBKR",
+        "quantity": 1,
+        "avg_cost": None,
+        "currency": "USD",
+        "asset_class": None,
+        "industry": None,
+        "tag": [],
+        "created_at": None,
+        "updated_at": None,
+    }
+    fields.update(overrides)
+    return fields
+
+
+def test_persistent_index_migrates_legacy_key_and_values_to_canonical_form():
+    local_cache = StubLocalHoldingsIndexCache({
+        " AAPL : lx : IBKR ": _cached_holding_fields(
+            asset_id=" AAPL ",
+            account=" lx ",
+            broker=" IBKR ",
+            currency="usd",
+        )
+    })
+    storage = FeishuStorage(
+        client=StubHoldingsClient(),
+        local_holdings_index_cache=local_cache,
+    )
+
+    canonical_key = storage._get_holding_cache_key("AAPL", "lx", "IBKR")
+    assert set(local_cache.items) == {canonical_key}
+    assert local_cache.items[canonical_key]["asset_id"] == "AAPL"
+    assert local_cache.items[canonical_key]["account"] == "lx"
+    assert local_cache.items[canonical_key]["broker"] == "IBKR"
+    assert local_cache.items[canonical_key]["currency"] == "USD"
+    assert local_cache.flush_calls == 1
+
+
+def test_full_fresh_read_replaces_persistent_cache_including_absent_accounts():
+    stale_key = '["AAPL","lx","IBKR"]'
+    local_cache = StubLocalHoldingsIndexCache({
+        stale_key: _cached_holding_fields(),
+    })
+    client = StubHoldingsClient(initial_records=[{
+        "record_id": "rec_sy",
+        "fields": {
+            "asset_id": "MSFT",
+            "asset_name": "Microsoft",
+            "asset_type": "us_stock",
+            "account": "sy",
+            "broker": "IBKR",
+            "quantity": 2,
+            "currency": "USD",
+        },
+    }])
+    storage = FeishuStorage(
+        client=client,
+        local_holdings_index_cache=local_cache,
+    )
+
+    holdings = storage.get_holdings_fresh(account=None)
+
+    fresh_key = storage._get_holding_cache_key("MSFT", "sy", "IBKR")
+    assert [item.asset_id for item in holdings] == ["MSFT"]
+    assert stale_key not in local_cache.items
+    assert set(local_cache.items) == {fresh_key}
+
+
+def test_brokerless_lookup_does_not_treat_persistent_cache_as_uniqueness_proof():
+    local_cache = StubLocalHoldingsIndexCache({
+        '["AAPL","lx","IBKR"]': _cached_holding_fields(),
+    })
+    client = StubHoldingsClient(initial_records=[
+        {
+            "record_id": "rec_ibkr",
+            "fields": _cached_holding_fields(
+                validation_policy_version=None,
+                record_id=None,
+            ),
+        },
+        {
+            "record_id": "rec_futu",
+            "fields": _cached_holding_fields(
+                validation_policy_version=None,
+                record_id=None,
+                broker="FUTU",
+            ),
+        },
+    ])
+    storage = FeishuStorage(
+        client=client,
+        local_holdings_index_cache=local_cache,
+    )
+
+    try:
+        storage.get_holding("AAPL", "lx")
+    except ValueError as exc:
+        assert "requires broker" in str(exc)
+    else:
+        raise AssertionError("expected brokerless ambiguity failure")
+
+    assert len(client.list_records_calls) == 1
+    assert client.update_record_calls == []
+    assert client.create_record_calls == []
+
+
+def test_get_holdings_uses_one_canonical_account_for_remote_and_cache_filters():
+    client = StubHoldingsClient(initial_records=[{
+        "record_id": "rec_aapl",
+        "fields": {
+            "asset_id": "AAPL",
+            "asset_name": "Apple",
+            "asset_type": "us_stock",
+            "account": "lx",
+            "broker": "IBKR",
+            "quantity": 1,
+            "currency": "USD",
+        },
+    }])
+    storage = FeishuStorage(client=client)
+
+    holdings = storage.get_holdings(account=" lx ", include_empty=True)
+
+    assert [(item.asset_id, item.account, item.broker) for item in holdings] == [
+        ("AAPL", "lx", "IBKR")
+    ]
+    assert storage._holdings_index_loaded_accounts == {"lx"}
+
+
 
 def test_preload_builds_index_and_projection_and_avoids_refetch():
     client = StubHoldingsClient(
@@ -122,6 +281,7 @@ def test_raw_holdings_read_preserves_blank_fields_and_record_id():
                 "record_id": "rec_blank",
                 "fields": {
                     "asset_id": "AAPL",
+                    "asset_name": "Apple",
                     "asset_type": "us_stock",
                     "account": "lx",
                     "broker": "IBKR",
@@ -149,6 +309,7 @@ def test_failed_preload_aggregates_invalid_rows_and_publishes_nothing():
                 "record_id": "rec_missing_currency",
                 "fields": {
                     "asset_id": "AAPL",
+                    "asset_name": "Apple",
                     "asset_type": "us_stock",
                     "account": "lx",
                     "broker": "IBKR",
@@ -186,6 +347,39 @@ def test_failed_preload_aggregates_invalid_rows_and_publishes_nothing():
     assert "lx" not in storage._holdings_index_loaded_accounts
 
 
+def test_failed_preload_rejects_missing_required_asset_name():
+    client = StubHoldingsClient(
+        initial_records=[
+            {
+                "record_id": "rec_missing_name",
+                "fields": {
+                    "asset_id": "AAPL",
+                    "asset_type": "us_stock",
+                    "account": "lx",
+                    "broker": "IBKR",
+                    "quantity": 1,
+                    "currency": "USD",
+                },
+            }
+        ]
+    )
+    storage = FeishuStorage(client=client)
+
+    try:
+        storage.preload_holdings_index(account="lx")
+    except HoldingsIntegrityError as exc:
+        assert exc.errors == [
+            {
+                "record_id": "rec_missing_name",
+                "error": "missing required holdings fields: asset_name",
+            }
+        ]
+    else:
+        raise AssertionError("expected missing asset_name integrity failure")
+
+    assert storage._holding_fields_cache == {}
+
+
 def test_failed_preload_rejects_duplicates_before_replacing_existing_cache():
     client = StubHoldingsClient(
         initial_records=[
@@ -193,6 +387,7 @@ def test_failed_preload_rejects_duplicates_before_replacing_existing_cache():
                 "record_id": "rec_original",
                 "fields": {
                     "asset_id": "AAPL",
+                    "asset_name": "Apple",
                     "asset_type": "us_stock",
                     "account": "lx",
                     "broker": "IBKR",
@@ -209,6 +404,7 @@ def test_failed_preload_rejects_duplicates_before_replacing_existing_cache():
             "record_id": "rec_duplicate",
             "fields": {
                 "asset_id": "AAPL",
+                "asset_name": "Apple",
                 "asset_type": "us_stock",
                 "account": "lx",
                 "broker": "IBKR",
@@ -241,6 +437,7 @@ def test_failed_preload_does_not_loose_parse_invalid_optional_fields():
                 "record_id": "rec_bad_tag",
                 "fields": {
                     "asset_id": "AAPL",
+                    "asset_name": "Apple",
                     "asset_type": "us_stock",
                     "account": "lx",
                     "broker": "IBKR",
@@ -302,7 +499,8 @@ def test_preload_accepts_incident_and_predecessor_holding_date_formats():
     predecessor = storage.get_holding("ASSET-16", "lx", "富途")
     assert predecessor is not None
     assert predecessor.updated_at == datetime(2026, 8, 1)
-    assert storage._holding_fields_cache["ASSET-16:lx:富途"]["updated_at"] == "2026/08/01"
+    cache_key = storage._get_holding_cache_key("ASSET-16", "lx", "富途")
+    assert storage._holding_fields_cache[cache_key]["updated_at"] == "2026/08/01"
 
 
 def test_preload_rejects_malformed_holding_date_without_publishing_cache():
@@ -312,6 +510,7 @@ def test_preload_rejects_malformed_holding_date_without_publishing_cache():
                 "record_id": "rec_bad_date",
                 "fields": {
                     "asset_id": "AAPL",
+                    "asset_name": "Apple",
                     "asset_type": "us_stock",
                     "account": "lx",
                     "broker": "富途",
@@ -398,9 +597,9 @@ def test_reconciliation_patch_is_narrow_and_fresh_reads_back():
     )
     storage = FeishuStorage(client=client)
 
+    raw = storage.get_raw_holdings(record_id="rec_patch")[0]
     readback = storage.patch_holding_record(
-        record_id="rec_patch",
-        fields={"currency": "USD"},
+        HoldingRepairPatch.from_raw(raw, {"currency": "USD"})
     )
 
     assert readback.raw_fields["currency"] == "USD"
@@ -410,17 +609,99 @@ def test_reconciliation_patch_is_narrow_and_fresh_reads_back():
     )
     assert len(client.update_record_calls[0]["fields"]) == 2
     try:
-        storage.patch_holding_record(
-            record_id="rec_patch",
-            fields={"quantity": 2},
-        )
+        HoldingRepairPatch.from_raw(readback, {"quantity": 2})
     except ValueError as exc:
         assert "unsupported" in str(exc)
     else:
         raise AssertionError("expected reconciliation patch allowlist failure")
 
 
-def test_upsert_uses_preloaded_cache_for_batch_updates():
+def test_reconciliation_patch_invalidates_cache_when_full_proof_read_fails():
+    client = StubHoldingsClient(
+        initial_records=[
+            {
+                "record_id": "rec_patch",
+                "fields": {
+                    "asset_id": "AAPL",
+                    "asset_name": "Apple",
+                    "asset_type": "us_stock",
+                    "account": "lx",
+                    "broker": "IBKR",
+                    "quantity": 1,
+                    "currency": "USD",
+                },
+            }
+        ]
+    )
+    local_cache = StubLocalHoldingsIndexCache()
+    storage = FeishuStorage(
+        client=client,
+        local_holdings_index_cache=local_cache,
+    )
+    storage.preload_holdings_index(account="lx")
+    cache_key = storage._get_holding_cache_key("AAPL", "lx", "IBKR")
+    assert cache_key in storage._holding_fields_cache
+    raw = storage.get_raw_holdings(record_id="rec_patch")[0]
+    patch = HoldingRepairPatch.from_raw(raw, {"asset_name": "Apple Inc."})
+
+    def fail_full_slice_read(*_args, **_kwargs):
+        raise RuntimeError("readback slice unavailable")
+
+    client.list_records = fail_full_slice_read
+    try:
+        storage.patch_holding_record(patch)
+    except RuntimeError as exc:
+        assert "readback slice unavailable" in str(exc)
+    else:
+        raise AssertionError("expected full-slice proof failure")
+
+    assert cache_key not in storage._holding_fields_cache
+    assert cache_key not in local_cache.items
+
+
+def test_reconciliation_patch_rejects_changed_confirmed_raw_base():
+    client = StubHoldingsClient(
+        initial_records=[
+            {
+                "record_id": "rec_patch",
+                "fields": {
+                    "asset_id": "AAPL",
+                    "asset_name": "Apple",
+                    "asset_type": "us_stock",
+                    "account": "lx",
+                    "broker": "IBKR",
+                    "quantity": 1,
+                    "currency": "USD",
+                },
+            }
+        ]
+    )
+    local_cache = StubLocalHoldingsIndexCache()
+    storage = FeishuStorage(
+        client=client,
+        local_holdings_index_cache=local_cache,
+    )
+    storage.preload_holdings_index(account="lx")
+    cache_key = storage._get_holding_cache_key("AAPL", "lx", "IBKR")
+    raw = storage.get_raw_holdings(record_id="rec_patch")[0]
+    patch = HoldingRepairPatch.from_raw(raw, {"asset_name": "Apple Inc."})
+
+    client._records[0]["fields"]["asset_name"] = "External Name"
+
+    try:
+        storage.patch_holding_record(patch)
+    except HoldingMutationConflictError as exc:
+        assert "repair base changed" in str(exc)
+    else:
+        raise AssertionError("expected confirmed raw-base conflict")
+
+    assert client.update_record_calls == []
+    assert cache_key not in storage._holding_fields_cache
+    assert cache_key not in local_cache.items
+    assert local_cache.flush_calls >= 1
+
+
+def test_upsert_uses_fresh_base_and_readback_for_each_update():
     client = StubHoldingsClient(
         initial_records=[
             {
@@ -462,8 +743,9 @@ def test_upsert_uses_preloaded_cache_for_batch_updates():
     storage.upsert_holding(h1)
     storage.upsert_holding(h2)
 
-    # only preload triggered one list; each upsert should update by cache (no re-list)
-    assert len(client.list_records_calls) == 1
+    # Preload is not mutation evidence. Each upsert reads its base, rebinds at
+    # the write boundary, and reads back the complete account slice.
+    assert len(client.list_records_calls) == 7
     assert len(client.update_record_calls) == 2
     assert client.update_record_calls[0]["fields"]["quantity"] == 120
     assert client.update_record_calls[1]["fields"]["quantity"] == 150
@@ -471,7 +753,7 @@ def test_upsert_uses_preloaded_cache_for_batch_updates():
     _assert_canonical_holding_date(client.update_record_calls[1]["fields"]["updated_at"])
 
 
-def test_upsert_create_after_preload_missing_key_without_refetch():
+def test_upsert_create_after_preload_still_requires_fresh_empty_base_and_proof():
     client = StubHoldingsClient(initial_records=[])
     storage = FeishuStorage(client=client)
     storage.preload_holdings_index(account="lx")
@@ -488,7 +770,7 @@ def test_upsert_create_after_preload_missing_key_without_refetch():
     created = storage.upsert_holding(h)
 
     assert created.record_id == "rec_new_1"
-    assert len(client.list_records_calls) == 1  # preload only
+    assert len(client.list_records_calls) == 4
     assert len(client.create_record_calls) == 1
     created_fields = client.create_record_calls[0]["fields"]
     _assert_canonical_holding_date(created_fields["created_at"])
@@ -557,6 +839,55 @@ def test_replace_holding_updates_absolute_quantity_and_descriptor_fields():
     assert fields["asset_type"] == "cash"
     assert fields["currency"] == "CNY"
     _assert_canonical_holding_date(fields["updated_at"])
+
+
+def test_target_conflict_invalidates_memory_and_persistent_account_cache():
+    client = StubHoldingsClient(
+        initial_records=[
+            {
+                "record_id": "rec_aapl",
+                "fields": {
+                    "asset_id": "AAPL",
+                    "asset_name": "Apple",
+                    "asset_type": "us_stock",
+                    "account": "lx",
+                    "broker": "IBKR",
+                    "quantity": 1,
+                    "currency": "USD",
+                },
+            }
+        ]
+    )
+    local_cache = StubLocalHoldingsIndexCache()
+    storage = FeishuStorage(
+        client=client,
+        local_holdings_index_cache=local_cache,
+    )
+    storage.preload_holdings_index(account="lx")
+    base = storage.get_holding_fresh("AAPL", "lx", "IBKR")
+    assert base is not None
+    target = HoldingTarget.from_holdings(
+        base=base,
+        target=base.model_copy(update={"quantity": 2}),
+        owned_fields={"quantity"},
+    )
+    cache_key = storage._get_holding_cache_key("AAPL", "lx", "IBKR")
+    assert cache_key in storage._holding_fields_cache
+    assert cache_key in local_cache.items
+
+    client._records[0]["fields"]["quantity"] = 3
+
+    try:
+        storage.replace_holding(target)
+    except HoldingMutationConflictError as exc:
+        assert "digest changed" in str(exc)
+    else:
+        raise AssertionError("expected stale target conflict")
+
+    assert client.update_record_calls == []
+    assert cache_key not in storage._holding_fields_cache
+    assert cache_key not in local_cache.items
+    assert local_cache.flush_calls >= 1
 
 
 def test_sync_mmf_balance_serializes_text_timestamp():

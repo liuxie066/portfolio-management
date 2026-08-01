@@ -11,6 +11,7 @@ from pytest import MonkeyPatch
 from src import config
 from src.app import FutuBalanceSnapshot, FutuBalanceSyncService
 from src.app.futu_balance_sync_service import FutuOpenApiBalanceProvider
+from src.domain.holding_mutations import HoldingTarget
 from src.models import AssetType, Holding
 from skill_api import PortfolioSkill
 
@@ -39,6 +40,12 @@ class FakeStorage:
     def get_holding(self, asset_id, account, broker=None):
         return self.holdings.get((asset_id, account, broker))
 
+    def get_holding_fresh(self, asset_id, account, broker):
+        holding = self.holdings.get((asset_id, account, broker))
+        if holding is not None and not holding.record_id:
+            holding.record_id = f"rec_{asset_id}_{account}_{broker}"
+        return holding
+
     def update_holding_quantity(self, asset_id, account, quantity_change, broker=None):
         self.updates.append((asset_id, account, quantity_change, broker))
         holding = self.holdings[(asset_id, account, broker)]
@@ -49,6 +56,33 @@ class FakeStorage:
         self.holdings[(holding.asset_id, holding.account, holding.broker)] = holding
         return holding
 
+    def replace_holding(self, target):
+        assert isinstance(target, HoldingTarget)
+        key = (
+            target.identity.asset_id,
+            target.identity.account,
+            target.identity.broker,
+        )
+        current = self.holdings.get(key)
+        replacement = target.to_holding(
+            record_id=(
+                current.record_id
+                if current is not None
+                else f"rec_{target.identity.asset_id}_{target.identity.account}"
+            )
+        )
+        if current is None:
+            self.creates.append(replacement)
+        else:
+            self.updates.append((
+                replacement.asset_id,
+                replacement.account,
+                replacement.quantity - current.quantity,
+                replacement.broker,
+            ))
+        self.holdings[key] = replacement
+        return replacement
+
 
 class FakeReplaceStorage(FakeStorage):
     def __init__(self):
@@ -57,6 +91,8 @@ class FakeReplaceStorage(FakeStorage):
 
     def replace_holding(self, holding):
         self.replacements.append(holding)
+        if isinstance(holding, HoldingTarget):
+            return super().replace_holding(holding)
         existing = self.holdings.get((holding.asset_id, holding.account, holding.broker))
         holding.record_id = getattr(existing, "record_id", None)
         self.holdings[(holding.asset_id, holding.account, holding.broker)] = holding

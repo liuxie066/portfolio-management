@@ -35,13 +35,13 @@ Generated from `src.feishu.contracts.TABLE_CONTRACTS`; do not edit this block by
 | `currency` | 1 | `Text` | `text` | `required` | `manual` | `no` |  |
 | `asset_class` | 3 | `SingleSelect` | `single_select` | `optional` | `manual` | `yes` | `美国资产`, `另类资产`, `中国资产`, `现金`, `港股资产` |
 | `industry` | 3 | `SingleSelect` | `single_select` | `optional` | `manual` | `yes` | `金融`, `AI`, `中概`, `非行业指数`, `区块链`, `能源`, `消费`, `房地产`, `半导体`, `现金`, `科技`, `其他` |
-| `tag` | 1 | `Text` | `json_text` | `optional` | `manual` | `yes` |  |
+| `tag` | 1 | `Text` | `json_text` | `optional` | `manual` | `no` |  |
 | `created_at` | 1 | `Text` | `text` | `optional` | `system` | `no` |  |
 | `updated_at` | 1 | `Text` | `text` | `optional` | `system` | `no` |  |
 
 Write contracts:
 
-- `create` row-required fields: `account`, `asset_id`, `quantity`
+- `create` row-required fields: `account`, `asset_id`, `asset_name`, `asset_type`, `broker`, `currency`, `quantity`
 - `update` row-required fields: none
 - `delete` row-required fields: none
 

@@ -96,7 +96,7 @@ _HOLDING_FIELDS = (
     ),
     _field(
         "tag", 1, "Text", FieldEncoding.JSON_TEXT, FieldOwnership.MANUAL,
-        required=False, clearable=True,
+        required=False,
     ),
     _field("created_at", 1, "Text", FieldEncoding.TEXT, FieldOwnership.SYSTEM, required=False),
     _field("updated_at", 1, "Text", FieldEncoding.TEXT, FieldOwnership.SYSTEM, required=False),
@@ -216,7 +216,13 @@ _TABLES = (
         role=TableRole.CORE,
         fields=_HOLDING_FIELDS,
         business_key=("asset_id", "account", "broker"),
-        write_contracts=_writes(_HOLDING_FIELDS, ("asset_id", "account", "quantity")),
+        write_contracts=_writes(
+            _HOLDING_FIELDS,
+            (
+                "asset_id", "asset_name", "asset_type", "account", "broker",
+                "quantity", "currency",
+            ),
+        ),
     ),
     TableContract(
         name="cash_flow",
@@ -365,15 +371,35 @@ def validate_write_fields(
     if normalized_operation is not WriteOperation.DELETE and not fields:
         raise ValueError(f"{location}: fields must not be empty")
     for field_name in sorted(contract.required_fields):
-        if field_name not in fields or fields[field_name] is None or fields[field_name] == "":
+        value = fields.get(field_name)
+        if (
+            field_name not in fields
+            or value is None
+            or (isinstance(value, str) and not value.strip())
+        ):
             raise ValueError(f"{location}: 缺少必填字段: {field_name}")
+    fields_by_name = table.fields_by_name
     if normalized_operation is WriteOperation.CREATE:
         null_fields = sorted(name for name, value in fields.items() if value is None)
         if null_fields:
             raise ValueError(
                 f"{location}: create fields cannot be null: {', '.join(null_fields)}"
             )
-    fields_by_name = table.fields_by_name
+    if normalized_operation is WriteOperation.UPDATE:
+        nonclearable_empty = sorted(
+            name
+            for name, value in fields.items()
+            if (
+                value is None
+                or (isinstance(value, str) and not value.strip())
+            )
+            and not fields_by_name[name].clearable
+        )
+        if nonclearable_empty:
+            raise ValueError(
+                f"{location}: fields cannot be cleared: "
+                + ", ".join(nonclearable_empty)
+            )
     for field_name, value in fields.items():
         field = fields_by_name[field_name]
         if value in (None, "") or field.encoding is not FieldEncoding.SINGLE_SELECT:

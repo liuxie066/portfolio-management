@@ -10,6 +10,12 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Callable, Dict, Optional
 
 from src import config
+from src.domain.holding_mutations import (
+    HOLDING_REQUIRED_VALUE_FIELDS,
+    HoldingTarget,
+    canonical_holding,
+    holding_owned_fields_match,
+)
 from src.models import (
     CASH_ASSET_ID,
     HKD_CASH_ASSET_ID,
@@ -1611,17 +1617,51 @@ class CashFlowEffectService:
             )
 
         targets: list[Holding] = []
+        mutation_targets: list[HoldingTarget] = []
         befores: list[Optional[Holding]] = []
         compensation_targets: list[Dict[str, Any]] = []
-        for target_data in recomputed["targets"]:
-            target = Holding(**target_data)
+        for target_data, target_row in zip(
+            recomputed["targets"],
+            recomputed["target_rows"],
+            strict=True,
+        ):
+            confirmed_target = Holding(**target_data)
             target_source = {
-                "account": target.account,
-                "broker": target.broker,
-                "currency": target.currency,
+                "account": confirmed_target.account,
+                "broker": confirmed_target.broker,
+                "currency": confirmed_target.currency,
             }
             before = self._fresh_holding(target_source)
+            if self._holding_payload(before) != target_row["before"]:
+                raise ValueError(
+                    "cash holding changed after preview hash validation; "
+                    "preview and confirm again"
+                )
+            owned_fields = (
+                {"quantity"}
+                if before is not None
+                else set(HOLDING_REQUIRED_VALUE_FIELDS) | {
+                    "asset_class",
+                    "industry",
+                }
+            )
+            target = (
+                canonical_holding(before).model_copy(
+                    update={"quantity": confirmed_target.quantity}
+                )
+                if before is not None
+                else confirmed_target
+            )
+            mutation_target = HoldingTarget.from_holdings(
+                base=before,
+                target=target,
+                owned_fields=owned_fields,
+            )
+            target_payload = CompensationService.serialize_holding(target)
+            if target_payload is None:
+                raise RuntimeError("cash mutation target serialization failed")
             targets.append(target)
+            mutation_targets.append(mutation_target)
             befores.append(before)
             compensation_targets.append({
                 "type": "CASH_TARGET_SET",
@@ -1631,7 +1671,8 @@ class CashFlowEffectService:
                     target.broker,
                 ),
                 "before": CompensationService.serialize_holding(before),
-                "target": target_data,
+                "target": target_payload,
+                "mutation": mutation_target.to_payload(),
             })
 
         self.store.update_effect(
@@ -1649,14 +1690,17 @@ class CashFlowEffectService:
         already_applied = True
         readbacks: list[Optional[Holding]] = []
         try:
-            for target, target_data, before in zip(
+            for target, mutation_target, before in zip(
                 targets,
-                recomputed["targets"],
+                mutation_targets,
                 befores,
+                strict=True,
             ):
-                current_payload = CompensationService.serialize_holding(before)
-                if current_payload != target_data:
-                    self.storage.replace_holding(target)
+                if (
+                    before is None
+                    or not holding_owned_fields_match(before, mutation_target)
+                ):
+                    self.storage.replace_holding(mutation_target)
                     already_applied = False
                 target_source = {
                     "account": target.account,
@@ -1665,7 +1709,10 @@ class CashFlowEffectService:
                 }
                 readback = self._fresh_holding(target_source)
                 readbacks.append(readback)
-                if CompensationService.serialize_holding(readback) != target_data:
+                if (
+                    readback is None
+                    or not holding_owned_fields_match(readback, mutation_target)
+                ):
                     raise RuntimeError(
                         "holding fresh readback does not match confirmed target: "
                         f"{self._identity(target.asset_id, target.account, target.broker)}"
@@ -1814,17 +1861,21 @@ class CashFlowEffectService:
             return effect
         targets = list((task.get("payload") or {}).get("targets") or [])
         for target_spec in targets:
-            target_data = target_spec.get("target")
-            if not isinstance(target_data, dict):
+            mutation_payload = target_spec.get("mutation")
+            if not isinstance(mutation_payload, dict):
                 raise RuntimeError("resolved compensation target is invalid")
-            target = Holding(**target_data)
+            mutation = HoldingTarget.from_payload(mutation_payload)
+            target = mutation.to_holding()
             source = {
                 "account": target.account,
                 "broker": target.broker,
                 "currency": target.currency,
             }
             readback = self._fresh_holding(source)
-            if CompensationService.serialize_holding(readback) != target_data:
+            if (
+                readback is None
+                or not holding_owned_fields_match(readback, mutation)
+            ):
                 raise RuntimeError(
                     "resolved compensation fresh readback does not match target"
                 )

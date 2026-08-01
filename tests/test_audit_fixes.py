@@ -47,16 +47,16 @@ def test_deduct_cash_prevalidates_insufficient_funds():
     from src.app.cash_service import CashService
 
     storage = Mock()
-    storage.get_holding.side_effect = [
+    storage.get_holding_fresh.side_effect = [
         Holding(asset_id="CNY-CASH", asset_name="人民币现金", asset_type=AssetType.CASH,
-                account="a", quantity=1000, currency="CNY"),
+                account="a", broker="manual", quantity=1000, currency="CNY"),
         Holding(asset_id="CNY-MMF", asset_name="货币基金", asset_type=AssetType.MMF,
-                account="a", quantity=2000, currency="CNY"),
+                account="a", broker="manual", quantity=2000, currency="CNY"),
     ]
     service = CashService(storage)
 
     # Request 5000 but only 3000 available
-    result = service.deduct_cash("a", 5000)
+    result = service.deduct_cash("a", 5000, "manual")
     assert result is False
     # No holding updates should have been made
     storage.update_holding_quantity.assert_not_called()
@@ -67,15 +67,15 @@ def test_deduct_cash_succeeds_when_sufficient():
     from src.app.cash_service import CashService
 
     storage = Mock()
-    storage.get_holding.side_effect = [
+    storage.get_holding_fresh.side_effect = [
         Holding(asset_id="CNY-CASH", asset_name="人民币现金", asset_type=AssetType.CASH,
-                account="a", quantity=1000, currency="CNY"),
+                account="a", broker="manual", quantity=1000, currency="CNY"),
         Holding(asset_id="CNY-MMF", asset_name="货币基金", asset_type=AssetType.MMF,
-                account="a", quantity=2000, currency="CNY"),
+                account="a", broker="manual", quantity=2000, currency="CNY"),
     ]
     service = CashService(storage)
 
-    result = service.deduct_cash("a", 2500)
+    result = service.deduct_cash("a", 2500, "manual")
     assert result is True
     assert storage.update_holding_quantity.call_count == 2
 
