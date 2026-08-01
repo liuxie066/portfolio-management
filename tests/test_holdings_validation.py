@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 import pytest
 
 from src.app.holdings_validation import (
+    ASSET_CLASS_POLICY_VERSION,
     FutuAccountEvidence,
     FutuPositionEvidence,
     HoldingsEvidenceBundle,
@@ -88,6 +89,89 @@ def test_currency_resolver_asset_type_matrix(
     currency = _outcome(report, "currency")
     assert currency.status == expected_status
     assert currency.proposed == expected_currency
+
+
+@pytest.mark.parametrize(
+    ("asset_type", "asset_id", "current"),
+    [
+        ("otc_fund", "007721", "美国资产"),
+        ("cn_fund", "QDII-CN", "港股资产"),
+        ("us_fund", "CROSS-BORDER-US", "中国资产"),
+        ("hk_fund", "CROSS-BORDER-HK", "美国资产"),
+        ("us_stock", "PDD", "中国资产"),
+        ("hk_stock", "00700", "中国资产"),
+        ("exchange_fund", "SPY.US", "美国资产"),
+    ],
+)
+def test_asset_class_preserves_manual_underlying_exposure_when_type_is_not_authority(
+    asset_type,
+    asset_id,
+    current,
+):
+    report = HoldingsValidator().validate(
+        [
+            _record(
+                asset_type=asset_type,
+                asset_id=asset_id,
+                asset_class=current,
+            )
+        ]
+    )
+
+    asset_class = _outcome(report, "asset_class")
+    assert asset_class.status == "valid"
+    assert asset_class.current == current
+    assert asset_class.proposed is None
+    assert asset_class.authority == "manual_raw_unverified"
+
+
+@pytest.mark.parametrize(
+    ("asset_type", "asset_id"),
+    [
+        ("otc_fund", "007721"),
+        ("us_stock", "PDD"),
+        ("exchange_fund", "SPY.US"),
+    ],
+)
+def test_asset_class_without_instrument_level_exposure_stays_optional_missing(
+    asset_type,
+    asset_id,
+):
+    report = HoldingsValidator().validate(
+        [_record(asset_type=asset_type, asset_id=asset_id, asset_class="")]
+    )
+
+    asset_class = _outcome(report, "asset_class")
+    assert asset_class.status == "optional_missing"
+    assert asset_class.proposed is None
+
+
+@pytest.mark.parametrize(
+    ("asset_type", "asset_id", "expected"),
+    [
+        ("a_stock", "000001", "中国资产"),
+        ("cash", "CNY-CASH", "现金"),
+        ("mmf", "CNY-MMF", "现金"),
+    ],
+)
+def test_asset_class_is_completed_only_when_instrument_type_proves_exposure(
+    asset_type,
+    asset_id,
+    expected,
+):
+    report = HoldingsValidator().validate(
+        [_record(asset_type=asset_type, asset_id=asset_id, asset_class="")]
+    )
+
+    asset_class = _outcome(report, "asset_class")
+    assert asset_class.status == "missing_completable"
+    assert asset_class.proposed == expected
+    assert asset_class.authority == "asset_type_policy"
+    assert report.asset_class_policy_version == ASSET_CLASS_POLICY_VERSION
+    assert (
+        report.as_dict()["asset_class_policy_version"]
+        == ASSET_CLASS_POLICY_VERSION
+    )
 
 
 @pytest.mark.parametrize(

@@ -181,7 +181,7 @@ approved completion.
 | `asset_name` | no | exact Futu position/security metadata | nonblocking conflict |
 | `asset_type` | yes | exact Futu market/security type or an explicitly suffixed supported asset id | conflict |
 | `currency` | yes | the versioned resolver in section 5 | conflict |
-| `asset_class` | no | deterministic derivation from confirmed asset type/currency | conflict if populated |
+| `asset_class` | no | exact underlying/economic-exposure evidence; deterministic type mapping only for A-shares, CASH, and MMF | conflict only with permitted authority |
 | `avg_cost` | no | none in this reconciler | warning only |
 | `industry` / `tag` | no | none in this reconciler | warning only |
 | `created_at` / `updated_at` | no | excluded from standalone completion | warning only |

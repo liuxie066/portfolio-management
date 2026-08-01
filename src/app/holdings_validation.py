@@ -16,6 +16,7 @@ from src.domain.holdings import RawHoldingRecord
 
 VALIDATION_POLICY_VERSION = "holdings-validation.v1"
 CURRENCY_POLICY_VERSION = "holdings-currency.v1"
+ASSET_CLASS_POLICY_VERSION = "holdings-asset-class.v2"
 
 REQUIRED_FIELDS = {
     "asset_id",
@@ -390,6 +391,7 @@ class HoldingsValidationReport:
     evidence_errors: Mapping[str, str]
     policy_version: str = VALIDATION_POLICY_VERSION
     currency_policy_version: str = CURRENCY_POLICY_VERSION
+    asset_class_policy_version: str = ASSET_CLASS_POLICY_VERSION
 
     @property
     def blocking_count(self) -> int:
@@ -420,6 +422,7 @@ class HoldingsValidationReport:
             "read_only": True,
             "policy_version": self.policy_version,
             "currency_policy_version": self.currency_policy_version,
+            "asset_class_policy_version": self.asset_class_policy_version,
             "record_count": len(self.records),
             "blocking_record_count": self.blocking_count,
             "actionable_record_count": self.actionable_count,
@@ -1051,12 +1054,14 @@ class HoldingsValidator:
 
 
 def _asset_class_for_type(asset_type: Optional[AssetType]) -> Optional[AssetClass]:
-    if asset_type in {AssetType.A_STOCK, AssetType.CN_FUND, AssetType.OTC_FUND}:
+    """Return a class only when instrument type proves economic exposure.
+
+    Fund domicile/distribution channel and a security's listing market do not
+    establish the geography of its underlying assets or economic exposure.
+    """
+
+    if asset_type == AssetType.A_STOCK:
         return AssetClass.CN_ASSET
-    if asset_type in {AssetType.US_STOCK, AssetType.US_FUND}:
-        return AssetClass.US_ASSET
-    if asset_type in {AssetType.HK_STOCK, AssetType.HK_FUND}:
-        return AssetClass.HK_ASSET
     if asset_type in {AssetType.CASH, AssetType.MMF}:
         return AssetClass.CASH
     return None

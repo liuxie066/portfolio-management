@@ -17,6 +17,7 @@ from .holdings_reconciliation_service import (
     HoldingsReconciliationService,
 )
 from .holdings_validation import (
+    ASSET_CLASS_POLICY_VERSION,
     CURRENCY_POLICY_VERSION,
     RecordValidation,
     VALIDATION_POLICY_VERSION,
@@ -300,6 +301,8 @@ class HoldingsWorkflowService:
             expected_policy = VALIDATION_POLICY_VERSION
             if field == "currency":
                 expected_policy += f"+{CURRENCY_POLICY_VERSION}"
+            elif field == "asset_class":
+                expected_policy += f"+{ASSET_CLASS_POLICY_VERSION}"
             if case.get("policy_version") != expected_policy:
                 continue
             identity = self._raw_identity(raw.raw_fields)
@@ -505,7 +508,7 @@ class HoldingsWorkflowService:
                         "mode": "manual_apply_no_eligible",
                         "operator": confirmed_operator,
                     },
-                    prove_external=False,
+                    prove_external=True,
                 )
                 return {
                     "success": True,
@@ -990,6 +993,8 @@ class HoldingsWorkflowService:
         policy_version = evaluation.report.policy_version
         if field == "currency":
             policy_version += f"+{evaluation.report.currency_policy_version}"
+        elif field == "asset_class":
+            policy_version += f"+{evaluation.report.asset_class_policy_version}"
         precondition_payload = {
             "record_id": validation.raw.record_id,
             "identity": identity,

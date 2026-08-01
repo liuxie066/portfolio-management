@@ -294,9 +294,32 @@ def test_apply_fresh_scan_closes_other_manually_repaired_case(tmp_path):
     result = service.apply_missing(record_id="rec-1", confirmed_operator=_operator())
 
     assert result["success"] is True
+    assert result["status"] == "no_eligible_missing_fields"
     assert result["workflow"]["closed_case_keys"] == [currency_case]
     assert service.store.get_holding_case(currency_case)["state"] == "resolved_external"
-    assert storage.patch_calls[-1] == ("rec-1", {"asset_class": "美国资产"})
+    assert storage.patch_calls == []
+
+
+def test_asset_class_case_uses_independent_policy_version(tmp_path):
+    storage = _Storage(currency="CNY")
+    storage.fields.update(
+        {
+            "asset_id": "CNY-CASH",
+            "asset_name": "Cash",
+            "asset_type": "cash",
+            "asset_class": "美国资产",
+        }
+    )
+    service = _workflow(tmp_path, storage)
+
+    result = service.notify(record_id="rec-1")
+
+    assert result["workflow"]["created_case_keys"]
+    case = service.list_cases()["cases"][0]
+    assert case["field"] == "asset_class"
+    assert case["policy_version"] == (
+        "holdings-validation.v1+holdings-asset-class.v2"
+    )
 
 
 def test_recovery_that_still_reads_before_remains_unknown_without_resend(tmp_path):

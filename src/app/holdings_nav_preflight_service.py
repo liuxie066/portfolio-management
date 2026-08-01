@@ -139,6 +139,7 @@ class ValidatedHoldingsSnapshot:
     source_fetch_time: str
     policy_version: str
     currency_policy_version: str
+    asset_class_policy_version: str
     source_mode: str
     warnings: tuple[str, ...] = ()
 
@@ -216,6 +217,9 @@ class ValidatedHoldingsSnapshot:
             source_fetch_time=source_fetch_time.astimezone(UTC).isoformat(),
             policy_version=evaluation.report.policy_version,
             currency_policy_version=evaluation.report.currency_policy_version,
+            asset_class_policy_version=(
+                evaluation.report.asset_class_policy_version
+            ),
             source_mode=source_mode,
             warnings=tuple(str(item) for item in warnings if str(item).strip()),
         )
@@ -234,6 +238,7 @@ class ValidatedHoldingsSnapshot:
             "source_fetch_time": self.source_fetch_time,
             "policy_version": self.policy_version,
             "currency_policy_version": self.currency_policy_version,
+            "asset_class_policy_version": self.asset_class_policy_version,
             "source_mode": self.source_mode,
             "warnings": list(self.warnings),
         }

@@ -61,6 +61,14 @@ Optional fields:
 
 Allowed `asset_type` values include: `a_stock`, `hk_stock`, `us_stock`, `exchange_fund`, `otc_fund`, `fund`, `cash`, `mmf`, `bond`, `crypto`, `other`.
 
+`asset_class` describes the geography of the underlying assets or economic
+exposure, not fund domicile, distribution channel, trading currency, or listing
+venue. Fund and cross-market security rows therefore retain explicit manual
+values unless exact instrument-level exposure evidence is available. Only
+instrument types that prove the classification (currently A-shares, CASH, and
+MMF) are eligible for deterministic `asset_class` completion or conflict
+detection.
+
 ### transactions
 
 Role: optional
