@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
+import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -91,10 +93,181 @@ def test_notify_materializes_one_case_without_remote_holding_write(tmp_path):
     assert [(item["field"], item["state"]) for item in cases] == [
         ("currency", "pending_apply")
     ]
+    assert cases[0]["case_key"] == (
+        "bb54e18113db476fe42491aa1a489a3cc2a85590c0214a4a3b978330f6f0b64f"
+    )
+    assert cases[0]["case_precondition_digest"] == (
+        "holdings-precondition.v2:"
+        "a20516349cabdadc50e6d067535d5278f8da62fccaf13a317aba925ea8297c68"
+    )
     receipt = service.store.get_operation_receipt(
         f"holdings:case:discovered:{cases[0]['case_key']}"
     )
     assert "--record-id rec-1 --apply --confirm" in receipt["payload"]["action"]["command"]
+
+
+def test_spy_repair_closes_only_name_while_legacy_timestamps_migrate(tmp_path):
+    record_id = "recvfmaw53roJx"
+
+    class SpyStorage(_Storage):
+        def __init__(self):
+            super().__init__(currency="USD")
+            self.fields.update(
+                {
+                    "asset_id": "SPY",
+                    "asset_name": "SPY",
+                    "asset_type": "us_fund",
+                    "account": "sy",
+                    "broker": "富途",
+                    "asset_class": "美国资产",
+                    "created_at": "2026-03-30T00:00:00Z",
+                    "updated_at": "2026-07-31T00:00:00Z",
+                }
+            )
+
+        def get_raw_holdings(self, *, account=None, record_id=None):
+            self.read_calls.append({"account": account, "record_id": record_id})
+            if account is not None and account != self.fields["account"]:
+                return []
+            if record_id is not None and record_id != record_id_value:
+                return []
+            return [RawHoldingRecord(record_id_value, dict(self.fields))]
+
+    record_id_value = record_id
+    storage = SpyStorage()
+
+    def observe(_account):
+        return SimpleNamespace(
+            source="futu",
+            source_snapshot_id="snapshot-sy",
+            observed_at_utc="2026-08-01T01:00:00+00:00",
+            profile_fingerprint="profile-sy",
+            account_fingerprint="account-sy",
+            positions=(
+                SimpleNamespace(
+                    asset_id="SPY.US",
+                    raw_code="US.SPY",
+                    asset_name="标普500ETF-SPDR",
+                    security_type="ETF",
+                    market="US",
+                    currency="USD",
+                    currency_explicit=True,
+                ),
+            ),
+        )
+
+    reconciliation = HoldingsReconciliationService(
+        storage=storage,
+        futu_observer=observe,
+    )
+    service = HoldingsWorkflowService(
+        storage=storage,
+        store=OperationStateStore(tmp_path / "operations.sqlite3"),
+        reconciliation=reconciliation,
+        lock_factory=lambda _key: nullcontext(),
+    )
+    evaluation = reconciliation.evaluate(record_id=record_id)
+    current_cases = service._cases_for_record(
+        evaluation.report.records[0], evaluation
+    )
+    assert {item["field"] for item in current_cases} == {
+        "asset_type",
+        "asset_name",
+        "created_at",
+        "updated_at",
+    }
+    legacy_cases = []
+    for item in current_cases:
+        legacy = dict(item)
+        legacy["case_precondition_digest"] = item[
+            "legacy_case_precondition_digest"
+        ]
+        legacy_cases.append(legacy)
+    service.store.materialize_holding_cases(
+        cases=legacy_cases,
+        discovery_receipts=[
+            service._discovery_receipt(item) for item in legacy_cases
+        ],
+        trigger={"mode": "seed_legacy_fixture"},
+    )
+
+    by_field = {item["field"]: item for item in legacy_cases}
+    service.store.resolve_holding_cases_external(
+        record_id=record_id,
+        active_case_keys=[
+            item["case_key"]
+            for item in legacy_cases
+            if item["field"] != "asset_type"
+        ],
+        record_digest=evaluation.report.records[0].record_digest,
+        current_identity=service._raw_identity(storage.fields),
+        trigger={"mode": "seed_already_repaired_type"},
+    )
+    timestamp_keys = {
+        by_field[field]["case_key"] for field in ("created_at", "updated_at")
+    }
+
+    def receipt_rows():
+        with service.store._connect() as conn:
+            return [
+                (
+                    row["receipt_key"],
+                    row["receipt_type"],
+                    json.loads(row["payload_json"]),
+                )
+                for row in conn.execute(
+                    "SELECT receipt_key, receipt_type, payload_json "
+                    "FROM operation_receipt_outbox ORDER BY receipt_key"
+                ).fetchall()
+            ]
+
+    before_receipts = receipt_rows()
+    storage.fields.update(
+        {
+            "asset_type": "exchange_fund",
+            "asset_name": "标普500ETF-SPDR",
+        }
+    )
+
+    repaired = service.notify(record_id=record_id)
+
+    assert storage.patch_calls == []
+    assert repaired["workflow"]["closed_case_keys"] == [
+        by_field["asset_name"]["case_key"]
+    ]
+    assert repaired["workflow"]["superseded_case_keys"] == []
+    after_receipts = receipt_rows()
+    new_receipts = [row for row in after_receipts if row not in before_receipts]
+    assert len(new_receipts) == 1
+    assert new_receipts[0][1] == "holding_case_closed"
+    assert new_receipts[0][2]["field"] == "asset_name"
+    for case_key in timestamp_keys:
+        durable = service.store.get_holding_case(case_key)
+        assert durable["state"] == "pending_manual_edit"
+        assert durable["case_precondition_digest"].startswith(
+            "holdings-precondition.v2:"
+        )
+        assert [
+            event["event_type"]
+            for event in service.store.list_holding_case_events(case_key)
+        ].count("precondition_contract_migrated") == 1
+
+    event_counts = {
+        item["case_key"]: len(
+            service.store.list_holding_case_events(item["case_key"])
+        )
+        for item in service.store.list_holding_cases()
+    }
+    repeated = service.notify(record_id=record_id)
+
+    assert all(not values for values in repeated["workflow"].values())
+    assert receipt_rows() == after_receipts
+    assert event_counts == {
+        item["case_key"]: len(
+            service.store.list_holding_case_events(item["case_key"])
+        )
+        for item in service.store.list_holding_cases()
+    }
 
 
 def test_missing_apply_is_exact_and_locks_account_before_record(tmp_path):
@@ -118,6 +291,39 @@ def test_missing_apply_is_exact_and_locks_account_before_record(tmp_path):
     second = service.apply_missing(record_id="rec-1", confirmed_operator=_operator())
     assert second["status"] == "no_eligible_missing_fields"
     assert len(storage.patch_calls) == 1
+
+
+def test_direct_apply_migrates_eligible_legacy_case_before_remote_write(tmp_path):
+    storage = _Storage()
+    service = _workflow(tmp_path, storage)
+    evaluation = service.reconciliation.evaluate(record_id="rec-1")
+    current = service._cases_for_record(
+        evaluation.report.records[0], evaluation
+    )[0]
+    legacy = dict(current)
+    legacy["case_precondition_digest"] = current[
+        "legacy_case_precondition_digest"
+    ]
+    service.store.materialize_holding_cases(
+        cases=[legacy],
+        discovery_receipts=[service._discovery_receipt(legacy)],
+    )
+
+    result = service.apply_missing(
+        record_id="rec-1", confirmed_operator=_operator()
+    )
+
+    assert result["success"] is True
+    assert storage.patch_calls == [("rec-1", {"currency": "USD"})]
+    durable = service.store.get_holding_case(current["case_key"])
+    assert durable["state"] == "resolved_accept"
+    assert durable["case_precondition_digest"] == current[
+        "case_precondition_digest"
+    ]
+    assert [
+        event["event_type"]
+        for event in service.store.list_holding_case_events(current["case_key"])
+    ].count("precondition_contract_migrated") == 1
 
 
 def test_timeout_with_actual_success_is_resolved_by_fresh_readback(tmp_path):
@@ -212,6 +418,41 @@ def test_conflict_keep_current_closes_without_feishu_write(tmp_path):
     ]
     assert len(new_cases) == 1
     assert new_cases[0]["state"] == "pending_confirmation"
+
+
+def test_direct_keep_resolution_migrates_eligible_legacy_scope(tmp_path):
+    storage = _Storage(currency="CNY")
+    service = _workflow(tmp_path, storage)
+    evaluation = service.reconciliation.evaluate(record_id="rec-1")
+    current = service._cases_for_record(
+        evaluation.report.records[0], evaluation
+    )[0]
+    legacy = dict(current)
+    legacy["case_precondition_digest"] = current[
+        "legacy_case_precondition_digest"
+    ]
+    service.store.materialize_holding_cases(
+        cases=[legacy],
+        discovery_receipts=[service._discovery_receipt(legacy)],
+    )
+
+    result = service.resolve(
+        case_key=legacy["case_key"],
+        decision="keep-current",
+        reason="statement verified",
+        confirmed_operator=_operator(),
+    )
+
+    assert result["status"] == "resolved_keep"
+    assert storage.patch_calls == []
+    durable = service.store.get_holding_case(legacy["case_key"])
+    assert durable["state"] == "resolved_keep"
+    assert durable["case_precondition_digest"] == current[
+        "case_precondition_digest"
+    ]
+    assert durable["resolution"]["confirmation_scope"] == service._confirmation_scope(
+        current
+    )
 
 
 def test_repeat_keep_current_rechecks_fresh_scope_before_deduplication(tmp_path):

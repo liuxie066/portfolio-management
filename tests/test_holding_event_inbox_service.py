@@ -290,6 +290,73 @@ def test_new_event_for_repaired_record_closes_once_then_becomes_semantic_noop(tm
     assert service.store.get_operation_receipt(closure_keys[0]) is not None
 
 
+def test_event_closes_repaired_field_while_silently_migrating_legacy_case(tmp_path):
+    class TimestampStorage(_Storage):
+        def get_raw_holdings(self, *, account=None, record_id=None):
+            rows = super().get_raw_holdings(account=account, record_id=record_id)
+            if not rows:
+                return rows
+            fields = dict(rows[0].raw_fields)
+            fields["created_at"] = "2026-03-30T00:00:00Z"
+            return [RawHoldingRecord(rows[0].record_id, fields)]
+
+    storage = TimestampStorage()
+    service = _service(tmp_path, storage)
+    service.accept(_payload("evt-1"))
+    assert service.process_due()["success"] is True
+    cases = {case["field"]: case for case in service.store.list_holding_cases()}
+    planned = service.workflow.plan_event_notification(
+        record_id="rec-1",
+        trigger={"mode": "test_legacy_fixture"},
+    )
+    timestamp_candidate = next(
+        case for case in planned["cases"] if case["field"] == "created_at"
+    )
+    with service.store._connect() as conn:
+        conn.execute(
+            "UPDATE holding_reconciliation_cases "
+            "SET case_precondition_digest = ? WHERE case_key = ?",
+            (
+                timestamp_candidate["legacy_case_precondition_digest"],
+                timestamp_candidate["case_key"],
+            ),
+        )
+        receipt_count = conn.execute(
+            "SELECT COUNT(*) FROM operation_receipt_outbox"
+        ).fetchone()[0]
+    storage.currency = "USD"
+    service.accept(_payload("evt-2"))
+
+    processed = service.process_due()
+
+    assert processed["success"] is True
+    assert storage.patch_calls == []
+    event = service.store.get_holding_event("evt-2")
+    workflow = event["outcome"]["workflow"]
+    assert workflow["closed_case_keys"] == [cases["currency"]["case_key"]]
+    assert len(workflow["enqueued_receipt_keys"]) == 1
+    assert service.store.get_operation_receipt(
+        workflow["enqueued_receipt_keys"][0]
+    )["receipt_type"] == "holding_case_closed"
+    durable_timestamp = service.store.get_holding_case(
+        cases["created_at"]["case_key"]
+    )
+    assert durable_timestamp["state"] == "pending_manual_edit"
+    assert durable_timestamp["case_precondition_digest"].startswith(
+        "holdings-precondition.v2:"
+    )
+    assert [
+        item["event_type"]
+        for item in service.store.list_holding_case_events(
+            cases["created_at"]["case_key"]
+        )
+    ].count("precondition_contract_migrated") == 1
+    with service.store._connect() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM operation_receipt_outbox"
+        ).fetchone()[0] == receipt_count + 1
+
+
 def test_read_only_status_does_not_create_operation_state(tmp_path):
     db_path = tmp_path / "missing" / "operations.sqlite3"
 
