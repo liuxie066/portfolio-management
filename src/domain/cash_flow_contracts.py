@@ -5,15 +5,29 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
+import json
 from types import MappingProxyType
-from typing import Any, Mapping, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 from src.models import Currency
 
 
 CASH_FLOW_CONTRACT_VERSION = "pm.cash_flow.row.v1"
+CASH_FLOW_GENERATED_FINGERPRINT_VERSION = "pm.cash_flow.generated.v1"
 CASH_FLOW_MONEY_QUANT = Decimal("0.01")
 CASH_FLOW_TYPES = frozenset({"DEPOSIT", "WITHDRAW"})
+CASH_FLOW_AMBIGUOUS_RATE_SOURCES = frozenset({
+    "-",
+    "manual",
+    "n/a",
+    "na",
+    "none",
+    "null",
+    "placeholder",
+    "tbd",
+    "todo",
+    "unknown",
+})
 BEIJING_TZ = timezone(timedelta(hours=8))
 
 
@@ -104,6 +118,14 @@ class ManualCashFlowFacts:
     amount: Decimal
     currency: str
     remark: Optional[str] = None
+
+    @property
+    def expected_flow_type(self) -> str:
+        return expected_cash_flow_type(self)
+
+    @property
+    def expected_dedup_key(self) -> str:
+        return expected_cash_flow_dedup_key(self, self.expected_flow_type)
 
     @classmethod
     def validate(
@@ -297,7 +319,7 @@ class CompletedCashFlowFacts:
                         fields.get("cny_amount"),
                     ))
         expected_dedup = (
-            expected_cash_flow_dedup_key(manual, flow_type)
+            manual.expected_dedup_key
             if flow_type in CASH_FLOW_TYPES
             else None
         )
@@ -379,8 +401,8 @@ class CompletedCashFlowFacts:
             if manual.currency == Currency.CNY.value and cny_amount is None
             else cny_amount
         )
-        flow_type = "DEPOSIT" if manual.amount > 0 else "WITHDRAW"
-        dedup_key = expected_cash_flow_dedup_key(manual, flow_type)
+        flow_type = manual.expected_flow_type
+        dedup_key = manual.expected_dedup_key
         record = RawCashFlowRecord(
             record_id=record_id,
             raw_fields={
@@ -436,6 +458,139 @@ class CompletedCashFlowFacts:
         if self.replayed:
             result.mark_replayed()
         return result
+
+
+@dataclass(frozen=True)
+class CashFlowDuplicateGroup:
+    """Distinct source rows that resolve to one canonical manual identity."""
+
+    expected_dedup_key: str
+    record_ids: tuple[str, ...]
+    account: str
+    broker: str
+    flow_date: date
+    amount: Decimal
+    currency: str
+    flow_type: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "expected_dedup_key": self.expected_dedup_key,
+            "record_ids": list(self.record_ids),
+            "record_count": len(self.record_ids),
+            "account": self.account,
+            "broker": self.broker,
+            "flow_date": self.flow_date.isoformat(),
+            "amount": _decimal_text(self.amount),
+            "currency": self.currency,
+            "flow_type": self.flow_type,
+        }
+
+
+@dataclass(frozen=True)
+class CashFlowManualDatasetAudit:
+    """Single authority for manual validation and expected-key duplicates."""
+
+    valid_facts: tuple[ManualCashFlowFacts, ...]
+    issues: tuple[CashFlowValidationIssue, ...]
+    duplicate_groups: tuple[CashFlowDuplicateGroup, ...]
+    valid_by_record_id: Mapping[str, ManualCashFlowFacts]
+    duplicate_by_record_id: Mapping[str, CashFlowDuplicateGroup]
+
+    @classmethod
+    def build(
+        cls,
+        records: Iterable[RawCashFlowRecord],
+    ) -> "CashFlowManualDatasetAudit":
+        valid_facts: list[ManualCashFlowFacts] = []
+        issues: list[CashFlowValidationIssue] = []
+        facts_by_key: dict[str, list[ManualCashFlowFacts]] = {}
+        valid_by_record_id: dict[str, ManualCashFlowFacts] = {}
+
+        for record in records:
+            facts, row_issues = ManualCashFlowFacts.validate(record)
+            if facts is None:
+                issues.extend(row_issues)
+                continue
+            valid_facts.append(facts)
+            valid_by_record_id[facts.record_id] = facts
+            facts_by_key.setdefault(facts.expected_dedup_key, []).append(facts)
+
+        duplicate_groups: list[CashFlowDuplicateGroup] = []
+        duplicate_by_record_id: dict[str, CashFlowDuplicateGroup] = {}
+        for expected_key, grouped_facts in sorted(facts_by_key.items()):
+            record_ids = tuple(sorted({facts.record_id for facts in grouped_facts}))
+            if len(record_ids) < 2:
+                continue
+            representative = grouped_facts[0]
+            group = CashFlowDuplicateGroup(
+                expected_dedup_key=expected_key,
+                record_ids=record_ids,
+                account=representative.account,
+                broker=representative.broker,
+                flow_date=representative.flow_date,
+                amount=representative.amount,
+                currency=representative.currency,
+                flow_type=representative.expected_flow_type,
+            )
+            duplicate_groups.append(group)
+            for record_id in record_ids:
+                duplicate_by_record_id[record_id] = group
+
+        return cls(
+            valid_facts=tuple(valid_facts),
+            issues=tuple(issues),
+            duplicate_groups=tuple(duplicate_groups),
+            valid_by_record_id=MappingProxyType(valid_by_record_id),
+            duplicate_by_record_id=MappingProxyType(duplicate_by_record_id),
+        )
+
+    def issues_for(self, record_id: str) -> tuple[CashFlowValidationIssue, ...]:
+        return tuple(issue for issue in self.issues if issue.record_id == record_id)
+
+
+def expected_cash_flow_type(manual: ManualCashFlowFacts) -> str:
+    """Derive the system-owned direction from the signed manual amount."""
+
+    if not isinstance(manual, ManualCashFlowFacts):
+        raise TypeError("expected_cash_flow_type requires ManualCashFlowFacts")
+    return "DEPOSIT" if manual.amount > 0 else "WITHDRAW"
+
+
+def cash_flow_generated_fingerprint(facts: CompletedCashFlowFacts) -> str:
+    """Fingerprint the validated generated fields observed for FX binding."""
+
+    if not isinstance(facts, CompletedCashFlowFacts):
+        raise TypeError(
+            "cash_flow_generated_fingerprint requires CompletedCashFlowFacts"
+        )
+    facts = CompletedCashFlowFacts.require(RawCashFlowRecord.from_cash_flow(facts))
+    payload = {
+        "contract_version": CASH_FLOW_GENERATED_FINGERPRINT_VERSION,
+        "flow_type": facts.flow_type,
+        "exchange_rate": _canonical_decimal_text(facts.exchange_rate),
+        "cny_amount": format(_money(facts.cny_amount), ".2f"),
+        "dedup_key": facts.dedup_key,
+        "source": facts.source.strip(),
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def normalize_cash_flow_rate_source(raw: Any) -> str:
+    """Require one non-placeholder source usable for later investigation."""
+
+    if not isinstance(raw, str):
+        raise ValueError("exchange_rate_source must be traceable text")
+    source = raw.strip()
+    if not source or source.casefold() in CASH_FLOW_AMBIGUOUS_RATE_SOURCES:
+        raise ValueError("exchange_rate_source must be traceable text")
+    return source
 
 
 def expected_cash_flow_dedup_key(
@@ -682,7 +837,7 @@ def _flow_type(
             raw,
         ))
         return None
-    expected = "DEPOSIT" if manual.amount > 0 else "WITHDRAW"
+    expected = manual.expected_flow_type
     if candidate != expected:
         issues.append(_issue(
             record_id,
@@ -708,15 +863,29 @@ def _decimal_text(value: Decimal) -> str:
     return str(float(resolved))
 
 
+def _canonical_decimal_text(value: Decimal) -> str:
+    normalized = value.normalize()
+    if normalized == 0:
+        return "0"
+    return format(normalized, "f")
+
+
 __all__ = [
     "CASH_FLOW_CONTRACT_VERSION",
+    "CASH_FLOW_AMBIGUOUS_RATE_SOURCES",
+    "CASH_FLOW_GENERATED_FINGERPRINT_VERSION",
     "CASH_FLOW_MONEY_QUANT",
     "CASH_FLOW_TYPES",
+    "CashFlowDuplicateGroup",
+    "CashFlowManualDatasetAudit",
     "CashFlowContractError",
     "CashFlowValidationIssue",
     "CompletedCashFlowFacts",
     "ManualCashFlowFacts",
     "RawCashFlowRecord",
+    "cash_flow_generated_fingerprint",
     "expected_cash_flow_dedup_key",
     "expected_cash_flow_dedup_key_from_values",
+    "expected_cash_flow_type",
+    "normalize_cash_flow_rate_source",
 ]

@@ -1,15 +1,16 @@
 """Repository for the Feishu cash_flow table."""
 from datetime import UTC, date, datetime
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Dict, List, Optional
 
 from ...domain.cash_flow_contracts import (
     CASH_FLOW_MONEY_QUANT,
-    CashFlowContractError,
+    CashFlowManualDatasetAudit,
     CompletedCashFlowFacts,
     ManualCashFlowFacts,
     RawCashFlowRecord,
-    expected_cash_flow_dedup_key,
+    cash_flow_generated_fingerprint,
+    normalize_cash_flow_rate_source,
 )
 from ...models import CashFlow, DATETIME_FORMAT
 from ...process_lock import process_lock
@@ -472,267 +473,575 @@ class CashFlowRepository:
         rate_date: Optional[date] = None,
         rate_source: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Fill system-managed fields for manually entered cash_flow rows.
-
-        Manual rows only need flow_date/account/amount/currency/remark.  This
-        method derives blank system fields without recalculating populated CNY
-        amounts, so historical FX decisions are not churned by a later run.
-        """
+        """Reconcile from one fresh account scan and prove writes by readback."""
         if not dry_run and fx_rates:
             raise ValueError(
                 "provider FX apply requires the application confirmation workflow; "
                 "repository-level apply is refused"
             )
-        requested_record_id = record_id
-        conditions = []
-        if account:
-            conditions.append(f'CurrentValue.[account] = "{self._escape_filter_value(account)}"')
-        if requested_record_id:
-            conditions.append(
-                f'RecordId() = "{self._escape_filter_value(requested_record_id)}"'
+        requested_account = str(account).strip() if account is not None else None
+        requested_record_id = (
+            str(record_id).strip() if record_id is not None else None
+        )
+        if account is not None and not requested_account:
+            raise ValueError("account must not be blank")
+        if record_id is not None and not requested_record_id:
+            raise ValueError("record_id must not be blank")
+        manual_rate, resolved_rate_date, resolved_rate_source = (
+            self._validate_manual_cash_flow_fx_evidence(
+                record_id=requested_record_id,
+                manual_exchange_rate=manual_exchange_rate,
+                rate_date=rate_date,
+                rate_source=rate_source,
             )
-        filter_str = ' AND '.join(conditions) if conditions else None
+        )
 
-        manual_values = (manual_exchange_rate, rate_date, rate_source)
-        if any(value is not None for value in manual_values):
-            if not record_id:
-                raise ValueError("manual FX evidence requires record_id")
-            if any(value in (None, "") for value in manual_values):
-                raise ValueError(
-                    "manual FX evidence requires exchange_rate, rate_date, and rate_source"
+        records = self.get_raw_cash_flows(account=requested_account)
+        initial = self._build_cash_flow_reconcile_plan(
+            records,
+            account=requested_account,
+            record_id=requested_record_id,
+            fx_rates=dict(fx_rates or {}),
+            manual_exchange_rate=manual_rate,
+            rate_date=resolved_rate_date,
+            rate_source=resolved_rate_source,
+        )
+        if dry_run:
+            return self._public_cash_flow_reconcile_result(
+                initial,
+                dry_run=True,
+                change_count=len(initial["update_payloads"]),
+                updated_count=0,
+            )
+
+        update_payloads = list(initial["update_payloads"])
+        updated_count = 0
+        if update_payloads:
+            write_error: Optional[Exception] = None
+            updated_records: List[Dict[str, Any]] = []
+            try:
+                updated_records = self.client.batch_update_records(
+                    'cash_flow',
+                    update_payloads,
                 )
-            rate_source = str(rate_source).strip()
-            if not rate_source or rate_source.lower() == "manual":
-                raise ValueError("manual FX evidence requires a traceable rate_source")
+            except Exception as exc:
+                write_error = exc
+            finally:
+                self._invalidate_cash_flow_agg_cache(
+                    set(initial["affected_accounts"])
+                )
+            if write_error is not None:
+                failed = self._public_cash_flow_reconcile_result(
+                    initial,
+                    dry_run=False,
+                    change_count=len(update_payloads),
+                    updated_count=0,
+                )
+                return {
+                    **failed,
+                    "success": False,
+                    "reason_code": "cash_flow_batch_update_failed",
+                    "error": str(write_error),
+                    "partial_write_possible": True,
+                    "readback_verified": False,
+                }
+            updated_count = len(updated_records)
+            if updated_count != len(update_payloads):
+                failed = self._public_cash_flow_reconcile_result(
+                    initial,
+                    dry_run=False,
+                    change_count=len(update_payloads),
+                    updated_count=updated_count,
+                )
+                return {
+                    **failed,
+                    "success": False,
+                    "reason_code": "cash_flow_batch_update_count_mismatch",
+                    "error": (
+                        "cash_flow batch update count mismatch: "
+                        f"expected={len(update_payloads)}, actual={updated_count}"
+                    ),
+                    "partial_write_possible": True,
+                    "readback_verified": False,
+                }
 
         try:
-            records = self.client.list_records(
-                'cash_flow',
-                filter_str=filter_str,
-                field_names=self.CASH_FLOW_RECONCILE_FIELDS,
+            readback_records = self.get_raw_cash_flows(account=requested_account)
+            readback = self._build_cash_flow_reconcile_plan(
+                readback_records,
+                account=requested_account,
+                record_id=requested_record_id,
+                fx_rates={},
+                manual_exchange_rate=manual_rate,
+                rate_date=resolved_rate_date,
+                rate_source=resolved_rate_source,
             )
-        except Exception as e:
-            if 'FieldNameNotFound' in str(e):
-                fallback_fields = [f for f in self.CASH_FLOW_RECONCILE_FIELDS if f != 'updated_at']
-                records = self.client.list_records(
-                    'cash_flow',
-                    filter_str=filter_str,
-                    field_names=fallback_fields,
+        except Exception as exc:
+            failed = self._public_cash_flow_reconcile_result(
+                initial,
+                dry_run=False,
+                change_count=len(update_payloads),
+                updated_count=updated_count,
+            )
+            return {
+                **failed,
+                "success": False,
+                "reason_code": "cash_flow_readback_failed",
+                "error": str(exc),
+                "partial_write_possible": bool(updated_count),
+                "readback_verified": False,
+            }
+        initial_rows = {
+            str(row.get("record_id") or ""): row
+            for row in initial["rows"]
+        }
+        readback_rows = {
+            str(row.get("record_id") or ""): row
+            for row in readback["rows"]
+        }
+        for expected_record_id, initial_row in initial_rows.items():
+            if expected_record_id not in readback_rows:
+                readback["rows"].append({
+                    "record_id": expected_record_id,
+                    "status": "error",
+                    "reason_code": "cash_flow_readback_missing",
+                    "error": "cash_flow row missing from fresh post-write readback",
+                    "updates": {},
+                    "readback_verified": False,
+                })
+                continue
+            if initial_row.get("updates"):
+                readback_rows[expected_record_id]["applied_updates"] = dict(
+                    initial_row["updates"]
                 )
-            else:
-                raise
 
+        return self._public_cash_flow_reconcile_result(
+            readback,
+            dry_run=False,
+            change_count=len(update_payloads),
+            updated_count=updated_count,
+        )
+
+    def audit_cash_flow_duplicates(
+        self,
+        *,
+        account: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Fresh read-only audit grouped only by canonical manual identity."""
+
+        requested_account = str(account).strip() if account is not None else None
+        if account is not None and not requested_account:
+            raise ValueError("account must not be blank")
+        records = self.get_raw_cash_flows(account=requested_account)
+        audit = CashFlowManualDatasetAudit.build(records)
+        invalid_rows = []
+        for record in records:
+            issues = audit.issues_for(record.record_id)
+            if issues:
+                invalid_rows.append({
+                    "record_id": record.record_id,
+                    "issues": [issue.as_dict() for issue in issues],
+                })
+        groups = [group.as_dict() for group in audit.duplicate_groups]
+        return {
+            "success": True,
+            "read_only": True,
+            "account": requested_account,
+            "scanned": len(records),
+            "duplicate_group_count": len(groups),
+            "duplicate_record_count": sum(
+                int(group["record_count"]) for group in groups
+            ),
+            "duplicate_groups": groups,
+            "invalid_count": len(invalid_rows),
+            "invalid_rows": invalid_rows,
+        }
+
+    def _build_cash_flow_reconcile_plan(
+        self,
+        records: List[RawCashFlowRecord],
+        *,
+        account: Optional[str],
+        record_id: Optional[str],
+        fx_rates: Dict[str, Any],
+        manual_exchange_rate: Optional[Decimal],
+        rate_date: Optional[date],
+        rate_source: Optional[str],
+    ) -> Dict[str, Any]:
+        audit = CashFlowManualDatasetAudit.build(records)
+        target_records = [
+            record
+            for record in records
+            if record_id is None or record.record_id == record_id
+        ]
         rows: List[Dict[str, Any]] = []
         update_payloads: List[Dict[str, Any]] = []
         affected_accounts: set[str] = set()
-        rate_cache = dict(fx_rates or {})
 
-        for record in records:
-            row_record_id = record.get('record_id')
-            raw_fields = record.get('fields') or {}
-            fields = dict(raw_fields)
-            parsed = self._parse_cash_flow_manual_fields(fields)
-            if parsed.get('error'):
+        for record in target_records:
+            manual = audit.valid_by_record_id.get(record.record_id)
+            if manual is None:
+                issues = audit.issues_for(record.record_id)
                 rows.append({
-                    'record_id': row_record_id,
-                    'status': 'error',
-                    'error': parsed['error'],
-                    'fields': parsed.get('fields', {}),
+                    "record_id": record.record_id,
+                    "status": "error",
+                    "reason_code": "cash_flow_manual_validation_failed",
+                    "error": "; ".join(
+                        f"{issue.field}:{issue.reason_code}" for issue in issues
+                    ),
+                    "issues": [issue.as_dict() for issue in issues],
+                    "fields": record.canonical_fields(),
+                    "updates": {},
+                    "readback_verified": False,
                 })
                 continue
-
-            manual = parsed['manual']
-            flow_date = manual.flow_date
-            row_account = manual.account
-            amount = manual.amount
-            currency = manual.currency
-            cny_amount = fields.get('cny_amount')
-            exchange_rate = fields.get('exchange_rate')
-            fx_evidence: Optional[Dict[str, str]] = None
-            expected_flow_type = 'DEPOSIT' if amount > 0 else 'WITHDRAW'
-            updates: Dict[str, Any] = {}
-            warnings: List[str] = []
-
-            current_flow_type = fields.get('flow_type')
-            if not current_flow_type:
-                updates['flow_type'] = expected_flow_type
-            elif str(current_flow_type).upper() != expected_flow_type:
-                updates['flow_type'] = expected_flow_type
-                warnings.append(
-                    f"flow_type={current_flow_type} differs from amount sign; expected {expected_flow_type}"
-            )
-
+            duplicate_group = audit.duplicate_by_record_id.get(record.record_id)
+            if duplicate_group is not None:
+                rows.append({
+                    "record_id": record.record_id,
+                    "account": manual.account,
+                    "broker": manual.broker,
+                    "flow_date": manual.flow_date.isoformat(),
+                    "currency": manual.currency,
+                    "amount": float(manual.amount),
+                    "status": "error",
+                    "reason_code": "cash_flow_expected_dedup_duplicate",
+                    "error": (
+                        "multiple cash_flow rows share the canonical manual identity"
+                    ),
+                    "duplicate_group": duplicate_group.as_dict(),
+                    "updates": {},
+                    "readback_verified": False,
+                })
+                continue
             try:
-                if currency == 'CNY':
-                    exchange_rate = 1.0
-                elif (
-                    requested_record_id
-                    and str(row_record_id) == str(requested_record_id)
-                    and manual_exchange_rate is not None
-                ):
-                    exchange_rate = Decimal(str(manual_exchange_rate))
-                    fx_evidence = {
-                        "exchange_rate_date": rate_date.isoformat(),
-                        "exchange_rate_source": str(rate_source),
-                        "exchange_rate_evidence_type": "manual_supplement",
-                    }
-                elif exchange_rate is None:
-                    key = f"{currency}CNY"
-                    evidence = rate_cache.get(key)
-                    if isinstance(evidence, dict):
-                        exchange_rate = evidence.get("rate")
-                        evidence_date = evidence.get("date") or flow_date
-                        evidence_source = evidence.get("source")
-                    elif evidence is not None:
-                        exchange_rate = evidence
-                        evidence_date = flow_date
-                        evidence_source = "injected_historical_rate"
-                    if exchange_rate is None:
-                        raise ValueError(
-                            f"historical FX evidence required for {currency} on {flow_date.isoformat()}"
-                        )
-                    if isinstance(evidence_date, (int, float)):
-                        evidence_date = datetime.fromtimestamp(
-                            evidence_date / 1000,
-                            tz=self.FEISHU_DATE_TZ,
-                        ).date()
-                    elif isinstance(evidence_date, str):
-                        evidence_date = datetime.strptime(
-                            evidence_date[:10], '%Y-%m-%d'
-                        ).date()
-                    evidence_source = str(evidence_source or "").strip()
-                    if evidence_date != flow_date:
-                        raise ValueError(
-                            "exchange_rate_date must equal cash_flow flow_date: "
-                            f"rate_date={evidence_date}, flow_date={flow_date}"
-                        )
-                    if not evidence_source:
-                        raise ValueError("exchange_rate_source is required")
-                    fx_evidence = {
-                        "exchange_rate_date": evidence_date.isoformat(),
-                        "exchange_rate_source": evidence_source,
-                        "exchange_rate_evidence_type": "provider",
-                    }
-
-                if Decimal(str(exchange_rate)) <= 0:
-                    raise ValueError("exchange_rate must be positive")
-                if (
-                    fields.get("exchange_rate") is None
-                    or Decimal(str(fields.get("exchange_rate")))
-                    != Decimal(str(exchange_rate))
-                ):
-                    updates["exchange_rate"] = float(exchange_rate)
-
-                expected_cny_amount = Decimal(str(amount)) * Decimal(str(exchange_rate))
-                expected_cny_amount = expected_cny_amount.quantize(
-                    Decimal('0.01'),
-                    rounding=ROUND_HALF_UP,
+                row = self._plan_cash_flow_reconcile_row(
+                    record,
+                    manual=manual,
+                    fx_rates=fx_rates,
+                    manual_exchange_rate=(
+                        manual_exchange_rate
+                        if record_id == record.record_id
+                        else None
+                    ),
+                    rate_date=rate_date,
+                    rate_source=rate_source,
                 )
-                if (
-                    cny_amount is None
-                    or Decimal(str(cny_amount)).quantize(
-                        Decimal('0.01'),
-                        rounding=ROUND_HALF_UP,
-                    )
-                    != expected_cny_amount
-                ):
-                    cny_amount = expected_cny_amount
-                    updates['cny_amount'] = float(cny_amount)
-            except Exception as exc:
+            except (ArithmeticError, TypeError, ValueError) as exc:
                 rows.append({
-                    'record_id': row_record_id,
-                    'account': row_account,
-                    'flow_date': flow_date.strftime('%Y-%m-%d'),
-                    'currency': currency,
-                    'amount': float(amount),
-                    'status': 'error',
-                    'error': str(exc),
+                    "record_id": record.record_id,
+                    "account": manual.account,
+                    "broker": manual.broker,
+                    "flow_date": manual.flow_date.isoformat(),
+                    "currency": manual.currency,
+                    "amount": float(manual.amount),
+                    "status": "error",
+                    "reason_code": "cash_flow_reconcile_evidence_invalid",
+                    "error": str(exc),
+                    "updates": {},
+                    "readback_verified": False,
                 })
                 continue
-
-            expected_dedup_key = expected_cash_flow_dedup_key(
-                manual,
-                expected_flow_type,
-            )
-            if fields.get('dedup_key') != expected_dedup_key:
-                updates['dedup_key'] = expected_dedup_key
-
-            if not isinstance(fields.get('source'), str) or not fields['source'].strip():
-                updates['source'] = 'manual'
-
-            completed_fields = {
-                **fields,
-                **updates,
-                'flow_date': manual.flow_date,
-                'account': manual.account,
-                'broker': manual.broker,
-                'amount': manual.amount,
-                'currency': manual.currency,
-                'flow_type': expected_flow_type,
-                'exchange_rate': exchange_rate,
-                'cny_amount': cny_amount,
-                'dedup_key': expected_dedup_key,
-                'source': updates.get('source', fields.get('source')),
-            }
-            try:
-                CompletedCashFlowFacts.require(RawCashFlowRecord(
-                    record_id=str(row_record_id or ''),
-                    raw_fields=completed_fields,
-                    source='reconcile-plan',
-                ))
-            except CashFlowContractError as exc:
-                rows.append({
-                    'record_id': row_record_id,
-                    'account': row_account,
-                    'status': 'error',
-                    'error': str(exc),
-                    'issues': [issue.as_dict() for issue in exc.issues],
-                })
-                continue
-
-            row = {
-                'record_id': row_record_id,
-                'account': row_account,
-                'broker': manual.broker,
-                'flow_date': flow_date.strftime('%Y-%m-%d'),
-                'currency': currency,
-                'amount': float(amount),
-                'exchange_rate': float(exchange_rate),
-                'cny_amount': float(cny_amount),
-                'source_hash': expected_dedup_key,
-                'requires_fx_confirmation': currency != 'CNY',
-                'status': 'pending' if updates else 'ok',
-                'updates': updates,
-            }
-            if fx_evidence is not None:
-                row['fx_evidence'] = fx_evidence
-            if warnings:
-                row['warnings'] = warnings
             rows.append(row)
-
-            if updates:
+            if row["updates"]:
                 update_payloads.append({
-                    'record_id': row_record_id,
-                    'fields': self._to_feishu_fields(updates, 'cash_flow'),
+                    "record_id": record.record_id,
+                    "fields": self._to_feishu_fields(
+                        row["updates"],
+                        "cash_flow",
+                    ),
                 })
-                affected_accounts.add(row_account)
-
-        updated_count = 0
-        if not dry_run and update_payloads:
-            updated_records = self.client.batch_update_records('cash_flow', update_payloads)
-            updated_count = len(updated_records)
-            self._invalidate_cash_flow_agg_cache(affected_accounts)
+                affected_accounts.add(manual.account)
 
         return {
-            'success': True,
-            'dry_run': dry_run,
-            'account': account,
-            'scanned': len(records),
-            'change_count': len(update_payloads),
-            'updated_count': updated_count,
-            'error_count': sum(1 for row in rows if row.get('status') == 'error'),
-            'rows': rows,
+            "account": account,
+            "record_id": record_id,
+            "source_scanned": len(records),
+            "scanned": len(target_records),
+            "rows": rows,
+            "update_payloads": update_payloads,
+            "affected_accounts": affected_accounts,
+            "duplicate_groups": [
+                group.as_dict() for group in audit.duplicate_groups
+            ],
         }
+
+    def _plan_cash_flow_reconcile_row(
+        self,
+        record: RawCashFlowRecord,
+        *,
+        manual: ManualCashFlowFacts,
+        fx_rates: Dict[str, Any],
+        manual_exchange_rate: Optional[Decimal],
+        rate_date: Optional[date],
+        rate_source: Optional[str],
+    ) -> Dict[str, Any]:
+        fields = record.canonical_fields()
+        updates: Dict[str, Any] = {}
+        warnings: List[str] = []
+        expected_flow_type = manual.expected_flow_type
+        current_flow_type = fields.get("flow_type")
+        if not isinstance(current_flow_type, str) or not current_flow_type.strip():
+            updates["flow_type"] = expected_flow_type
+        elif current_flow_type.strip().upper() != expected_flow_type:
+            updates["flow_type"] = expected_flow_type
+            warnings.append(
+                f"flow_type={current_flow_type} differs from amount sign; "
+                f"expected {expected_flow_type}"
+            )
+
+        fx_evidence: Optional[Dict[str, str]] = None
+        if manual.currency == "CNY":
+            if manual_exchange_rate is not None:
+                raise ValueError("manual FX evidence is not valid for CNY cash_flow")
+            exchange_rate = Decimal("1")
+        elif manual_exchange_rate is not None:
+            if rate_date != manual.flow_date:
+                raise ValueError(
+                    "exchange_rate_date must equal cash_flow flow_date: "
+                    f"rate_date={rate_date}, flow_date={manual.flow_date}"
+                )
+            exchange_rate = manual_exchange_rate
+            fx_evidence = {
+                "exchange_rate_date": manual.flow_date.isoformat(),
+                "exchange_rate_source": str(rate_source),
+                "exchange_rate_evidence_type": "manual_supplement",
+            }
+        elif fields.get("exchange_rate") not in (None, ""):
+            exchange_rate = self._require_positive_cash_flow_rate(
+                fields.get("exchange_rate")
+            )
+        else:
+            key = f"{manual.currency}CNY"
+            evidence = fx_rates.get(key)
+            if isinstance(evidence, dict):
+                exchange_rate = self._require_positive_cash_flow_rate(
+                    evidence.get("rate")
+                )
+                evidence_date = self._cash_flow_evidence_date(
+                    evidence.get("date") or manual.flow_date
+                )
+                evidence_source = normalize_cash_flow_rate_source(
+                    evidence.get("source")
+                )
+            elif evidence is not None:
+                exchange_rate = self._require_positive_cash_flow_rate(evidence)
+                evidence_date = manual.flow_date
+                evidence_source = normalize_cash_flow_rate_source(
+                    "injected_historical_rate"
+                )
+            else:
+                raise ValueError(
+                    "historical FX evidence required for "
+                    f"{manual.currency} on {manual.flow_date.isoformat()}"
+                )
+            if evidence_date != manual.flow_date:
+                raise ValueError(
+                    "exchange_rate_date must equal cash_flow flow_date: "
+                    f"rate_date={evidence_date}, flow_date={manual.flow_date}"
+                )
+            fx_evidence = {
+                "exchange_rate_date": evidence_date.isoformat(),
+                "exchange_rate_source": evidence_source,
+                "exchange_rate_evidence_type": "provider",
+            }
+        exchange_rate = self._require_positive_cash_flow_rate(exchange_rate)
+
+        if not self._cash_flow_decimal_matches(
+            fields.get("exchange_rate"),
+            exchange_rate,
+        ):
+            updates["exchange_rate"] = float(exchange_rate)
+        expected_cny_amount = (manual.amount * exchange_rate).quantize(
+            CASH_FLOW_MONEY_QUANT,
+            rounding=ROUND_HALF_UP,
+        )
+        if not self._cash_flow_decimal_matches(
+            fields.get("cny_amount"),
+            expected_cny_amount,
+            quant=CASH_FLOW_MONEY_QUANT,
+        ):
+            updates["cny_amount"] = float(expected_cny_amount)
+
+        expected_dedup_key = manual.expected_dedup_key
+        if fields.get("dedup_key") != expected_dedup_key:
+            updates["dedup_key"] = expected_dedup_key
+        current_source = fields.get("source")
+        if not isinstance(current_source, str) or not current_source.strip():
+            updates["source"] = "manual"
+
+        completed_fields = {
+            **fields,
+            **updates,
+            "flow_date": manual.flow_date,
+            "account": manual.account,
+            "broker": manual.broker,
+            "amount": manual.amount,
+            "currency": manual.currency,
+            "flow_type": expected_flow_type,
+            "exchange_rate": exchange_rate,
+            "cny_amount": expected_cny_amount,
+            "dedup_key": expected_dedup_key,
+            "source": updates.get("source", fields.get("source")),
+        }
+        completed = CompletedCashFlowFacts.require(RawCashFlowRecord(
+            record_id=record.record_id,
+            raw_fields=completed_fields,
+            source="reconcile-plan",
+        ))
+        fingerprint = cash_flow_generated_fingerprint(completed)
+        observed = not updates
+        row = {
+            "record_id": record.record_id,
+            "account": manual.account,
+            "broker": manual.broker,
+            "flow_date": manual.flow_date.isoformat(),
+            "currency": manual.currency,
+            "amount": float(manual.amount),
+            "flow_type": expected_flow_type,
+            "exchange_rate": float(exchange_rate),
+            "cny_amount": float(expected_cny_amount),
+            "expected_dedup_key": expected_dedup_key,
+            "expected_generated_fingerprint": fingerprint,
+            "generated_fingerprint": fingerprint if observed else None,
+            "source_hash": fingerprint if observed else None,
+            "requires_fx_confirmation": manual.currency != "CNY",
+            "status": "ok" if observed else "pending",
+            "completion_state": "completed" if observed else "proposed",
+            "readback_verified": observed,
+            "updates": updates,
+        }
+        if fx_evidence is not None:
+            row["fx_evidence"] = fx_evidence
+        if warnings:
+            row["warnings"] = warnings
+        return row
+
+    @staticmethod
+    def _validate_manual_cash_flow_fx_evidence(
+        *,
+        record_id: Optional[str],
+        manual_exchange_rate: Any,
+        rate_date: Optional[date],
+        rate_source: Optional[str],
+    ) -> tuple[Optional[Decimal], Optional[date], Optional[str]]:
+        values = (manual_exchange_rate, rate_date, rate_source)
+        if not any(value is not None for value in values):
+            return None, None, None
+        if not record_id:
+            raise ValueError("manual FX evidence requires record_id")
+        if any(value in (None, "") for value in values):
+            raise ValueError(
+                "manual FX evidence requires exchange_rate, rate_date, and rate_source"
+            )
+        if not isinstance(rate_date, date) or isinstance(rate_date, datetime):
+            raise ValueError("manual FX evidence rate_date must be a date")
+        resolved_source = normalize_cash_flow_rate_source(rate_source)
+        resolved_rate = CashFlowRepository._require_positive_cash_flow_rate(
+            manual_exchange_rate
+        )
+        return resolved_rate, rate_date, resolved_source
+
+    @staticmethod
+    def _require_positive_cash_flow_rate(raw: Any) -> Decimal:
+        if isinstance(raw, bool) or raw in (None, ""):
+            raise ValueError("exchange_rate must be a finite positive Decimal")
+        try:
+            value = Decimal(str(raw).strip())
+        except (InvalidOperation, AttributeError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "exchange_rate must be a finite positive Decimal"
+            ) from exc
+        if not value.is_finite() or value <= 0:
+            raise ValueError("exchange_rate must be a finite positive Decimal")
+        return value
+
+    def _cash_flow_evidence_date(self, raw: Any) -> date:
+        if isinstance(raw, datetime):
+            return (
+                raw.astimezone(self.FEISHU_DATE_TZ).date()
+                if raw.tzinfo
+                else raw.date()
+            )
+        if isinstance(raw, date):
+            return raw
+        if isinstance(raw, bool):
+            raise ValueError("exchange_rate_date is invalid")
+        if isinstance(raw, (int, float, Decimal)):
+            value = Decimal(str(raw))
+            if not value.is_finite():
+                raise ValueError("exchange_rate_date is invalid")
+            return datetime.fromtimestamp(
+                float(value) / 1000,
+                tz=self.FEISHU_DATE_TZ,
+            ).date()
+        if isinstance(raw, str):
+            return date.fromisoformat(raw.strip()[:10])
+        raise ValueError("exchange_rate_date is invalid")
+
+    @staticmethod
+    def _cash_flow_decimal_matches(
+        raw: Any,
+        expected: Decimal,
+        *,
+        quant: Optional[Decimal] = None,
+    ) -> bool:
+        if isinstance(raw, bool) or raw in (None, ""):
+            return False
+        try:
+            actual = Decimal(str(raw).strip())
+            if not actual.is_finite():
+                return False
+            if quant is not None:
+                actual = actual.quantize(quant, rounding=ROUND_HALF_UP)
+                expected = expected.quantize(quant, rounding=ROUND_HALF_UP)
+            return actual == expected
+        except (InvalidOperation, AttributeError, TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _public_cash_flow_reconcile_result(
+        plan: Dict[str, Any],
+        *,
+        dry_run: bool,
+        change_count: int,
+        updated_count: int,
+    ) -> Dict[str, Any]:
+        rows = list(plan["rows"])
+        error_count = sum(1 for row in rows if row.get("status") == "error")
+        completed_count = sum(
+            1 for row in rows if row.get("completion_state") == "completed"
+        )
+        readback_verified = all(
+            bool(row.get("readback_verified")) for row in rows
+        ) and (bool(rows) or plan.get("record_id") is None)
+        success = bool(dry_run or readback_verified)
+        result = {
+            "success": success,
+            "dry_run": dry_run,
+            "account": plan.get("account"),
+            "record_id": plan.get("record_id"),
+            "source_scanned": int(plan.get("source_scanned") or 0),
+            "scanned": int(plan.get("scanned") or 0),
+            "change_count": int(change_count),
+            "updated_count": int(updated_count),
+            "completed_count": completed_count,
+            "error_count": error_count,
+            "readback_verified": readback_verified,
+            "partial_write_possible": bool(
+                not dry_run and updated_count and not readback_verified
+            ),
+            "duplicate_groups": list(plan.get("duplicate_groups") or ()),
+            "rows": rows,
+        }
+        if not success:
+            result.update({
+                "reason_code": "cash_flow_readback_not_verified",
+                "error": (
+                    "cash_flow apply did not produce a unique completed fresh readback"
+                ),
+            })
+        return result
 
     def _parse_cash_flow_manual_fields(self, fields: Dict[str, Any]) -> Dict[str, Any]:
         manual, issues = ManualCashFlowFacts.validate(RawCashFlowRecord(
@@ -765,21 +1074,12 @@ class CashFlowRepository:
         cny_amount: Optional[float],
         rate_cache: Dict[str, float],
     ) -> float:
-        if currency == 'CNY':
+        if str(currency or '').strip().upper() == 'CNY':
             return 1.0
-
-        if cny_amount is not None and amount != 0:
-            return float(Decimal(str(cny_amount)) / Decimal(str(amount)))
-
-        key = f'{currency}CNY'
-        rate = rate_cache.get(key)
-        if rate is None:
-            raise ValueError(
-                f"historical FX evidence required for cash_flow currency: {currency}"
-            )
-        if isinstance(rate, dict):
-            rate = rate.get("rate")
-        return float(rate)
+        raise ValueError(
+            "legacy cash_flow FX resolver cannot prove dated evidence; "
+            "use reconcile_cash_flows with flow_date-bound evidence"
+        )
 
     def _invalidate_cash_flow_agg_cache(self, accounts: set[str]):
         for account in accounts:

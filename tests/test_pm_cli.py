@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import io
 from contextlib import redirect_stdout
+from datetime import date
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -1464,3 +1465,213 @@ def test_pm_manual_nav_commands_default_to_no_overwrite_and_require_explicit_opt
     assert nav_overwrite.overwrite is True
     assert daily_overwrite.overwrite is True
     assert legacy_no_overwrite.overwrite is False
+
+
+def test_pm_cash_flow_duplicates_is_fresh_read_only_audit():
+    import src.feishu_storage as storage_module
+
+    calls = []
+
+    class FakeCashFlowRepository:
+        def audit_cash_flow_duplicates(self, *, account=None):
+            calls.append(("audit", account))
+            return {
+                "success": True,
+                "read_only": True,
+                "account": account,
+                "duplicate_group_count": 1,
+                "duplicate_groups": [{"record_ids": ["cf_1", "cf_2"]}],
+            }
+
+    class FakeStorage:
+        def __init__(self):
+            self.cash_flow = FakeCashFlowRepository()
+
+    old_storage = storage_module.FeishuStorage
+    stdout = io.StringIO()
+    try:
+        storage_module.FeishuStorage = FakeStorage
+        with redirect_stdout(stdout):
+            assert pm.main([
+                "cash-flow",
+                "duplicates",
+                "--account",
+                "lx",
+                "--json",
+            ]) == 0
+    finally:
+        storage_module.FeishuStorage = old_storage
+
+    result = json.loads(stdout.getvalue())
+    assert result["read_only"] is True
+    assert result["duplicate_groups"][0]["record_ids"] == ["cf_1", "cf_2"]
+    assert calls == [("audit", "lx")]
+
+
+def test_pm_manual_fx_date_mismatch_records_zero_confirmation():
+    import src.app.operation_state_store as state_module
+    import src.feishu_storage as storage_module
+
+    confirmation_calls = []
+    reconcile_calls = []
+
+    class FakeStorage:
+        def reconcile_cash_flows(self, **kwargs):
+            reconcile_calls.append(kwargs)
+            return {
+                "success": False,
+                "reason_code": "cash_flow_readback_not_verified",
+                "partial_write_possible": False,
+                "rows": [{
+                    "record_id": "cf_usd",
+                    "status": "error",
+                    "error": "exchange_rate_date must equal cash_flow flow_date",
+                }],
+            }
+
+    class FakeOperationStore:
+        def record_fx_confirmation(self, **kwargs):
+            confirmation_calls.append(kwargs)
+            return "should-not-exist"
+
+    old_storage = storage_module.FeishuStorage
+    old_store = state_module.OperationStateStore
+    stdout = io.StringIO()
+    try:
+        storage_module.FeishuStorage = FakeStorage
+        state_module.OperationStateStore = FakeOperationStore
+        with redirect_stdout(stdout):
+            assert pm.main([
+                "cash-flow",
+                "reconcile",
+                "--record-id",
+                "cf_usd",
+                "--exchange-rate",
+                "7.2",
+                "--rate-date",
+                "2026-07-25",
+                "--rate-source",
+                "bank:receipt-1",
+                "--apply",
+                "--confirm",
+                "--json",
+            ]) == 1
+    finally:
+        storage_module.FeishuStorage = old_storage
+        state_module.OperationStateStore = old_store
+
+    assert reconcile_calls[0]["rate_date"] == date(2026, 7, 25)
+    assert confirmation_calls == []
+    result = json.loads(stdout.getvalue())
+    assert result["reason_code"] == "cash_flow_readback_not_verified"
+    assert result["partial_write_possible"] is False
+
+
+def test_pm_placeholder_fx_source_records_zero_confirmation():
+    import src.app.operation_state_store as state_module
+    import src.feishu_storage as storage_module
+
+    confirmation_calls = []
+
+    class FakeStorage:
+        def reconcile_cash_flows(self, **_kwargs):
+            raise ValueError("exchange_rate_source must be traceable text")
+
+    class FakeOperationStore:
+        def record_fx_confirmation(self, **kwargs):
+            confirmation_calls.append(kwargs)
+            return "should-not-exist"
+
+    old_storage = storage_module.FeishuStorage
+    old_store = state_module.OperationStateStore
+    try:
+        storage_module.FeishuStorage = FakeStorage
+        state_module.OperationStateStore = FakeOperationStore
+        try:
+            pm.main([
+                "cash-flow",
+                "reconcile",
+                "--record-id",
+                "cf_usd",
+                "--exchange-rate",
+                "7.2",
+                "--rate-date",
+                "2026-07-26",
+                "--rate-source",
+                "unknown",
+                "--apply",
+                "--confirm",
+                "--json",
+            ])
+        except SystemExit as exc:
+            assert "traceable text" in str(exc)
+        else:
+            raise AssertionError("expected placeholder source rejection")
+    finally:
+        storage_module.FeishuStorage = old_storage
+        state_module.OperationStateStore = old_store
+
+    assert confirmation_calls == []
+
+
+def test_pm_manual_fx_confirmation_binds_observed_generated_fingerprint():
+    import src.app.operation_state_store as state_module
+    import src.feishu_storage as storage_module
+
+    confirmation_calls = []
+
+    class FakeStorage:
+        def reconcile_cash_flows(self, **_kwargs):
+            return {
+                "success": True,
+                "rows": [{
+                    "record_id": "cf_usd",
+                    "status": "ok",
+                    "completion_state": "completed",
+                    "readback_verified": True,
+                    "generated_fingerprint": "generated-fingerprint-1",
+                    "exchange_rate": 7.2,
+                    "cny_amount": 720.0,
+                    "fx_evidence": {
+                        "exchange_rate_date": "2026-07-26",
+                        "exchange_rate_source": "bank:receipt-1",
+                        "exchange_rate_evidence_type": "manual_supplement",
+                    },
+                }],
+            }
+
+    class FakeOperationStore:
+        def record_fx_confirmation(self, **kwargs):
+            confirmation_calls.append(kwargs)
+            return "confirmation-1"
+
+    old_storage = storage_module.FeishuStorage
+    old_store = state_module.OperationStateStore
+    stdout = io.StringIO()
+    try:
+        storage_module.FeishuStorage = FakeStorage
+        state_module.OperationStateStore = FakeOperationStore
+        with redirect_stdout(stdout):
+            assert pm.main([
+                "cash-flow",
+                "reconcile",
+                "--record-id",
+                "cf_usd",
+                "--exchange-rate",
+                "7.2",
+                "--rate-date",
+                "2026-07-26",
+                "--rate-source",
+                "bank:receipt-1",
+                "--apply",
+                "--confirm",
+                "--json",
+            ]) == 0
+    finally:
+        storage_module.FeishuStorage = old_storage
+        state_module.OperationStateStore = old_store
+
+    result = json.loads(stdout.getvalue())
+    assert result["fx_confirmation_id"] == "confirmation-1"
+    assert confirmation_calls[0]["record_id"] == "cf_usd"
+    assert confirmation_calls[0]["source_hash"] == "generated-fingerprint-1"
