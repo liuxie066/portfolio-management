@@ -21,6 +21,9 @@ from .holdings_validation import canonical_record_payload
 from .holdings_workflow_service import HoldingsWorkflowService
 
 
+_MAX_ACTION_ITEMS_PER_SCOPE = 5
+
+
 def _canonical_json(value: Any) -> str:
     return json.dumps(
         value,
@@ -49,6 +52,51 @@ def _canonical_number(value: Any) -> Optional[str]:
     if number == number.to_integral():
         return str(number.quantize(Decimal("1")))
     return format(number.normalize(), "f")
+
+
+def _pending_case_keys(plan: Mapping[str, Any]) -> list[str]:
+    confirmed = {
+        str(case_key)
+        for case_key in list(plan.get("confirmed_case_keys") or [])
+    }
+    return [
+        str(case_key)
+        for case_key in list(plan.get("case_keys") or [])
+        if str(case_key) not in confirmed
+    ]
+
+
+def _action_contract(plan: Mapping[str, Any]) -> dict[str, Any]:
+    pending_case_keys = _pending_case_keys(plan)
+    pending = set(pending_case_keys)
+    action_items: list[dict[str, str]] = []
+    for receipt in list(plan.get("discovery_receipts") or []):
+        payload = dict(receipt.get("payload") or {})
+        if str(payload.get("case_key") or "") not in pending:
+            continue
+        action = dict(payload.get("action") or {})
+        command = str(action.get("command") or "").strip()
+        if not command:
+            continue
+        action_items.append(
+            {
+                "case_key": str(payload.get("case_key") or ""),
+                "record_id": str(payload.get("record_id") or ""),
+                "field": str(payload.get("field") or ""),
+                "state": str(payload.get("state") or ""),
+                "command": command,
+            }
+        )
+    total = len(action_items)
+    return {
+        "pending_case_keys": pending_case_keys,
+        "action_items": action_items[:_MAX_ACTION_ITEMS_PER_SCOPE],
+        "action_item_count": total,
+        "action_item_omitted_count": max(
+            total - _MAX_ACTION_ITEMS_PER_SCOPE,
+            0,
+        ),
+    }
 
 
 @dataclass(frozen=True)
@@ -278,22 +326,31 @@ class HoldingsNavPreflightService:
             raise ValueError("formal holdings preflight requires confirmation")
         records = list(self.storage.get_raw_holdings())
         plan = self.workflow.plan_global_orphans(records, trigger=dict(trigger))
+        action_contract = _action_contract(plan)
         if not plan["case_keys"]:
             workflow_result = None
             if not dry_run:
                 workflow_result = self.workflow.prove_global_orphans_absent(
-                    trigger=dict(trigger)
+                    trigger=dict(trigger),
+                    enqueue_receipts=False,
                 )
             return {
                 "success": True,
                 "status": "valid",
                 "scope": "global",
                 "orphan_count": 0,
+                "case_keys": [],
+                "pending_case_keys": [],
+                "blocking_case_keys": [],
                 "workflow": workflow_result,
+                **action_contract,
             }
         workflow_result = None
         if not dry_run:
-            workflow_result = self.workflow.materialize_plan(plan)
+            workflow_result = self.workflow.materialize_plan(
+                plan,
+                enqueue_receipts=False,
+            )
         orphan_records = list(plan["cases"][0]["current"]["orphan_records"])
         return {
             "success": False,
@@ -304,8 +361,10 @@ class HoldingsNavPreflightService:
             "orphan_count": len(orphan_records),
             "orphan_record_ids": [item["record_id"] for item in orphan_records],
             "case_keys": list(plan["case_keys"]),
+            "blocking_case_keys": list(plan["blocking_case_keys"]),
             "would_materialize": dry_run,
             "workflow": workflow_result,
+            **action_contract,
         }
 
     def prepare_account(
@@ -346,12 +405,14 @@ class HoldingsNavPreflightService:
                 plan,
                 evaluation,
             )
+            action_contract = _action_contract(plan)
             workflow_result = None
             if not dry_run:
                 try:
                     workflow_result = self.workflow.materialize_preflight_plan(
                         plan,
                         evaluation,
+                        enqueue_receipts=False,
                     )
                 except Exception as exc:
                     return {
@@ -372,6 +433,7 @@ class HoldingsNavPreflightService:
                             evaluation
                         ),
                         "source_mode": source_mode,
+                        **action_contract,
                     }
 
             validation_payload = self.reconciliation.reconcile_payload(evaluation)
@@ -398,6 +460,7 @@ class HoldingsNavPreflightService:
                     "workflow": workflow_result,
                     "validation": validation_payload,
                     "source_mode": source_mode,
+                    **action_contract,
                 }
 
             confirmed_fields: dict[str, set[str]] = {}
@@ -448,9 +511,11 @@ class HoldingsNavPreflightService:
                 "holdings_snapshot": snapshot.provenance(),
                 "warnings": warnings,
                 "case_keys": list(plan["case_keys"]),
+                "blocking_case_keys": list(plan["blocking_case_keys"]),
                 "would_materialize": dry_run and bool(plan["case_keys"]),
                 "workflow": workflow_result,
                 "validation": validation_payload,
+                **action_contract,
             }
 
     @staticmethod

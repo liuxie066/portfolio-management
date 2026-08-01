@@ -45,6 +45,16 @@ def _set_run_id(payload: Any, run_id: str) -> Any:
     return payload
 
 
+def _public_holdings_preflight(payload: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return None
+    return {
+        key: value
+        for key, value in payload.items()
+        if key != "validated_snapshot"
+    }
+
+
 class AccountNavRecorderService:
     """Sync account cash inputs, build one valuation snapshot, and record NAV."""
 
@@ -113,6 +123,7 @@ class AccountNavRecorderService:
                 "confirm": confirm,
             }
 
+        holdings_preflight_result = None
         try:
             futu_sync_result = None
             project_futu_dry_run = False
@@ -130,7 +141,6 @@ class AccountNavRecorderService:
                     return _set_run_id(futu_sync_result, resolved_run_id)
                 project_futu_dry_run = bool(resolved_sync_futu_dry_run)
 
-            holdings_preflight_result = None
             if self.holdings_preflight is not None:
                 if snapshot is not None:
                     raise ValueError(
@@ -150,11 +160,10 @@ class AccountNavRecorderService:
                     project_futu_dry_run=project_futu_dry_run,
                 )
                 if not holdings_preflight_result.get("success"):
-                    failure = {
-                        key: value
-                        for key, value in holdings_preflight_result.items()
-                        if key != "validated_snapshot"
-                    }
+                    public_preflight = _public_holdings_preflight(
+                        holdings_preflight_result
+                    ) or {}
+                    failure = dict(public_preflight)
                     failure.update(
                         {
                             "account": self.account,
@@ -163,6 +172,7 @@ class AccountNavRecorderService:
                             "dry_run": dry_run,
                             "confirm": confirm,
                             "futu_sync_result": futu_sync_result,
+                            "holdings_preflight": public_preflight,
                         }
                     )
                     return failure
@@ -262,18 +272,12 @@ class AccountNavRecorderService:
                 },
                 "futu_sync_result": futu_sync_result,
                 "holdings_preflight": (
-                    {
-                        key: value
-                        for key, value in holdings_preflight_result.items()
-                        if key != "validated_snapshot"
-                    }
-                    if holdings_preflight_result is not None
-                    else None
+                    _public_holdings_preflight(holdings_preflight_result)
                 ),
                 "holdings_snapshot": holdings_snapshot,
             }
         except Exception as e:
-            return {
+            failure = {
                 "success": False,
                 "error": str(e),
                 "account": self.account,
@@ -282,3 +286,9 @@ class AccountNavRecorderService:
                 "dry_run": dry_run,
                 "confirm": confirm,
             }
+            public_preflight = _public_holdings_preflight(
+                holdings_preflight_result
+            )
+            if public_preflight is not None:
+                failure["holdings_preflight"] = public_preflight
+            return failure

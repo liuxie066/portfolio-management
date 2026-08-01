@@ -72,7 +72,12 @@ class DailyAccountNavService:
         if not record_result.get("success"):
             nav_result = record_result.get("nav_result")
             if isinstance(nav_result, dict) and not nav_result.get("success"):
-                return nav_result
+                failure = dict(nav_result)
+                if record_result.get("holdings_preflight") is not None:
+                    failure["holdings_preflight"] = record_result[
+                        "holdings_preflight"
+                    ]
+                return failure
             return record_result
 
         try:
@@ -89,7 +94,7 @@ class DailyAccountNavService:
                 run_id=record_result["run_id"],
             )
         except Exception as e:
-            return {
+            failure = {
                 "success": False,
                 "status": "failed" if dry_run else "partial",
                 "error": str(e),
@@ -101,6 +106,11 @@ class DailyAccountNavService:
                 "nav_persisted": not dry_run,
                 "nav_result": record_result.get("nav_result"),
             }
+            if record_result.get("holdings_preflight") is not None:
+                failure["holdings_preflight"] = record_result[
+                    "holdings_preflight"
+                ]
+            return failure
         if not payload_result.get("success"):
             payload_result.setdefault("status", "failed" if dry_run else "partial")
             payload_result.setdefault("nav_persisted", not dry_run)
@@ -109,6 +119,11 @@ class DailyAccountNavService:
             payload_result.setdefault("date", record_result["date"])
             payload_result.setdefault("dry_run", dry_run)
             payload_result.setdefault("confirm", confirm)
+            if record_result.get("holdings_preflight") is not None:
+                payload_result.setdefault(
+                    "holdings_preflight",
+                    record_result["holdings_preflight"],
+                )
             return _set_run_id(payload_result, record_result["run_id"])
 
         stage_timings = {
