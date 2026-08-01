@@ -99,6 +99,7 @@ class NavInitializationService:
                 use_bulk_persist=use_bulk_persist,
                 run_id=run_id,
                 cash_flow_dataset=cash_flow_dataset,
+                normalized_valuation=snapshot.get("normalized_valuation"),
                 nav_write_context=NavWriteContext(
                     status="initial",
                     writer="init-nav",

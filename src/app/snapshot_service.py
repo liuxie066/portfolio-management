@@ -1,33 +1,18 @@
 """Holdings snapshot persistence service."""
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Optional
 
 from src import config
+from src.domain.snapshot_contracts import (
+    SNAPSHOT_DIGEST_VERSION,
+    NormalizedValuationSnapshot,
+    snapshot_digest,
+    snapshot_row_payload as snapshot_row_payload,
+)
 from src.snapshot_models import HoldingSnapshot
-
-
-def snapshot_digest(snapshots: Iterable[HoldingSnapshot]) -> str:
-    """Compute a stable digest for holdings snapshot content."""
-    items = []
-    for snapshot in snapshots:
-        items.append(
-            {
-                "account": snapshot.account,
-                "as_of": snapshot.as_of,
-                "asset_id": snapshot.asset_id,
-                "broker": snapshot.broker,
-                "currency": snapshot.currency,
-                "quantity": snapshot.quantity,
-                "market_value_cny": snapshot.market_value_cny,
-            }
-        )
-    items.sort(key=lambda item: (item["account"], item["as_of"], item["broker"], item["asset_id"]))
-    raw = json.dumps(items, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()
 
 
 class SnapshotService:
@@ -37,30 +22,31 @@ class SnapshotService:
         self.storage = storage
         self.data_dir = data_dir or config.get_data_dir()
 
-    def build_holdings_snapshots(self, *, account: str, as_of: str, valuation: Any) -> list[HoldingSnapshot]:
-        snapshots = []
-        for holding in valuation.holdings:
-            broker = holding.broker or ""
-            snapshots.append(
-                HoldingSnapshot(
-                    as_of=as_of,
-                    account=account,
-                    asset_id=holding.asset_id,
-                    broker=broker,
-                    quantity=holding.quantity,
-                    currency=holding.currency,
-                    price=holding.current_price,
-                    cny_price=holding.cny_price,
-                    market_value_cny=holding.market_value_cny,
-                    dedup_key=f"{account}:{as_of}:{broker}:{holding.asset_id}",
-                    asset_name=holding.asset_name,
-                    avg_cost=holding.avg_cost,
-                    source="record_nav",
-                )
+    def build_holdings_snapshots(
+        self,
+        *,
+        account: str,
+        as_of: str,
+        normalized_valuation: NormalizedValuationSnapshot,
+    ) -> list[HoldingSnapshot]:
+        if not isinstance(normalized_valuation, NormalizedValuationSnapshot):
+            raise TypeError(
+                "snapshot persistence requires NormalizedValuationSnapshot"
             )
-        return snapshots
+        if normalized_valuation.account != account:
+            raise ValueError(
+                "normalized valuation account mismatch for holdings snapshot"
+            )
+        return list(normalized_valuation.to_snapshot_rows(as_of=as_of))
 
-    def persist_holdings_snapshot(self, *, account: str, today, valuation: Any, dry_run: bool = False) -> list[HoldingSnapshot]:
+    def persist_holdings_snapshot(
+        self,
+        *,
+        account: str,
+        today,
+        normalized_valuation: NormalizedValuationSnapshot,
+        dry_run: bool = False,
+    ) -> list[HoldingSnapshot]:
         """Persist holdings_snapshot rows and write a best-effort local copy.
 
         Feishu write failures are allowed to bubble up because snapshots are part
@@ -68,7 +54,11 @@ class SnapshotService:
         best-effort and should not block NAV recording.
         """
         as_of = today.strftime("%Y-%m-%d")
-        snapshots = self.build_holdings_snapshots(account=account, as_of=as_of, valuation=valuation)
+        snapshots = self.build_holdings_snapshots(
+            account=account,
+            as_of=as_of,
+            normalized_valuation=normalized_valuation,
+        )
 
         dry_preview = self.storage.batch_upsert_holding_snapshots(snapshots, dry_run=True)
         should_write_snapshot = bool(dry_preview.get("to_create") or dry_preview.get("to_update"))
@@ -88,6 +78,7 @@ class SnapshotService:
                 "as_of": as_of,
                 "account": account,
                 "count": len(snapshots),
+                "digest_version": SNAPSHOT_DIGEST_VERSION,
                 "digest": snapshot_digest(snapshots),
                 "snapshots": [snapshot.model_dump() for snapshot in snapshots],
             }

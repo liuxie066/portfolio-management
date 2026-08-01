@@ -12,6 +12,10 @@ from src.app.quality.evidence import valuation_quality_evidence
 from src.app.quality.policy import assert_official_nav_write_allowed
 from src.app.snapshot_service import snapshot_digest
 from src.domain.nav_calculator import ClosedNavTarget, NavCalculator
+from src.domain.snapshot_contracts import (
+    NormalizedValuationSnapshot,
+    attached_normalized_valuation,
+)
 from src.models import NAVHistory, PortfolioValuation
 from src.time_utils import bj_today
 
@@ -118,6 +122,7 @@ class NavRecordService:
         nav_write_context: Optional[NavWriteContext] = None,
         cash_flow_dataset: Any = None,
         nav_history_snapshot: Optional[tuple[NAVHistory, ...]] = None,
+        normalized_valuation: Optional[NormalizedValuationSnapshot] = None,
     ) -> NAVHistory:
         today_value = nav_date or bj_today()
         today = today_value.date() if isinstance(today_value, datetime) else today_value
@@ -162,9 +167,45 @@ class NavRecordService:
             raise ValueError(
                 f"valuation account mismatch: {valuation.account} != {account}"
             )
-        valuation_quality = valuation_quality_evidence(valuation)
+        attached = attached_normalized_valuation(valuation)
+        if normalized_valuation is None:
+            normalized_valuation = attached
+        elif not isinstance(
+            normalized_valuation,
+            NormalizedValuationSnapshot,
+        ):
+            raise TypeError(
+                "normalized_valuation must be a NormalizedValuationSnapshot"
+            )
+        if persist and normalized_valuation is None:
+            raise ValueError(
+                "official NAV persistence requires a ValuationService-owned "
+                "NormalizedValuationSnapshot"
+            )
+        if normalized_valuation is not None:
+            if attached is not None and attached.digest != normalized_valuation.digest:
+                raise ValueError(
+                    "normalized valuation digest does not match the exact "
+                    "object attached to the compatibility projection"
+                )
+            if persist and attached is None:
+                raise ValueError(
+                    "official NAV persistence requires a compatibility "
+                    "projection derived from NormalizedValuationSnapshot"
+                )
+            normalized_valuation.assert_official_eligible(
+                expected_source="valuation_service"
+            )
+            if normalized_valuation.account != account:
+                raise ValueError("normalized valuation account mismatch")
+            normalized_valuation.assert_compatible(valuation)
+            canonical_valuation = normalized_valuation.to_portfolio_valuation()
+        else:
+            canonical_valuation = valuation
+
+        valuation_quality = valuation_quality_evidence(canonical_valuation)
         if persist and not dry_run:
-            self._assert_valuation_reliable_for_write(valuation)
+            self._assert_valuation_reliable_for_write(canonical_valuation)
             assert_official_nav_write_allowed(
                 account=account,
                 valuation_quality=valuation_quality,
@@ -172,8 +213,10 @@ class NavRecordService:
 
         current_year = today.strftime("%Y")
 
-        valuation_projection = NavCalculator.project_valuation(valuation)
-        canonical_valuation = valuation.model_copy(update={
+        valuation_projection = NavCalculator.project_valuation(
+            canonical_valuation
+        )
+        canonical_valuation = canonical_valuation.model_copy(update={
             "total_value_cny": float(valuation_projection.total_value),
             "cash_value_cny": float(valuation_projection.cash_value),
             "stock_value_cny": float(
@@ -297,10 +340,28 @@ class NavRecordService:
         )
         if cash_flow_dataset is not None:
             details["cash_flow_dataset"] = cash_flow_dataset.details()
-        if valuation.holdings_provenance:
-            details["holdings_snapshot"] = dict(valuation.holdings_provenance)
+        if canonical_valuation.holdings_provenance:
+            details["holdings_snapshot"] = dict(
+                canonical_valuation.holdings_provenance
+            )
         if resolved_context.run_id:
             details["run_id"] = resolved_context.run_id
+
+        snapshot_rows = []
+        if persist:
+            if normalized_valuation is None:  # pragma: no cover - guarded above
+                raise ValueError(
+                    "snapshot persistence requires NormalizedValuationSnapshot"
+                )
+            snapshot_rows = self.manager.snapshot_service.build_holdings_snapshots(
+                account=account,
+                as_of=today.isoformat(),
+                normalized_valuation=normalized_valuation,
+            )
+            details["snapshot_evidence"] = normalized_valuation.evidence(
+                as_of=today.isoformat(),
+                status="planned",
+            )
         nav_record.details = details
 
         NavCalculator.assert_nav_invariants(
@@ -319,12 +380,6 @@ class NavRecordService:
             cash_flow_dataset=cash_flow_dataset,
             require_finality=True,
         )
-
-        snapshot_rows = []
-        if persist:
-            snapshot_rows = self.manager.snapshot_service.build_holdings_snapshots(
-                account=account, as_of=today.isoformat(), valuation=valuation
-            )
 
         if persist:
             if use_bulk_persist and (not dry_run) and overwrite_existing:
@@ -346,7 +401,7 @@ class NavRecordService:
                 self.manager.snapshot_service.persist_holdings_snapshot(
                     account=account,
                     today=today,
-                    valuation=valuation,
+                    normalized_valuation=normalized_valuation,
                     dry_run=dry_run,
                 )
             except Exception as exc:
@@ -465,6 +520,19 @@ class NavRecordService:
             cash_value=cash_value,
             non_cash_value=stock_value,
         )
+        normalized_valuation = NormalizedValuationSnapshot.from_closed_input(
+            target,
+            account=account,
+            source_provenance={"run_id": run_id},
+        )
+        normalized_valuation.assert_official_eligible(
+            expected_source="closed_input"
+        )
+        compatibility_valuation = normalized_valuation.to_portfolio_valuation()
+        normalized_valuation.assert_compatible(compatibility_valuation)
+        valuation_projection = NavCalculator.project_valuation(
+            compatibility_valuation
+        )
 
         context = nav_write_context or NavWriteContext(
             status="closed",
@@ -488,24 +556,30 @@ class NavRecordService:
         cash_flow_summary = cash_flow_dataset.summary(last_nav=last_nav)
         daily_cash_flow = cash_flow_summary["daily"]
         gap_cash_flow = cash_flow_summary["gap"]
-        stock_weight = target.non_cash_value / target.total_value
-        cash_weight = target.cash_value / target.total_value
         nav_record = NAVHistory(
             date=nav_date,
             account=account,
-            total_value=float(target.total_value),
-            cash_value=float(target.cash_value),
-            stock_value=float(target.non_cash_value),
-            stock_weight=float(NavCalculator.quantize_weight(stock_weight)),
-            cash_weight=float(NavCalculator.quantize_weight(cash_weight)),
-            shares=float(target.shares),
-            nav=float(target.nav),
+            total_value=float(valuation_projection.total_value),
+            cash_value=float(valuation_projection.cash_value),
+            stock_value=float(valuation_projection.non_cash_value),
+            fund_value=float(valuation_projection.fund_value),
+            cn_stock_value=float(valuation_projection.cn_exposure_value),
+            us_stock_value=float(valuation_projection.us_exposure_value),
+            hk_stock_value=float(valuation_projection.hk_exposure_value),
+            stock_weight=float(valuation_projection.stock_weight),
+            cash_weight=float(valuation_projection.cash_weight),
+            shares=compatibility_valuation.shares,
+            nav=compatibility_valuation.nav,
             cash_flow=float(NavCalculator.quantize_money(daily_cash_flow)),
             share_change=0.0,
             details={
                 "status": "CLOSED",
                 "finality": context.to_details(),
                 "run_id": run_id,
+                "snapshot_evidence": normalized_valuation.evidence(
+                    as_of=nav_date.isoformat(),
+                    status="planned",
+                ),
                 "cash_flow_dataset": cash_flow_dataset.details(),
                 "cash_flow_basis": NavCalculator.build_cash_flow_basis(
                     nav_date=nav_date,

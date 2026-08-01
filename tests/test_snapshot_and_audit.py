@@ -82,6 +82,7 @@ def test_full_report_and_record_nav_share_same_snapshot():
     )
 
     snapshot = skill.build_snapshot()
+    assert snapshot['normalized_valuation'].official_eligible is False
     full = skill.full_report(snapshot=snapshot)
     rec = skill.record_nav(snapshot=snapshot)
 
@@ -93,6 +94,10 @@ def test_full_report_and_record_nav_share_same_snapshot():
     assert (
         skill.portfolio.record_nav.call_args.kwargs['cash_flow_dataset']
         is cash_flow_dataset
+    )
+    assert (
+        skill.portfolio.record_nav.call_args.kwargs['normalized_valuation']
+        is snapshot['normalized_valuation']
     )
 
 

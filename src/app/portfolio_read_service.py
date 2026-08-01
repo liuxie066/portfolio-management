@@ -6,6 +6,10 @@ from typing import Any, Dict, Optional
 from zoneinfo import ZoneInfo
 
 from src.asset_utils import normalize_code
+from src.domain.snapshot_contracts import (
+    NormalizedValuationSnapshot,
+    attached_normalized_valuation,
+)
 from src.reporting_utils import normalize_asset_type, normalization_warning
 from src.time_utils import bj_now_naive
 
@@ -213,17 +217,49 @@ class PortfolioReadService:
             self.account,
             **valuation_kwargs,
         )
-        if holdings_provenance is not None:
-            valuation.holdings_provenance = dict(holdings_provenance)
-        if holdings_warnings:
-            valuation.warnings = list(
-                dict.fromkeys(
-                    [
-                        *(str(item) for item in holdings_warnings),
-                        *(str(item) for item in (valuation.warnings or [])),
-                    ]
+        normalized_valuation = attached_normalized_valuation(valuation)
+        if normalized_valuation is None:
+            # Reporting-only compatibility for injected/custom portfolio
+            # implementations. Official persistence rejects this adapter.
+            if not str(getattr(valuation, "account", "") or "").strip():
+                setattr(valuation, "account", self.account)
+            if holdings_provenance is not None:
+                setattr(
+                    valuation,
+                    "holdings_provenance",
+                    dict(holdings_provenance),
+                )
+            if holdings_warnings:
+                setattr(
+                    valuation,
+                    "warnings",
+                    list(
+                        dict.fromkeys(
+                            [
+                                *(str(item) for item in holdings_warnings),
+                                *(
+                                    str(item)
+                                    for item in (
+                                        getattr(valuation, "warnings", None) or []
+                                    )
+                                ),
+                            ]
+                        )
+                    ),
+                )
+            normalized_valuation = (
+                NormalizedValuationSnapshot.from_compatibility_projection(
+                    valuation,
+                    account_override=self.account,
                 )
             )
+        else:
+            normalized_valuation = normalized_valuation.with_runtime_context(
+                holdings_provenance=holdings_provenance,
+                warnings=holdings_warnings or (),
+            )
+            valuation = normalized_valuation.to_portfolio_valuation()
+            normalized_valuation.assert_compatible(valuation)
         valuation_holdings = valuation.holdings or []
         holdings_list = []
         for h in valuation_holdings:
@@ -252,6 +288,7 @@ class PortfolioReadService:
 
         return {
             "snapshot_time": bj_now_naive().isoformat(),
+            "normalized_valuation": normalized_valuation,
             "valuation": valuation,
             "holdings_snapshot": dict(holdings_provenance or {}),
             "holdings_data": {

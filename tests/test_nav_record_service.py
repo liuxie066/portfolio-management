@@ -13,12 +13,18 @@ from src.app.compensation_service import PartialWriteError
 from src.app.nav_finality import NavWriteContext
 from src.app.nav_record_service import NavRecordService
 from src.app.operation_state_store import OperationStateStore
+from src.app.valuation_service import ValuationService
 from src.domain.cash_flow_contracts import (
     CompletedCashFlowFacts,
     RawCashFlowRecord,
     cash_flow_generated_fingerprint,
 )
-from src.models import NAVHistory, PortfolioValuation
+from src.domain.nav_calculator import ClosedNavTarget
+from src.domain.snapshot_contracts import (
+    NormalizedValuationSnapshot,
+    attached_normalized_valuation,
+)
+from src.models import AssetClass, AssetType, Holding, NAVHistory, PortfolioValuation
 from src.maintenance.nav_history_repair import backfill
 from src.maintenance.nav_history_repair.common import (
     BASE_FIELDS,
@@ -31,19 +37,74 @@ from src.maintenance.nav_history_repair.context import NavRepairContext
 from src.portfolio import PortfolioManager
 
 
-def _valuation(warnings=None):
-    return PortfolioValuation(
-        account="a",
-        total_value_cny=1200.0,
-        cash_value_cny=200.0,
-        stock_value_cny=900.0,
-        fund_value_cny=100.0,
-        cn_asset_value=1000.0,
-        shares=1000.0,
-        nav=1.2,
-        holdings=[],
-        warnings=list(warnings or []),
+def _valuation(warnings=None, holdings_provenance=None):
+    row_inputs = (
+        (
+            Holding(
+                asset_id="CNY-CASH",
+                asset_name="Cash",
+                asset_type=AssetType.CASH,
+                account="a",
+                broker="TEST",
+                quantity=200,
+                currency="CNY",
+                asset_class=AssetClass.CASH,
+            ),
+            "cash",
+            "1",
+        ),
+        (
+            Holding(
+                asset_id="000001",
+                asset_name="Equity",
+                asset_type=AssetType.A_STOCK,
+                account="a",
+                broker="TEST",
+                quantity=90,
+                currency="CNY",
+                asset_class=AssetClass.CN_ASSET,
+            ),
+            "equity",
+            "10",
+        ),
+        (
+            Holding(
+                asset_id="FUND-1",
+                asset_name="Fund",
+                asset_type=AssetType.FUND,
+                account="a",
+                broker="TEST",
+                quantity=10,
+                currency="CNY",
+                asset_class=AssetClass.CN_ASSET,
+            ),
+            "fund",
+            "10",
+        ),
     )
+    holdings = [holding for holding, _normalized_type, _price in row_inputs]
+    price_snapshot = {
+        holding.asset_id: {
+            "price": price,
+            "cny_price": price,
+            "currency": "CNY",
+            "source": "test_fixture",
+        }
+        for holding, _normalized_type, price in row_inputs
+    }
+    normalized = ValuationService(
+        manager=None,
+        storage=Mock(),
+        price_fetcher=None,
+    ).calculate_normalized_valuation(
+        account="a",
+        holdings=holdings,
+        price_snapshot=price_snapshot,
+        total_shares=1000,
+        holdings_provenance=holdings_provenance,
+        price_warnings=list(warnings or []),
+    )
+    return normalized.to_portfolio_valuation()
 
 
 def _storage():
@@ -301,13 +362,12 @@ def test_nav_record_service_persists_holdings_input_provenance():
     storage = _storage()
     manager = _manager(storage)
     service = NavRecordService(manager=manager, storage=storage)
-    valuation = _valuation()
-    valuation.holdings_provenance = {
+    valuation = _valuation(holdings_provenance={
         "account": "a",
         "raw_record_digest": "raw-1",
         "normalized_holdings_digest": "normalized-1",
         "source_fetch_time": "2026-03-19T10:00:00+00:00",
-    }
+    })
 
     result = service.record_nav(
         account="a",
@@ -533,6 +593,132 @@ def test_nav_record_service_rejects_real_write_on_unreliable_valuation():
     manager.snapshot_service.persist_holdings_snapshot.assert_not_called()
 
 
+def test_nav_record_service_rejects_mutated_compatibility_projection():
+    storage = _storage()
+    manager = _manager(storage)
+    service = NavRecordService(manager=manager, storage=storage)
+    valuation = _valuation()
+    normalized = attached_normalized_valuation(valuation)
+    assert normalized is not None
+    valuation.total_value_cny = 1201.0
+
+    with pytest.raises(ValueError, match="compatibility projection"):
+        service.record_nav(
+            account="a",
+            valuation=valuation,
+            normalized_valuation=normalized,
+            nav_date=date(2026, 3, 19),
+            persist=True,
+            dry_run=True,
+            run_id="run-mutated",
+            cash_flow_dataset=_dataset(
+                storage,
+                date(2026, 3, 19),
+                "run-mutated",
+            ),
+        )
+
+    storage.write_nav_record.assert_not_called()
+    manager.snapshot_service.persist_holdings_snapshot.assert_not_called()
+
+
+def test_nav_record_service_rejects_unattached_aggregate_projection():
+    storage = _storage()
+    manager = _manager(storage)
+    service = NavRecordService(manager=manager, storage=storage)
+    valuation = PortfolioValuation(
+        account="a",
+        total_value_cny=100,
+        cash_value_cny=100,
+        shares=100,
+        nav=1,
+    )
+
+    with pytest.raises(ValueError, match="ValuationService-owned"):
+        service.record_nav(
+            account="a",
+            valuation=valuation,
+            nav_date=date(2026, 3, 19),
+            persist=True,
+            dry_run=True,
+            run_id="run-aggregate",
+            cash_flow_dataset=_dataset(
+                storage,
+                date(2026, 3, 19),
+                "run-aggregate",
+            ),
+        )
+
+    storage.write_nav_record.assert_not_called()
+    storage.write_nav_records.assert_not_called()
+    manager.snapshot_service.persist_holdings_snapshot.assert_not_called()
+
+
+def test_normal_nav_entrypoint_rejects_closed_input_authority():
+    storage = _storage()
+    manager = _manager(storage)
+    service = NavRecordService(manager=manager, storage=storage)
+    normalized = NormalizedValuationSnapshot.from_closed_input(
+        ClosedNavTarget.build(
+            total_value=100,
+            cash_value=100,
+            non_cash_value=0,
+        ),
+        account="a",
+    )
+
+    with pytest.raises(ValueError, match="source mismatch"):
+        service.record_nav(
+            account="a",
+            valuation=normalized.to_portfolio_valuation(),
+            normalized_valuation=normalized,
+            nav_date=date(2026, 3, 19),
+            persist=True,
+            dry_run=True,
+            run_id="run-closed-wrong-entry",
+            cash_flow_dataset=_dataset(
+                storage,
+                date(2026, 3, 19),
+                "run-closed-wrong-entry",
+            ),
+        )
+
+    storage.write_nav_record.assert_not_called()
+    manager.snapshot_service.persist_holdings_snapshot.assert_not_called()
+
+
+def test_nav_record_service_rejects_substituted_normalized_digest():
+    storage = _storage()
+    manager = _manager(storage)
+    service = NavRecordService(manager=manager, storage=storage)
+    valuation = _valuation()
+    attached = attached_normalized_valuation(valuation)
+    assert attached is not None
+    substituted = replace(attached, source="substituted_source")
+    substituted.assert_compatible(valuation)
+    assert substituted.digest != attached.digest
+
+    with pytest.raises(ValueError, match="normalized valuation digest"):
+        service.record_nav(
+            account="a",
+            valuation=valuation,
+            normalized_valuation=substituted,
+            nav_date=date(2026, 3, 19),
+            persist=True,
+            dry_run=True,
+            run_id="run-substituted",
+            cash_flow_dataset=_dataset(
+                storage,
+                date(2026, 3, 19),
+                "run-substituted",
+            ),
+        )
+
+    storage.write_nav_record.assert_not_called()
+    storage.write_nav_records.assert_not_called()
+    manager.snapshot_service.persist_holdings_snapshot.assert_not_called()
+
+
 def test_nav_record_service_logs_snapshot_failure_after_nav_write(caplog):
     storage = _storage()
     manager = _manager(storage)
@@ -692,6 +878,15 @@ def test_portfolio_skill_close_nav_persists_closed_finality():
     assert written.details["status"] == "CLOSED"
     assert written.details["finality"]["status"] == "closed"
     assert written.details["finality"]["writer"] == "close-nav"
+    evidence = written.details["snapshot_evidence"]
+    assert evidence["version"] == "v2"
+    assert evidence["status"] == "planned"
+    assert evidence["row_count"] == 0
+    assert [item["name"] for item in evidence["components"]] == [
+        "manual_cash_value",
+        "manual_non_cash_value",
+    ]
+    assert evidence["target_digest"]
     assert written.details["cash_flow_dataset"]["financial_fingerprint"]
     assert skill.storage.get_raw_cash_flows.call_count == 1
     skill.storage.reconcile_cash_flows.assert_not_called()

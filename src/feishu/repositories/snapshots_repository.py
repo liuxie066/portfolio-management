@@ -1,5 +1,5 @@
 """Repository for the Feishu holdings_snapshot table."""
-from typing import Any, Dict, List
+from typing import Dict, List
 
 from ...snapshot_models import HoldingSnapshot
 

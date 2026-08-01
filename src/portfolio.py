@@ -155,7 +155,8 @@ class PortfolioManager:
                             holdings: list[Any] | None = None,
                             price_snapshot: Dict[str, Any] | None = None,
                             price_warnings: list[str] | None = None,
-                            total_shares: Any = None) -> PortfolioValuation:
+                            total_shares: Any = None,
+                            holdings_provenance: Dict[str, Any] | None = None) -> PortfolioValuation:
         """计算账户估值
 
         Args:
@@ -178,6 +179,44 @@ class PortfolioManager:
             price_snapshot=price_snapshot,
             price_warnings=price_warnings,
             total_shares=total_shares,
+            holdings_provenance=holdings_provenance,
+        )
+
+    def calculate_normalized_valuation(
+        self,
+        account: str,
+        fetch_prices: bool = True,
+        price_timeout_seconds: int = 25,
+        allow_stale_price_fallback: bool = True,
+        price_market_closed_ttl_multiplier: float = 1.0,
+        run_quote_pool: Any = None,
+        supplemental_codes: list[str] | None = None,
+        deadline: float | None = None,
+        holdings: list[Any] | None = None,
+        price_snapshot: Dict[str, Any] | None = None,
+        price_warnings: list[str] | None = None,
+        total_shares: Any = None,
+        holdings_provenance: Dict[str, Any] | None = None,
+    ) -> Any:
+        """Build the immutable source used by NAV and snapshot persistence."""
+
+        self.valuation_service.price_fetcher = self.price_fetcher
+        return self.valuation_service.calculate_normalized_valuation(
+            account=account,
+            fetch_prices=fetch_prices,
+            price_timeout_seconds=price_timeout_seconds,
+            allow_stale_price_fallback=allow_stale_price_fallback,
+            price_market_closed_ttl_multiplier=(
+                price_market_closed_ttl_multiplier
+            ),
+            run_quote_pool=run_quote_pool,
+            supplemental_codes=supplemental_codes,
+            deadline=deadline,
+            holdings=holdings,
+            price_snapshot=price_snapshot,
+            price_warnings=price_warnings,
+            total_shares=total_shares,
+            holdings_provenance=holdings_provenance,
         )
 
     def fetch_price_snapshot(
@@ -207,7 +246,8 @@ class PortfolioManager:
                    use_bulk_persist: bool = False, run_id: Optional[str] = None,
                    nav_write_context: Optional[NavWriteContext] = None,
                    cash_flow_dataset: Any = None,
-                   nav_history_snapshot: Optional[tuple[NAVHistory, ...]] = None) -> NAVHistory:
+                   nav_history_snapshot: Optional[tuple[NAVHistory, ...]] = None,
+                   normalized_valuation: Any = None) -> NAVHistory:
         """
         记录每日净值（按Excel账户净值sheet逻辑）
         计算字段：股票市值、现金结余、账户净值、占比、份额变动、涨幅、资产升值
@@ -228,6 +268,7 @@ class PortfolioManager:
             nav_write_context=nav_write_context,
             cash_flow_dataset=cash_flow_dataset,
             nav_history_snapshot=nav_history_snapshot,
+            normalized_valuation=normalized_valuation,
         )
 
     def build_cash_flow_dataset(

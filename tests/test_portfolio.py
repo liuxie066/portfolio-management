@@ -6,13 +6,14 @@ from unittest.mock import Mock, patch
 
 from src import config
 from src.app.cash_flow_summary_service import CashFlowSummaryService
+from src.app.valuation_service import ValuationService
 from src.domain.cash_flow_contracts import (
     CompletedCashFlowFacts,
     RawCashFlowRecord,
 )
 from src.portfolio import PortfolioManager
 from src.models import (
-    Holding, NAVHistory, PortfolioValuation,
+    Holding, NAVHistory,
     AssetType, AssetClass, Industry
 )
 from src.asset_utils import detect_asset_type
@@ -41,6 +42,59 @@ def _cash_flow_dataset(storage, nav_date: date, run_id: str):
         run_id=run_id,
         start_year=config.get_start_year(),
     )
+
+
+def _normalized_valuation(*, total_value: float, cash_value: float, stock_value: float):
+    assert total_value == cash_value + stock_value
+    inputs = (
+        (
+            Holding(
+                asset_id="CNY-CASH",
+                asset_name="人民币现金",
+                asset_type=AssetType.CASH,
+                account="测试账户",
+                broker="测试券商",
+                quantity=cash_value,
+                currency="CNY",
+                asset_class=AssetClass.CASH,
+            ),
+            "cash",
+        ),
+        (
+            Holding(
+                asset_id="TEST-EQUITY",
+                asset_name="测试权益",
+                asset_type=AssetType.A_STOCK,
+                account="测试账户",
+                broker="测试券商",
+                quantity=stock_value,
+                currency="CNY",
+                asset_class=AssetClass.CN_ASSET,
+            ),
+            "equity",
+        ),
+    )
+    holdings = [holding for holding, _normalized_type in inputs]
+    price_snapshot = {
+        holding.asset_id: {
+            "price": "1",
+            "cny_price": "1",
+            "currency": "CNY",
+            "source": "test_fixture",
+        }
+        for holding, _normalized_type in inputs
+    }
+    normalized = ValuationService(
+        manager=None,
+        storage=Mock(),
+        price_fetcher=None,
+    ).calculate_normalized_valuation(
+        account="测试账户",
+        holdings=holdings,
+        price_snapshot=price_snapshot,
+        total_shares=0,
+    )
+    return normalized.to_portfolio_valuation()
 
 
 class TestPortfolioManagerInitialization:
@@ -346,11 +400,10 @@ class TestPortfolioManagerNAVRecord:
 
     def test_record_nav_first_time(self):
         """测试首次记录净值"""
-        valuation = PortfolioValuation(
-            account='测试账户',
-            total_value_cny=1000000.0,
-            cash_value_cny=100000.0,
-            stock_value_cny=900000.0
+        valuation = _normalized_valuation(
+            total_value=1000000.0,
+            cash_value=100000.0,
+            stock_value=900000.0,
         )
         self.mock_storage.write_nav_record.return_value = None
         self.mock_storage.get_nav_history.return_value = []  # 无历史记录
@@ -380,11 +433,10 @@ class TestPortfolioManagerNAVRecord:
 
     def test_record_nav_with_existing(self):
         """测试已有净值记录"""
-        valuation = PortfolioValuation(
-            account='测试账户',
-            total_value_cny=1100000.0,
-            cash_value_cny=100000.0,
-            stock_value_cny=1000000.0
+        valuation = _normalized_valuation(
+            total_value=1100000.0,
+            cash_value=100000.0,
+            stock_value=1000000.0,
         )
         # 模拟已有净值记录
         existing_nav = NAVHistory(
@@ -418,11 +470,10 @@ class TestPortfolioManagerNAVRecord:
 
     def test_record_nav_with_cash_flow(self):
         """测试有出入金的净值记录"""
-        valuation = PortfolioValuation(
-            account='测试账户',
-            total_value_cny=1050000.0,
-            cash_value_cny=150000.0,
-            stock_value_cny=900000.0
+        valuation = _normalized_valuation(
+            total_value=1050000.0,
+            cash_value=150000.0,
+            stock_value=900000.0,
         )
         existing_nav = NAVHistory(
             date=date(2025, 3, 13),

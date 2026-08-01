@@ -225,6 +225,7 @@ class AccountNavRecorderService:
                 run_id=resolved_run_id,
                 nav_write_context=resolved_context,
                 cash_flow_dataset=cash_flow_dataset,
+                normalized_valuation=snapshot.get("normalized_valuation"),
             )
             nav_payload = format_nav_payload(nav_record)
             nav_result = {

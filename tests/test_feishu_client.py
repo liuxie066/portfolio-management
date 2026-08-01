@@ -1,7 +1,6 @@
 """测试飞书客户端"""
 import pytest
-from datetime import datetime
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 import json
 import os
 
@@ -18,6 +17,23 @@ def _holding_create_fields(asset_id='000001', quantity=1, **overrides):
         'broker': 'IBKR',
         'quantity': quantity,
         'currency': 'USD',
+    }
+    fields.update(overrides)
+    return fields
+
+
+def _snapshot_create_fields(**overrides):
+    fields = {
+        'as_of': '2026-08-01',
+        'account': 'lx',
+        'asset_id': 'AAPL',
+        'broker': 'IBKR',
+        'quantity': 1,
+        'currency': 'USD',
+        'price': 200,
+        'cny_price': 1440,
+        'market_value_cny': 1440,
+        'dedup_key': 'lx:2026-08-01:IBKR:AAPL',
     }
     fields.update(overrides)
     return fields
@@ -415,7 +431,7 @@ class TestFeishuClientRecords:
         }
 
         client = FeishuClient(app_id='test', app_secret='test')
-        records = client.list_records('holdings', filter_str='asset_id = "000001"')
+        client.list_records('holdings', filter_str='asset_id = "000001"')
 
         # 验证_filter参数被正确传递
         call_args = mock_request.call_args
@@ -557,6 +573,38 @@ class TestFeishuClientRecords:
 
     @patch('src.feishu_client.FeishuClient._request')
     @patch('src.feishu_client.FeishuClient._get_table_config')
+    @pytest.mark.parametrize('missing_field', [
+        'account',
+        'asset_id',
+        'broker',
+        'price',
+        'cny_price',
+        'market_value_cny',
+        'dedup_key',
+    ])
+    def test_snapshot_single_and_batch_create_share_required_validation(
+        self,
+        mock_config,
+        mock_request,
+        missing_field,
+    ):
+        mock_config.return_value = ('app_token', 'table_id')
+        client = FeishuClient(app_id='test', app_secret='test')
+        fields = _snapshot_create_fields()
+        fields.pop(missing_field)
+
+        with pytest.raises(ValueError, match=f'缺少必填字段: {missing_field}'):
+            client.create_record('holdings_snapshot', fields)
+        with pytest.raises(ValueError, match=f'缺少必填字段: {missing_field}'):
+            client.batch_create_records(
+                'holdings_snapshot',
+                [{'fields': fields}],
+            )
+
+        mock_request.assert_not_called()
+
+    @patch('src.feishu_client.FeishuClient._request')
+    @patch('src.feishu_client.FeishuClient._get_table_config')
     def test_update_record(self, mock_config, mock_request):
         """测试更新记录"""
         mock_config.return_value = ('app_token', 'table_id')
@@ -611,7 +659,7 @@ class TestFeishuClientRecords:
         client = FeishuClient(app_id='test', app_secret='test')
         result = client.delete_record('holdings', 'rec_123')
 
-        assert result == True
+        assert result is True
 
     @patch('src.feishu_client.FeishuClient._request')
     @patch('src.feishu_client.FeishuClient._get_table_config')
