@@ -131,6 +131,5 @@ def test_adapter_subscribes_only_configured_base_document_event():
     assert state["request"] == {
         "file_token": "base_holdings",
         "file_type": "bitable",
-        "event_type": "bitable_record_changed_v1",
     }
     assert result["response"] == {"ok": True}

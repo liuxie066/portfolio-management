@@ -117,7 +117,6 @@ class FeishuBitableEventAdapter:
                 SubscribeFileRequest.builder()
                 .file_token(file_token)
                 .file_type(BITABLE_FILE_TYPE)
-                .event_type(BITABLE_SUBSCRIPTION_EVENT_TYPE)
                 .build()
             )
             try:

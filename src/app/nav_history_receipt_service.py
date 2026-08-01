@@ -12,6 +12,7 @@ from src.feishu_client import FeishuClient
 
 
 _BEIJING = ZoneInfo("Asia/Shanghai")
+_MAX_HOLDINGS_ACTION_ITEMS_PER_SCOPE = 5
 _BLOCKING_STATUSES = {
     "failed",
     "partial",
@@ -39,6 +40,13 @@ _STATUS_EMOJI = {
     "失败": "❌ 失败",
     "无需写入": "⏭ 无需写入",
 }
+
+
+def _nonnegative_int(value: Any, *, default: int = 0) -> int:
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return max(int(default), 0)
 
 
 class NavHistoryReceiptService:
@@ -139,6 +147,7 @@ class NavHistoryReceiptService:
 
         price_summary, warnings = cls._warning_summary(items)
         warning_rows = ([price_summary] if price_summary else []) + list(warnings)
+        holdings_rows = cls._holdings_preflight_rows(job_result, items)
 
         return render_receipt(
             title="NAV History",
@@ -146,10 +155,95 @@ class NavHistoryReceiptService:
             status=_STATUS_EMOJI.get(title, title),
             fields=fields,
             sections=[
+                ("Holdings 预检", holdings_rows),
                 ("账户明细", [cls._item_row(item) for item in items]),
                 ("告警", warning_rows),
             ],
         )
+
+    @classmethod
+    def _holdings_preflight_rows(
+        cls,
+        job_result: dict[str, Any],
+        items: list[dict[str, Any]],
+    ) -> list[str]:
+        rows: list[str] = []
+        global_preflight = job_result.get("global_holdings_preflight")
+        if isinstance(global_preflight, dict):
+            rows.extend(cls._holdings_scope_rows("全局", global_preflight))
+        for item in items:
+            preflight = item.get("holdings_preflight")
+            if not isinstance(preflight, dict):
+                continue
+            rows.extend(
+                cls._holdings_scope_rows(
+                    str(item.get("account") or preflight.get("account") or "-"),
+                    preflight,
+                )
+            )
+        return rows
+
+    @staticmethod
+    def _holdings_scope_rows(
+        scope: str,
+        preflight: dict[str, Any],
+    ) -> list[str]:
+        workflow = dict(preflight.get("workflow") or {})
+        counts = [
+            ("新增", len(workflow.get("created_case_keys") or [])),
+            ("重开", len(workflow.get("reopened_case_keys") or [])),
+            ("关闭", len(workflow.get("closed_case_keys") or [])),
+            ("替代", len(workflow.get("superseded_case_keys") or [])),
+            (
+                "待处理",
+                len(
+                    preflight.get("pending_case_keys")
+                    if preflight.get("pending_case_keys") is not None
+                    else (preflight.get("case_keys") or [])
+                ),
+            ),
+            ("阻断", len(preflight.get("blocking_case_keys") or [])),
+        ]
+        raw_action_items = [
+            item
+            for item in list(preflight.get("action_items") or [])
+            if isinstance(item, dict)
+        ]
+        action_items = raw_action_items[:_MAX_HOLDINGS_ACTION_ITEMS_PER_SCOPE]
+        action_count = max(
+            _nonnegative_int(
+                preflight.get("action_item_count")
+                if preflight.get("action_item_count") is not None
+                else len(raw_action_items),
+                default=len(raw_action_items),
+            ),
+            len(raw_action_items),
+        )
+        omitted_count = max(
+            _nonnegative_int(preflight.get("action_item_omitted_count")),
+            action_count - len(action_items),
+            len(raw_action_items) - len(action_items),
+        )
+        if not any(count for _, count in counts) and not action_count:
+            return []
+
+        count_text = "｜".join(
+            f"{label} {count}" for label, count in counts if count
+        )
+        rows = [f"{scope}｜{count_text}"] if count_text else []
+        for item in action_items:
+            rows.append(
+                f"{scope}｜Case {item.get('case_key') or '-'}"
+                f"｜记录 {item.get('record_id') or '-'}"
+                f"｜字段 {item.get('field') or '-'}"
+                f"｜状态 {item.get('state') or '-'}"
+                f"｜处理 {item.get('command') or '-'}"
+            )
+        if omitted_count:
+            rows.append(
+                f"{scope}｜另有 {omitted_count} 条行动项未展开，请从 Holdings Case 审计查询"
+            )
+        return rows
 
     @staticmethod
     def _counts(job_result: dict[str, Any], items: list[dict[str, Any]]) -> tuple[int, int, int]:

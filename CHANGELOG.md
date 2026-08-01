@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.33 - 2026-08-01
+
+- Restored holdings `created_at` and `updated_at` writes and cache snapshots to
+  canonical `YYYY/MM/DD`, while accepting the immediately preceding full
+  timestamp representation on reads so mixed production rows no longer block
+  holdings preload and synchronization.
+- Unified repository materialization and standalone holdings validation on one
+  strict shared date parser, retaining aggregate fail-closed cache publication
+  for malformed source rows.
+- Preserved manually maintained `asset_class` values for funds and cross-market
+  securities unless exact instrument evidence proves their economic exposure,
+  with versioned policy identity carried into validation cases and NAV
+  preflight snapshots.
+
 ## 0.1.32 - 2026-08-01
 
 - Added asset-type-driven holdings validation and completion for `currency` and `current`, with durable conflict receipts and exact-record human confirmation before ambiguous corrections.

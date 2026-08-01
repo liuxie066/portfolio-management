@@ -205,23 +205,34 @@ class HoldingsWorkflowService:
             "trigger": dict(trigger),
         }
 
-    def materialize_plan(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+    def materialize_plan(
+        self,
+        plan: Dict[str, Any],
+        *,
+        enqueue_receipts: bool = True,
+    ) -> Dict[str, Any]:
         """Atomically materialize every case and receipt in a prepared plan."""
 
         return self.store.materialize_holding_cases(
             cases=list(plan.get("cases") or []),
             discovery_receipts=list(plan.get("discovery_receipts") or []),
             trigger=dict(plan.get("trigger") or {}),
+            enqueue_receipts=enqueue_receipts,
         )
 
     def materialize_preflight_plan(
         self,
         plan: Dict[str, Any],
         evaluation: HoldingsReconciliationEvaluation,
+        *,
+        enqueue_receipts: bool = True,
     ) -> Dict[str, Any]:
         """Materialize current cases and prove repaired account cases closed."""
 
-        combined = self.materialize_plan(plan)
+        combined = self.materialize_plan(
+            plan,
+            enqueue_receipts=enqueue_receipts,
+        )
         active_by_record: Dict[str, list[str]] = {}
         for case in list(plan.get("cases") or []):
             active_by_record.setdefault(str(case["record_id"]), []).append(
@@ -242,6 +253,7 @@ class HoldingsWorkflowService:
                 record_digest=validation.record_digest,
                 current_identity=self._raw_identity(validation.raw.raw_fields),
                 trigger=dict(plan.get("trigger") or {}),
+                enqueue_receipts=enqueue_receipts,
             )
             for key, values in closed.items():
                 combined.setdefault(key, []).extend(values)
@@ -251,6 +263,7 @@ class HoldingsWorkflowService:
         self,
         *,
         trigger: Dict[str, Any],
+        enqueue_receipts: bool = True,
     ) -> Dict[str, Any]:
         """Close prior synthetic global orphan cases after a fresh empty scan."""
 
@@ -260,6 +273,7 @@ class HoldingsWorkflowService:
             record_digest=_digest([]),
             current_identity={"asset_id": None, "account": None, "broker": None},
             trigger=dict(trigger),
+            enqueue_receipts=enqueue_receipts,
         )
 
     def apply_outage_manual_confirmations(

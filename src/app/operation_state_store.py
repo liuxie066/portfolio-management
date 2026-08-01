@@ -846,6 +846,7 @@ class OperationStateStore:
         cases: list[Dict[str, Any]],
         discovery_receipts: list[Dict[str, Any]],
         trigger: Optional[Dict[str, Any]] = None,
+        enqueue_receipts: bool = True,
     ) -> Dict[str, Any]:
         """Atomically store semantic cases/events and first-discovery receipts."""
 
@@ -858,6 +859,7 @@ class OperationStateStore:
                 discovery_receipts=discovery_receipts,
                 trigger=trigger,
                 now=now,
+                enqueue_receipts=enqueue_receipts,
             )
 
     def _materialize_holding_cases_tx(
@@ -868,6 +870,7 @@ class OperationStateStore:
         discovery_receipts: list[Dict[str, Any]],
         trigger: Optional[Dict[str, Any]],
         now: str,
+        enqueue_receipts: bool = True,
     ) -> Dict[str, Any]:
         receipt_by_case = {
             str(item.get("case_key") or ""): dict(item)
@@ -944,7 +947,7 @@ class OperationStateStore:
                     f"holdings:case:closed:{old['case_key']}:superseded:"
                     f"{record_digest}"
                 )
-                if self._insert_repeatable_closure_receipt_tx(
+                if enqueue_receipts and self._insert_repeatable_closure_receipt_tx(
                     conn,
                     receipt_key=closure_key,
                     payload={
@@ -1131,7 +1134,7 @@ class OperationStateStore:
             receipt = receipt_by_case.get(case_key)
             if receipt is None:
                 raise ValueError(f"new holding case lacks discovery receipt: {case_key}")
-            if self._insert_operation_receipt_tx(
+            if enqueue_receipts and self._insert_operation_receipt_tx(
                 conn,
                 receipt_key=str(receipt["receipt_key"]),
                 receipt_type=str(receipt["receipt_type"]),
@@ -1275,6 +1278,7 @@ class OperationStateStore:
         record_digest: str,
         current_identity: Dict[str, Any],
         trigger: Optional[Dict[str, Any]] = None,
+        enqueue_receipts: bool = True,
     ) -> Dict[str, list[str]]:
         """Close previously open cases only after a fresh scan proves repair."""
 
@@ -1289,6 +1293,7 @@ class OperationStateStore:
                 current_identity=current_identity,
                 trigger=trigger,
                 now=now,
+                enqueue_receipts=enqueue_receipts,
             )
 
     def _resolve_absent_holding_cases_tx(
@@ -1301,6 +1306,7 @@ class OperationStateStore:
         current_identity: Dict[str, Any],
         trigger: Optional[Dict[str, Any]],
         now: str,
+        enqueue_receipts: bool = True,
     ) -> Dict[str, list[str]]:
         eligible_states = (
             "pending_apply",
@@ -1365,7 +1371,7 @@ class OperationStateStore:
                 f"holdings:case:closed:{row['case_key']}:{terminal_state}:"
                 f"{record_digest}"
             )
-            if self._insert_repeatable_closure_receipt_tx(
+            if enqueue_receipts and self._insert_repeatable_closure_receipt_tx(
                 conn,
                 receipt_key=receipt_key,
                 payload={

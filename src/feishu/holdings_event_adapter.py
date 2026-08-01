@@ -89,7 +89,6 @@ class FeishuHoldingsEventAdapter:
             SubscribeFileRequest.builder()
             .file_token(self.target.file_token)
             .file_type(HOLDINGS_FILE_TYPE)
-            .event_type(HOLDINGS_SUBSCRIPTION_EVENT_TYPE)
             .build()
         )
         response = client.drive.v1.file.subscribe(request)
