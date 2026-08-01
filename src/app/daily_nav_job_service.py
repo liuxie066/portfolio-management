@@ -417,6 +417,7 @@ class DailyNavJobService:
             if dry_run
             else (False if sync_futu_dry_run is None else sync_futu_dry_run)
         )
+        global_preflight = None
         if ready_accounts:
             global_trigger = {
                 "mode": "daily_nav_global_preflight",
@@ -497,4 +498,5 @@ class DailyNavJobService:
             "items": items,
             "summary": summary,
             "pricing_summary": run_quote_pool.summary(),
+            "global_holdings_preflight": global_preflight,
         }

@@ -102,6 +102,181 @@ def test_nav_receipt_sends_one_consolidated_success_message():
     assert "Run ID｜daily-nav-job-multi-1" in text
 
 
+def test_nav_receipt_aggregates_32_holdings_closures_before_accounts():
+    text = NavHistoryReceiptService.build_message(
+        {
+            "success": True,
+            "status": "completed",
+            "dry_run": False,
+            "date": "2026-08-01",
+            "items": [
+                {
+                    **_written("lx"),
+                    "holdings_preflight": {
+                        "case_keys": [],
+                        "blocking_case_keys": [],
+                        "workflow": {
+                            "closed_case_keys": [f"lx-{index}" for index in range(13)]
+                        },
+                    },
+                },
+                {
+                    **_written("sy"),
+                    "holdings_preflight": {
+                        "case_keys": [],
+                        "blocking_case_keys": [],
+                        "workflow": {
+                            "closed_case_keys": [f"sy-{index}" for index in range(19)]
+                        },
+                    },
+                },
+            ],
+        },
+        executed_at=datetime(2026, 8, 1, 10, 0),
+    )
+
+    assert "## Holdings 预检" in text
+    assert "lx｜关闭 13" in text
+    assert "sy｜关闭 19" in text
+    assert text.index("## Holdings 预检") < text.index("## 账户明细")
+    assert "Case lx-0" not in text
+    assert "Case sy-0" not in text
+
+
+def test_nav_receipt_keeps_bounded_action_items_and_overflow_count():
+    action_items = [
+        {
+            "case_key": f"case-{index}",
+            "record_id": f"rec-{index}",
+            "field": "currency",
+            "state": "pending_confirmation",
+            "command": f"pm holdings resolve --case-key case-{index} --confirm",
+        }
+        for index in range(5)
+    ]
+    text = NavHistoryReceiptService.build_message(
+        {
+            "success": False,
+            "status": "failed",
+            "dry_run": False,
+            "date": "2026-08-01",
+            "items": [
+                {
+                    "success": False,
+                    "status": "holdings_confirmation_required",
+                    "account": "lx",
+                    "error": "holdings requires confirmation",
+                    "holdings_preflight": {
+                        "case_keys": [f"case-{index}" for index in range(7)],
+                        "blocking_case_keys": [
+                            f"case-{index}" for index in range(7)
+                        ],
+                        "workflow": {"created_case_keys": ["case-0"]},
+                        "action_items": action_items,
+                        "action_item_count": 7,
+                        "action_item_omitted_count": 2,
+                    },
+                }
+            ],
+        },
+        executed_at=datetime(2026, 8, 1, 10, 0),
+    )
+
+    assert "lx｜新增 1｜待处理 7｜阻断 7" in text
+    assert "Case case-0｜记录 rec-0｜字段 currency" in text
+    assert "处理 pm holdings resolve --case-key case-0 --confirm" in text
+    assert "Case case-4" in text
+    assert "Case case-5" not in text
+    assert "另有 2 条行动项未展开" in text
+
+
+def test_nav_receipt_enforces_action_cap_and_tolerates_malformed_counts():
+    text = NavHistoryReceiptService.build_message(
+        {
+            "success": False,
+            "status": "failed",
+            "dry_run": False,
+            "date": "2026-08-01",
+            "items": [
+                {
+                    "success": False,
+                    "status": "holdings_confirmation_required",
+                    "account": "lx",
+                    "error": "holdings requires confirmation",
+                    "holdings_preflight": {
+                        "pending_case_keys": [
+                            f"case-{index}" for index in range(7)
+                        ],
+                        "blocking_case_keys": [
+                            f"case-{index}" for index in range(7)
+                        ],
+                        "action_items": [
+                            {
+                                "case_key": f"case-{index}",
+                                "record_id": f"rec-{index}",
+                                "field": "currency",
+                                "state": "pending_confirmation",
+                                "command": f"resolve-{index}",
+                            }
+                            for index in range(7)
+                        ],
+                        "action_item_count": "not-an-int",
+                        "action_item_omitted_count": "also-not-an-int",
+                    },
+                }
+            ],
+        },
+        executed_at=datetime(2026, 8, 1, 10, 0),
+    )
+
+    assert "Case case-4" in text
+    assert "Case case-5" not in text
+    assert "另有 2 条行动项未展开" in text
+
+
+def test_nav_receipt_renders_global_blocker_once_despite_account_copies():
+    global_preflight = {
+        "success": False,
+        "status": "holdings_confirmation_required",
+        "scope": "global",
+        "global_blocker": True,
+        "error": "holdings contains records without an account",
+        "case_keys": ["global-case"],
+        "pending_case_keys": ["global-case"],
+        "blocking_case_keys": ["global-case"],
+        "workflow": {"created_case_keys": ["global-case"]},
+        "action_items": [
+            {
+                "case_key": "global-case",
+                "record_id": "__global_orphan_holdings__",
+                "field": "__global__:account",
+                "state": "pending_manual_edit",
+                "command": "pm holdings reconcile --notify --confirm",
+            }
+        ],
+        "action_item_count": 1,
+        "action_item_omitted_count": 0,
+    }
+    text = NavHistoryReceiptService.build_message(
+        {
+            "success": False,
+            "status": "partial",
+            "dry_run": False,
+            "date": "2026-08-01",
+            "global_holdings_preflight": global_preflight,
+            "items": [
+                {**global_preflight, "account": "lx"},
+                {**global_preflight, "account": "sy"},
+            ],
+        },
+        executed_at=datetime(2026, 8, 1, 10, 0),
+    )
+
+    assert text.count("全局｜新增 1｜待处理 1｜阻断 1") == 1
+    assert text.count("全局｜Case global-case") == 1
+    assert text.index("## Holdings 预检") < text.index("## 账户明细")
+
+
 def test_nav_receipt_formats_negative_and_missing_ytd_nav_change():
     negative = NavHistoryReceiptService._item_row(_written("lx", ytd_nav_change=-0.0123))
     missing = NavHistoryReceiptService._item_row(_written("hb", ytd_nav_change=None))

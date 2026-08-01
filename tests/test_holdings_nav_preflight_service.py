@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from datetime import UTC, date, datetime
+import sqlite3
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -379,7 +380,7 @@ def test_account_recorder_rejects_formal_futu_projection_before_sync(monkeypatch
     assert result["error"] == "formal NAV cannot consume a Futu dry-run projection"
 
 
-def test_formal_conflict_materializes_case_and_receipt_before_blocking(tmp_path):
+def test_formal_conflict_materializes_case_without_individual_receipt(tmp_path):
     storage = RawStorage(
         [
             _raw(
@@ -408,10 +409,21 @@ def test_formal_conflict_materializes_case_and_receipt_before_blocking(tmp_path)
     receipt = store.get_operation_receipt(
         f"holdings:case:discovered:{conflict['case_key']}"
     )
-    assert receipt["receipt_type"] == "holding_case_discovered"
-    assert receipt["payload"]["action"]["allowed_decisions"] == [
-        "accept-proposed",
-        "keep-current",
+    assert receipt is None
+    assert result["workflow"]["enqueued_receipt_keys"] == []
+    assert result["action_item_count"] == 1
+    assert result["action_item_omitted_count"] == 0
+    assert result["action_items"] == [
+        {
+            "case_key": conflict["case_key"],
+            "record_id": "rec_conflict",
+            "field": "currency",
+            "state": "pending_confirmation",
+            "command": (
+                f"pm holdings resolve --case-key {conflict['case_key']} "
+                "--decision accept-proposed|keep-current --reason REASON --confirm"
+            ),
+        }
     ]
 
 
@@ -459,6 +471,9 @@ def test_matching_keep_current_confirmation_unblocks_exact_conflict(tmp_path):
     assert allowed["success"] is True
     assert allowed["validated_snapshot"].rows[0].asset_type == "us_stock"
     assert "confirmed keep-current" in " ".join(allowed["warnings"])
+    assert allowed["pending_case_keys"] == []
+    assert allowed["action_items"] == []
+    assert allowed["action_item_count"] == 0
 
 
 def test_matching_futu_keep_current_survives_later_provider_outage(tmp_path):
@@ -751,7 +766,7 @@ def test_formal_preflight_closes_account_case_after_fresh_repair(tmp_path):
     )
 
 
-def test_global_orphans_create_one_case_and_one_receipt(tmp_path):
+def test_global_orphans_create_one_case_without_individual_receipt(tmp_path):
     storage = RawStorage(
         [
             _raw("orphan_1", account=None),
@@ -775,7 +790,9 @@ def test_global_orphans_create_one_case_and_one_receipt(tmp_path):
     receipt = store.get_operation_receipt(
         f"holdings:case:discovered:{cases[0]['case_key']}"
     )
-    assert receipt["payload"]["action"]["command"] == (
+    assert receipt is None
+    assert result["workflow"]["enqueued_receipt_keys"] == []
+    assert result["action_items"][0]["command"] == (
         "pm holdings reconcile --notify --confirm"
     )
 
@@ -804,10 +821,45 @@ def test_formal_global_scan_closes_orphan_case_after_fresh_repair(tmp_path):
         "resolved_external"
     )
     receipt_keys = repaired["workflow"]["enqueued_receipt_keys"]
-    assert len(receipt_keys) == 1
-    assert store.get_operation_receipt(receipt_keys[0])["receipt_type"] == (
-        "holding_case_closed"
+    assert receipt_keys == []
+    assert repaired["workflow"]["closed_case_keys"] == [case["case_key"]]
+    with sqlite3.connect(store.db_path) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM operation_receipt_outbox"
+        ).fetchone()[0] == 0
+
+
+def test_preflight_action_items_are_bounded_and_keep_frozen_commands(tmp_path):
+    storage = RawStorage(
+        [
+            _raw(
+                f"rec_conflict_{index}",
+                asset_id=f"ASSET-{index}.US",
+                asset_type="us_stock",
+                currency="CNY",
+                asset_class="美国资产",
+            )
+            for index in range(6)
+        ]
     )
+    result = _service(
+        storage,
+        store=OperationStateStore(tmp_path / "operations.sqlite3"),
+    ).prepare_account(
+        account="lx",
+        dry_run=True,
+        confirm=False,
+        trigger={"mode": "daily_nav_preflight"},
+    )
+
+    assert result["success"] is False
+    assert result["action_item_count"] == 6
+    assert len(result["action_items"]) == 5
+    assert result["action_item_omitted_count"] == 1
+    first = result["action_items"][0]
+    assert first["record_id"] == "rec_conflict_0"
+    assert first["case_key"] in first["command"]
+    assert "accept-proposed|keep-current" in first["command"]
 
 
 def test_attributed_blocker_is_account_local():
