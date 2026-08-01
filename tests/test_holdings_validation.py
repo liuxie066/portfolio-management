@@ -10,6 +10,7 @@ from src.app.holdings_validation import (
     FutuPositionEvidence,
     HoldingsEvidenceBundle,
     HoldingsValidator,
+    canonical_record_payload,
 )
 from src.domain.holdings import RawHoldingRecord
 
@@ -335,6 +336,56 @@ def test_typed_holding_uses_the_same_normalized_asset_type_as_validation():
 
     assert record.valid_for_typed_holding is True
     assert record.to_holding().asset_type.value == "us_stock"
+
+
+@pytest.mark.parametrize("value", [[], "[]"])
+def test_empty_native_and_json_text_tags_are_optional_missing(value):
+    report = HoldingsValidator().validate([_record(tag=value)])
+
+    outcome = _outcome(report, "tag")
+    assert outcome.status == "optional_missing"
+    assert outcome.current == []
+    assert outcome.reason_code == "TAG_OPTIONAL_MISSING"
+    assert outcome.blocks_official_nav is False
+
+
+@pytest.mark.parametrize("value", [["core", "income"], '["core", "income"]'])
+def test_native_and_json_text_tags_build_the_same_typed_holding(value):
+    record = HoldingsValidator().validate([_record(tag=value)]).records[0]
+
+    outcome = next(item for item in record.outcomes if item.field == "tag")
+    assert outcome.status == "valid"
+    assert outcome.current == ["core", "income"]
+    assert record.to_holding().tag == ["core", "income"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "not-json",
+        "{}",
+        "null",
+        '"core"',
+        '["core", 1]',
+        {"core": True},
+        ["core", 1],
+    ],
+)
+def test_invalid_tag_shapes_remain_nonblocking_and_preserve_raw_evidence(value):
+    report = HoldingsValidator().validate([_record(tag=value)])
+
+    outcome = _outcome(report, "tag")
+    assert outcome.status == "invalid"
+    assert outcome.current == value
+    assert outcome.reason_code == "TAG_INVALID"
+    assert outcome.blocks_official_nav is False
+
+
+def test_tag_digest_canonicalization_keeps_missing_and_empty_array_distinct():
+    assert canonical_record_payload({"tag": None})["tag"] is None
+    assert canonical_record_payload({"tag": ""})["tag"] is None
+    assert canonical_record_payload({"tag": []})["tag"] == []
+    assert canonical_record_payload({"tag": "[]"})["tag"] == []
 
 
 def test_record_digest_normalizes_semantically_equivalent_field_values():
