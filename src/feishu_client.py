@@ -50,8 +50,8 @@ class FeishuClient:
             app_secret: 飞书自建应用 App Secret
             user_token: 个人访问令牌（与 app_id/app_secret 二选一）
         """
-        self.app_id = app_id or config.get("feishu.app_id")
-        self.app_secret = app_secret or config.get("feishu.app_secret")
+        self.app_id = app_id or config.get("feishu.bitable.app_id")
+        self.app_secret = app_secret or config.get("feishu.bitable.app_secret")
         self.user_token = user_token or config.get("feishu.user_token")
         self.timeout = (
             config.get_float("feishu.connect_timeout", 5.0) or 5.0,

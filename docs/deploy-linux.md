@@ -12,15 +12,17 @@
 /var/lib/portfolio-management/reports
 ```
 
-`config.yaml` 是唯一主配置文件。环境变量只用于覆盖主配置或承载 systemd 路径。
+`config.yaml` 是非秘密业务配置的主文件。环境变量只用于覆盖非秘密配置或承载
+systemd 路径；两个 Feishu App Secret 只通过 systemd encrypted credentials
+进入各自服务。
 
 ## 安装
 
 推荐入口：
 
 ```bash
-# 在目标 checkout 内运行；脚本会使用当前 checkout 作为 app 目录
-sudo scripts/install.sh --apply
+# 先准备 checkout/venv 并查看 system asset 计划，不写 config/env/unit
+sudo scripts/install.sh
 ```
 
 这个 bootstrap installer 会：
@@ -36,7 +38,7 @@ sudo scripts/install.sh --apply
 如果希望安装脚本自己从 GitHub 拉取指定版本：
 
 ```bash
-sudo bash -c 'curl -fsSL https://raw.githubusercontent.com/liuxie066/portfolio-management/main/scripts/install.sh | bash -s -- --apply --ref main'
+sudo bash -c 'curl -fsSL https://raw.githubusercontent.com/liuxie066/portfolio-management/main/scripts/install.sh | bash -s -- --ref main'
 ```
 
 如果网络环境对 PyPI 慢或不稳定，可以指定镜像：
@@ -56,7 +58,7 @@ python3 -m venv .venv
 # 先审计计划，不写系统文件
 python3 scripts/install_linux.py --json
 
-# 写入 config/env/systemd unit；不会覆盖已有 config.yaml
+# 仅在下文两份 encrypted credentials 已配置后执行；不会覆盖已有 config.yaml
 sudo python3 scripts/install_linux.py --apply
 ```
 
@@ -72,7 +74,10 @@ sudo python3 scripts/install_linux.py --apply
 - `/etc/systemd/system/portfolio-cash-flow-scan.service`
 - `/etc/systemd/system/portfolio-cash-flow-scan.timer`
 - `/etc/systemd/system/portfolio-management-api.service`
+- `/etc/systemd/system/portfolio-quality-refresh.service`
+- `/etc/systemd/system/portfolio-receipt-dispatch.service`
 - `/etc/systemd/system/portfolio-holdings-event-listener.service`
+- `/etc/systemd/system/portfolio-feishu-preflight.service`（默认禁用）
 
 如果已有 `config.yaml`，默认保留不覆盖；确需重建模板时显式加 `--overwrite-config`。
 
@@ -87,8 +92,7 @@ sudo chmod 600 /etc/portfolio-management/config.yaml
 
 定时日净值任务至少需要：
 
-- `feishu.app_id`
-- `feishu.app_secret`
+- `feishu.bitable.app_id`
 - `feishu.tables.holdings`
 - `feishu.tables.nav_history`
 - `feishu.tables.cash_flow`
@@ -96,7 +100,62 @@ sudo chmod 600 /etc/portfolio-management/config.yaml
 
 若表配置只写 `tbl...`，还需要 `feishu.app_token`；也可以直接写成 `app_token/table_id`。
 
+## 两个 Feishu 应用与密钥
+
+只配置两个应用身份，不配置第三个 event-only 应用：
+
+| 角色 | 非秘密配置 | systemd credential | 需要的能力 |
+|---|---|---|---|
+| Bitable | `feishu.bitable.app_id` | `pm-feishu-bitable-app-secret` | 目标 Base 的记录读取/写入；云文档事件订阅；`drive.file.bitable_record_changed_v1` 长连接；目标 Base 管理/访问权限 |
+| Conversation | `feishu.conversation.app_id`、`feishu.conversation.open_id` | `pm-feishu-conversation-app-secret` | 开启机器人能力；精确授予以应用身份发送消息 `im:message:send_as_bot`；目标用户在机器人可用范围内 |
+
+Bitable 应用同时负责 Base API 与表格变更事件。Conversation 应用只发对话/回执，
+不需要 Base 权限。飞书官方接口权限依据见
+[多维表格 API 概述](https://open.feishu.cn/document/server-docs/docs/bitable-v1/bitable-overview?lang=zh-CN)、
+[订阅云文档事件](https://open.feishu.cn/document/server-docs/docs/drive-v1/event/subscribe?lang=zh-CN)
+和[发送消息](https://open.feishu.cn/document/server-docs/im-v1/message/create?lang=zh-CN)。
+
+先通过组织认可的安全终端流程把两份 Secret 加密到 systemd credential store。
+下面的示例使用隐藏输入；Secret 不进入命令行参数、shell history、YAML 或 env：
+
+```bash
+sudo install -d -m 0700 /etc/credstore.encrypted
+systemd-ask-password "Bitable App Secret" | \
+  sudo systemd-creds encrypt --name=pm-feishu-bitable-app-secret - \
+  /etc/credstore.encrypted/pm-feishu-bitable-app-secret
+systemd-ask-password "Conversation App Secret" | \
+  sudo systemd-creds encrypt --name=pm-feishu-conversation-app-secret - \
+  /etc/credstore.encrypted/pm-feishu-conversation-app-secret
+
+# 两份 encrypted credentials 就绪后才写部署资产；仍不会自动启用服务
+sudo scripts/install.sh --apply
+```
+
+任何曾出现在聊天、日志或明文配置中的 Secret 都必须先在飞书后台轮换，不能把已
+披露值直接迁入 credential store。安装器不会接收、创建、加密、解密、复制或打印
+Secret；apply 只按名称和 regular-file 元数据检查两份文件，并在任何目标文件写入前
+使用临时 unit 执行 `systemd-analyze verify`。dry-run 只报告能力要求，不声称已验证。
+所有 credential-bearing `ExecStart` 还会在加载共享 `EnvironmentFile` 后重新固定
+secure mode 和 `/run/credentials/<exact-unit>.service`，防止旧 env 中的同名变量覆盖
+systemd credential 边界。
+
 ## 预检
+
+生产服务必须通过生成的 oneshot 运行预检，使 systemd 注入两份 credentials：
+
+```bash
+sudo systemctl start portfolio-feishu-preflight.service
+systemctl status portfolio-feishu-preflight.service --no-pager
+journalctl -u portfolio-feishu-preflight.service -n 100 --no-pager
+```
+
+这个 service 只执行
+`pm config doctor --require-secure-feishu --json` 和本地
+`pm events status --json`；不请求飞书、不订阅、不连接 listener、不发送消息，也不写
+业务数据。成功只证明配置解析、两份 credential 注入、SDK 与本地 target/inbox
+状态通过，不证明远端权限、订阅或连接健康。
+
+开发环境不使用 secure systemd unit 时，可另外执行只读检查：
 
 ```bash
 pm config inspect --json
@@ -200,25 +259,54 @@ Futu CASH 只保留原币观测证据，不与 PM 的 `CNY-CASH` 人民币汇总
 也不生成 reconciliation effect；股票/ETF 与 MMF 保持各自同步。
 Cash Flow 激活、备份和恢复见 `docs/cash-flow-effects-runbook.md`。
 
-完整 Futu 同步还需要配置飞书“刘看山”回执：
+完整 Futu 同步还需要配置 Conversation 应用的非秘密身份：
 
 ```yaml
 feishu:
-  receipt:
+  conversation:
     app_id: "cli_..."
-    app_secret: "..."
     open_id: "ou_..."
 ```
 
-也可使用 `FEISHU_RECEIPT_APP_ID`、`FEISHU_RECEIPT_APP_SECRET` 和
-`FEISHU_RECEIPT_OPEN_ID`。未设置时会兼容读取 `options-monitor` 已有的
-`OM_FEISHU_BOT_APP_ID`、`OM_FEISHU_BOT_APP_SECRET` 和
-`OM_FEISHU_BOT_USER_OPEN_ID`。执行 `scripts/install.sh --apply` 时，安装器会从
-`/etc/options-monitor/options-monitor.env` 只提取这三项并写入
-`/etc/portfolio-management/portfolio-management.env`；不会复制或加载整份
-`options-monitor.env`。源文件存在但三项缺失或为空时，部署会在写文件前失败。
+`FEISHU_CONVERSATION_APP_ID` 和 `FEISHU_CONVERSATION_OPEN_ID` 可覆盖这两个
+非秘密值。安装器也可从 options-monitor 兼容读取
+`OM_FEISHU_BOT_APP_ID`/`OM_FEISHU_BOT_USER_OPEN_ID`，但绝不会导入
+`OM_FEISHU_BOT_APP_SECRET`。`feishu.receipt.*`、`FEISHU_RECEIPT_*`、
+`feishu.app_*`、`FEISHU_APP_*` 和 `OM_FEISHU_BOT_*` 的 Secret 形式都只用于
+识别旧安装的迁移 shadow，不是生产稳态配置。
 
-`pm config doctor --require-futu --json` 会检查三项最终解析结果。Futu 真实写入成功或失败都会分别发送回执；多账户 NAV 任务会再发送一条汇总回执。dry-run 不发送。飞书应用需要具备发送消息权限，并能向该 `open_id` 发起单聊。
+生产 secure mode 不会回退到任何明文 Secret。Futu 真实写入成功或失败都会分别
+发送回执；多账户 NAV 任务会再发送一条汇总回执。dry-run 不发送。
+
+### 迁移、轮换和回滚边界
+
+按以下状态逐步推进，每一步都要独立确认，不能因前一步成功自动执行后一步：
+
+```text
+旧明文仍在
+  -> 仅准备 credential-capable checkout/venv（不 apply system assets）
+  -> 轮换并配置两份 encrypted credentials
+  -> apply credential-capable config/env/units
+  -> secure preflight 通过
+  -> 按授权切换非 listener 消费者
+  -> 单独完成 Base subscription
+  -> 单独启用 listener
+  -> controlled canary 通过
+  -> 单独授权后清理明文 shadow
+```
+
+- 安装不会自动启用 timer、API 或 listener；订阅也不会启用 listener。
+- `config inspect`/doctor 报告 `plaintext_shadow_detected` 时，credential 仍优先，
+  canary 不会因旧值不同而失败；不要在验证前删除旧行。
+- canary 通过后，使用 `sudoedit` 从目标 env/config 和 options-monitor 源中逐项移除
+  shadow key。删除属于单独的破坏性操作；安装器绝不代做。清理后再次运行 secure
+  preflight。
+- 轮换时先用相同 `--name` 生成新的 encrypted 文件，经 preflight 验证后再按明确
+  授权重启消费者。不要把明文 Secret 放进命令参数或临时文件。
+- 明文清理前可回滚到上一套 credential-capable unit；清理后不得回滚到只支持明文
+  的版本。此时应恢复已备份的 encrypted credential 或再次轮换，而不是重建明文。
+- install、release、remote upgrade、subscription、service activation、canary 和
+  plaintext cleanup 是互相独立的授权边界。
 
 ## Holdings 与 Cash Flow 变更事件入口
 

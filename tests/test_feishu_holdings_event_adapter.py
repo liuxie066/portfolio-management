@@ -108,6 +108,23 @@ def _adapter(sdk):
     )
 
 
+def test_compatibility_adapter_default_secret_uses_bitable_role(monkeypatch):
+    requested = []
+
+    def fake_get(key, default=None):
+        requested.append(key)
+        return "data_secret" if key == "feishu.bitable.app_secret" else default
+
+    monkeypatch.setattr("src.feishu.holdings_event_adapter.config.get", fake_get)
+
+    adapter = FeishuHoldingsEventAdapter(
+        target=HoldingsEventTarget("cli_data", "base_holdings", "tbl_holdings")
+    )
+
+    assert adapter.app_secret == "data_secret"
+    assert requested == ["feishu.bitable.app_secret"]
+
+
 def test_adapter_registers_only_exact_event_and_forwards_marshaled_payload():
     sdk, state = _sdk()
     received = []

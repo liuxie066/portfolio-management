@@ -76,6 +76,30 @@ def test_futu_sync_receipt_sends_write_summary_from_liukanshan():
     assert "成本 127.52→116.68" in calls[1][2]
 
 
+def test_futu_sync_receipt_defaults_to_conversation_role(monkeypatch):
+    requested = []
+    values = {
+        "feishu.conversation.app_id": "cli_conversation",
+        "feishu.conversation.app_secret": "conversation_secret",
+        "feishu.conversation.open_id": "ou_user",
+    }
+
+    def fake_get(key, default=None):
+        requested.append(key)
+        return values.get(key, default)
+
+    monkeypatch.setattr("src.app.futu_sync_receipt_service.config.get", fake_get)
+
+    service = FutuSyncReceiptService()
+
+    assert (service.app_id, service.app_secret, service.open_id) == (
+        "cli_conversation",
+        "conversation_secret",
+        "ou_user",
+    )
+    assert requested == list(values)
+
+
 def test_futu_sync_receipt_skips_dry_run_without_creating_client():
     calls = []
     service = FutuSyncReceiptService(
