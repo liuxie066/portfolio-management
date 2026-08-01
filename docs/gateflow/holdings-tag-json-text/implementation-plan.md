@@ -5,8 +5,8 @@
 - Branch: `fix/holdings-tag-json-text`
 - Design source: confirmed user request, live read-only evidence, and current
   Holdings schema/writer/validator contracts
-- Current gate: `aggregate re-review pass`
-- Next entry point: `accepted deepreview commit`
+- Current gate: `PR re-review pass`
+- Next entry point: `accepted PR review commit`
 
 ## Goal and motivation
 
