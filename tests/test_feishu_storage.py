@@ -11,6 +11,12 @@ from src.models import (
 )
 
 
+def _assert_canonical_holding_date(value):
+    assert isinstance(value, str)
+    parsed = datetime.strptime(value, '%Y/%m/%d')
+    assert parsed.strftime('%Y/%m/%d') == value
+
+
 class TestFeishuStorageInitialization:
     """测试飞书存储层初始化"""
 
@@ -407,8 +413,7 @@ class TestFeishuStorageHoldingOperations:
         self.mock_client.update_record.assert_called_once()
         update_fields = self.mock_client.update_record.call_args.args[2]
         assert update_fields['asset_name'] == '平安银行股份有限公司'
-        assert isinstance(update_fields['updated_at'], str)
-        datetime.strptime(update_fields['updated_at'], '%Y-%m-%d %H:%M:%S')
+        _assert_canonical_holding_date(update_fields['updated_at'])
 
     def test_update_holding_quantity(self):
         """测试更新持仓数量"""
@@ -426,8 +431,7 @@ class TestFeishuStorageHoldingOperations:
         self.mock_client.update_record.assert_called_once()
         call_args = self.mock_client.update_record.call_args
         assert call_args[0][2]['quantity'] == 1500  # 1000 + 500
-        assert isinstance(call_args[0][2]['updated_at'], str)
-        datetime.strptime(call_args[0][2]['updated_at'], '%Y-%m-%d %H:%M:%S')
+        _assert_canonical_holding_date(call_args[0][2]['updated_at'])
 
     def test_delete_holding_if_zero(self):
         """测试持仓为0时删除"""

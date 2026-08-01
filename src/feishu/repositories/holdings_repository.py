@@ -5,9 +5,10 @@ import json
 from math import isfinite
 from typing import Dict, List, Optional
 
+from ...domain.holding_dates import format_holding_date, parse_holding_date
 from ...domain.holdings import RawHoldingRecord
 from ...models import (
-    Holding, AssetType, AssetClass, Industry, DATETIME_FORMAT,
+    Holding, AssetType, AssetClass, Industry,
 )
 
 
@@ -54,8 +55,8 @@ class HoldingsRepository:
             'asset_class': holding.asset_class.value if holding.asset_class else None,
             'industry': holding.industry.value if holding.industry else None,
             'tag': holding.tag,
-            'created_at': holding.created_at.strftime(DATETIME_FORMAT) if holding.created_at else None,
-            'updated_at': holding.updated_at.strftime(DATETIME_FORMAT) if holding.updated_at else None,
+            'created_at': format_holding_date(holding.created_at) if holding.created_at else None,
+            'updated_at': format_holding_date(holding.updated_at) if holding.updated_at else None,
         }
 
     def _load_persistent_holdings_index(self):
@@ -122,8 +123,8 @@ class HoldingsRepository:
             'asset_class': holding.asset_class.value if holding.asset_class else None,
             'industry': holding.industry.value if holding.industry else None,
             'tag': holding.tag,
-            'created_at': holding.created_at.strftime(DATETIME_FORMAT) if holding.created_at else None,
-            'updated_at': holding.updated_at.strftime(DATETIME_FORMAT) if holding.updated_at else None,
+            'created_at': format_holding_date(holding.created_at) if holding.created_at else None,
+            'updated_at': format_holding_date(holding.updated_at) if holding.updated_at else None,
         }
 
         self._local_holdings_index_cache.upsert(
@@ -303,7 +304,7 @@ class HoldingsRepository:
             raise ValueError("holdings reconciliation patch cannot write blank values")
         update_fields = {
             **supplied,
-            'updated_at': bj_now_naive().strftime(DATETIME_FORMAT),
+            'updated_at': format_holding_date(bj_now_naive()),
         }
         feishu_fields = self._to_feishu_fields(update_fields, 'holdings')
         try:
@@ -453,7 +454,7 @@ class HoldingsRepository:
 
         self._validate_writable_holding(holding)
         now = bj_now_naive()
-        now_text = now.strftime(DATETIME_FORMAT)
+        now_text = format_holding_date(now)
         existing = self.get_holding(holding.asset_id, holding.account, holding.broker)
 
         if existing and existing.record_id:
@@ -562,7 +563,7 @@ class HoldingsRepository:
                 preloaded_accounts.append(account)
 
         now = bj_now_naive()
-        now_text = now.strftime(DATETIME_FORMAT)
+        now_text = format_holding_date(now)
         update_payloads: List[Dict[str, any]] = []
         update_targets: List[Holding] = []
         create_payloads: List[Dict[str, any]] = []
@@ -673,7 +674,7 @@ class HoldingsRepository:
         if abs(new_quantity) <= 1e-8:
             new_quantity = 0.0
         now = bj_now_naive()
-        now_text = now.strftime(DATETIME_FORMAT)
+        now_text = format_holding_date(now)
         update_fields = {
             'quantity': new_quantity,
             'updated_at': now_text,
@@ -722,9 +723,9 @@ class HoldingsRepository:
         }
 
         if holding.created_at:
-            result['created_at'] = holding.created_at.strftime(DATETIME_FORMAT)
+            result['created_at'] = format_holding_date(holding.created_at)
         if holding.updated_at:
-            result['updated_at'] = holding.updated_at.strftime(DATETIME_FORMAT)
+            result['updated_at'] = format_holding_date(holding.updated_at)
 
         return result
 
@@ -836,9 +837,4 @@ class HoldingsRepository:
 
     @staticmethod
     def _strict_holding_timestamp(value, *, field_name: str) -> Optional[datetime]:
-        if value in (None, ''):
-            return None
-        try:
-            return datetime.strptime(str(value).strip(), DATETIME_FORMAT)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"invalid {field_name}: {value}") from exc
+        return parse_holding_date(value, field_name=field_name)
