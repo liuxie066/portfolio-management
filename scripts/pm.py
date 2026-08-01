@@ -1346,6 +1346,7 @@ def cmd_config_doctor(args):
     res = config.validate_deploy_config(
         require_futu=bool(args.require_futu),
         require_quality=bool(args.require_quality),
+        require_secure_feishu=bool(args.require_secure_feishu),
     )
     _dump(res, args.json)
     return res
@@ -1564,6 +1565,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_config_doctor = config_sub.add_parser("doctor", help="validate config needed by scheduled daily NAV jobs")
     p_config_doctor.add_argument("--require-futu", action="store_true", help="require Futu OpenD settings and SDK importability")
     p_config_doctor.add_argument("--require-quality", action="store_true", help="require quality producer token and account scope")
+    p_config_doctor.add_argument(
+        "--require-secure-feishu",
+        action="store_true",
+        help="require systemd credentials for both Feishu application roles",
+    )
     p_config_doctor.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
     p_config_doctor.set_defaults(func=cmd_config_doctor)
 

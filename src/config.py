@@ -11,6 +11,14 @@ from typing import Any, Dict, Iterable, Optional
 
 import yaml
 
+from src.configuration.feishu_credentials import (
+    BITABLE_APP_SECRET_CREDENTIAL,
+    CONVERSATION_APP_SECRET_CREDENTIAL,
+    FeishuCredentialConfigError,
+    read_systemd_credential,
+    secure_feishu_credentials_required,
+)
+
 # 项目根目录（config.yaml 所在目录）
 _PROJECT_ROOT = Path(__file__).parent.parent
 _CONFIG_FILE = _PROJECT_ROOT / "config.yaml"
@@ -49,6 +57,11 @@ ENV_MAP = {
     "futu.trd_market": "FUTU_TRD_MARKET",
     "futu.cash_currency": "FUTU_CASH_CURRENCY",
     "feishu.app_token": "FEISHU_APP_TOKEN",
+    "feishu.bitable.app_id": "FEISHU_BITABLE_APP_ID",
+    "feishu.bitable.app_secret": "FEISHU_BITABLE_APP_SECRET",
+    "feishu.conversation.app_id": "FEISHU_CONVERSATION_APP_ID",
+    "feishu.conversation.app_secret": "FEISHU_CONVERSATION_APP_SECRET",
+    "feishu.conversation.open_id": "FEISHU_CONVERSATION_OPEN_ID",
     "feishu.app_id": "FEISHU_APP_ID",
     "feishu.app_secret": "FEISHU_APP_SECRET",
     "feishu.user_token": "FEISHU_USER_TOKEN",
@@ -74,6 +87,25 @@ ENV_FALLBACKS = {
     "feishu.receipt.open_id": ("OM_FEISHU_BOT_USER_OPEN_ID",),
 }
 
+CANONICAL_CONFIG_ALIASES = {
+    "feishu.bitable.app_id": ("feishu.app_id",),
+    "feishu.bitable.app_secret": ("feishu.app_secret",),
+    "feishu.conversation.app_id": ("feishu.receipt.app_id",),
+    "feishu.conversation.app_secret": ("feishu.receipt.app_secret",),
+    "feishu.conversation.open_id": ("feishu.receipt.open_id",),
+}
+
+FEISHU_SECRET_CREDENTIALS = {
+    "feishu.bitable.app_secret": BITABLE_APP_SECRET_CREDENTIAL,
+    "feishu.conversation.app_secret": CONVERSATION_APP_SECRET_CREDENTIAL,
+}
+
+_CANONICAL_FOR_ALIAS = {
+    alias: canonical
+    for canonical, aliases in CANONICAL_CONFIG_ALIASES.items()
+    for alias in aliases
+}
+
 OPERATOR_CONFIG_KEYS = (
     "account",
     "data.dir",
@@ -93,14 +125,14 @@ OPERATOR_CONFIG_KEYS = (
     "futu.opend.host",
     "futu.opend.port",
     "futu.profiles",
-    "feishu.app_id",
-    "feishu.app_secret",
+    "feishu.bitable.app_id",
+    "feishu.bitable.app_secret",
     "feishu.app_token",
     "feishu.connect_timeout",
     "feishu.read_timeout",
-    "feishu.receipt.app_id",
-    "feishu.receipt.app_secret",
-    "feishu.receipt.open_id",
+    "feishu.conversation.app_id",
+    "feishu.conversation.app_secret",
+    "feishu.conversation.open_id",
     "feishu.tables.holdings",
     "feishu.tables.nav_history",
     "feishu.tables.cash_flow",
@@ -110,15 +142,26 @@ OPERATOR_CONFIG_KEYS = (
 )
 
 REQUIRED_DAILY_JOB_KEYS = (
-    "feishu.app_id",
-    "feishu.app_secret",
+    "feishu.bitable.app_id",
+    "feishu.bitable.app_secret",
     "feishu.tables.holdings",
     "feishu.tables.nav_history",
     "feishu.tables.cash_flow",
     "feishu.tables.holdings_snapshot",
 )
 
+REQUIRED_CONVERSATION_KEYS = (
+    "feishu.conversation.app_id",
+    "feishu.conversation.app_secret",
+    "feishu.conversation.open_id",
+)
+
 SECRET_KEYS = {
+    "feishu.bitable.app_id",
+    "feishu.bitable.app_secret",
+    "feishu.conversation.app_id",
+    "feishu.conversation.app_secret",
+    "feishu.conversation.open_id",
     "feishu.app_id",
     "feishu.app_secret",
     "feishu.user_token",
@@ -127,6 +170,19 @@ SECRET_KEYS = {
     "feishu.receipt.open_id",
     "finnhub_api_key",
     "quality.read_token",
+}
+
+NON_DISCLOSABLE_KEYS = {
+    "feishu.bitable.app_id",
+    "feishu.bitable.app_secret",
+    "feishu.conversation.app_id",
+    "feishu.conversation.app_secret",
+    "feishu.conversation.open_id",
+    "feishu.app_id",
+    "feishu.app_secret",
+    "feishu.receipt.app_id",
+    "feishu.receipt.app_secret",
+    "feishu.receipt.open_id",
 }
 
 OPERATOR_DEFAULTS: Dict[str, Any] = {
@@ -214,21 +270,131 @@ def _get_from_file(key: str, default=None) -> tuple[Any, bool]:
     return (default, True) if node == "" else (node, True)
 
 
-def get_with_source(key: str, default=None) -> tuple[Any, str]:
-    env_keys = tuple(
-        env_key
-        for env_key in (ENV_MAP.get(key), *ENV_FALLBACKS.get(key, ()))
-        if env_key
-    )
-    for env_key in env_keys:
-        env_val = os.environ.get(env_key)
-        if env_val not in (None, ""):
-            return env_val, f"env:{env_key}"
+def _has_file_key(key: str) -> bool:
+    node: Any = _load_config_file()
+    for part in key.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return False
+        node = node[part]
+    return True
+
+
+def _direct_candidates(
+    key: str,
+    *,
+    default=None,
+    legacy: bool = False,
+) -> list[tuple[Any, str]]:
+    candidates: list[tuple[Any, str]] = []
+    for env_key in (ENV_MAP.get(key), *ENV_FALLBACKS.get(key, ())):
+        if not env_key:
+            continue
+        value = os.environ.get(env_key)
+        if value not in (None, ""):
+            prefix = "legacy-env" if legacy else "env"
+            candidates.append((value, f"{prefix}:{env_key}"))
 
     file_value, found = _get_from_file(key, default)
-    if found:
-        return file_value, f"file:{get_config_file()}"
+    if found and file_value not in (None, ""):
+        prefix = "legacy-file" if legacy else "file"
+        candidates.append((file_value, f"{prefix}:{get_config_file()}"))
+    return candidates
+
+
+def _plaintext_shadow_sources(canonical_key: str) -> list[str]:
+    sources: list[str] = []
+    for key in (canonical_key, *CANONICAL_CONFIG_ALIASES.get(canonical_key, ())):
+        for env_key in (ENV_MAP.get(key), *ENV_FALLBACKS.get(key, ())):
+            if env_key and env_key in os.environ:
+                sources.append(f"environment:{env_key}")
+        if _has_file_key(key):
+            sources.append(f"config:{key}")
+    return sorted(set(sources))
+
+
+def _resolve_canonical_non_secret(key: str, default=None) -> tuple[Any, str]:
+    canonical_candidates = _direct_candidates(key, default=default)
+    legacy_candidates = [
+        candidate
+        for alias in CANONICAL_CONFIG_ALIASES.get(key, ())
+        for candidate in _direct_candidates(alias, default=default, legacy=True)
+    ]
+    if canonical_candidates:
+        selected_value, selected_source = canonical_candidates[0]
+        if any(str(value) != str(selected_value) for value, _ in legacy_candidates):
+            raise FeishuCredentialConfigError(
+                "conflicting_role_configuration",
+                key,
+            )
+        return selected_value, selected_source
+    if legacy_candidates:
+        return legacy_candidates[0]
     return default, "default"
+
+
+def _resolve_canonical_secret(
+    key: str,
+    default=None,
+    *,
+    secure_override: Optional[bool] = None,
+) -> tuple[Any, str]:
+    credential_name = FEISHU_SECRET_CREDENTIALS[key]
+    credential, found = read_systemd_credential(
+        key=key,
+        credential_name=credential_name,
+    )
+    if found:
+        return credential, f"credential:{credential_name}"
+
+    secure_required = (
+        secure_feishu_credentials_required()
+        if secure_override is None
+        else bool(secure_override)
+    )
+    if secure_required:
+        code = (
+            "insecure_secret_source"
+            if _plaintext_shadow_sources(key)
+            else "missing_secure_credential"
+        )
+        raise FeishuCredentialConfigError(code, key)
+
+    canonical_candidates = _direct_candidates(key, default=default)
+    legacy_candidates = [
+        candidate
+        for alias in CANONICAL_CONFIG_ALIASES.get(key, ())
+        for candidate in _direct_candidates(alias, default=default, legacy=True)
+    ]
+    plaintext_candidates = [*canonical_candidates, *legacy_candidates]
+    if plaintext_candidates:
+        return plaintext_candidates[0]
+    return default, "default"
+
+
+def _resolve_with_source(
+    key: str,
+    default=None,
+    *,
+    secure_override: Optional[bool] = None,
+) -> tuple[Any, str]:
+    canonical_key = _CANONICAL_FOR_ALIAS.get(key, key)
+    if canonical_key in FEISHU_SECRET_CREDENTIALS:
+        return _resolve_canonical_secret(
+            canonical_key,
+            default,
+            secure_override=secure_override,
+        )
+    if canonical_key in CANONICAL_CONFIG_ALIASES:
+        return _resolve_canonical_non_secret(canonical_key, default)
+
+    candidates = _direct_candidates(key, default=default)
+    if candidates:
+        return candidates[0]
+    return default, "default"
+
+
+def get_with_source(key: str, default=None) -> tuple[Any, str]:
+    return _resolve_with_source(key, default)
 
 
 def get(key: str, default=None):
@@ -306,26 +472,90 @@ def _redact_value(key: str, value: Any) -> Any:
     return value
 
 
+def _source_warnings(key: str, source: str) -> list[Dict[str, Any]]:
+    canonical_key = _CANONICAL_FOR_ALIAS.get(key, key)
+    if (
+        canonical_key in CANONICAL_CONFIG_ALIASES
+        and canonical_key not in FEISHU_SECRET_CREDENTIALS
+    ):
+        canonical_candidates = _direct_candidates(canonical_key)
+        legacy_candidates = [
+            candidate
+            for alias in CANONICAL_CONFIG_ALIASES[canonical_key]
+            for candidate in _direct_candidates(alias, legacy=True)
+        ]
+        if canonical_candidates and legacy_candidates:
+            return [
+                {
+                    "key": canonical_key,
+                    "warning": "redundant_legacy_configuration",
+                    "sources": sorted(
+                        {candidate_source for _, candidate_source in legacy_candidates}
+                    ),
+                }
+            ]
+    if canonical_key not in FEISHU_SECRET_CREDENTIALS:
+        return []
+    if source.startswith("credential:"):
+        shadows = _plaintext_shadow_sources(canonical_key)
+        if shadows:
+            return [
+                {
+                    "key": canonical_key,
+                    "warning": "plaintext_shadow_detected",
+                    "sources": shadows,
+                }
+            ]
+        return []
+    if source != "default":
+        return [
+            {
+                "key": canonical_key,
+                "warning": "plaintext_secret_source",
+                "source": source,
+            }
+        ]
+    return []
+
+
 def inspect_config(*, keys: Optional[Iterable[str]] = None, redact: bool = True) -> Dict[str, Any]:
     """Return operator-facing effective configuration with source metadata."""
     selected_keys = tuple(keys or OPERATOR_CONFIG_KEYS)
     values: Dict[str, Dict[str, Any]] = {}
+    issues: list[Dict[str, Any]] = []
+    warnings: list[Dict[str, Any]] = []
     for key in selected_keys:
-        value, source = get_with_source(key, OPERATOR_DEFAULTS.get(key))
+        try:
+            value, source = get_with_source(key, OPERATOR_DEFAULTS.get(key))
+        except FeishuCredentialConfigError as exc:
+            issues.append(exc.as_issue())
+            values[key] = {
+                "value": None,
+                "source": "error",
+                "env": ENV_MAP.get(key),
+                "env_fallbacks": list(ENV_FALLBACKS.get(key, ())),
+                "set": False,
+                "error": exc.code,
+            }
+            continue
+        warnings.extend(_source_warnings(key, source))
+        must_redact = redact or key in NON_DISCLOSABLE_KEYS
         values[key] = {
-            "value": _redact_value(key, value) if redact else value,
+            "value": _redact_value(key, value) if must_redact else value,
             "source": source,
             "env": ENV_MAP.get(key),
             "env_fallbacks": list(ENV_FALLBACKS.get(key, ())),
             "set": source != "default" and value not in (None, ""),
         }
     return {
-        "success": True,
+        "success": not issues,
         "config_file": str(get_config_file()),
         "config_format": get_config_file().suffix.lower().lstrip(".") or "yaml",
         "config_file_exists": get_config_file().exists(),
         "config_file_env": CONFIG_FILE_ENV,
         "values": values,
+        "issues": issues,
+        "warnings": warnings,
     }
 
 
@@ -333,24 +563,63 @@ def validate_deploy_config(
     *,
     require_futu: bool = False,
     require_quality: bool = False,
+    require_secure_feishu: bool = False,
 ) -> Dict[str, Any]:
     """Validate configuration needed by scheduled daily NAV jobs."""
     issues = []
     warnings = []
 
-    for key in REQUIRED_DAILY_JOB_KEYS:
-        value = get(key)
-        if value in (None, ""):
-            issues.append({"key": key, "error": "missing required value", "env": ENV_MAP.get(key)})
+    try:
+        environment_secure_mode = secure_feishu_credentials_required()
+        secure_mode_valid = True
+    except FeishuCredentialConfigError as exc:
+        issues.append(exc.as_issue())
+        environment_secure_mode = True
+        secure_mode_valid = False
+    effective_secure_mode = bool(require_secure_feishu or environment_secure_mode)
 
-    app_token = get("feishu.app_token")
+    def resolved(key: str, default=None):
+        try:
+            value, source = _resolve_with_source(
+                key,
+                default,
+                secure_override=effective_secure_mode,
+            )
+        except FeishuCredentialConfigError as exc:
+            if not any(item.get("key") == exc.key for item in issues):
+                issues.append(exc.as_issue())
+            return default
+        warnings.extend(_source_warnings(key, source))
+        return value
+
+    for key in REQUIRED_DAILY_JOB_KEYS:
+        value = resolved(key)
+        if value in (None, ""):
+            if not any(item.get("key") == key for item in issues):
+                issues.append({"key": key, "error": "missing required value", "env": ENV_MAP.get(key)})
+
+    if require_secure_feishu:
+        for key in REQUIRED_CONVERSATION_KEYS:
+            value = resolved(key)
+            if value in (None, "") and not any(
+                item.get("key") == key for item in issues
+            ):
+                issues.append(
+                    {
+                        "key": key,
+                        "error": "missing required value",
+                        "env": ENV_MAP.get(key),
+                    }
+                )
+
+    app_token = resolved("feishu.app_token")
     for key in (
         "feishu.tables.holdings",
         "feishu.tables.nav_history",
         "feishu.tables.cash_flow",
         "feishu.tables.holdings_snapshot",
     ):
-        value = get(key)
+        value = resolved(key)
         if value and "/" not in str(value) and not app_token:
             issues.append({
                 "key": key,
@@ -376,12 +645,10 @@ def validate_deploy_config(
                         "error": str(exc),
                         "env": None,
                     })
-        for key in (
-            "feishu.receipt.app_id",
-            "feishu.receipt.app_secret",
-            "feishu.receipt.open_id",
-        ):
-            if not get(key):
+        for key in REQUIRED_CONVERSATION_KEYS:
+            if not resolved(key) and not any(
+                item.get("key") == key for item in issues
+            ):
                 issues.append({"key": key, "error": "missing Futu sync receipt config", "env": ENV_MAP.get(key)})
         try:
             __import__("futu")
@@ -401,13 +668,13 @@ def validate_deploy_config(
         )
 
     if require_quality:
-        if not get("quality.read_token"):
+        if not resolved("quality.read_token"):
             issues.append({
                 "key": "quality.read_token",
                 "error": "missing quality read token",
                 "env": ENV_MAP.get("quality.read_token"),
             })
-        if not get("quality.accounts"):
+        if not resolved("quality.accounts"):
             issues.append({
                 "key": "quality.accounts",
                 "error": "at least one quality account is required",
@@ -422,6 +689,10 @@ def validate_deploy_config(
         "issues": issues,
         "warnings": warnings,
         "required_keys": list(REQUIRED_DAILY_JOB_KEYS),
+        "secure_feishu_required": bool(
+            effective_secure_mode
+        ),
+        "secure_feishu_mode_valid": secure_mode_valid,
     }
 
 
