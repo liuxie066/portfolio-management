@@ -135,6 +135,9 @@ sudo scripts/install.sh --apply
 披露值直接迁入 credential store。安装器不会接收、创建、加密、解密、复制或打印
 Secret；apply 只按名称和 regular-file 元数据检查两份文件，并在任何目标文件写入前
 使用临时 unit 执行 `systemd-analyze verify`。dry-run 只报告能力要求，不声称已验证。
+所有 credential-bearing `ExecStart` 还会在加载共享 `EnvironmentFile` 后重新固定
+secure mode 和 `/run/credentials/<exact-unit>.service`，防止旧 env 中的同名变量覆盖
+systemd credential 边界。
 
 ## 预检
 

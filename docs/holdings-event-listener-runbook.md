@@ -80,6 +80,8 @@ sudo systemd-run --wait --pipe --collect \
   --property=EnvironmentFile=/etc/portfolio-management/portfolio-management.env \
   --property=Environment=PM_REQUIRE_SECURE_FEISHU_CREDENTIALS=1 \
   --property=LoadCredentialEncrypted=pm-feishu-bitable-app-secret \
+  /usr/bin/env PM_REQUIRE_SECURE_FEISHU_CREDENTIALS=1 \
+  CREDENTIALS_DIRECTORY=/run/credentials/portfolio-feishu-subscribe-once.service \
   /usr/local/bin/pm events subscribe --confirm --json
 ```
 
@@ -89,7 +91,8 @@ not load the Conversation credential, edit the app event configuration, or
 enable the listener. `file_type=bitable` is sent and outbound `event_type` is
 omitted; the inbound registration remains exactly
 `drive.file.bitable_record_changed_v1`. Failure, partial success, or ambiguous
-output is a stop condition.
+output is a stop condition. The final `/usr/bin/env` assignments intentionally
+override the shared `EnvironmentFile`; do not remove or reorder them.
 
 ## Separately confirmed service activation
 

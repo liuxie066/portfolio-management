@@ -302,6 +302,10 @@ def test_dual_feishu_app_docs_preserve_secret_and_authorization_boundaries():
     assert "systemd-run --wait --pipe --collect" in subscription
     assert "LoadCredentialEncrypted=pm-feishu-bitable-app-secret" in subscription
     assert "pm-feishu-conversation-app-secret" not in subscription
+    assert (
+        "CREDENTIALS_DIRECTORY=/run/credentials/"
+        "portfolio-feishu-subscribe-once.service"
+    ) in subscription
     assert "file_type=bitable" in subscription
     assert "outbound `event_type` is\nomitted" in subscription
 
@@ -311,7 +315,12 @@ def test_install_linux_api_service_is_loopback_only_and_long_running(tmp_path):
     unit = install_linux.render_api_service_unit(paths, run_user="portfolio")
 
     assert "Type=simple" in unit
-    assert f"ExecStart={paths.python_bin} {paths.app_dir / 'scripts' / 'serve.py'} --host 127.0.0.1 --port 8765" in unit
+    assert (
+        "ExecStart=/usr/bin/env PM_REQUIRE_SECURE_FEISHU_CREDENTIALS=1 "
+        f"CREDENTIALS_DIRECTORY=/run/credentials/{install_linux.API_SERVICE_NAME} "
+        f"{paths.python_bin} {paths.app_dir / 'scripts' / 'serve.py'} "
+        "--host 127.0.0.1 --port 8765"
+    ) in unit
     assert "Restart=on-failure" in unit
     assert "RestartSec=5" in unit
     assert "WantedBy=multi-user.target" in unit
@@ -331,7 +340,9 @@ def test_install_linux_quality_units_are_read_only_scoped_and_every_15_minutes(t
 
     assert "Type=oneshot" in service
     assert (
-        f"ExecStart=/usr/bin/flock -n {install_linux.QUALITY_LOCK_FILE} "
+        "ExecStart=/usr/bin/env PM_REQUIRE_SECURE_FEISHU_CREDENTIALS=1 "
+        f"CREDENTIALS_DIRECTORY=/run/credentials/{install_linux.QUALITY_SERVICE_NAME} "
+        f"/usr/bin/flock -n {install_linux.QUALITY_LOCK_FILE} "
         f"{paths.launcher_path} quality refresh --json"
     ) in service
     assert "RuntimeMaxSec=300" in service
@@ -354,7 +365,9 @@ def test_install_linux_receipt_units_retry_durable_outbox_every_five_minutes(tmp
     )
 
     assert (
-        f"ExecStart=/usr/bin/flock -n {install_linux.RECEIPT_LOCK_FILE} "
+        "ExecStart=/usr/bin/env PM_REQUIRE_SECURE_FEISHU_CREDENTIALS=1 "
+        f"CREDENTIALS_DIRECTORY=/run/credentials/{install_linux.RECEIPT_SERVICE_NAME} "
+        f"/usr/bin/flock -n {install_linux.RECEIPT_LOCK_FILE} "
         f"{paths.launcher_path} receipts dispatch --limit 100 --confirm --json"
     ) in service
     assert "RuntimeMaxSec=60" in service
@@ -405,6 +418,15 @@ def test_install_linux_service_units_have_exact_feishu_credential_grants(tmp_pat
         "receipts": {install_linux.CONVERSATION_APP_SECRET_CREDENTIAL},
         "events": {install_linux.BITABLE_APP_SECRET_CREDENTIAL},
     }
+    expected_units = {
+        "morning": install_linux.SERVICE_NAME,
+        "evening": install_linux.EVENING_SERVICE_NAME,
+        "cash_flow": install_linux.CASH_FLOW_SERVICE_NAME,
+        "api": install_linux.API_SERVICE_NAME,
+        "quality": install_linux.QUALITY_SERVICE_NAME,
+        "receipts": install_linux.RECEIPT_SERVICE_NAME,
+        "events": install_linux.HOLDINGS_EVENT_SERVICE_NAME,
+    }
 
     for unit_name, unit in rendered.items():
         grants = {
@@ -414,6 +436,10 @@ def test_install_linux_service_units_have_exact_feishu_credential_grants(tmp_pat
         }
         assert grants == expected[unit_name]
         assert unit.count("Environment=PM_REQUIRE_SECURE_FEISHU_CREDENTIALS=1") == 1
+        assert unit.count(
+            "ExecStart=/usr/bin/env PM_REQUIRE_SECURE_FEISHU_CREDENTIALS=1 "
+            f"CREDENTIALS_DIRECTORY=/run/credentials/{expected_units[unit_name]} "
+        ) == 1
         assert "App Secret" not in unit
         assert "OM_FEISHU_BOT_APP_SECRET" not in unit
 
@@ -433,13 +459,81 @@ def test_install_linux_preflight_is_disabled_local_and_nonmutating(tmp_path):
         if line.startswith("LoadCredentialEncrypted=")
     }
     assert (
-        f"ExecStart={paths.launcher_path} config doctor "
+        "ExecStart=/usr/bin/env PM_REQUIRE_SECURE_FEISHU_CREDENTIALS=1 "
+        f"CREDENTIALS_DIRECTORY=/run/credentials/{install_linux.FEISHU_PREFLIGHT_SERVICE_NAME} "
+        f"{paths.launcher_path} config doctor "
         "--require-secure-feishu --json"
     ) in unit
-    assert f"ExecStart={paths.launcher_path} events status --json" in unit
+    assert (
+        "ExecStart=/usr/bin/env PM_REQUIRE_SECURE_FEISHU_CREDENTIALS=1 "
+        f"CREDENTIALS_DIRECTORY=/run/credentials/{install_linux.FEISHU_PREFLIGHT_SERVICE_NAME} "
+        f"{paths.launcher_path} events status --json"
+    ) in unit
     assert "events subscribe" not in unit
     assert "events listen" not in unit
     assert "--confirm" not in unit
+
+
+def test_secure_feishu_exec_overrides_conflicting_shared_env_for_every_unit(
+    tmp_path,
+):
+    paths = install_linux.build_paths(_args(tmp_path))
+    hostile_env = (
+        "PM_REQUIRE_SECURE_FEISHU_CREDENTIALS=0\n"
+        "CREDENTIALS_DIRECTORY=/tmp/not-systemd-credentials\n"
+    )
+    assert install_linux.render_env_file(
+        paths,
+        existing_content=hostile_env,
+    ) == hostile_env
+
+    units = {
+        install_linux.SERVICE_NAME: install_linux.render_service_unit(
+            paths, run_user="portfolio", mode="morning"
+        ),
+        install_linux.EVENING_SERVICE_NAME: install_linux.render_service_unit(
+            paths, run_user="portfolio", mode="evening"
+        ),
+        install_linux.CASH_FLOW_SERVICE_NAME: (
+            install_linux.render_cash_flow_service_unit(
+                paths, run_user="portfolio"
+            )
+        ),
+        install_linux.API_SERVICE_NAME: install_linux.render_api_service_unit(
+            paths, run_user="portfolio"
+        ),
+        install_linux.QUALITY_SERVICE_NAME: (
+            install_linux.render_quality_service_unit(
+                paths, run_user="portfolio"
+            )
+        ),
+        install_linux.RECEIPT_SERVICE_NAME: (
+            install_linux.render_receipt_service_unit(
+                paths, run_user="portfolio"
+            )
+        ),
+        install_linux.HOLDINGS_EVENT_SERVICE_NAME: (
+            install_linux.render_holdings_event_service_unit(
+                paths, run_user="portfolio"
+            )
+        ),
+        install_linux.FEISHU_PREFLIGHT_SERVICE_NAME: (
+            install_linux.render_feishu_preflight_service_unit(
+                paths, run_user="portfolio"
+            )
+        ),
+    }
+
+    for unit_name, unit in units.items():
+        exec_lines = [
+            line for line in unit.splitlines() if line.startswith("ExecStart=")
+        ]
+        assert exec_lines
+        expected_prefix = (
+            "ExecStart=/usr/bin/env PM_REQUIRE_SECURE_FEISHU_CREDENTIALS=1 "
+            f"CREDENTIALS_DIRECTORY=/run/credentials/{unit_name} "
+        )
+        assert all(line.startswith(expected_prefix) for line in exec_lines)
 
 
 def test_systemd_credential_capability_probe_uses_exact_unit_syntax(tmp_path):

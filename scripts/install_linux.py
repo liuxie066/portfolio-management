@@ -342,6 +342,17 @@ def _render_feishu_credential_directives(*roles: str) -> str:
     return "\n".join(lines)
 
 
+def _secure_feishu_exec(command: str, *, unit_name: str) -> str:
+    """Make secure mode and the system credential path authoritative at exec."""
+
+    if not unit_name.endswith(".service") or "/" in unit_name:
+        raise ValueError("invalid systemd service name for secure Feishu exec")
+    return (
+        "/usr/bin/env PM_REQUIRE_SECURE_FEISHU_CREDENTIALS=1 "
+        f"CREDENTIALS_DIRECTORY=/run/credentials/{unit_name} {command}"
+    )
+
+
 def render_service_unit(paths: InstallPaths, *, run_user: str, mode: str) -> str:
     if mode not in {"morning", "evening"}:
         raise ValueError(f"unsupported scheduled job mode: {mode}")
@@ -350,6 +361,7 @@ def render_service_unit(paths: InstallPaths, *, run_user: str, mode: str) -> str
         if mode == "morning"
         else "portfolio-management evening Futu holdings sync"
     )
+    unit_name = SERVICE_NAME if mode == "morning" else EVENING_SERVICE_NAME
     schedule_script = paths.app_dir / "scripts" / "portfolio_scheduled_job.sh"
     return f"""[Unit]
 Description={description}
@@ -366,7 +378,7 @@ Environment=PYTHON_BIN={paths.python_bin}
 Environment=PORTFOLIO_PM_BIN={paths.launcher_path}
 EnvironmentFile={paths.env_file}
 {_render_feishu_credential_directives("bitable", "conversation")}
-ExecStart=/usr/bin/flock -n {SCHEDULE_LOCK_FILE} {schedule_script} {mode}
+ExecStart={_secure_feishu_exec(f"/usr/bin/flock -n {SCHEDULE_LOCK_FILE} {schedule_script} {mode}", unit_name=unit_name)}
 """
 
 
@@ -383,7 +395,7 @@ WorkingDirectory={paths.app_dir}
 Environment=TZ=Asia/Shanghai
 EnvironmentFile={paths.env_file}
 {_render_feishu_credential_directives("bitable", "conversation")}
-ExecStart={paths.launcher_path} cash-flow effects scan --json
+ExecStart={_secure_feishu_exec(f"{paths.launcher_path} cash-flow effects scan --json", unit_name=CASH_FLOW_SERVICE_NAME)}
 """
 
 
@@ -400,7 +412,7 @@ WorkingDirectory={paths.app_dir}
 Environment=TZ=Asia/Shanghai
 EnvironmentFile={paths.env_file}
 {_render_feishu_credential_directives("bitable", "conversation")}
-ExecStart={paths.python_bin} {paths.app_dir / "scripts" / "serve.py"} --host 127.0.0.1 --port 8765
+ExecStart={_secure_feishu_exec(f"{paths.python_bin} {paths.app_dir / 'scripts' / 'serve.py'} --host 127.0.0.1 --port 8765", unit_name=API_SERVICE_NAME)}
 Restart=on-failure
 RestartSec=5
 
@@ -422,7 +434,7 @@ WorkingDirectory={paths.app_dir}
 Environment=TZ=Asia/Shanghai
 EnvironmentFile={paths.env_file}
 {_render_feishu_credential_directives("bitable")}
-ExecStart=/usr/bin/flock -n {QUALITY_LOCK_FILE} {paths.launcher_path} quality refresh --json
+ExecStart={_secure_feishu_exec(f"/usr/bin/flock -n {QUALITY_LOCK_FILE} {paths.launcher_path} quality refresh --json", unit_name=QUALITY_SERVICE_NAME)}
 RuntimeMaxSec=300
 """
 
@@ -440,7 +452,7 @@ WorkingDirectory={paths.app_dir}
 Environment=TZ=Asia/Shanghai
 EnvironmentFile={paths.env_file}
 {_render_feishu_credential_directives("conversation")}
-ExecStart=/usr/bin/flock -n {RECEIPT_LOCK_FILE} {paths.launcher_path} receipts dispatch --limit 100 --confirm --json
+ExecStart={_secure_feishu_exec(f"/usr/bin/flock -n {RECEIPT_LOCK_FILE} {paths.launcher_path} receipts dispatch --limit 100 --confirm --json", unit_name=RECEIPT_SERVICE_NAME)}
 RuntimeMaxSec=60
 """
 
@@ -458,7 +470,7 @@ WorkingDirectory={paths.app_dir}
 Environment=TZ=Asia/Shanghai
 EnvironmentFile={paths.env_file}
 {_render_feishu_credential_directives("bitable")}
-ExecStart={paths.launcher_path} events listen --confirm --json
+ExecStart={_secure_feishu_exec(f"{paths.launcher_path} events listen --confirm --json", unit_name=HOLDINGS_EVENT_SERVICE_NAME)}
 Restart=always
 RestartSec=5
 
@@ -482,8 +494,8 @@ WorkingDirectory={paths.app_dir}
 Environment=TZ=Asia/Shanghai
 EnvironmentFile={paths.env_file}
 {_render_feishu_credential_directives("bitable", "conversation")}
-ExecStart={paths.launcher_path} config doctor --require-secure-feishu --json
-ExecStart={paths.launcher_path} events status --json
+ExecStart={_secure_feishu_exec(f"{paths.launcher_path} config doctor --require-secure-feishu --json", unit_name=FEISHU_PREFLIGHT_SERVICE_NAME)}
+ExecStart={_secure_feishu_exec(f"{paths.launcher_path} events status --json", unit_name=FEISHU_PREFLIGHT_SERVICE_NAME)}
 """
 
 
