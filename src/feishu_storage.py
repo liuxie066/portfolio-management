@@ -18,6 +18,8 @@ from .models import (
 )
 from .snapshot_models import HoldingSnapshot
 from .feishu_client import FeishuClient
+from .feishu.contracts import FieldEncoding, field_names_by_encoding
+from .feishu.errors import FeishuRecordNotFoundError
 from .local_cache import (
     LocalPriceCache,
     LocalHoldingsIndexCache,
@@ -30,6 +32,22 @@ from .feishu._cash_flow_mixin import CashFlowMixin
 from .feishu._holdings_mixin import HoldingsMixin
 from .feishu._snapshots_mixin import SnapshotsMixin
 from .feishu._nav_mixin import NavMixin
+
+
+_LOCAL_PRICE_CACHE_NUMBER_FIELDS = frozenset({
+    'price', 'cny_price', 'change', 'change_pct', 'exchange_rate',
+})
+
+
+def _wire_fields_by_encoding(table: str, encoding: FieldEncoding) -> frozenset[str]:
+    """Resolve remote wire types from the registry; price_cache is local-only."""
+    if table == 'price_cache':
+        return (
+            _LOCAL_PRICE_CACHE_NUMBER_FIELDS
+            if encoding is FieldEncoding.NUMBER
+            else frozenset()
+        )
+    return field_names_by_encoding(table, encoding)
 
 
 class _MemoryHoldingsIndexCache:
@@ -240,64 +258,8 @@ class FeishuStorage(
         """
         result = {}
 
-        # 定义各表的数字字段类型映射
-        # True = 数字类型, False = 文本类型
-        table_number_fields = {
-            'holdings': {
-                'quantity': True,
-                'avg_cost': True,
-            },
-            'transactions': {
-                # NOTE: Feishu transactions table stores numeric fields as Number.
-                'quantity': True,
-                'price': True,
-                'amount': True,
-                'fee': True,
-                # 'tax' 字段飞书表中可能不存在，作为可选字段处理
-            },
-            'cash_flow': {
-                # NOTE: Feishu cash_flow table stores numeric fields as Number.
-                'amount': True,
-                'cny_amount': True,
-                'exchange_rate': True,
-            },
-            'holdings_snapshot': {
-                'quantity': True,
-                'avg_cost': True,
-                'price': True,
-                'cny_price': True,
-                'market_value_cny': True,
-            },
-            'nav_history': {
-                'total_value': True,
-                'cash_value': True,
-                'stock_value': True,
-                'fund_value': True,
-                'cn_stock_value': True,
-                'us_stock_value': True,
-                'hk_stock_value': True,
-                'stock_weight': True,
-                'cash_weight': True,
-                'shares': True,
-                'nav': True,
-                'cash_flow': True,
-                'share_change': True,
-                'mtd_nav_change': True,
-                'ytd_nav_change': True,
-                'pnl': True,
-                'mtd_pnl': True,
-                'ytd_pnl': True,
-            },
-            'price_cache': {
-                'price': True,
-                'cny_price': True,
-                'change': True,
-                'change_pct': True,
-                'exchange_rate': True,
-            }
-        }
-
-        num_fields_config = table_number_fields.get(table, {})
+        number_fields = _wire_fields_by_encoding(table, FieldEncoding.NUMBER)
+        json_text_fields = _wire_fields_by_encoding(table, FieldEncoding.JSON_TEXT)
 
         for key, value in data.items():
             if value is None:
@@ -321,17 +283,11 @@ class FeishuStorage(
             elif isinstance(value, (AssetType, TransactionType, AssetClass, Industry)):
                 result[key] = value.value
             # JSON 字段
-            elif key in ['tag', 'details'] and isinstance(value, (list, dict)):
+            elif key in json_text_fields and isinstance(value, (list, dict)):
                 result[key] = json.dumps(value, ensure_ascii=False)
             # 数字字段类型处理
-            elif key in num_fields_config:
-                normalized_value = self._normalize_numeric_field(table, key, value)
-                if num_fields_config[key]:
-                    # 数字类型：直接传数字
-                    result[key] = normalized_value
-                else:
-                    # 文本类型：转换为字符串
-                    result[key] = str(normalized_value)
+            elif key in number_fields:
+                result[key] = self._normalize_numeric_field(table, key, value)
             # 其他直接传
             else:
                 result[key] = value
@@ -341,6 +297,8 @@ class FeishuStorage(
     def _from_feishu_fields(self, fields: Dict, table: str) -> Dict[str, Any]:
         """将飞书字段格式转换为 Python 字典"""
         result = {}
+        number_fields = _wire_fields_by_encoding(table, FieldEncoding.NUMBER)
+        json_text_fields = _wire_fields_by_encoding(table, FieldEncoding.JSON_TEXT)
 
         for key, value in fields.items():
             if value is None:
@@ -356,81 +314,23 @@ class FeishuStorage(
                 result[key] = asset_id_str
                 continue
 
-            # 根据表名和字段名做类型转换
-            if table == 'holdings':
-                if key == 'quantity' and value is not None and value != '':
-                    result[key] = self._parse_float(value)
-                elif key == 'avg_cost' and value is not None and value != '':
-                    parsed = self._parse_float(value)
-                    result[key] = self._normalize_numeric_field(table, key, parsed) if parsed is not None else None
-                elif key == 'tag' and value:
-                    try:
-                        result[key] = json.loads(value) if isinstance(value, str) else value
-                    except (json.JSONDecodeError, TypeError, ValueError):
-                        result[key] = []
-                else:
-                    result[key] = value
+            if key in number_fields and value != '':
+                parsed = self._parse_float(value)
+                result[key] = (
+                    self._normalize_numeric_field(table, key, parsed)
+                    if parsed is not None
+                    else None
+                )
+                continue
 
-            elif table == 'transactions':
-                if key in ['quantity', 'price', 'amount', 'fee', 'tax'] and value is not None and value != '':
-                    parsed = self._parse_float(value)
-                    result[key] = self._normalize_numeric_field(table, key, parsed) if parsed is not None else None
-                elif key == 'tx_date' and value:
-                    result[key] = value  # 保持字符串，模型会解析
-                else:
-                    result[key] = value
+            if key in json_text_fields and value:
+                try:
+                    result[key] = json.loads(value) if isinstance(value, str) else value
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    result[key] = [] if table == 'holdings' and key == 'tag' else None
+                continue
 
-            elif table == 'cash_flow':
-                if key in ['amount', 'cny_amount', 'exchange_rate'] and value is not None and value != '':
-                    parsed = self._parse_float(value)
-                    result[key] = self._normalize_numeric_field(table, key, parsed) if parsed is not None else None
-                elif key == 'flow_date' and value:
-                    result[key] = value
-                else:
-                    result[key] = value
-
-            elif table == 'nav_history':
-                # nav_history numeric fields: do NOT manufacture zeros.
-                # total_value is required; breakdown fields may be missing in legacy history.
-                nav_must_fields = {'total_value'}
-                nav_breakdown_fields = {
-                    'cash_value', 'stock_value', 'fund_value',
-                    'cn_stock_value', 'us_stock_value', 'hk_stock_value'
-                }
-                nav_optional_numeric_fields = {
-                    'stock_weight', 'cash_weight', 'shares', 'nav',
-                    'cash_flow', 'share_change',
-                    'mtd_nav_change', 'ytd_nav_change',
-                    'pnl', 'mtd_pnl', 'ytd_pnl'
-                }
-
-                if key in nav_must_fields:
-                    parsed = self._parse_float(value)
-                    result[key] = self._normalize_numeric_field(table, key, parsed) if parsed is not None else None
-                elif key in nav_breakdown_fields:
-                    parsed = self._parse_float(value)
-                    result[key] = self._normalize_numeric_field(table, key, parsed) if parsed is not None else None
-                elif key in nav_optional_numeric_fields:
-                    # 关键可选数值字段严禁把空值偷偷补成 0.0；None 和 0 语义不同
-                    parsed = self._parse_float(value)
-                    result[key] = self._normalize_numeric_field(table, key, parsed) if parsed is not None else None
-                elif key == 'details' and value:
-                    try:
-                        result[key] = json.loads(value) if isinstance(value, str) else value
-                    except (json.JSONDecodeError, TypeError, ValueError):
-                        result[key] = None
-                else:
-                    result[key] = value
-
-            elif table == 'price_cache':
-                if key in ['price', 'cny_price', 'change', 'change_pct', 'exchange_rate'] and value is not None and value != '':
-                    parsed = self._parse_float(value)
-                    result[key] = self._normalize_numeric_field(table, key, parsed) if parsed is not None else None
-                else:
-                    result[key] = value
-
-            else:
-                result[key] = value
+            result[key] = value
 
         return result
 
@@ -507,7 +407,7 @@ class FeishuStorage(
                 record = strict(table_name, record_id)
                 if isinstance(record, dict):
                     return record
-            except Exception:
+            except FeishuRecordNotFoundError:
                 return None
         return None
 
@@ -530,6 +430,7 @@ class FeishuStorage(
         payload = dict(fields)
         if isinstance(payload.get("payload"), (dict, list)):
             payload["payload"] = json.dumps(payload["payload"], ensure_ascii=False, sort_keys=True)
+        payload = {key: value for key, value in payload.items() if value is not None}
         result = self.client.create_record("compensation_tasks", payload)
         record_id = result.get("record_id")
         if isinstance(task, dict):

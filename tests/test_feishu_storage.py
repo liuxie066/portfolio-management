@@ -5,6 +5,8 @@ from unittest.mock import Mock, patch, MagicMock
 import json
 
 from src.feishu_storage import FeishuStorage
+from src.feishu.errors import FeishuRecordNotFoundError
+from src.feishu.contracts import TABLE_CONTRACTS, FieldEncoding
 from src.models import (
     Holding, Transaction, CashFlow, NAVHistory, PriceCache,
     AssetType, TransactionType, AssetClass, Industry, make_cf_dedup_key
@@ -177,7 +179,7 @@ class TestFeishuStorageFieldConversion:
 
         assert tx_fields['amount'] == 0.0
         assert tx_fields['fee'] == 0.0
-        assert tx_fields['tax'] == 0.0
+        assert tx_fields['tax'] == '0'
         assert cf_fields['amount'] == 0.0
         assert cf_fields['cny_amount'] == 0.0
         assert cf_fields['exchange_rate'] == 0.0
@@ -185,6 +187,30 @@ class TestFeishuStorageFieldConversion:
         assert price.change == 0.0
         assert price.change_pct == 0.0
         assert price.exchange_rate == 0.0
+
+    def test_registered_number_fields_share_registry_owned_read_conversion(self):
+        for table_name, contract in TABLE_CONTRACTS.items():
+            fields = {
+                field.name: '1.25'
+                for field in contract.fields
+                if field.encoding is FieldEncoding.NUMBER
+            }
+            if not fields:
+                continue
+            converted = self.storage._from_feishu_fields(fields, table_name)
+
+            assert converted
+            assert all(isinstance(value, float) for value in converted.values())
+
+    def test_registered_json_text_fields_share_registry_owned_conversion(self):
+        encoded = self.storage._to_feishu_fields(
+            {'payload': {'target': 1}},
+            'compensation_tasks',
+        )
+        decoded = self.storage._from_feishu_fields(encoded, 'compensation_tasks')
+
+        assert encoded['payload'] == '{"target": 1}'
+        assert decoded['payload'] == {'target': 1}
 
 
 class TestFeishuStorageEscapeFilter:
@@ -667,11 +693,28 @@ class TestFeishuStorageTransactionOperations:
 
     def test_get_transaction_not_found(self):
         """测试交易记录不存在"""
-        self.mock_client.get_record_strict.side_effect = Exception('not found')
+        self.mock_client.get_record_strict.side_effect = FeishuRecordNotFoundError(
+            code=1254043,
+            message='RecordIdNotFound',
+        )
 
         result = self.storage.get_transaction('non_existent')
 
         assert result is None
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            PermissionError('forbidden'),
+            TimeoutError('timeout'),
+            ValueError('malformed response'),
+        ],
+    )
+    def test_get_transaction_propagates_non_not_found_errors(self, error):
+        self.mock_client.get_record_strict.side_effect = error
+
+        with pytest.raises(type(error), match=str(error)):
+            self.storage.get_transaction('rec_forbidden')
 
     def test_get_transactions(self):
         """测试获取交易记录列表"""

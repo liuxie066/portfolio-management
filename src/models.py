@@ -101,6 +101,7 @@ class TransactionType(str, Enum):
 
 class Industry(str, Enum):
     """行业分类"""
+    AI = "AI"
     ZHONGGAI = "中概"
     CONSUMPTION = "消费"
     ENERGY = "能源"

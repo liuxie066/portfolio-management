@@ -205,6 +205,43 @@ def test_feishu_table_ref_fails_closed_on_ambiguous_or_incomplete_config(monkeyp
         config.get_feishu_table_ref("holdings")
 
 
+def test_remote_price_cache_config_is_retired():
+    assert "feishu.tables.price_cache" not in config.ENV_MAP
+
+
+def test_validate_deploy_config_uses_strict_table_ref_parser():
+    with TemporaryDirectory() as tmp:
+        config_file = Path(tmp) / "config.yaml"
+        config_file.write_text(
+            """
+feishu:
+  app_id: cli_abc
+  app_secret: secret
+  app_token: shared
+  tables:
+    holdings: base/table/extra
+    nav_history: base/tbl_nav
+    cash_flow: base/tbl_cash
+    holdings_snapshot: base/tbl_snapshot
+""",
+            encoding="utf-8",
+        )
+        patch = MonkeyPatch()
+        try:
+            patch.setenv(config.CONFIG_FILE_ENV, str(config_file))
+            _clear_env(patch, *config.REQUIRED_DAILY_JOB_KEYS, "feishu.app_token")
+            config.reload_config()
+
+            payload = config.validate_deploy_config()
+
+            assert payload["success"] is False
+            issue = next(item for item in payload["issues"] if item["key"] == "feishu.tables.holdings")
+            assert "expected app_token/table_id" in issue["error"]
+        finally:
+            patch.undo()
+            config.reload_config()
+
+
 def test_validate_deploy_config_accepts_complete_yaml_config():
     with TemporaryDirectory() as tmp:
         config_file = Path(tmp) / "config.yaml"

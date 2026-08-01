@@ -1,29 +1,222 @@
-# Feishu Bitable Schema (truth source)
+# Feishu Bitable Schema and Operating Policy
 
 Schema version: `0005_cash_flow_holding_effects`
 
-This doc defines the canonical Feishu Bitable field names expected by the code.
-Field names must match exactly: they are case-sensitive and underscore-sensitive.
-The parenthesized type family on every required/optional field is also part of
-the strict live-schema contract. Slash-separated values are accepted
-alternatives (`text/select`, `date/text`, `text/datetime`). `text/json` means
-JSON serialized into a text field, not a separate Feishu JSON field type.
+The generated block below is a projection of the canonical typed registry in
+`src/feishu/contracts`. Field names, types, UI types, encodings, select options,
+ownership, clearability, business keys, and write requirements must be changed
+there first. The remaining prose defines human operating policy.
 
 Manual editing policy:
 - Manual fields are safe to edit directly in Feishu.
 - System fields should be hidden from normal manual-entry views. Leave them blank when manually adding rows.
 - System-only tables should not be edited by hand except during explicit repair.
-- "Required fields" means the Feishu table should contain these fields. It does not mean every manual row must fill every field.
+- Registry schema presence and per-operation row requirements are separate contracts.
+
+<!-- BEGIN GENERATED FEISHU CONTRACTS -->
+## Generated Field Contracts
+
+Generated from `src.feishu.contracts.TABLE_CONTRACTS`; do not edit this block by hand.
+
+### `holdings` contract
+
+- Role: `core`
+- Business key: `asset_id`, `account`, `broker`
+
+| Field | Type ID | UI type | Encoding | Presence | Ownership | Clearable | Select options |
+|---|---:|---|---|---|---|---|---|
+| `asset_id` | 1 | `Text` | `text` | `required` | `manual` | `no` |  |
+| `asset_name` | 1 | `Text` | `text` | `required` | `manual` | `no` |  |
+| `asset_type` | 3 | `SingleSelect` | `single_select` | `required` | `manual` | `no` | `a_stock`, `cash`, `otc_fund`, `other`, `hk_stock`, `us_stock`, `exchange_fund`, `us_fund`, `mmf`, `crypto` |
+| `account` | 1 | `Text` | `text` | `required` | `manual` | `no` |  |
+| `broker` | 1 | `Text` | `text` | `required` | `manual` | `no` |  |
+| `quantity` | 2 | `Number` | `number` | `required` | `manual` | `no` |  |
+| `avg_cost` | 2 | `Number` | `number` | `optional` | `mixed` | `yes` |  |
+| `currency` | 1 | `Text` | `text` | `required` | `manual` | `no` |  |
+| `asset_class` | 3 | `SingleSelect` | `single_select` | `optional` | `manual` | `yes` | `美国资产`, `另类资产`, `中国资产`, `现金`, `港股资产` |
+| `industry` | 3 | `SingleSelect` | `single_select` | `optional` | `manual` | `yes` | `金融`, `AI`, `中概`, `非行业指数`, `区块链`, `能源`, `消费`, `房地产`, `半导体`, `现金`, `科技`, `其他` |
+| `tag` | 1 | `Text` | `json_text` | `optional` | `manual` | `yes` |  |
+| `created_at` | 1 | `Text` | `text` | `optional` | `system` | `no` |  |
+| `updated_at` | 1 | `Text` | `text` | `optional` | `system` | `no` |  |
+
+Write contracts:
+
+- `create` row-required fields: `account`, `asset_id`, `quantity`
+- `update` row-required fields: none
+- `delete` row-required fields: none
+
+### `cash_flow` contract
+
+- Role: `core`
+- Business key: `dedup_key`
+
+| Field | Type ID | UI type | Encoding | Presence | Ownership | Clearable | Select options |
+|---|---:|---|---|---|---|---|---|
+| `flow_date` | 5 | `DateTime` | `datetime` | `required` | `manual` | `no` |  |
+| `account` | 1 | `Text` | `text` | `required` | `manual` | `no` |  |
+| `broker` | 1 | `Text` | `text` | `required` | `manual` | `no` |  |
+| `amount` | 2 | `Number` | `number` | `required` | `manual` | `no` |  |
+| `currency` | 1 | `Text` | `text` | `required` | `manual` | `no` |  |
+| `flow_type` | 3 | `SingleSelect` | `single_select` | `required` | `system` | `no` | `DEPOSIT`, `WITHDRAW` |
+| `cny_amount` | 2 | `Number` | `number` | `required` | `system` | `no` |  |
+| `dedup_key` | 1 | `Text` | `text` | `required` | `system` | `no` |  |
+| `exchange_rate` | 2 | `Number` | `number` | `optional` | `system` | `yes` |  |
+| `source` | 1 | `Text` | `text` | `optional` | `system` | `no` |  |
+| `remark` | 1 | `Text` | `text` | `optional` | `manual` | `yes` |  |
+| `updated_at` | 1 | `Text` | `text` | `optional` | `system` | `no` |  |
+
+Write contracts:
+
+- `create` row-required fields: `account`, `amount`, `currency`, `flow_date`
+- `update` row-required fields: none
+- `delete` row-required fields: none
+
+Forbidden fields: `exchange_rate_date`, `exchange_rate_evidence_type`, `exchange_rate_source`.
+
+### `nav_history` contract
+
+- Role: `core`
+- Business key: `account`, `date`
+
+| Field | Type ID | UI type | Encoding | Presence | Ownership | Clearable | Select options |
+|---|---:|---|---|---|---|---|---|
+| `date` | 5 | `DateTime` | `datetime` | `required` | `system` | `no` |  |
+| `account` | 1 | `Text` | `text` | `required` | `system` | `no` |  |
+| `total_value` | 2 | `Number` | `number` | `required` | `system` | `no` |  |
+| `shares` | 2 | `Number` | `number` | `required` | `system` | `no` |  |
+| `nav` | 2 | `Number` | `number` | `required` | `system` | `no` |  |
+| `cash_value` | 2 | `Number` | `number` | `optional` | `system` | `no` |  |
+| `stock_value` | 2 | `Number` | `number` | `optional` | `system` | `no` |  |
+| `fund_value` | 2 | `Number` | `number` | `optional` | `system` | `no` |  |
+| `cn_stock_value` | 2 | `Number` | `number` | `optional` | `system` | `no` |  |
+| `us_stock_value` | 2 | `Number` | `number` | `optional` | `system` | `no` |  |
+| `hk_stock_value` | 2 | `Number` | `number` | `optional` | `system` | `no` |  |
+| `stock_weight` | 2 | `Number` | `number` | `optional` | `system` | `no` |  |
+| `cash_weight` | 2 | `Number` | `number` | `optional` | `system` | `no` |  |
+| `cash_flow` | 2 | `Number` | `number` | `optional` | `system` | `no` |  |
+| `share_change` | 2 | `Number` | `number` | `optional` | `system` | `no` |  |
+| `mtd_nav_change` | 2 | `Number` | `number` | `optional` | `system` | `no` |  |
+| `ytd_nav_change` | 2 | `Number` | `number` | `optional` | `system` | `no` |  |
+| `pnl` | 2 | `Number` | `number` | `optional` | `system` | `no` |  |
+| `mtd_pnl` | 2 | `Number` | `number` | `optional` | `system` | `no` |  |
+| `ytd_pnl` | 2 | `Number` | `number` | `optional` | `system` | `no` |  |
+| `details` | 1 | `Text` | `json_text` | `optional` | `system` | `no` |  |
+| `updated_at` | 1 | `Text` | `text` | `optional` | `system` | `no` |  |
+
+Write contracts:
+
+- `create` row-required fields: `account`, `date`, `nav`, `shares`, `total_value`
+- `update` row-required fields: none
+- `delete` row-required fields: none
+
+### `holdings_snapshot` contract
+
+- Role: `core`
+- Business key: `as_of`, `account`, `asset_id`, `broker`
+
+| Field | Type ID | UI type | Encoding | Presence | Ownership | Clearable | Select options |
+|---|---:|---|---|---|---|---|---|
+| `as_of` | 1 | `Text` | `text` | `required` | `system` | `no` |  |
+| `account` | 1 | `Text` | `text` | `required` | `system` | `no` |  |
+| `asset_id` | 1 | `Text` | `text` | `required` | `system` | `no` |  |
+| `broker` | 1 | `Text` | `text` | `required` | `system` | `no` |  |
+| `quantity` | 2 | `Number` | `number` | `required` | `system` | `no` |  |
+| `currency` | 1 | `Text` | `text` | `required` | `system` | `no` |  |
+| `price` | 2 | `Number` | `number` | `required` | `system` | `no` |  |
+| `cny_price` | 2 | `Number` | `number` | `required` | `system` | `no` |  |
+| `market_value_cny` | 2 | `Number` | `number` | `required` | `system` | `no` |  |
+| `dedup_key` | 1 | `Text` | `text` | `required` | `system` | `no` |  |
+| `asset_name` | 1 | `Text` | `text` | `optional` | `system` | `no` |  |
+| `avg_cost` | 2 | `Number` | `number` | `optional` | `system` | `no` |  |
+| `source` | 1 | `Text` | `text` | `optional` | `system` | `no` |  |
+| `remark` | 1 | `Text` | `text` | `optional` | `system` | `yes` |  |
+
+Write contracts:
+
+- `create` row-required fields: `account`, `as_of`, `asset_id`, `broker`, `cny_price`, `currency`, `dedup_key`, `market_value_cny`, `price`, `quantity`
+- `update` row-required fields: none
+- `delete` row-required fields: none
+
+### `transactions` contract
+
+- Role: `optional`
+- Business key: `request_id`
+
+| Field | Type ID | UI type | Encoding | Presence | Ownership | Clearable | Select options |
+|---|---:|---|---|---|---|---|---|
+| `tx_date` | 1 | `Text` | `text` | `required` | `mixed` | `no` |  |
+| `tx_type` | 1 | `Text` | `text` | `required` | `manual` | `no` |  |
+| `asset_id` | 1 | `Text` | `text` | `required` | `manual` | `no` |  |
+| `account` | 1 | `Text` | `text` | `required` | `manual` | `no` |  |
+| `quantity` | 2 | `Number` | `number` | `required` | `manual` | `no` |  |
+| `price` | 2 | `Number` | `number` | `required` | `manual` | `no` |  |
+| `currency` | 1 | `Text` | `text` | `required` | `manual` | `no` |  |
+| `request_id` | 1 | `Text` | `text` | `required` | `system` | `no` |  |
+| `dedup_key` | 1 | `Text` | `text` | `required` | `system` | `no` |  |
+| `asset_name` | 1 | `Text` | `text` | `optional` | `mixed` | `no` |  |
+| `asset_type` | 1 | `Text` | `text` | `optional` | `mixed` | `no` |  |
+| `market` | 1 | `Text` | `text` | `optional` | `mixed` | `no` |  |
+| `amount` | 2 | `Number` | `number` | `optional` | `system` | `no` |  |
+| `fee` | 2 | `Number` | `number` | `optional` | `manual` | `no` |  |
+| `remark` | 1 | `Text` | `text` | `optional` | `manual` | `no` |  |
+
+Write contracts:
+
+- none (read-only table)
+
+### `compensation_tasks` contract
+
+- Role: `optional`
+- Business key: `task_id`
+
+| Field | Type ID | UI type | Encoding | Presence | Ownership | Clearable | Select options |
+|---|---:|---|---|---|---|---|---|
+| `task_id` | 1 | `Text` | `text` | `required` | `system` | `no` |  |
+| `operation_type` | 1 | `Text` | `text` | `required` | `system` | `no` |  |
+| `account` | 1 | `Text` | `text` | `required` | `system` | `no` |  |
+| `status` | 3 | `SingleSelect` | `single_select` | `required` | `system` | `no` | `PENDING`, `RUNNING`, `FAILED`, `RESOLVED` |
+| `payload` | 1 | `Text` | `json_text` | `required` | `system` | `no` |  |
+| `error` | 1 | `Text` | `text` | `required` | `system` | `no` |  |
+| `related_record_id` | 1 | `Text` | `text` | `required` | `system` | `no` |  |
+| `retry_count` | 2 | `Number` | `number` | `required` | `system` | `no` |  |
+| `created_at` | 1 | `Text` | `text` | `required` | `system` | `no` |  |
+| `updated_at` | 1 | `Text` | `text` | `required` | `system` | `no` |  |
+| `resolved_at` | 1 | `Text` | `text` | `optional` | `system` | `no` |  |
+| `resolution` | 1 | `Text` | `text` | `optional` | `system` | `no` |  |
+
+Write contracts:
+
+- `create` row-required fields: `account`, `created_at`, `error`, `operation_type`, `payload`, `retry_count`, `status`, `task_id`, `updated_at`
+- `update` row-required fields: none
+- `delete` row-required fields: none
+
+### `schema_version` contract
+
+- Role: `optional`
+- Business key: `migration_id`
+
+| Field | Type ID | UI type | Encoding | Presence | Ownership | Clearable | Select options |
+|---|---:|---|---|---|---|---|---|
+| `migration_id` | 1 | `Text` | `text` | `required` | `system` | `no` |  |
+| `description` | 1 | `Text` | `text` | `required` | `system` | `no` |  |
+| `applied_at` | 1 | `Text` | `text` | `required` | `system` | `no` |  |
+| `status` | 3 | `SingleSelect` | `single_select` | `required` | `system` | `no` | `APPLIED`, `FAILED` |
+| `notes` | 1 | `Text` | `text` | `optional` | `mixed` | `no` |  |
+
+Write contracts:
+
+- `create` row-required fields: `applied_at`, `description`, `migration_id`, `status`
+- `update` row-required fields: none
+- `delete` row-required fields: none
+
+`price_cache` is retired as a remote table; its storage is local-only.
+<!-- END GENERATED FEISHU CONTRACTS -->
 
 ## Active Tables
 
 ### holdings
 
-Role: core
-
 Purpose: current positions. This is the main manual-maintained table.
-
-Business key: `(asset_id, account, broker)`
 
 Manual edit policy:
 - Non-Futu stock/fund/other holding rows are maintained manually in the manual view.
@@ -45,25 +238,6 @@ System fields:
   accept the predecessor `YYYY-MM-DD HH:MM:SS` representation during the
   compatibility transition; new writes never emit that predecessor form.
 
-Required fields:
-- `asset_id` (text) - manual
-- `asset_name` (text) - manual
-- `asset_type` (text/select) - manual
-- `account` (text) - manual
-- `broker` (text) - manual
-- `quantity` (number) - manual
-- `currency` (text) - manual
-
-Optional fields:
-- `avg_cost` (number) - manual except system-managed Futu stock/ETF rows
-- `asset_class` (text/select) - manual
-- `industry` (text/select) - manual
-- `tag` (text/json) - manual
-- `created_at` (text date, `YYYY/MM/DD`) - system
-- `updated_at` (text date, `YYYY/MM/DD`) - system
-
-Allowed `asset_type` values include: `a_stock`, `hk_stock`, `us_stock`, `exchange_fund`, `otc_fund`, `fund`, `cash`, `mmf`, `bond`, `crypto`, `other`.
-
 `asset_class` describes the geography of the underlying assets or economic
 exposure, not fund domicile, distribution channel, trading currency, or listing
 venue. Fund and cross-market security rows therefore retain explicit manual
@@ -73,8 +247,6 @@ MMF) are eligible for deterministic `asset_class` completion or conflict
 detection.
 
 ### transactions
-
-Role: optional
 
 Status: legacy read-only archive
 
@@ -89,38 +261,12 @@ Manual edit policy:
 
 Manual view fields:
 - `tx_date`, `tx_type`, `asset_id`, `account`, `quantity`, `price`, `currency`
-- Optional manual fields: `asset_name`, `asset_type`, `broker`, `fee`, `remark`
+- Optional archive fields: `asset_name`, `asset_type`, `market`, `fee`, `remark`
 
 System fields:
-- `amount`, `request_id`, `dedup_key`, `source`
-
-Required fields:
-- `tx_date` (text/date) - manual/system, currently stored as `YYYY-MM-DD` text in live Feishu
-- `tx_type` (text/select) - manual
-- `asset_id` (text) - manual
-- `account` (text) - manual
-- `quantity` (number) - manual
-- `price` (number) - manual
-- `currency` (text) - manual
-- `request_id` (text) - system
-- `dedup_key` (text) - system
-
-Optional fields:
-- `asset_name` (text) - manual/system
-- `asset_type` (text/select) - manual/system
-- `broker` (text) - manual
-- `amount` (number) - system
-- `fee` (number) - manual
-- `remark` (text) - manual
-- `source` (text) - system
-- `tax` (number) - reserved
-- `related_account` (text) - reserved
-
-Allowed `tx_type` values: `BUY`, `SELL`, `DEPOSIT`, `WITHDRAW`.
+- `amount`, `request_id`, `dedup_key`
 
 ### cash_flow
-
-Role: core
 
 Purpose: cash deposits/withdrawals used by NAV calculation. This table must stay easy to maintain manually.
 
@@ -145,35 +291,10 @@ System fields:
 - `dedup_key` - generated for duplicate protection
 - `source` - `manual`, `system`, `broker_sync`, or repair source
 
-Required fields:
-- `flow_date` (date) - manual
-- `account` (text) - manual
-- `broker` (text) - manual
-- `amount` (number) - manual
-- `currency` (text) - manual
-- `flow_type` (text/select) - system
-- `cny_amount` (number) - system
-- `dedup_key` (text) - system
-
-Optional fields:
-- `exchange_rate` (number) - system
-- `source` (text) - system
-- `remark` (text) - manual
-- `updated_at` (text/datetime) - system
-
-Forbidden fields:
-- `exchange_rate_date`
-- `exchange_rate_source`
-- `exchange_rate_evidence_type`
-
 Historical FX evidence is technical workflow state stored in local SQLite. It
 must never be added to or queried from the Feishu `cash_flow` table.
 
-Allowed `flow_type` values: `DEPOSIT`, `WITHDRAW`.
-
 ### nav_history
-
-Role: core
 
 Purpose: daily NAV facts. Do not use this as a normal manual-entry table.
 
@@ -184,102 +305,25 @@ Manual edit policy:
 - Duplicate `(account, date)` rows are considered data corruption. Run `pm nav duplicates --json`; normal NAV writes block until duplicates are repaired.
 
 System-only fields:
-- all fields below are generated or repaired by the system.
-
-Required fields:
-- `date` (date) - system
-- `account` (text) - system
-- `total_value` (number) - system
-- `shares` (number) - system
-- `nav` (number) - system
-
-Optional fields:
-- `cash_value` (number) - system
-- `stock_value` (number) - system
-- `fund_value` (number) - system
-- `cn_stock_value` (number) - system
-- `us_stock_value` (number) - system
-- `hk_stock_value` (number) - system
-- `stock_weight` (number) - system
-- `cash_weight` (number) - system
-- `cash_flow` (number) - system
-- `share_change` (number) - system
-- `mtd_nav_change` (number) - system
-- `ytd_nav_change` (number) - system
-- `pnl` (number) - system
-- `mtd_pnl` (number) - system
-- `ytd_pnl` (number) - system
-- `details` (text/json) - system
-- `updated_at` (text/datetime) - system
+- all registered fields are generated or repaired by the system.
 
 ### holdings_snapshot
 
-Role: core
-
 Purpose: per-NAV-date holdings snapshot for audit/replay. This is a system-only table.
-
-Business key: `(as_of, account, asset_id, broker)`
 
 Manual edit policy:
 - Do not manually edit during normal operation.
 - If a snapshot is wrong, repair the source data and regenerate/rewrite the snapshot.
 
-Required fields:
-- `as_of` (date/text) - system
-- `account` (text) - system
-- `asset_id` (text) - system
-- `broker` (text) - system
-- `quantity` (number) - system
-- `currency` (text) - system
-- `price` (number) - system
-- `cny_price` (number) - system
-- `market_value_cny` (number) - system
-- `dedup_key` (text) - system
-
-Optional fields:
-- `asset_name` (text) - system
-- `avg_cost` (number) - system
-- `source` (text) - system
-- `remark` (text) - system
-
 ### compensation_tasks
-
-Role: optional
 
 Purpose: optional Feishu mirror for partial multi-table write failures. The same-host source of truth is the append-only `${PM_DATA_DIR}/compensation_tasks.jsonl` event log; every append is process-locked, flushed, and fsync'd before the mirror is attempted. Events fold by `task_id` through `PENDING`, `RUNNING`, `FAILED`, and `RESOLVED`.
 
 Automatic retry only accepts absolute compare-and-set targets of type `HOLDING_TARGET_SET`, `HOLDING_ZERO_DELETE`, `CASH_TARGET_SET`, or `HOLDINGS_SNAPSHOT_TARGET_SET`. Legacy delta payloads remain inspectable with `supported=false` but must not be replayed automatically.
 
-Required fields:
-- `task_id` (text) - system
-- `operation_type` (text/select) - system
-- `account` (text) - system
-- `status` (text/select) - system
-- `payload` (text/json) - system
-- `error` (text) - system
-- `related_record_id` (text) - system
-- `retry_count` (number) - system
-- `created_at` (text/datetime) - system
-- `updated_at` (text/datetime) - system
-
-Optional fields:
-- `resolved_at` (text/datetime) - system
-- `resolution` (text) - system
-
 ### schema_version
 
-Role: optional
-
 Purpose: track Feishu schema migration status. This is a system-only table.
-
-Required fields:
-- `migration_id` (text) - system
-- `description` (text) - system
-- `applied_at` (text/datetime) - system
-- `status` (text/select) - system
-
-Optional fields:
-- `notes` (text) - system/manual
 
 ## Retired Tables
 

@@ -1,46 +1,74 @@
 #!/usr/bin/env python3
-"""Validate documented Feishu schema expectations."""
+"""Inspect the canonical or live Feishu Bitable structure contract."""
 from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.feishu_client import FeishuClient
+from src.feishu.contracts import (  # noqa: E402
+    RETIRED_REMOTE_TABLES,
+    TABLE_CONTRACTS,
+    FieldEncoding,
+    TableRole,
+    compare_live_schema,
+)
+from src.feishu_client import FeishuClient  # noqa: E402
 
 
 DOCS_SCHEMA = REPO_ROOT / "docs" / "schema.md"
 
 
-@dataclass
+@dataclass(frozen=True)
 class TableSpec:
+    """Compatibility projection of one registry table.
+
+    The historical type is retained for callers that imported
+    ``parse_docs_schema``. Its values are registry-owned and markdown is never
+    parsed as runtime input.
+    """
+
     name: str
-    required: dict[str, frozenset[str]]
-    optional: dict[str, frozenset[str]]
-    forbidden: set[str]
-    role: str = "core"
+    required: Any
+    optional: Any
+    forbidden: frozenset[str]
+    role: str
 
 
-FIELD_TYPE_IDS = {
-    "text": {1},
-    "number": {2},
-    "select": {3, 4},
-    "date": {5},
-    "datetime": {5},
-    "json-text": {1},
-}
+def parse_docs_schema(path: Path = DOCS_SCHEMA) -> dict[str, TableSpec]:
+    """Return registry-backed specs without reading the legacy markdown path."""
+
+    del path
+    return {
+        table_name: TableSpec(
+            name=table_name,
+            required=MappingProxyType({
+                field.name: field
+                for field in table.fields
+                if field.schema_required
+            }),
+            optional=MappingProxyType({
+                field.name: field
+                for field in table.fields
+                if not field.schema_required
+            }),
+            forbidden=table.forbidden_fields,
+            role=table.role.value,
+        )
+        for table_name, table in TABLE_CONTRACTS.items()
+    }
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Inspect documented or live Feishu schema.")
+    parser = argparse.ArgumentParser(description="Inspect canonical or live Feishu schema.")
     parser.add_argument(
         "command",
         nargs="?",
@@ -51,18 +79,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--strict",
         action="store_true",
-        help="Exit non-zero when required live fields are missing or have incompatible types.",
+        help="exit non-zero when a configured table differs from the registry",
     )
     parser.add_argument(
         "--apply",
         action="store_true",
         help="create missing cash-flow effect fields; default is dry-run",
     )
-    parser.add_argument(
-        "--confirm",
-        action="store_true",
-        help="required with --apply",
-    )
+    parser.add_argument("--confirm", action="store_true", help="required with --apply")
     return parser.parse_args()
 
 
@@ -83,8 +107,9 @@ def main() -> int:
     return 0 if result.get("ok", result.get("success", True)) else 1
 
 
+_CASH_FLOW_BROKER = TABLE_CONTRACTS["cash_flow"].fields_by_name["broker"]
 CASH_FLOW_EFFECT_FIELD_DEFINITIONS = {
-    "broker": {"field_name": "broker", "type": 1},
+    "broker": {"field_name": "broker", "type": _CASH_FLOW_BROKER.type_id},
 }
 
 
@@ -157,127 +182,56 @@ def migrate_cash_flow_effect_fields(
     }
 
 
-def schema_expectations() -> dict:
-    specs = parse_docs_schema()
-    numeric_fields = {
-        "holdings": ["quantity", "avg_cost"],
-        "transactions": ["quantity", "price", "amount", "fee", "tax"],
-        "cash_flow": ["amount", "cny_amount", "exchange_rate"],
-        "nav_history": [
-            "total_value", "cash_value", "stock_value", "fund_value",
-            "cn_stock_value", "us_stock_value", "hk_stock_value",
-            "stock_weight", "cash_weight", "shares", "nav",
-            "cash_flow", "share_change", "mtd_nav_change",
-            "ytd_nav_change", "pnl", "mtd_pnl", "ytd_pnl",
-        ],
-        "holdings_snapshot": ["quantity", "avg_cost", "price", "cny_price", "market_value_cny"],
-        "compensation_tasks": ["retry_count"],
-    }
-    expects = {
-        table_name: {
-            "role": spec.role,
-            "required": sorted(spec.required),
-            "optional": sorted(spec.optional),
-            "forbidden": sorted(spec.forbidden),
-            "field_types": {
-                field_name: sorted(accepted)
-                for field_name, accepted in sorted({**spec.required, **spec.optional}.items())
+def schema_expectations() -> dict[str, Any]:
+    """Serialize the typed registry for operators and deterministic tests."""
+    tables: dict[str, Any] = {}
+    for table_name, table in TABLE_CONTRACTS.items():
+        required = [field.name for field in table.fields if field.schema_required]
+        optional = [field.name for field in table.fields if not field.schema_required]
+        tables[table_name] = {
+            "role": table.role.value,
+            "business_key": list(table.business_key),
+            "required": sorted(required),
+            "optional": sorted(optional),
+            "forbidden": sorted(table.forbidden_fields),
+            "numeric_fields": sorted(
+                field.name
+                for field in table.fields
+                if field.encoding is FieldEncoding.NUMBER
+            ),
+            "fields": {
+                field.name: {
+                    "type": field.type_id,
+                    "ui_type": field.ui_type,
+                    "encoding": field.encoding.value,
+                    "ownership": field.ownership.value,
+                    "schema_required": field.schema_required,
+                    "clearable": field.clearable,
+                    "select_options": list(field.select_options),
+                }
+                for field in table.fields
             },
-            "numeric_fields": numeric_fields.get(table_name, []),
+            "write_operations": {
+                contract.operation.value: {
+                    "required_fields": sorted(contract.required_fields),
+                    "allowed_fields": sorted(contract.allowed_fields),
+                }
+                for contract in table.write_contracts
+            },
         }
-        for table_name, spec in specs.items()
+    return {
+        "success": True,
+        "source": "src.feishu.contracts.TABLE_CONTRACTS",
+        "retired_remote_tables": sorted(RETIRED_REMOTE_TABLES),
+        "tables": tables,
     }
-    return {"success": True, "tables": expects}
 
 
-def _normalize_doc_type(raw_type: str) -> frozenset[str]:
-    accepted = []
-    for value in str(raw_type or "").lower().split("/"):
-        family = value.strip()
-        if family == "json":
-            family = "json-text"
-        if family:
-            accepted.append(family)
-    return frozenset(accepted)
-
-
-def parse_docs_schema(path: Path = DOCS_SCHEMA) -> dict[str, TableSpec]:
-    """Parse docs/schema.md into expected Feishu field names and type families."""
-    text = path.read_text(encoding="utf-8")
-    tables: dict[str, TableSpec] = {}
-    cur_table: str | None = None
-    mode: str | None = None
-    heading_re = re.compile(r"^###\s+([a-zA-Z0-9_]+)\s*$")
-
-    for line in text.splitlines():
-        heading = heading_re.match(line.strip())
-        if heading:
-            cur_table = heading.group(1)
-            tables[cur_table] = TableSpec(
-                name=cur_table,
-                required={},
-                optional={},
-                forbidden=set(),
-            )
-            mode = None
-            continue
-
-        if cur_table is None:
-            continue
-
-        lowered = line.strip().lower()
-        if lowered.startswith("role:"):
-            role = lowered.split(":", 1)[1].strip()
-            tables[cur_table].role = "optional" if role.startswith("optional") else "core"
-            mode = None
-            continue
-        if lowered.startswith("required fields"):
-            mode = "required"
-            continue
-        if lowered.startswith("optional fields"):
-            mode = "optional"
-            continue
-        if lowered.startswith("forbidden fields"):
-            mode = "forbidden"
-            continue
-
-        stripped = line.strip()
-        if stripped and not stripped.startswith("-"):
-            mode = None
-            continue
-
-        forbidden_field = re.match(r"^-\s+`([^`]+)`(?:\s+.*)?$", stripped)
-        if forbidden_field and mode == "forbidden":
-            tables[cur_table].forbidden.add(forbidden_field.group(1).strip())
-            continue
-
-        field = re.match(r"^-\s+`([^`]+)`\s+\(([^)]+)\)", stripped)
-        if field and mode in ("required", "optional"):
-            field_name = field.group(1).strip()
-            target = tables[cur_table].required if mode == "required" else tables[cur_table].optional
-            target[field_name] = _normalize_doc_type(field.group(2))
-
-    return tables
-
-
-def _live_field_matches(item: dict[str, Any], accepted: frozenset[str]) -> bool:
-    if not accepted:
-        return True
-    try:
-        type_id = int(item.get("type"))
-    except (TypeError, ValueError):
-        return False
-    ui_type = str(item.get("ui_type") or "").strip().lower()
-    for family in accepted:
-        if type_id not in FIELD_TYPE_IDS.get(family, set()):
-            continue
-        if family == "datetime" and ui_type != "datetime":
-            continue
-        return True
-    return False
-
-
-def _list_live_fields(client: FeishuClient, app_token: str, table_id: str) -> list[dict[str, Any]]:
+def _list_live_fields(
+    client: FeishuClient,
+    app_token: str,
+    table_id: str,
+) -> list[dict[str, Any]]:
     endpoint = f"/bitable/v1/apps/{app_token}/tables/{table_id}/fields"
     items: list[dict[str, Any]] = []
     page_token: str | None = None
@@ -301,101 +255,77 @@ def _list_live_fields(client: FeishuClient, app_token: str, table_id: str) -> li
 
 
 def run_schema_check(strict: bool = False) -> dict[str, Any]:
+    """Read live field metadata and compare configured tables with the registry."""
     if not DOCS_SCHEMA.exists():
         raise SystemExit(f"docs/schema.md not found: {DOCS_SCHEMA}")
 
-    specs = parse_docs_schema(DOCS_SCHEMA)
     client = FeishuClient()
-
     report: dict[str, Any] = {
         "schema_doc": str(DOCS_SCHEMA),
+        "contract_source": "src.feishu.contracts.TABLE_CONTRACTS",
         "tables": {},
-        "all_ok": True,
+        "configured_ok": True,
         "core_ok": True,
+        "complete": True,
+        "all_ok": True,
         "ok": True,
     }
 
-    for table_name, spec in specs.items():
-        blocking = spec.role == "core"
+    for table_name, table in TABLE_CONTRACTS.items():
+        blocking = table.role is TableRole.CORE
         try:
             app_token, table_id = client._get_table_config(table_name)
-        except Exception as e:
+        except ValueError as exc:
+            if table.role is TableRole.OPTIONAL:
+                report["tables"][table_name] = {
+                    "configured": False,
+                    "role": table.role.value,
+                    "blocking": False,
+                    "status": "skipped_unconfigured",
+                    "error": str(exc),
+                    "ok": None,
+                }
+                report["complete"] = False
+                report["all_ok"] = False
+                continue
             report["tables"][table_name] = {
                 "configured": False,
-                "role": spec.role,
-                "blocking": blocking,
-                "error": str(e),
-                "required": sorted(spec.required),
-                "optional": sorted(spec.optional),
-                "forbidden": sorted(spec.forbidden),
-                "ok": not blocking,
+                "role": table.role.value,
+                "blocking": True,
+                "status": "failed",
+                "error": str(exc),
+                "ok": False,
             }
+            report["configured_ok"] = False
+            report["core_ok"] = False
             report["all_ok"] = False
-            if blocking:
-                report["core_ok"] = False
-                report["ok"] = False
             continue
 
         items = _list_live_fields(client, app_token, table_id)
-        live_by_name = {
-            str(item.get("field_name")): item
-            for item in items
-            if item.get("field_name")
-        }
-        live_fields = set(live_by_name)
-
-        missing_required = sorted(set(spec.required) - live_fields)
-        forbidden_present = sorted(spec.forbidden & live_fields)
-        extra_fields = sorted(live_fields - (set(spec.required) | set(spec.optional)))
-        required_type_mismatches = [
-            {
-                "field_name": field_name,
-                "expected": sorted(accepted),
-                "live_type": live_by_name[field_name].get("type"),
-                "live_ui_type": live_by_name[field_name].get("ui_type"),
-            }
-            for field_name, accepted in sorted(spec.required.items())
-            if field_name in live_by_name and not _live_field_matches(live_by_name[field_name], accepted)
-        ]
-        optional_type_mismatches = [
-            {
-                "field_name": field_name,
-                "expected": sorted(accepted),
-                "live_type": live_by_name[field_name].get("type"),
-                "live_ui_type": live_by_name[field_name].get("ui_type"),
-            }
-            for field_name, accepted in sorted(spec.optional.items())
-            if field_name in live_by_name and not _live_field_matches(live_by_name[field_name], accepted)
-        ]
-        ok = (
-            not missing_required
-            and not forbidden_present
-            and (not strict or not required_type_mismatches)
-        )
-
+        comparison = compare_live_schema(table, items)
+        status = "passed" if comparison["ok"] else "failed"
         report["tables"][table_name] = {
             "app_token": app_token,
             "table_id": table_id,
-            "role": spec.role,
+            "configured": True,
+            "role": table.role.value,
             "blocking": blocking,
-            "required": sorted(spec.required),
-            "optional": sorted(spec.optional),
-            "forbidden": sorted(spec.forbidden),
-            "live_fields": sorted(live_fields),
-            "missing_required": missing_required,
-            "forbidden_present": forbidden_present,
-            "extra_fields": extra_fields,
-            "required_type_mismatches": required_type_mismatches,
-            "optional_type_mismatches": optional_type_mismatches,
-            "ok": ok,
+            "status": status,
+            "live_fields": sorted(
+                str(item.get("field_name"))
+                for item in items
+                if item.get("field_name")
+            ),
+            **comparison,
         }
-
-        if not ok:
+        if not comparison["ok"]:
+            report["configured_ok"] = False
             report["all_ok"] = False
             if blocking:
                 report["core_ok"] = False
-                report["ok"] = False
 
+    report["ok"] = report["configured_ok"]
+    report["all_ok"] = bool(report["all_ok"] and report["complete"])
     if strict and not report["ok"]:
         raise SystemExit(2)
     return report

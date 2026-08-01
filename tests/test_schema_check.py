@@ -1,149 +1,209 @@
+from __future__ import annotations
+
 from pathlib import Path
 
 import pytest
 
 from scripts import migrate_schema
+from src.feishu.contracts import TABLE_CONTRACTS
 
 
-SCHEMA_TEXT = """# Test schema
-
-### holdings
-
-Role: core
-
-Required fields:
-- `asset_id` (text) - system
-- `quantity` (number) - system
-
-Optional fields:
-- `updated_at` (text/datetime) - system
-- `details` (text/json) - system
-"""
+def _live_field(field):
+    item = {
+        "field_name": field.name,
+        "type": field.type_id,
+        "ui_type": field.ui_type,
+    }
+    if field.select_options:
+        item["property"] = {
+            "options": [{"name": value} for value in field.select_options]
+        }
+    return item
 
 
-def test_typed_schema_check_reads_all_pages_and_accepts_documented_alternatives(tmp_path, monkeypatch):
-    schema_path = tmp_path / "schema.md"
-    schema_path.write_text(SCHEMA_TEXT, encoding="utf-8")
+def _live_table(table_name: str, *, omit: set[str] | None = None):
+    omitted = omit or set()
+    return [
+        _live_field(field)
+        for field in TABLE_CONTRACTS[table_name].fields
+        if field.name not in omitted
+    ]
 
-    class FakeClient:
-        def __init__(self):
-            self.calls = []
 
-        def _get_table_config(self, table_name):
-            assert table_name == "holdings"
-            return "base", "tbl"
+class FakeSchemaClient:
+    def __init__(
+        self,
+        *,
+        configured: set[str],
+        overrides: dict[str, list[dict]] | None = None,
+        paginate: str | None = None,
+    ):
+        self.configured = set(configured)
+        self.overrides = overrides or {}
+        self.paginate = paginate
+        self.calls = []
 
-        def _request(self, method, endpoint, **kwargs):
-            self.calls.append(kwargs["params"])
-            if "page_token" not in kwargs["params"]:
+    def _get_table_config(self, table_name):
+        if table_name not in self.configured:
+            raise ValueError(f"unconfigured: {table_name}")
+        return "base", table_name
+
+    def _request(self, method, endpoint, **kwargs):
+        assert method == "GET"
+        table_name = endpoint.split("/tables/", 1)[1].split("/", 1)[0]
+        params = kwargs["params"]
+        self.calls.append((table_name, dict(params)))
+        items = self.overrides.get(table_name, _live_table(table_name))
+        if self.paginate == table_name:
+            split_at = max(1, len(items) // 2)
+            if "page_token" not in params:
                 return {
-                    "items": [{"field_name": "asset_id", "type": 1, "ui_type": "Text"}],
+                    "items": items[:split_at],
                     "has_more": True,
                     "page_token": "next",
                 }
-            return {
-                "items": [
-                    {"field_name": "quantity", "type": 2, "ui_type": "Number"},
-                    {"field_name": "updated_at", "type": 5, "ui_type": "DateTime"},
-                    {"field_name": "details", "type": 1, "ui_type": "Text"},
-                ],
-                "has_more": False,
-            }
+            return {"items": items[split_at:], "has_more": False}
+        return {"items": items, "has_more": False}
 
-    client = FakeClient()
-    monkeypatch.setattr(migrate_schema, "DOCS_SCHEMA", schema_path)
+
+def _core_tables() -> set[str]:
+    return {
+        name
+        for name, table in TABLE_CONTRACTS.items()
+        if table.role.value == "core"
+    }
+
+
+def test_exact_schema_check_reads_all_pages_and_marks_optional_unconfigured(monkeypatch):
+    client = FakeSchemaClient(configured=_core_tables(), paginate="holdings")
     monkeypatch.setattr(migrate_schema, "FeishuClient", lambda: client)
 
     result = migrate_schema.run_schema_check(strict=True)
 
     assert result["ok"] is True
-    assert result["tables"]["holdings"]["required_type_mismatches"] == []
-    assert result["tables"]["holdings"]["optional_type_mismatches"] == []
-    assert client.calls == [{"page_size": 200}, {"page_size": 200, "page_token": "next"}]
+    assert result["core_ok"] is True
+    assert result["complete"] is False
+    assert result["all_ok"] is False
+    assert result["tables"]["holdings"]["field_mismatches"] == []
+    assert result["tables"]["transactions"] == {
+        "configured": False,
+        "role": "optional",
+        "blocking": False,
+        "status": "skipped_unconfigured",
+        "error": "unconfigured: transactions",
+        "ok": None,
+    }
+    holding_calls = [params for name, params in client.calls if name == "holdings"]
+    assert holding_calls == [
+        {"page_size": 200},
+        {"page_size": 200, "page_token": "next"},
+    ]
 
 
-def test_strict_schema_check_rejects_required_type_mismatch(tmp_path, monkeypatch):
-    schema_path = tmp_path / "schema.md"
-    schema_path.write_text(SCHEMA_TEXT, encoding="utf-8")
-
-    class FakeClient:
-        def _get_table_config(self, _table_name):
-            return "base", "tbl"
-
-        def _request(self, _method, _endpoint, **_kwargs):
-            return {
-                "items": [
-                    {"field_name": "asset_id", "type": 1, "ui_type": "Text"},
-                    {"field_name": "quantity", "type": 1, "ui_type": "Text"},
-                ],
-                "has_more": False,
-            }
-
-    monkeypatch.setattr(migrate_schema, "DOCS_SCHEMA", schema_path)
-    monkeypatch.setattr(migrate_schema, "FeishuClient", FakeClient)
-
-    non_strict = migrate_schema.run_schema_check(strict=False)
-    mismatch = non_strict["tables"]["holdings"]["required_type_mismatches"]
-    assert mismatch == [{
-        "field_name": "quantity",
-        "expected": ["number"],
-        "live_type": 1,
-        "live_ui_type": "Text",
-    }]
-    assert non_strict["ok"] is True
-
-    with pytest.raises(SystemExit) as exc_info:
-        migrate_schema.run_schema_check(strict=True)
-    assert exc_info.value.code == 2
-
-
-def test_parse_docs_schema_normalizes_json_text_family(tmp_path):
-    schema_path = Path(tmp_path) / "schema.md"
-    schema_path.write_text(SCHEMA_TEXT, encoding="utf-8")
-
-    spec = migrate_schema.parse_docs_schema(schema_path)["holdings"]
-
-    assert spec.required["asset_id"] == frozenset({"text"})
-    assert spec.optional["updated_at"] == frozenset({"text", "datetime"})
-    assert spec.optional["details"] == frozenset({"text", "json-text"})
-
-
-def test_schema_check_rejects_forbidden_fields(tmp_path, monkeypatch):
-    schema_path = tmp_path / "schema.md"
-    schema_path.write_text(
-        SCHEMA_TEXT
-        + """
-Forbidden fields:
-- `exchange_rate_source`
-""",
-        encoding="utf-8",
+def test_schema_check_reports_exact_type_ui_and_select_option_drift(monkeypatch):
+    holdings = _live_table("holdings")
+    for item in holdings:
+        if item["field_name"] == "quantity":
+            item["type"] = 1
+            item["ui_type"] = "Text"
+        if item["field_name"] == "industry":
+            item["property"]["options"] = [{"name": "其他"}]
+    client = FakeSchemaClient(
+        configured=_core_tables(),
+        overrides={"holdings": holdings},
     )
-
-    class FakeClient:
-        def _get_table_config(self, _table_name):
-            return "base", "tbl"
-
-        def _request(self, _method, _endpoint, **_kwargs):
-            return {
-                "items": [
-                    {"field_name": "asset_id", "type": 1},
-                    {"field_name": "quantity", "type": 2},
-                    {"field_name": "exchange_rate_source", "type": 1},
-                ],
-                "has_more": False,
-            }
-
-    monkeypatch.setattr(migrate_schema, "DOCS_SCHEMA", schema_path)
-    monkeypatch.setattr(migrate_schema, "FeishuClient", FakeClient)
+    monkeypatch.setattr(migrate_schema, "FeishuClient", lambda: client)
 
     result = migrate_schema.run_schema_check(strict=False)
+
     assert result["ok"] is False
-    assert result["tables"]["holdings"]["forbidden_present"] == [
-        "exchange_rate_source"
-    ]
+    mismatches = {
+        item["field_name"]: item
+        for item in result["tables"]["holdings"]["field_mismatches"]
+    }
+    assert mismatches["quantity"]["expected_type"] == 2
+    assert mismatches["quantity"]["live_type"] == 1
+    assert mismatches["industry"]["live_select_options"] == ["其他"]
+
     with pytest.raises(SystemExit) as exc_info:
         migrate_schema.run_schema_check(strict=True)
     assert exc_info.value.code == 2
+
+
+def test_configured_transaction_archive_uses_observed_text_contract(monkeypatch):
+    configured = _core_tables() | {"transactions"}
+    client = FakeSchemaClient(configured=configured)
+    monkeypatch.setattr(migrate_schema, "FeishuClient", lambda: client)
+
+    result = migrate_schema.run_schema_check(strict=True)
+
+    transaction = result["tables"]["transactions"]
+    assert transaction["status"] == "passed"
+    assert transaction["ok"] is True
+    assert transaction["field_mismatches"] == []
+    assert result["tables"]["compensation_tasks"]["status"] == "skipped_unconfigured"
+
+
+def test_schema_check_rejects_forbidden_and_extra_fields(monkeypatch):
+    cash_flow = _live_table("cash_flow") + [
+        {"field_name": "exchange_rate_source", "type": 1, "ui_type": "Text"},
+        {"field_name": "unexpected", "type": 1, "ui_type": "Text"},
+    ]
+    client = FakeSchemaClient(
+        configured=_core_tables(),
+        overrides={"cash_flow": cash_flow},
+    )
+    monkeypatch.setattr(migrate_schema, "FeishuClient", lambda: client)
+
+    result = migrate_schema.run_schema_check(strict=False)
+
+    table = result["tables"]["cash_flow"]
+    assert table["forbidden_present"] == ["exchange_rate_source"]
+    assert table["extra_fields"] == ["exchange_rate_source", "unexpected"]
+    assert table["ok"] is False
+
+
+def test_optional_missing_fields_are_reported_without_failing(monkeypatch):
+    client = FakeSchemaClient(
+        configured=_core_tables(),
+        overrides={
+            "cash_flow": _live_table("cash_flow", omit={"updated_at"}),
+            "nav_history": _live_table("nav_history", omit={"updated_at"}),
+        },
+    )
+    monkeypatch.setattr(migrate_schema, "FeishuClient", lambda: client)
+
+    result = migrate_schema.run_schema_check(strict=True)
+
+    assert result["ok"] is True
+    assert result["tables"]["cash_flow"]["missing_optional"] == ["updated_at"]
+    assert result["tables"]["nav_history"]["missing_optional"] == ["updated_at"]
+
+
+def test_schema_expectations_come_from_registry_not_document_prose(tmp_path, monkeypatch):
+    schema_path = Path(tmp_path) / "schema.md"
+    schema_path.write_text("not a schema definition", encoding="utf-8")
+    monkeypatch.setattr(migrate_schema, "DOCS_SCHEMA", schema_path)
+
+    result = migrate_schema.schema_expectations()
+
+    assert result["source"] == "src.feishu.contracts.TABLE_CONTRACTS"
+    assert result["tables"]["holdings"]["fields"]["asset_type"] == {
+        "type": 3,
+        "ui_type": "SingleSelect",
+        "encoding": "single_select",
+        "ownership": "manual",
+        "schema_required": True,
+        "clearable": False,
+        "select_options": list(
+            TABLE_CONTRACTS["holdings"].fields_by_name["asset_type"].select_options
+        ),
+    }
+
+    compatibility = migrate_schema.parse_docs_schema(schema_path)
+    assert set(compatibility) == set(TABLE_CONTRACTS)
+    assert "flow_type" in compatibility["cash_flow"].required
+    assert compatibility["cash_flow"].forbidden == TABLE_CONTRACTS["cash_flow"].forbidden_fields
 
 
 def test_cash_flow_effect_schema_migration_is_dry_run_then_confirmed_apply():
@@ -157,11 +217,7 @@ def test_cash_flow_effect_schema_migration_is_dry_run_then_confirmed_apply():
 
         def _request(self, method, endpoint, **kwargs):
             if method == "GET":
-                return {
-                    "items": [
-                    ],
-                    "has_more": False,
-                }
+                return {"items": [], "has_more": False}
             self.created.append(kwargs["json"])
             return {"field_id": f"fld{len(self.created)}"}
 

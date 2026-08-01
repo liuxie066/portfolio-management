@@ -12,6 +12,13 @@ from typing import Dict, List, Optional, Any, Union
 from datetime import datetime
 
 from src import config
+from src.feishu.contracts import (
+    ACTIVE_REMOTE_TABLES,
+    WriteOperation,
+    parse_table_ref,
+    validate_write_fields,
+)
+from src.feishu.errors import FeishuRecordNotFoundError
 
 
 class FeishuBatchWriteError(RuntimeError):
@@ -72,22 +79,18 @@ class FeishuClient:
         # 方式1（统一base）：FEISHU_APP_TOKEN=bascnxxx + FEISHU_TABLE_HOLDINGS=tblxxx
         # 方式2（分表base）：FEISHU_TABLE_HOLDINGS=bascnxxx/tblxxx
         self.table_configs = {}
-        for table_name in ['holdings', 'transactions', 'price_cache', 'nav_history', 'cash_flow', 'holdings_snapshot', 'compensation_tasks', 'schema_version']:
+        for table_name in ACTIVE_REMOTE_TABLES:
             value = config.get(f"feishu.tables.{table_name}")
             if value:
-                if '/' in value:
-                    # 分表base配置: bascnxxx/tblxxx
-                    parts = value.split('/')
-                    self.table_configs[table_name] = {
-                        'app_token': parts[0],
-                        'table_id': parts[1] if len(parts) > 1 else value
-                    }
-                else:
-                    # 统一base配置，table_id单独存储
-                    self.table_configs[table_name] = {
-                        'app_token': None,  # 使用统一的 FEISHU_APP_TOKEN
-                        'table_id': value
-                    }
+                app_token, table_id = parse_table_ref(
+                    value,
+                    table_name=table_name,
+                    require_app_token=False,
+                )
+                self.table_configs[table_name] = {
+                    'app_token': app_token,
+                    'table_id': table_id,
+                }
 
         # 统一 base token（方式1使用，方式2中各表有自己的）
         self.default_app_token = config.get("feishu.app_token")
@@ -187,13 +190,38 @@ class FeishuClient:
             time.sleep(1 * (2 ** _retry_count))  # 指数退避
             return self._request(method, endpoint, _retry_count=_retry_count + 1, **kwargs)
 
-        response.raise_for_status()
-        data = response.json()
+        try:
+            data = response.json()
+        except (TypeError, ValueError) as exc:
+            response.raise_for_status()
+            raise RuntimeError("Feishu API returned a non-JSON response") from exc
 
-        if data.get('code') != 0:
+        if not isinstance(data, dict):
+            response.raise_for_status()
+            raise RuntimeError(f"Feishu API returned an invalid response object: {data!r}")
+
+        if 'code' not in data:
+            response.raise_for_status()
+            raise RuntimeError("Feishu API response is missing code")
+        raw_code = data['code']
+        if type(raw_code) is not int:
+            response.raise_for_status()
+            raise RuntimeError(f"Feishu API response has invalid code: {raw_code!r}")
+        code = raw_code
+        if code == 1254043:
+            raise FeishuRecordNotFoundError(
+                code=code,
+                message=str(data.get('msg') or 'RecordIdNotFound'),
+            )
+
+        response.raise_for_status()
+
+        if code != 0:
             raise Exception(f"飞书 API 错误: {data.get('msg')} (code={data.get('code')})")
 
-        return data.get('data', {})
+        if 'data' not in data or not isinstance(data['data'], dict):
+            raise RuntimeError(f"Feishu API success response has invalid data: {data.get('data')!r}")
+        return data['data']
 
     def _get_table_config(self, table_name: str) -> tuple:
         """获取表的配置 (app_token, table_id)"""
@@ -383,17 +411,6 @@ class FeishuClient:
             }
         raise ValueError(f"Unexpected get_record response shape for table={table_name}: {data}")
 
-    # 各表必填字段定义（用于验证）
-    REQUIRED_FIELDS = {
-        'holdings': ['asset_id', 'account', 'quantity'],
-        'transactions': ['tx_date', 'tx_type', 'asset_id', 'account', 'quantity', 'price'],
-        'cash_flow': ['flow_date', 'account', 'amount', 'currency'],
-        'nav_history': ['date', 'account', 'total_value', 'shares', 'nav'],
-        'price_cache': ['asset_id', 'price', 'currency', 'cny_price'],
-        # Per-NAV-date holdings snapshot for audit/repro.
-        'holdings_snapshot': ['as_of', 'account', 'asset_id', 'broker', 'quantity', 'currency', 'price', 'cny_price', 'market_value_cny', 'dedup_key'],
-    }
-
     def create_record(self, table_name: str, fields: Dict[str, Any]) -> Dict:
         """
         创建记录
@@ -402,13 +419,8 @@ class FeishuClient:
             table_name: 表名
             fields: 字段值字典
         """
+        validate_write_fields(table_name, WriteOperation.CREATE, fields)
         app_token, table_id = self._get_table_config(table_name)
-
-        # 验证必填字段
-        required = self.REQUIRED_FIELDS.get(table_name, [])
-        for field in required:
-            if field not in fields or fields[field] is None or fields[field] == '':
-                raise ValueError(f"表 {table_name} 缺少必填字段: {field}")
 
         # 过滤空值字段（避免创建空记录）
         filtered_fields = {k: v for k, v in fields.items() if v is not None and v != ''}
@@ -423,6 +435,7 @@ class FeishuClient:
 
     def update_record(self, table_name: str, record_id: str, fields: Dict[str, Any]) -> Dict:
         """更新记录"""
+        validate_write_fields(table_name, WriteOperation.UPDATE, fields)
         app_token, table_id = self._get_table_config(table_name)
 
         endpoint = f"/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}"
@@ -435,6 +448,7 @@ class FeishuClient:
 
     def delete_record(self, table_name: str, record_id: str) -> bool:
         """删除记录"""
+        validate_write_fields(table_name, WriteOperation.DELETE, {})
         app_token, table_id = self._get_table_config(table_name)
 
         endpoint = f"/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}"
@@ -552,6 +566,19 @@ class FeishuClient:
         if not records:
             return []
 
+        for row_index, record in enumerate(records):
+            if not isinstance(record, dict) or not isinstance(record.get('fields'), dict):
+                raise ValueError(
+                    f"table={table_name} operation=create row_index={row_index}: "
+                    "record.fields must be an object"
+                )
+            validate_write_fields(
+                table_name,
+                WriteOperation.CREATE,
+                record['fields'],
+                row_index=row_index,
+            )
+
         app_token, table_id = self._get_table_config(table_name)
 
         endpoint = f"/bitable/v1/apps/{app_token}/tables/{table_id}/records/batch_create"
@@ -586,6 +613,18 @@ class FeishuClient:
         record_ids = [str(record.get('record_id') or '').strip() for record in records]
         if any(not record_id for record_id in record_ids) or len(set(record_ids)) != len(record_ids):
             raise ValueError("batch update requires unique non-empty record_id values")
+        for row_index, record in enumerate(records):
+            if not isinstance(record, dict) or not isinstance(record.get('fields'), dict):
+                raise ValueError(
+                    f"table={table_name} operation=update row_index={row_index}: "
+                    "record.fields must be an object"
+                )
+            validate_write_fields(
+                table_name,
+                WriteOperation.UPDATE,
+                record['fields'],
+                row_index=row_index,
+            )
 
         app_token, table_id = self._get_table_config(table_name)
 
@@ -620,6 +659,8 @@ class FeishuClient:
         """
         if not record_ids:
             return 0
+
+        validate_write_fields(table_name, WriteOperation.DELETE, {})
 
         app_token, table_id = self._get_table_config(table_name)
 

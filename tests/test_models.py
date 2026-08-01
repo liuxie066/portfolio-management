@@ -53,6 +53,7 @@ class TestIndustry:
     """测试行业分类枚举"""
 
     def test_industry_values(self):
+        assert Industry.AI.value == "AI"
         """测试行业分类枚举值"""
         assert Industry.ZHONGGAI.value == "中概"
         assert Industry.CONSUMPTION.value == "消费"
