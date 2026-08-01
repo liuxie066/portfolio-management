@@ -230,25 +230,28 @@ class Transaction(BaseModel):
 
 
 class CashFlow(BaseModel):
-    """出入金记录
+    """出入金记录输运对象。
 
-    防重机制: dedup_key（内容指纹自动生成）
+    读取边界必须保留缺失状态，因此原始字段都允许 ``None``。
+    业务代码不应直接把本模型当作可写或可聚合事实；应先通过
+    ``CompletedCashFlowFacts`` 完成领域校验。
     """
     record_id: Optional[str] = None
     _was_replayed: bool = PrivateAttr(default=False)
     dedup_key: Optional[str] = Field(None, description="内容指纹，自动生成")
 
     # 核心字段
-    flow_date: date = Field(..., description="日期")
-    account: str = Field(..., description="账户")
-    broker: str = Field("", description="券商（现金目标的必选路由）")
-    amount: float = Field(..., description="金额(正数入金,负数出金)")
-    currency: str = Field(..., description="币种")
+    flow_date: Optional[date] = Field(None, description="日期")
+    account: Optional[str] = Field(None, description="账户")
+    broker: Optional[str] = Field(None, description="券商（现金目标的必选路由）")
+    amount: Optional[float] = Field(None, description="金额(正数入金,负数出金)")
+    currency: Optional[str] = Field(None, description="币种")
     cny_amount: Optional[float] = None
     exchange_rate: Optional[float] = None
-    flow_type: str = Field(..., description="DEPOSIT/WITHDRAW")
+    flow_type: Optional[str] = Field(None, description="DEPOSIT/WITHDRAW")
     source: Optional[str] = None
     remark: Optional[str] = None
+    updated_at: Optional[Any] = None
 
     @field_validator('amount', 'cny_amount', mode='before')
     @classmethod
@@ -461,5 +464,15 @@ def make_cf_dedup_key(cf: CashFlow) -> str:
     基于 (account, broker, flow_date, flow_type, amount, currency) 生成 SHA256 前16位。
     同一天、同金额、同币种的出入金会生成相同的 key。
     """
-    raw = f"{cf.account}|{cf.broker}|{cf.flow_date}|{cf.flow_type}|{cf.amount}|{cf.currency}"
-    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+    from src.domain.cash_flow_contracts import (
+        expected_cash_flow_dedup_key_from_values,
+    )
+
+    return expected_cash_flow_dedup_key_from_values(
+        flow_date=cf.flow_date,
+        account=cf.account,
+        broker=cf.broker,
+        amount=cf.amount,
+        currency=cf.currency,
+        flow_type=cf.flow_type,
+    )

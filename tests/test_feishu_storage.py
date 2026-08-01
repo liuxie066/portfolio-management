@@ -1,5 +1,6 @@
 """测试飞书存储层"""
 import pytest
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from unittest.mock import Mock, patch, MagicMock
 import json
@@ -7,6 +8,10 @@ import json
 from src.feishu_storage import FeishuStorage
 from src.feishu.errors import FeishuRecordNotFoundError
 from src.feishu.contracts import TABLE_CONTRACTS, FieldEncoding
+from src.domain.cash_flow_contracts import (
+    CashFlowContractError,
+    CompletedCashFlowFacts,
+)
 from src.domain.holding_mutations import (
     HoldingMutationConflictError,
     HoldingMutationProofError,
@@ -22,6 +27,33 @@ def _assert_canonical_holding_date(value):
     assert isinstance(value, str)
     parsed = datetime.strptime(value, '%Y/%m/%d')
     assert parsed.strftime('%Y/%m/%d') == value
+
+
+def _completed_cash_flow(
+    *,
+    amount=100,
+    flow_date=date(2025, 3, 14),
+    account='测试账户',
+    broker='华泰',
+    currency='CNY',
+    exchange_rate=None,
+    source='test',
+    record_id='',
+):
+    rate = exchange_rate
+    if rate is None:
+        rate = 1 if currency == 'CNY' else 7.2
+    return CompletedCashFlowFacts.build(
+        flow_date=flow_date,
+        account=account,
+        broker=broker,
+        amount=amount,
+        currency=currency,
+        exchange_rate=rate,
+        cny_amount=float(amount) * float(rate),
+        source=source,
+        record_id=record_id,
+    )
 
 
 class TestFeishuStorageInitialization:
@@ -957,34 +989,171 @@ class TestFeishuStorageCashFlowOperations:
             'record_id': 'cf_rec_123',
             'fields': {}
         }
-
-        cf = CashFlow(
-            flow_date=date(2025, 3, 14),
-            account='测试账户',
-            amount=100000,
-            currency='CNY',
-            cny_amount=100000,
-            flow_type='DEPOSIT'
+        self.storage._cash_flow_agg_loaded_accounts.add('测试账户')
+        self.storage._local_cash_flow_agg_cache.set_account(
+            '测试账户',
+            {'cumulative': 0.0, 'flow_count': 0},
         )
+
+        cf = _completed_cash_flow(amount=100000)
 
         result = self.storage.add_cash_flow(cf)
 
         assert result.record_id == 'cf_rec_123'
+        assert self.storage.get_cash_flow_aggs('测试账户')['cumulative'] == 100000.0
 
     def test_add_cash_flow_raises_when_dedup_key_field_missing(self):
         self.mock_client.list_records.side_effect = Exception('FieldNameNotFound')
 
-        cf = CashFlow(
-            flow_date=date(2025, 3, 14),
-            account='测试账户',
-            amount=100000,
-            currency='CNY',
-            cny_amount=100000,
-            flow_type='DEPOSIT'
-        )
+        cf = _completed_cash_flow(amount=100000)
 
         with pytest.raises(ValueError, match='缺少 dedup_key 字段'):
             self.storage.add_cash_flow(cf)
+
+    def test_add_cash_flow_rejects_transport_model_before_any_write(self):
+        transport = CashFlow(
+            flow_date=date(2025, 3, 14),
+            account='测试账户',
+            broker='华泰',
+            amount=100,
+            currency='CNY',
+        )
+
+        with pytest.raises(TypeError, match='CompletedCashFlowFacts'):
+            self.storage.add_cash_flow(transport)
+
+        self.mock_client.list_records.assert_not_called()
+        self.mock_client.create_record.assert_not_called()
+
+    def test_add_incomplete_foreign_facts_does_not_write_or_update_cache(self):
+        complete = _completed_cash_flow(
+            amount=10,
+            currency='USD',
+            exchange_rate=7.2,
+        )
+        incomplete = replace(
+            complete,
+            cny_amount=None,
+            exchange_rate=None,
+        )
+        self.storage._cash_flow_agg_loaded_accounts.add('测试账户')
+        self.storage._cash_flow_agg_mem_cache['测试账户'] = {
+            'cumulative': 100.0,
+        }
+
+        with pytest.raises(CashFlowContractError):
+            self.storage.add_cash_flow(incomplete)
+
+        self.mock_client.list_records.assert_not_called()
+        self.mock_client.create_record.assert_not_called()
+        assert self.storage._cash_flow_agg_mem_cache['测试账户'] == {
+            'cumulative': 100.0,
+        }
+
+    def test_add_invalidates_unloaded_disk_aggregate_instead_of_partial_append(self):
+        self.mock_client.list_records.return_value = []
+        self.mock_client.create_record.return_value = {
+            'record_id': 'cf_rec_123',
+            'fields': {},
+        }
+        self.storage._local_cash_flow_agg_cache.set_account(
+            '测试账户',
+            {'cumulative': 100.0, 'flow_count': 1},
+        )
+
+        self.storage.add_cash_flow(_completed_cash_flow(amount=50))
+
+        assert '测试账户' not in self.storage._cash_flow_agg_loaded_accounts
+        assert self.storage._local_cash_flow_agg_cache.get_account('测试账户') == {}
+
+    def test_add_cash_flow_rechecks_stale_dedup_cache_before_replay(self):
+        requested = _completed_cash_flow(amount=100)
+        changed = _completed_cash_flow(amount=200, record_id='cf_changed')
+        matching = requested.with_record_id('cf_matching')
+        records = {
+            'cf_changed': {
+                'record_id': 'cf_changed',
+                'fields': changed.to_fields(),
+            },
+            'cf_matching': {
+                'record_id': 'cf_matching',
+                'fields': matching.to_fields(),
+            },
+        }
+        self.storage._dedup_key_cache[
+            f'cash_flow:{requested.dedup_key}'
+        ] = 'cf_changed'
+        self.mock_client.get_record_strict.side_effect = (
+            lambda _table, record_id: records[record_id]
+        )
+        self.mock_client.list_records.return_value = [records['cf_matching']]
+
+        result = self.storage.add_cash_flow(requested)
+
+        assert result.record_id == 'cf_matching'
+        assert result.dedup_key == requested.dedup_key
+        assert result.amount == 100.0
+        assert result.was_replayed is True
+        assert self.storage._dedup_key_cache[
+            f'cash_flow:{requested.dedup_key}'
+        ] == 'cf_matching'
+        self.mock_client.list_records.assert_called_once()
+        self.mock_client.create_record.assert_not_called()
+
+    def test_add_cash_flow_creates_after_stale_dedup_cache_has_no_fresh_match(self):
+        requested = _completed_cash_flow(amount=100)
+        changed = _completed_cash_flow(amount=200, record_id='cf_changed')
+        stale_record = {
+            'record_id': 'cf_changed',
+            'fields': changed.to_fields(),
+        }
+        self.storage._dedup_key_cache[
+            f'cash_flow:{requested.dedup_key}'
+        ] = 'cf_changed'
+        self.mock_client.get_record_strict.return_value = stale_record
+        self.mock_client.list_records.return_value = []
+        self.mock_client.create_record.return_value = {
+            'record_id': 'cf_created',
+            'fields': requested.to_fields(),
+        }
+
+        result = self.storage.add_cash_flow(requested)
+
+        assert result.record_id == 'cf_created'
+        assert result.dedup_key == requested.dedup_key
+        assert result.was_replayed is False
+        self.mock_client.list_records.assert_called_once()
+        self.mock_client.create_record.assert_called_once()
+
+    def test_add_cash_flow_hot_cache_uses_decimal_aggregate_semantics(self):
+        self.mock_client.list_records.return_value = []
+        self.mock_client.create_record.return_value = {
+            'record_id': 'cf_created',
+            'fields': {},
+        }
+        cache_payload = {
+            'account': '测试账户',
+            'daily': {'2025-03-14': 0.1},
+            'monthly': {'2025-03': 0.1},
+            'yearly': {'2025': 0.1},
+            'cumulative': 0.1,
+            'flow_count': 1,
+            'flows': [],
+        }
+        self.storage._cash_flow_agg_loaded_accounts.add('测试账户')
+        self.storage._cash_flow_agg_mem_cache['测试账户'] = cache_payload
+        self.storage._local_cash_flow_agg_cache.set_account(
+            '测试账户',
+            cache_payload,
+        )
+
+        self.storage.add_cash_flow(_completed_cash_flow(amount='0.20'))
+
+        aggregate = self.storage.get_cash_flow_aggs('测试账户')
+        assert aggregate['daily']['2025-03-14'] == 0.3
+        assert aggregate['monthly']['2025-03'] == 0.3
+        assert aggregate['yearly']['2025'] == 0.3
+        assert aggregate['cumulative'] == 0.3
 
     def test_get_cash_flow(self):
         """测试获取单条出入金记录"""
@@ -993,7 +1162,6 @@ class TestFeishuStorageCashFlowOperations:
             'fields': {
                 'flow_date': '2025-03-14',
                 'amount': '100000',
-                'currency': 'CNY'
             }
         }
 
@@ -1001,6 +1169,31 @@ class TestFeishuStorageCashFlowOperations:
 
         assert result is not None
         assert result.amount == 100000.0
+        assert result.currency is None
+        assert result.flow_type is None
+        assert result.dedup_key is None
+        assert result.source is None
+
+    def test_get_cash_flow_preserves_observed_dedup_and_digest_fields(self):
+        facts = _completed_cash_flow(
+            amount=100,
+            source='bank-import',
+            record_id='cf_rec',
+        )
+        fields = facts.to_fields()
+        fields['remark'] = 'observed memo'
+        fields['updated_at'] = '2025-03-14 09:30:00'
+        self.mock_client.get_record_strict.return_value = {
+            'record_id': 'cf_rec',
+            'fields': fields,
+        }
+
+        result = self.storage.get_cash_flow('cf_rec')
+
+        assert result.dedup_key == facts.dedup_key
+        assert result.source == 'bank-import'
+        assert result.remark == 'observed memo'
+        assert result.updated_at == '2025-03-14 09:30:00'
 
     def test_get_cash_flows(self):
         """测试获取出入金记录列表"""
@@ -1036,13 +1229,28 @@ class TestFeishuStorageCashFlowOperations:
         )
 
         assert len(flows) == 2
+        projection = self.mock_client.list_records.call_args.kwargs['field_names']
+        assert projection == self.storage.CASH_FLOW_PROJECTION_FIELDS
+        assert {'remark', 'source', 'dedup_key'} <= set(projection)
 
     def test_get_total_cash_flow_cny(self):
         """测试获取累计出入金总额"""
+        facts = [
+            _completed_cash_flow(amount=100000, record_id='cf_1'),
+            _completed_cash_flow(
+                amount=-30000,
+                flow_date=date(2025, 3, 13),
+                record_id='cf_2',
+            ),
+            _completed_cash_flow(
+                amount=50000,
+                flow_date=date(2025, 3, 12),
+                record_id='cf_3',
+            ),
+        ]
         self.mock_client.list_records.return_value = [
-            {'fields': {'amount': '100000', 'cny_amount': '100000'}},
-            {'fields': {'amount': '-30000', 'cny_amount': '-30000'}},
-            {'fields': {'amount': '50000', 'cny_amount': '50000'}}
+            {'record_id': item.record_id, 'fields': item.to_fields()}
+            for item in facts
         ]
 
         total = self.storage.get_total_cash_flow_cny('测试账户')
@@ -1057,22 +1265,81 @@ class TestFeishuStorageCashFlowOperations:
                 'fields': {
                     'flow_date': '2025-03-14',
                     'account': '测试账户',
+                    'broker': '华泰',
                     'amount': '10',
                     'currency': 'USD',
+                    'flow_type': 'DEPOSIT',
+                    'dedup_key': _completed_cash_flow(
+                        amount=10,
+                        currency='USD',
+                    ).dedup_key,
+                    'source': 'test',
                 },
             }
         ]
 
-        with pytest.raises(ValueError, match='pm cash-flow reconcile'):
+        with pytest.raises(CashFlowContractError) as exc_info:
             self.storage.preload_cash_flow_aggs('测试账户', force_refresh=True)
+
+        assert {issue.reason_code for issue in exc_info.value.issues} >= {
+            'EXCHANGE_RATE_MISSING',
+            'CNY_AMOUNT_MISSING',
+        }
+
+    def test_preload_cash_flow_aggs_missing_date_blocks_and_keeps_old_cache(self):
+        self.storage._cash_flow_agg_mem_cache['测试账户'] = {
+            'cumulative': 42.0,
+        }
+        self.mock_client.list_records.return_value = [{
+            'record_id': 'cf_missing_date',
+            'fields': {
+                'account': '测试账户',
+                'broker': '华泰',
+                'amount': 100,
+                'currency': 'CNY',
+                'flow_type': 'DEPOSIT',
+                'cny_amount': 100,
+                'exchange_rate': 1,
+                'dedup_key': 'untrusted-without-date',
+                'source': 'test',
+            },
+        }]
+
+        with pytest.raises(CashFlowContractError) as exc_info:
+            self.storage.preload_cash_flow_aggs(
+                '测试账户',
+                force_refresh=True,
+            )
+
+        assert 'FLOW_DATE_MISSING' in {
+            issue.reason_code for issue in exc_info.value.issues
+        }
+        assert self.storage._cash_flow_agg_mem_cache['测试账户'] == {
+            'cumulative': 42.0,
+        }
 
     def test_delete_cash_flow_by_record_id(self):
         """测试通过记录ID删除出入金"""
+        self.mock_client.get_record_strict.return_value = {
+            'record_id': 'cf_rec',
+            'fields': {'account': '测试账户'},
+        }
         self.mock_client.delete_record.return_value = True
+        self.storage._cash_flow_agg_loaded_accounts.add('测试账户')
+        self.storage._cash_flow_agg_mem_cache['测试账户'] = {
+            'cumulative': 100.0,
+        }
+        self.storage._local_cash_flow_agg_cache.set_account(
+            '测试账户',
+            {'cumulative': 100.0},
+        )
 
         result = self.storage.delete_cash_flow_by_record_id('cf_rec')
 
         assert result == True
+        assert '测试账户' not in self.storage._cash_flow_agg_loaded_accounts
+        assert '测试账户' not in self.storage._cash_flow_agg_mem_cache
+        assert self.storage._local_cash_flow_agg_cache.get_account('测试账户') == {}
 
     def test_reconcile_cash_flows_dry_run_fills_manual_cny_row(self):
         """手工现金流只填人工字段时，reconcile dry-run 应补齐系统字段预览。"""
@@ -1567,24 +1834,22 @@ def test_cash_flow_replay_marker_is_runtime_only():
     client = Mock()
     storage = FeishuStorage(client=client)
     client.list_records.return_value = [{"record_id": "cf-existing", "fields": {}}]
+    facts = _completed_cash_flow(
+        account="a",
+        broker="某券商",
+        amount=100,
+        source="test",
+        record_id="cf-existing",
+    )
     client.get_record_strict.return_value = {
         "record_id": "cf-existing",
-        "fields": {
-            "flow_date": "2025-03-14",
-            "account": "a",
-            "amount": 100,
-            "currency": "CNY",
-            "cny_amount": 100,
-            "flow_type": "DEPOSIT",
-        },
+        "fields": facts.to_fields(),
     }
-    cf = CashFlow(
-        flow_date=date(2025, 3, 14),
+    cf = _completed_cash_flow(
         account="a",
+        broker="某券商",
         amount=100,
-        currency="CNY",
-        cny_amount=100,
-        flow_type="DEPOSIT",
+        source="test",
     )
 
     result = storage.add_cash_flow(cf)

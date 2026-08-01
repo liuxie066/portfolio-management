@@ -6,9 +6,10 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from src.domain.cash_flow_contracts import CompletedCashFlowFacts
 from src.feishu_storage import FeishuStorage
 from src.local_cache import LocalNavIndexCache, LocalCashFlowAggCache
-from src.models import CashFlow, NAVHistory, PortfolioValuation
+from src.models import NAVHistory, PortfolioValuation
 from src.portfolio import PortfolioManager
 
 
@@ -201,19 +202,22 @@ def test_nav_base_cache_month_boundary_and_invalidation_flag():
 
 
 def test_cash_flow_agg_cache_updates_on_new_record():
+    existing = CompletedCashFlowFacts.build(
+        flow_date=date(2026, 1, 5),
+        account='lx',
+        broker='测试券商',
+        amount=100,
+        currency='CNY',
+        source='test',
+        record_id='cf1',
+    )
+    existing_fields = existing.to_fields()
+    existing_fields['updated_at'] = '2026-01-05 10:00:00'
     client = StubNavCashClient(
         cash_records=[
             {
                 'record_id': 'cf1',
-                'fields': {
-                    'flow_date': '2026-01-05',
-                    'account': 'lx',
-                    'amount': 100,
-                    'currency': 'CNY',
-                    'cny_amount': 100,
-                    'flow_type': 'DEPOSIT',
-                    'updated_at': '2026-01-05 10:00:00',
-                },
+                'fields': existing_fields,
             }
         ]
     )
@@ -234,13 +238,12 @@ def test_cash_flow_agg_cache_updates_on_new_record():
     assert agg1['yearly']['2026'] == 100.0
 
     storage.add_cash_flow(
-        CashFlow(
+        CompletedCashFlowFacts.build(
             flow_date=date(2026, 1, 6),
             account='lx',
+            broker='测试券商',
             amount=50.0,
-            cny_amount=50.0,
             currency='CNY',
-            flow_type='DEPOSIT',
             source='manual',
         )
     )

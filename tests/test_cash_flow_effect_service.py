@@ -1,4 +1,5 @@
 from datetime import date
+from decimal import Decimal
 
 import pytest
 
@@ -7,8 +8,9 @@ from src.app.cash_flow_effect_receipt_service import CashFlowEffectReceiptServic
 from src.app.cash_flow_effect_service import CashFlowEffectService
 from src.app.cash_flow_effect_store import CashFlowEffectStore
 from src.app.futu_balance_sync_service import FutuBalanceSnapshot
+from src.domain.cash_flow_contracts import CompletedCashFlowFacts
 from src.domain.holding_mutations import HoldingTarget
-from src.models import AssetClass, AssetType, CashFlow, Holding
+from src.models import AssetClass, AssetType, Holding
 
 
 class FakeStorage:
@@ -144,17 +146,41 @@ def _flow(
     record_id="cf_1",
     account="lx",
 ):
-    return CashFlow(
-        record_id=record_id,
+    rate = Decimal("1") if currency == "CNY" else Decimal("7.2")
+    return CompletedCashFlowFacts.build(
         flow_date=date(2026, 7, 26),
         account=account,
         broker=broker,
         amount=amount,
         currency=currency,
-        cny_amount=amount if currency == "CNY" else None,
-        exchange_rate=1 if currency == "CNY" else None,
-        flow_type="DEPOSIT" if amount > 0 else "WITHDRAW",
-    )
+        cny_amount=Decimal(str(amount)) * rate,
+        exchange_rate=rate,
+        source="test",
+        record_id=record_id,
+    ).to_cash_flow()
+
+
+def _refresh_flow_contract(flow):
+    rate = Decimal(str(flow.exchange_rate or 1))
+    refreshed = CompletedCashFlowFacts.build(
+        flow_date=flow.flow_date,
+        account=flow.account,
+        broker=flow.broker,
+        amount=flow.amount,
+        currency=flow.currency,
+        cny_amount=Decimal(str(flow.amount)) * rate,
+        exchange_rate=rate,
+        source=flow.source or "test",
+        remark=flow.remark,
+        record_id=flow.record_id or "",
+        updated_at=flow.updated_at,
+    ).to_cash_flow()
+    flow.cny_amount = refreshed.cny_amount
+    flow.exchange_rate = refreshed.exchange_rate
+    flow.flow_type = refreshed.flow_type
+    flow.dedup_key = refreshed.dedup_key
+    flow.source = refreshed.source
+    return flow
 
 
 def _service(tmp_path, monkeypatch, storage, *, futu_provider=None):
@@ -453,6 +479,7 @@ def test_account_change_previews_and_confirms_old_and_new_cash_targets(
     )
 
     flow.account = "sy"
+    _refresh_flow_contract(flow)
     correction = next(
         item for item in service.review(account="lx")["effects"]
         if item["effect_kind"] == "cash_flow"
@@ -508,6 +535,7 @@ def test_amount_correction_applies_only_delta_and_deletion_reverses_it(
         confirm=True,
     )
     flow.amount = 30
+    _refresh_flow_contract(flow)
     correction = next(
         item for item in service.review(account="lx")["effects"]
         if item["effect_kind"] == "cash_flow"
@@ -571,7 +599,7 @@ def test_applied_receipt_renders_every_confirmed_cash_target():
     assert "sy · 某券商 · CNY 50.00 → 70.0" in message
 
 
-def test_remark_only_change_is_audited_by_scan_without_new_effect_version(
+def test_remark_only_change_creates_a_visible_source_version(
     tmp_path,
     monkeypatch,
 ):
@@ -587,8 +615,37 @@ def test_remark_only_change_is_audited_by_scan_without_new_effect_version(
     second_effect = service.store.get_latest_for_record("cf_1")
 
     assert second_scan["source_digest"] != first_scan["source_digest"]
-    assert second_effect["effect_id"] == first_effect["effect_id"]
-    assert second_effect["version"] == first_effect["version"]
+    assert second_effect["effect_id"] != first_effect["effect_id"]
+    assert second_effect["version"] == first_effect["version"] + 1
+    assert second_effect["source"]["remark"] == "补充银行流水号"
+
+
+def test_source_and_observed_dedup_changes_are_visible_to_effect_scan(
+    tmp_path,
+    monkeypatch,
+):
+    flow = _flow()
+    storage = FakeStorage(flows=[flow], holdings=[_cash()])
+    service = _service(tmp_path, monkeypatch, storage)
+    service.initialize_fingerprints()
+    service.scan()
+    first_effect = service.store.get_latest_for_record("cf_1")
+
+    flow.source = "bank-import"
+    service.scan()
+    source_changed = service.store.get_latest_for_record("cf_1")
+
+    assert source_changed["version"] == first_effect["version"] + 1
+    assert source_changed["source"]["source"] == "bank-import"
+
+    flow.dedup_key = "observed-tampered-key"
+    service.scan()
+    dedup_changed = service.store.get_latest_for_record("cf_1")
+
+    assert dedup_changed["version"] == source_changed["version"] + 1
+    assert dedup_changed["state"] == "blocked"
+    assert dedup_changed["source"]["dedup_key"] == "observed-tampered-key"
+    assert "DEDUP_KEY_MISMATCH" in dedup_changed["last_error"]
 
 
 def test_partial_multi_target_write_requires_confirmed_compensation_retry(
@@ -618,6 +675,7 @@ def test_partial_multi_target_write_requires_confirmed_compensation_retry(
     )
 
     flow.account = "sy"
+    _refresh_flow_contract(flow)
     correction = next(
         effect for effect in service.review()["effects"]
         if effect["effect_kind"] == "cash_flow"
@@ -668,6 +726,7 @@ def test_source_change_waits_for_compensation_then_requires_new_confirmation(
     )
 
     flow.account = "sy"
+    _refresh_flow_contract(flow)
     correction = next(
         effect for effect in service.review()["effects"]
         if effect["effect_kind"] == "cash_flow"
@@ -681,7 +740,7 @@ def test_source_change_waits_for_compensation_then_requires_new_confirmation(
     assert failed["status"] == "compensation_pending"
 
     flow.amount = 30
-    flow.cny_amount = 30
+    _refresh_flow_contract(flow)
     scan = service.scan()
     still_current = service.store.get_latest_for_record("cf_1")
 

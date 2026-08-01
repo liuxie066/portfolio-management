@@ -5,11 +5,15 @@ import getpass
 import socket
 import uuid
 from contextlib import ExitStack
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Callable, Dict, Optional
 
 from src import config
+from src.domain.cash_flow_contracts import (
+    CompletedCashFlowFacts,
+    RawCashFlowRecord,
+)
 from src.domain.holding_mutations import (
     HOLDING_REQUIRED_VALUE_FIELDS,
     HoldingTarget,
@@ -156,49 +160,54 @@ class CashFlowEffectService:
 
     @classmethod
     def source_from_cash_flow(cls, flow: CashFlow) -> Dict[str, Any]:
-        account = str(flow.account or "").strip()
-        broker = str(flow.broker or "").strip()
-        currency = str(flow.currency or "").strip().upper()
-        flow_type = str(flow.flow_type or "").strip().upper()
-        amount = cls._decimal(flow.amount)
+        facts = CompletedCashFlowFacts.require(
+            RawCashFlowRecord.from_cash_flow(flow)
+        )
         if not flow.record_id:
             raise ValueError("cash_flow record_id is required")
-        if not account:
-            raise ValueError("cash_flow account is required")
-        if not broker:
-            raise ValueError("cash_flow broker is required")
-        if currency not in CASH_ASSETS:
-            raise ValueError(f"unsupported cash_flow currency: {currency}")
-        if amount == 0:
-            raise ValueError("cash_flow amount must be non-zero")
-        if flow_type not in {"DEPOSIT", "WITHDRAW"}:
-            raise ValueError(f"unsupported cash_flow flow_type: {flow_type}")
-        if flow_type == "DEPOSIT" and amount <= 0:
-            raise ValueError("DEPOSIT amount must be positive")
-        if flow_type == "WITHDRAW" and amount >= 0:
-            raise ValueError("WITHDRAW amount must be negative")
         return {
             "record_id": str(flow.record_id),
-            "flow_date": flow.flow_date.isoformat(),
-            "account": account,
-            "broker": broker,
-            "currency": currency,
-            "flow_type": flow_type,
-            "signed_amount": cls._money(amount),
+            "flow_date": facts.flow_date.isoformat(),
+            "account": facts.account,
+            "broker": facts.broker,
+            "currency": facts.currency,
+            "flow_type": facts.flow_type,
+            "signed_amount": cls._money(facts.amount),
+            "cny_amount": cls._money(facts.cny_amount),
+            "exchange_rate": format(facts.exchange_rate, "f"),
+            "dedup_key": facts.dedup_key,
+            "source": facts.source,
+            "remark": facts.remark,
+            "updated_at": cls._source_value(facts.updated_at),
         }
 
     @classmethod
     def _raw_source(cls, flow: CashFlow) -> Dict[str, Any]:
         return {
             "record_id": str(flow.record_id or ""),
-            "flow_date": flow.flow_date.isoformat() if flow.flow_date else "",
-            "account": str(flow.account or "").strip(),
-            "broker": str(flow.broker or "").strip(),
-            "currency": str(flow.currency or "").strip().upper(),
-            "flow_type": str(flow.flow_type or "").strip().upper(),
-            "signed_amount": str(flow.amount),
-            "remark": str(flow.remark or ""),
+            "flow_date": cls._source_value(flow.flow_date),
+            "account": cls._source_value(flow.account),
+            "broker": cls._source_value(flow.broker),
+            "currency": cls._source_value(flow.currency),
+            "flow_type": cls._source_value(flow.flow_type),
+            "signed_amount": cls._source_value(flow.amount),
+            "cny_amount": cls._source_value(flow.cny_amount),
+            "exchange_rate": cls._source_value(flow.exchange_rate),
+            "dedup_key": cls._source_value(flow.dedup_key),
+            "source": cls._source_value(flow.source),
+            "remark": cls._source_value(flow.remark),
+            "updated_at": cls._source_value(flow.updated_at),
         }
+
+    @staticmethod
+    def _source_value(value: Any) -> Any:
+        if isinstance(value, (date, datetime)):
+            return value.isoformat()
+        if isinstance(value, Decimal):
+            return format(value, "f")
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        return str(value)
 
     def _has_nav_history(self, account: str) -> bool:
         if account in self._nav_history_cache:

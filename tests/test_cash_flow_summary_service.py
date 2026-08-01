@@ -4,7 +4,25 @@ from unittest.mock import Mock
 import pytest
 
 from src.app.cash_flow_summary_service import CashFlowSummaryService
+from src.domain.cash_flow_contracts import (
+    CashFlowContractError,
+    CompletedCashFlowFacts,
+    expected_cash_flow_dedup_key_from_values,
+)
 from src.models import CashFlow, NAVHistory
+
+
+def _completed_flow(flow_date, amount, *, currency="CNY", rate=1):
+    return CompletedCashFlowFacts.build(
+        flow_date=flow_date,
+        account="a",
+        broker="某券商",
+        amount=amount,
+        currency=currency,
+        exchange_rate=rate,
+        cny_amount=amount * rate,
+        source="test",
+    ).to_cash_flow()
 
 
 def test_cash_flow_summary_service_summarizes_aggregate_cache():
@@ -52,18 +70,69 @@ def test_cash_flow_summary_service_period_and_point_queries():
 
 def test_cash_flow_summary_service_sums_cash_flow_objects():
     flows = [
-        CashFlow(flow_date=date(2025, 3, 1), account="a", amount=100, currency="CNY", cny_amount=100, flow_type="DEPOSIT"),
-        CashFlow(flow_date=date(2025, 3, 2), account="a", amount=50, currency="CNY", cny_amount=None, flow_type="DEPOSIT"),
-        CashFlow(flow_date=date(2025, 3, 3), account="a", amount=-20, currency="CNY", cny_amount=-20, flow_type="WITHDRAW"),
+        _completed_flow(date(2025, 3, 1), 100),
+        _completed_flow(date(2025, 3, 2), 50),
+        _completed_flow(date(2025, 3, 3), -20),
     ]
 
     assert CashFlowSummaryService.sum_cash_flows(flows) == 130.0
 
 
 def test_cash_flow_summary_service_rejects_foreign_flow_without_cny_amount():
-    flows = [
-        CashFlow(flow_date=date(2025, 3, 1), account="a", amount=10, currency="USD", cny_amount=None, flow_type="DEPOSIT"),
-    ]
+    flow = CashFlow(
+        record_id="cf_usd",
+        flow_date=date(2025, 3, 1),
+        account="a",
+        broker="某券商",
+        amount=10,
+        currency="USD",
+        cny_amount=None,
+        exchange_rate=None,
+        flow_type="DEPOSIT",
+        dedup_key=expected_cash_flow_dedup_key_from_values(
+            flow_date=date(2025, 3, 1),
+            account="a",
+            broker="某券商",
+            amount=10,
+            currency="USD",
+            flow_type="DEPOSIT",
+        ),
+        source="test",
+    )
 
-    with pytest.raises(ValueError, match="run `pm cash-flow reconcile"):
-        CashFlowSummaryService.sum_cash_flows(flows)
+    with pytest.raises(CashFlowContractError) as exc_info:
+        CashFlowSummaryService.sum_cash_flows([flow])
+
+    assert {issue.reason_code for issue in exc_info.value.issues} >= {
+        "EXCHANGE_RATE_MISSING",
+        "CNY_AMOUNT_MISSING",
+    }
+
+
+def test_cash_flow_summary_service_missing_date_blocks_without_partial_aggregate():
+    missing_date = CashFlow(
+        record_id="cf_missing_date",
+        flow_date=None,
+        account="a",
+        broker="某券商",
+        amount=100,
+        currency="CNY",
+        cny_amount=100,
+        exchange_rate=1,
+        flow_type="DEPOSIT",
+        dedup_key="untrusted-without-date",
+        source="test",
+    )
+    storage = Mock()
+    storage.get_cash_flows.return_value = [
+        _completed_flow(date(2025, 3, 1), 50),
+        missing_date,
+    ]
+    service = CashFlowSummaryService(storage=storage)
+
+    with pytest.raises(CashFlowContractError) as exc_info:
+        service._build_aggs_from_flows("a")
+
+    assert "FLOW_DATE_MISSING" in {
+        issue.reason_code for issue in exc_info.value.issues
+    }

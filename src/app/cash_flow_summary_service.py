@@ -5,6 +5,12 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+from src.domain.cash_flow_contracts import (
+    CashFlowContractError,
+    CompletedCashFlowFacts,
+    RawCashFlowRecord,
+)
+
 
 class CashFlowSummaryService:
     def __init__(self, storage: Any):
@@ -27,17 +33,10 @@ class CashFlowSummaryService:
 
     @staticmethod
     def _cny_amount(flow) -> float:
-        amount = getattr(flow, "cny_amount", None)
-        if amount is not None:
-            return amount
-        currency = str(getattr(flow, "currency", "CNY") or "CNY").upper()
-        if currency == "CNY":
-            return getattr(flow, "amount", 0)
-        record_id = getattr(flow, "record_id", None) or "(unknown)"
-        raise ValueError(
-            f"cash_flow record {record_id} currency={currency} lacks cny_amount; "
-            "run `pm cash-flow reconcile --apply --confirm` before NAV calculation"
+        facts = CompletedCashFlowFacts.require(
+            RawCashFlowRecord.from_cash_flow(flow)
         )
+        return float(facts.cny_amount)
 
     def summarize(self, account: str, today: date, start_year: int, last_nav=None) -> dict:
         agg = self._load_aggs(account, start_date=date(start_year, 1, 1), end_date=today)
@@ -108,6 +107,8 @@ class CashFlowSummaryService:
         if callable(preload):
             try:
                 preload(account)
+            except CashFlowContractError:
+                raise
             except Exception:
                 return self._build_aggs_from_flows(account, start_date=start_date, end_date=end_date)
 
@@ -126,15 +127,15 @@ class CashFlowSummaryService:
         yearly: dict[str, float] = {}
         cumulative = Decimal("0")
 
-        for flow in flows or []:
-            flow_date = getattr(flow, "flow_date", None)
-            if not flow_date:
-                continue
-            amount = self._cny_amount(flow)
-            amount_dec = self.to_decimal(amount)
-            day_key = flow_date.strftime("%Y-%m-%d")
-            month_key = flow_date.strftime("%Y-%m")
-            year_key = flow_date.strftime("%Y")
+        completed = [
+            CompletedCashFlowFacts.require(RawCashFlowRecord.from_cash_flow(flow))
+            for flow in (flows or [])
+        ]
+        for facts in completed:
+            amount_dec = facts.cny_amount
+            day_key = facts.flow_date.strftime("%Y-%m-%d")
+            month_key = facts.flow_date.strftime("%Y-%m")
+            year_key = facts.flow_date.strftime("%Y")
             daily[day_key] = float(self.to_decimal(daily.get(day_key, 0.0)) + amount_dec)
             monthly[month_key] = float(self.to_decimal(monthly.get(month_key, 0.0)) + amount_dec)
             yearly[year_key] = float(self.to_decimal(yearly.get(year_key, 0.0)) + amount_dec)
