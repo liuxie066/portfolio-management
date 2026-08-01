@@ -766,8 +766,13 @@ broker 字段当成可选能力。
 Cash Flow 回执复用当前 NAV/Futu 回执配置：
 
 - 飞书机器人：`刘看山`
-- App：`feishu.receipt.app_id` / `feishu.receipt.app_secret`
-- 接收人：同一个 `feishu.receipt.open_id`
+- Conversation App：`feishu.conversation.app_id`
+- 接收人：同一个 `feishu.conversation.open_id`
+- App Secret：Linux 生产环境只通过 systemd encrypted credential
+  `pm-feishu-conversation-app-secret` 注入，不写入 YAML 或 env
+
+旧 `feishu.receipt.*` / `OM_FEISHU_BOT_*` 只作为迁移兼容和明文 shadow
+识别入口，不是生产稳态配置。
 
 第一阶段不增加 Cash Flow 专用机器人、群聊或第二套接收人配置。
 
