@@ -838,6 +838,32 @@ def test_formal_nonblocking_case_materializes_then_valuation_can_continue(tmp_pa
     assert result["validated_snapshot"].rows[0].asset_class is None
 
 
+def test_json_text_empty_tag_does_not_create_a_case_or_nav_warning(tmp_path):
+    base = _raw("rec_text_empty_tag")
+    record = RawHoldingRecord(
+        record_id=base.record_id,
+        raw_fields={**base.raw_fields, "tag": "[]"},
+        source=base.source,
+        fetched_at=base.fetched_at,
+    )
+    store = OperationStateStore(tmp_path / "operations.sqlite3")
+
+    result = _service(RawStorage([record]), store=store).prepare_account(
+        account="lx",
+        dry_run=True,
+        confirm=False,
+        trigger={"mode": "daily_nav_preflight"},
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "valid"
+    assert result["warnings"] == []
+    assert result["case_keys"] == []
+    assert result["blocking_case_keys"] == []
+    assert result["validated_snapshot"].rows[0].tag == ()
+    assert store.list_holding_cases(account="lx") == []
+
+
 def test_dry_run_reports_cases_without_materializing_state():
     class RefusingStore:
         def get_holding_case(self, _case_key):

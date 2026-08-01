@@ -5,8 +5,8 @@
 - Branch: `fix/holdings-tag-json-text`
 - Design source: confirmed user request, live read-only evidence, and current
   Holdings schema/writer/validator contracts
-- Current gate: `plan re-review pass`
-- Next entry point: `accepted plan commit`
+- Current gate: `code re-review pass`
+- Next entry point: `accepted slice commit`
 
 ## Goal and motivation
 

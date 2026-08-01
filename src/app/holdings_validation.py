@@ -350,7 +350,7 @@ class RecordValidation:
                 else None
             ),
             tag=(
-                list(fields.get("tag") or [])
+                list(outcome_by_field["tag"].current or [])
                 if outcome_by_field["tag"].status == "valid"
                 else []
             ),
@@ -973,7 +973,7 @@ class HoldingsValidator:
 
     @staticmethod
     def _optional_tag(value: Any) -> FieldOutcome:
-        if value in (None, "", []):
+        if value is None or value == "":
             return FieldOutcome(
                 field="tag",
                 status="optional_missing",
@@ -981,7 +981,15 @@ class HoldingsValidator:
                 reason_code="TAG_OPTIONAL_MISSING",
                 blocks_official_nav=False,
             )
-        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        candidate = value
+        if isinstance(candidate, str):
+            try:
+                candidate = json.loads(candidate)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                candidate = None
+        if not isinstance(candidate, list) or not all(
+            isinstance(item, str) for item in candidate
+        ):
             return FieldOutcome(
                 field="tag",
                 status="invalid",
@@ -989,10 +997,18 @@ class HoldingsValidator:
                 reason_code="TAG_INVALID",
                 blocks_official_nav=False,
             )
+        if not candidate:
+            return FieldOutcome(
+                field="tag",
+                status="optional_missing",
+                current=[],
+                reason_code="TAG_OPTIONAL_MISSING",
+                blocks_official_nav=False,
+            )
         return FieldOutcome(
             field="tag",
             status="valid",
-            current=list(value),
+            current=list(candidate),
             reason_code="TAG_VALID",
             blocks_official_nav=False,
         )
