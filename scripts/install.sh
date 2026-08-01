@@ -71,9 +71,10 @@ Defaults:
 By default this prepares code and the Python environment, then prints the
 system install plan. Add --apply to write system files.
 
-When /etc/options-monitor/options-monitor.env exists, --apply copies only
-OM_FEISHU_BOT_APP_ID, OM_FEISHU_BOT_APP_SECRET, and
-OM_FEISHU_BOT_USER_OPEN_ID into portfolio-management.env.
+When /etc/options-monitor/options-monitor.env exists, --apply may copy only the
+non-secret OM_FEISHU_BOT_APP_ID and OM_FEISHU_BOT_USER_OPEN_ID compatibility
+values. Feishu App Secrets must already be provisioned as the two named encrypted
+systemd credentials; the installer never reads, copies, or creates them.
 USAGE
 }
 
@@ -235,8 +236,8 @@ run_asset_installer
 cat <<EOF
 
 Next:
-  edit $CONFIG_DIR/config.yaml
-  $LAUNCHER config doctor --json
+  edit $CONFIG_DIR/config.yaml with non-secret routing values
+  sudo systemctl start portfolio-feishu-preflight.service
   $LAUNCHER daily-job --json --no-service
 
 To enable the timer later:
