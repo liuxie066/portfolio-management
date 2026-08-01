@@ -68,4 +68,3 @@ changing the required wire request, so it is intentionally out of scope.
 ## Open questions
 
 None. The user confirmed the goal and branch creation on 2026-08-01.
-

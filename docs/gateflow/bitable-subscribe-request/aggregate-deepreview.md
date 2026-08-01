@@ -28,4 +28,3 @@ accepted plan and preserves all non-request behavior.
 ## Next entry point
 
 `ready-to-open-draft-PR`
-
