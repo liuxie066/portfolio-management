@@ -376,13 +376,24 @@ def test_record_digest_normalizes_semantically_equivalent_field_values():
     assert first.record_digest != changed.record_digest
 
 
-def test_validation_reports_transport_metadata_as_nonblocking_outcomes():
+@pytest.mark.parametrize(
+    ("created_at", "expected"),
+    [
+        ("2026/07/31", datetime(2026, 7, 31)),
+        ("2026-07-31 12:00:00", datetime(2026, 7, 31, 12)),
+    ],
+)
+def test_validation_accepts_canonical_and_predecessor_holding_dates(
+    created_at,
+    expected,
+):
     report = HoldingsValidator().validate(
-        [_record(created_at="2026-07-31 12:00:00", updated_at="")]
+        [_record(created_at=created_at, updated_at="")]
     )
 
     assert _outcome(report, "created_at").status == "valid"
     assert _outcome(report, "updated_at").status == "optional_missing"
+    assert report.records[0].to_holding().created_at == expected
 
 
 def test_invalid_transport_timestamp_is_a_nonblocking_warning():
@@ -391,6 +402,14 @@ def test_invalid_transport_timestamp_is_a_nonblocking_warning():
     outcome = _outcome(report, "updated_at")
     assert outcome.status == "invalid"
     assert outcome.blocks_official_nav is False
+    assert report.records[0].to_holding().updated_at is None
+
+
+@pytest.mark.parametrize("updated_at", ["2026-08-01", "2026/8/1", "not-a-timestamp"])
+def test_holding_date_validation_is_not_permissive(updated_at):
+    report = HoldingsValidator().validate([_record(updated_at=updated_at)])
+
+    assert _outcome(report, "updated_at").status == "invalid"
 
 
 def test_record_digest_normalizes_negative_zero():

@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from src.feishu_storage import FeishuStorage
 from src.models import AssetType, Holding
+
+
+def _assert_canonical_holding_date(value: Any) -> None:
+    assert isinstance(value, str)
+    parsed = datetime.strptime(value, "%Y/%m/%d")
+    assert parsed.strftime("%Y/%m/%d") == value
 
 
 class StubLocalHoldingsIndexCache:
@@ -128,10 +135,8 @@ def test_bulk_upsert_additive_preloads_once_per_account_and_batches_updates():
     # One batch_update call with 3 updates
     assert len(client.batch_update_records_calls) == 1
     assert len(client.batch_update_records_calls[0]) == 3
-    assert all(
-        isinstance(row['fields']['updated_at'], str)
-        for row in client.batch_update_records_calls[0]
-    )
+    for row in client.batch_update_records_calls[0]:
+        _assert_canonical_holding_date(row['fields']['updated_at'])
     assert result['updated'] == 3
     assert result['created'] == 0
 
@@ -183,12 +188,14 @@ def test_bulk_upsert_replace_mixed_update_create_updates_caches():
 
     assert len(client.batch_update_records_calls) == 1
     assert len(client.batch_update_records_calls[0]) == 1
-    assert isinstance(
-        client.batch_update_records_calls[0][0]['fields']['updated_at'],
-        str,
+    _assert_canonical_holding_date(
+        client.batch_update_records_calls[0][0]['fields']['updated_at']
     )
     assert len(client.batch_create_records_calls) == 1
     assert len(client.batch_create_records_calls[0]) == 1
+    created_fields = client.batch_create_records_calls[0][0]['fields']
+    _assert_canonical_holding_date(created_fields['created_at'])
+    _assert_canonical_holding_date(created_fields['updated_at'])
     assert result['updated'] == 1
     assert result['created'] == 1
 
@@ -203,6 +210,9 @@ def test_bulk_upsert_replace_mixed_update_create_updates_caches():
     key_baba = storage._get_holding_cache_key('09988', 'lx', 'futu')
     assert local_idx.items[key_tencent]['quantity'] == 80
     assert local_idx.items[key_baba]['quantity'] == 50
+    _assert_canonical_holding_date(local_idx.items[key_tencent]['updated_at'])
+    _assert_canonical_holding_date(local_idx.items[key_baba]['created_at'])
+    _assert_canonical_holding_date(local_idx.items[key_baba]['updated_at'])
 
 
 def test_bulk_replace_updates_and_clears_avg_cost_without_touching_manual_metadata():

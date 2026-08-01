@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from src.app.cash_service import CashService
 from src.feishu.repositories.holdings_repository import HoldingsIntegrityError
 from src.feishu_storage import FeishuStorage
 from src.models import Holding, AssetType
+
+
+def _assert_canonical_holding_date(value: Any) -> None:
+    assert isinstance(value, str)
+    parsed = datetime.strptime(value, "%Y/%m/%d")
+    assert parsed.strftime("%Y/%m/%d") == value
 
 
 class StubHoldingsClient:
@@ -255,6 +262,81 @@ def test_failed_preload_does_not_loose_parse_invalid_optional_fields():
         raise AssertionError("expected invalid tag failure")
 
 
+def test_preload_accepts_incident_and_predecessor_holding_date_formats():
+    incident_dates = [
+        "2026/03/30",
+        "2026/04/08",
+        "2026/04/20",
+        "2026/05/12",
+        "2026/07/16",
+        "2026/07/17",
+        "2026/07/20",
+        "2026/07/22",
+    ]
+    records = []
+    for index in range(17):
+        fields = {
+            "asset_id": f"ASSET-{index:02d}",
+            "asset_name": f"Asset {index}",
+            "asset_type": "us_stock",
+            "account": "lx",
+            "broker": "富途",
+            "quantity": index + 1,
+            "currency": "USD",
+        }
+        if index == 16:
+            fields["updated_at"] = "2026-08-01 07:42:30"
+        elif index % 2:
+            fields["updated_at"] = incident_dates[index % len(incident_dates)]
+        else:
+            fields["created_at"] = incident_dates[index % len(incident_dates)]
+        records.append({"record_id": f"rec_{index:02d}", "fields": fields})
+
+    storage = FeishuStorage(client=StubHoldingsClient(initial_records=records))
+
+    result = storage.preload_holdings_index(account="lx")
+
+    assert result["loaded"] == 17
+    holdings = storage.get_holdings(account="lx", include_empty=True)
+    assert len(holdings) == 17
+    predecessor = storage.get_holding("ASSET-16", "lx", "富途")
+    assert predecessor is not None
+    assert predecessor.updated_at == datetime(2026, 8, 1)
+    assert storage._holding_fields_cache["ASSET-16:lx:富途"]["updated_at"] == "2026/08/01"
+
+
+def test_preload_rejects_malformed_holding_date_without_publishing_cache():
+    client = StubHoldingsClient(
+        initial_records=[
+            {
+                "record_id": "rec_bad_date",
+                "fields": {
+                    "asset_id": "AAPL",
+                    "asset_type": "us_stock",
+                    "account": "lx",
+                    "broker": "富途",
+                    "quantity": 1,
+                    "currency": "USD",
+                    "updated_at": "2026-08-01",
+                },
+            }
+        ]
+    )
+    storage = FeishuStorage(client=client)
+
+    try:
+        storage.preload_holdings_index(account="lx")
+    except HoldingsIntegrityError as exc:
+        assert exc.errors == [
+            {"record_id": "rec_bad_date", "error": "invalid updated_at: 2026-08-01"}
+        ]
+    else:
+        raise AssertionError("expected malformed holdings date failure")
+
+    assert storage._holding_id_cache == {}
+    assert storage._holding_fields_cache == {}
+
+
 def test_raw_account_scope_rejects_out_of_scope_source_rows():
     class CrossAccountClient(StubHoldingsClient):
         def list_records(self, *args, **kwargs):
@@ -323,7 +405,9 @@ def test_reconciliation_patch_is_narrow_and_fresh_reads_back():
 
     assert readback.raw_fields["currency"] == "USD"
     assert client.update_record_calls[0]["fields"]["currency"] == "USD"
-    assert "updated_at" in client.update_record_calls[0]["fields"]
+    _assert_canonical_holding_date(
+        client.update_record_calls[0]["fields"]["updated_at"]
+    )
     assert len(client.update_record_calls[0]["fields"]) == 2
     try:
         storage.patch_holding_record(
@@ -383,6 +467,8 @@ def test_upsert_uses_preloaded_cache_for_batch_updates():
     assert len(client.update_record_calls) == 2
     assert client.update_record_calls[0]["fields"]["quantity"] == 120
     assert client.update_record_calls[1]["fields"]["quantity"] == 150
+    _assert_canonical_holding_date(client.update_record_calls[0]["fields"]["updated_at"])
+    _assert_canonical_holding_date(client.update_record_calls[1]["fields"]["updated_at"])
 
 
 def test_upsert_create_after_preload_missing_key_without_refetch():
@@ -405,8 +491,8 @@ def test_upsert_create_after_preload_missing_key_without_refetch():
     assert len(client.list_records_calls) == 1  # preload only
     assert len(client.create_record_calls) == 1
     created_fields = client.create_record_calls[0]["fields"]
-    assert isinstance(created_fields["created_at"], str)
-    assert isinstance(created_fields["updated_at"], str)
+    _assert_canonical_holding_date(created_fields["created_at"])
+    _assert_canonical_holding_date(created_fields["updated_at"])
 
 
 def test_upsert_rejects_missing_broker_before_remote_access():
@@ -470,7 +556,7 @@ def test_replace_holding_updates_absolute_quantity_and_descriptor_fields():
     assert fields["asset_name"] == "人民币现金"
     assert fields["asset_type"] == "cash"
     assert fields["currency"] == "CNY"
-    assert isinstance(fields["updated_at"], str)
+    _assert_canonical_holding_date(fields["updated_at"])
 
 
 def test_sync_mmf_balance_serializes_text_timestamp():
@@ -508,4 +594,31 @@ def test_sync_mmf_balance_serializes_text_timestamp():
     assert result["updated"] is True
     fields = client.update_record_calls[0]["fields"]
     assert fields["quantity"] == 746470.86
-    assert isinstance(fields["updated_at"], str)
+    _assert_canonical_holding_date(fields["updated_at"])
+
+
+def test_update_holding_quantity_writes_canonical_date():
+    client = StubHoldingsClient(
+        initial_records=[
+            {
+                "record_id": "rec_quantity",
+                "fields": {
+                    "asset_id": "AAPL",
+                    "asset_name": "Apple",
+                    "asset_type": "us_stock",
+                    "account": "lx",
+                    "broker": "富途",
+                    "quantity": 1,
+                    "currency": "USD",
+                    "updated_at": "2026/07/31",
+                },
+            }
+        ]
+    )
+    storage = FeishuStorage(client=client)
+    storage.preload_holdings_index(account="lx")
+
+    updated = storage.update_holding_quantity("AAPL", "lx", 2, broker="富途")
+
+    assert updated.quantity == 3
+    _assert_canonical_holding_date(client.update_record_calls[0]["fields"]["updated_at"])

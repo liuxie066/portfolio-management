@@ -40,7 +40,9 @@ Manual view fields:
 - Optional metadata: `avg_cost`, `asset_class`, `industry`, `tag` (`avg_cost` is system-managed for Futu stock/ETF rows)
 
 System fields:
-- `created_at`, `updated_at`
+- `created_at`, `updated_at` are Text dates written as `YYYY/MM/DD`. Reads also
+  accept the predecessor `YYYY-MM-DD HH:MM:SS` representation during the
+  compatibility transition; new writes never emit that predecessor form.
 
 Required fields:
 - `asset_id` (text) - manual
@@ -56,8 +58,8 @@ Optional fields:
 - `asset_class` (text/select) - manual
 - `industry` (text/select) - manual
 - `tag` (text/json) - manual
-- `created_at` (text/datetime) - system
-- `updated_at` (text/datetime) - system
+- `created_at` (text date, `YYYY/MM/DD`) - system
+- `updated_at` (text date, `YYYY/MM/DD`) - system
 
 Allowed `asset_type` values include: `a_stock`, `hk_stock`, `us_stock`, `exchange_fund`, `otc_fund`, `fund`, `cash`, `mmf`, `bond`, `crypto`, `other`.
 

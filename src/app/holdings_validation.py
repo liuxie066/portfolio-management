@@ -12,6 +12,7 @@ from typing import Any, Iterable, Mapping, Optional
 
 from src.models import AssetClass, AssetType, Holding, Industry
 from src.domain.holdings import RawHoldingRecord
+from src.domain.holding_dates import parse_holding_date
 
 
 VALIDATION_POLICY_VERSION = "holdings-validation.v1"
@@ -355,12 +356,16 @@ class RecordValidation:
                 else []
             ),
             created_at=(
-                fields.get("created_at")
+                parse_holding_date(
+                    fields.get("created_at"), field_name="created_at"
+                )
                 if outcome_by_field["created_at"].status == "valid"
                 else None
             ),
             updated_at=(
-                fields.get("updated_at")
+                parse_holding_date(
+                    fields.get("updated_at"), field_name="updated_at"
+                )
                 if outcome_by_field["updated_at"].status == "valid"
                 else None
             ),
@@ -998,7 +1003,7 @@ class HoldingsValidator:
         normalized = _text(value)
         if normalized is not None:
             try:
-                datetime.strptime(normalized, "%Y-%m-%d %H:%M:%S")
+                parse_holding_date(normalized, field_name=field_name)
             except (TypeError, ValueError):
                 return FieldOutcome(
                     field=field_name,
