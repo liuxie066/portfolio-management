@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.1.34 - 2026-08-01
+
+- Corrected combined and holdings-compatible Feishu Bitable subscription
+  requests by omitting the unsupported `event_type` query parameter while
+  preserving exact Base targeting and callback event registration.
+- Aggregated scheduled Holdings lifecycle changes into the single durable Daily
+  NAV receipt, retaining every Case/Event audit fact while suppressing noisy
+  per-Case task receipts and bounding actionable detail.
+- Added field-specific `holdings-precondition.v2` tokens with atomic legacy-case
+  migration, stable semantic case keys, preserved valid `keep-current`
+  confirmations, and consistent notify/listener/apply/NAV compatibility checks.
+- Aligned Futu cash with the aggregate observation-only contract: CNY/USD/HKD
+  cash remains source evidence, no per-currency CASH holding or reconciliation
+  effect is generated, and NAV quality uses the new aggregate dataset identity.
+- Accepted strict JSON-text string arrays for the documented Holdings `tag`
+  text/JSON field, including `"[]"`, while malformed, non-list, and mixed-type
+  values remain nonblocking invalid evidence.
+- Deployment note: before the first production v2 materialization, suspend
+  Holdings materializers and operation-receipt dispatch, take a paired operation
+  database backup, and verify exact canary case/event/outbox deltas plus SQLite
+  integrity. After a v2 token is persisted, the preceding binary cannot consume
+  it; rollback must restore the paired database backup, and normal operation is
+  forward-fix only.
+
 ## 0.1.33 - 2026-08-01
 
 - Restored holdings `created_at` and `updated_at` writes and cache snapshots to
