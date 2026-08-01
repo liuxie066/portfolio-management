@@ -74,7 +74,8 @@ system install plan. Add --apply to write system files.
 When /etc/options-monitor/options-monitor.env exists, --apply may copy only the
 non-secret OM_FEISHU_BOT_APP_ID and OM_FEISHU_BOT_USER_OPEN_ID compatibility
 values. Feishu App Secrets must already be provisioned as the two named encrypted
-systemd credentials; the installer never reads, copies, or creates them.
+systemd credentials; the installer never imports, copies from the source,
+creates, or prints secret values.
 USAGE
 }
 

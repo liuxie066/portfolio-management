@@ -265,6 +265,47 @@ def test_combined_event_listener_docs_preserve_fx_and_holding_effect_boundaries(
     assert "pm events listen --confirm --json" in deploy
 
 
+def test_dual_feishu_app_docs_preserve_secret_and_authorization_boundaries():
+    root = install_linux.REPO_ROOT
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    example = (root / "config.example.yaml").read_text(encoding="utf-8")
+    deploy = (root / "docs" / "deploy-linux.md").read_text(encoding="utf-8")
+    listener = (
+        root / "docs" / "holdings-event-listener-runbook.md"
+    ).read_text(encoding="utf-8")
+
+    assert "feishu.bitable.app_id" in deploy
+    assert "feishu.conversation.app_id" in deploy
+    assert "pm-feishu-bitable-app-secret" in readme
+    assert "pm-feishu-conversation-app-secret" in readme
+    assert "app_secret:" not in example
+    assert "App Secret 都不写入 YAML" in readme
+    assert "不配置第三个 event-only 应用" in deploy
+    assert "绝不会导入\n`OM_FEISHU_BOT_APP_SECRET`" in deploy
+    assert "portfolio-feishu-preflight.service" in deploy
+    assert "不请求飞书、不订阅、不连接 listener、不发送消息" in deploy
+    assert "互相独立的授权边界" in deploy
+    assert "单独授权后清理明文 shadow" in deploy
+    assert "精确授予以应用身份发送消息 `im:message:send_as_bot`" in deploy
+    assert "等价消息发送权限" not in deploy
+
+    prepare_marker = "仅准备 credential-capable checkout/venv"
+    provision_marker = "轮换并配置两份 encrypted credentials"
+    apply_marker = "apply credential-capable config/env/units"
+    preflight_marker = "secure preflight 通过"
+    assert deploy.index(prepare_marker) < deploy.index(provision_marker)
+    assert deploy.index(provision_marker) < deploy.index(apply_marker)
+    assert deploy.index(apply_marker) < deploy.index(preflight_marker)
+
+    subscription = listener.split("## Separately confirmed subscription", 1)[1]
+    subscription = subscription.split("## Separately confirmed service activation", 1)[0]
+    assert "systemd-run --wait --pipe --collect" in subscription
+    assert "LoadCredentialEncrypted=pm-feishu-bitable-app-secret" in subscription
+    assert "pm-feishu-conversation-app-secret" not in subscription
+    assert "file_type=bitable" in subscription
+    assert "outbound `event_type` is\nomitted" in subscription
+
+
 def test_install_linux_api_service_is_loopback_only_and_long_running(tmp_path):
     paths = install_linux.build_paths(_args(tmp_path))
     unit = install_linux.render_api_service_unit(paths, run_user="portfolio")
@@ -811,7 +852,8 @@ def test_install_shell_help_is_available():
     assert "OM_FEISHU_BOT_APP_ID" in result.stdout
     assert "OM_FEISHU_BOT_USER_OPEN_ID" in result.stdout
     assert "OM_FEISHU_BOT_APP_SECRET" not in result.stdout
-    assert "installer never reads, copies, or creates them" in result.stdout
+    assert "installer never imports, copies from the source" in result.stdout
+    assert "creates, or prints secret values" in result.stdout
 
 
 def test_install_linux_direct_entrypoint_imports_runtime_contract_outside_repo_cwd(

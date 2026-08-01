@@ -130,10 +130,15 @@ For real writes, the application service sends a Feishu receipt through the
 configured “刘看山” app and adds a `receipt` object to the response. Dry-runs
 return `receipt.status=skipped`. Delivery failure is reported as
 `receipt.status=failed` without changing the holdings sync `success` value.
-Configure `feishu.receipt.app_id`, `feishu.receipt.app_secret`, and
-`feishu.receipt.open_id`, or inject options-monitor's existing
-`OM_FEISHU_BOT_APP_ID`, `OM_FEISHU_BOT_APP_SECRET`, and
-`OM_FEISHU_BOT_USER_OPEN_ID` variables.
+The old `feishu.receipt.app_id`, `feishu.receipt.app_secret`, and
+`feishu.receipt.open_id` keys are migration aliases only. The canonical receipt
+identity is `feishu.conversation.app_id` plus
+`feishu.conversation.open_id`; Linux services receive its App Secret only from
+the `pm-feishu-conversation-app-secret` systemd credential. The Conversation
+role never falls back to the Bitable role. Existing `OM_FEISHU_BOT_APP_ID` and
+`OM_FEISHU_BOT_USER_OPEN_ID` remain non-secret compatibility inputs, while
+plaintext `OM_FEISHU_BOT_APP_SECRET` is migration shadow evidence and is not
+imported by the installer.
 
 Run this endpoint or `pm futu sync` before `daily-nav-job`. Keeping the commands independent ensures holdings still refresh when NAV recording skips an existing date. Production ordering is owned by `scripts/portfolio_scheduled_job.sh`, not by `DailyNavJobService`.
 

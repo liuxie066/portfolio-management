@@ -1008,7 +1008,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--options-monitor-env-file",
         default=DEFAULT_OPTIONS_MONITOR_ENV_FILE,
-        help="source env file for the three OM_FEISHU_BOT_* receipt values",
+        help=(
+            "source env file for the two non-secret OM_FEISHU_BOT_* "
+            "conversation identity values"
+        ),
     )
     parser.add_argument("--data-dir", default="/var/lib/portfolio-management/.data", help="runtime state/cache directory")
     parser.add_argument("--reports-dir", default="/var/lib/portfolio-management/reports", help="report output directory")

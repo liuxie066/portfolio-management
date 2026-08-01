@@ -10,6 +10,9 @@ write permission, guess FX, or confirm CASH holding effects.
 - One long connection accepts only `drive.file.bitable_record_changed_v1` for
   the configured holdings and cash-flow Base targets. A Base document is the
   subscription boundary; exact app/file/table routing remains local.
+- The same Bitable application owns Base reads/writes, document subscription,
+  and the long connection. There is no third event-only identity. The separate
+  Conversation application only sends receipts.
 - The callback validates and durably inserts trigger metadata, then returns. A
   worker fresh-reads the exact record before validation.
 - Added and edited records may create validation cases and receipt outbox rows.
@@ -31,8 +34,9 @@ write permission, guess FX, or confirm CASH holding effects.
 
 Stop unless every item is independently confirmed:
 
-1. `feishu.app_id` and `feishu.app_secret` belong to the existing PM data
-   enterprise custom app, not the receipt bot.
+1. `feishu.bitable.app_id` belongs to the PM Bitable enterprise custom app and
+   `pm-feishu-bitable-app-secret` exists as an encrypted systemd credential.
+   Neither value belongs to the Conversation receipt bot.
 2. `feishu.tables.holdings` and `feishu.tables.cash_flow` each resolve
    unambiguously to the intended `app_token/table_id`. Their
    `(app_id,file_token,table_id)` identities must be distinct. If a value is
@@ -45,17 +49,20 @@ Stop unless every item is independently confirmed:
    systemd `User`, with the same `PM_DATA_DIR` used by the receipt timer.
 6. The installed environment contains the official `lark-oapi` dependency.
 
-Local preflight, with no Feishu request:
+Local secure preflight, with no Feishu request:
 
 ```bash
-pm config doctor --json
-pm events status --json
+sudo systemctl start portfolio-feishu-preflight.service
+systemctl status portfolio-feishu-preflight.service --no-pager
+journalctl -u portfolio-feishu-preflight.service -n 100 --no-pager
 systemctl cat portfolio-holdings-event-listener.service
 ```
 
-Required success evidence includes both exact target identities, a valid target
-registry, `app_secret_configured=true`, `sdk_available=true`, readable local
-inboxes, and
+The preflight unit loads both named credentials and runs
+`pm config doctor --require-secure-feishu --json` followed by
+`pm events status --json`. Required success evidence includes both exact target
+identities, a valid target registry, `credentials.role=bitable`,
+`app_secret_configured=true`, `sdk_available=true`, readable local inboxes, and
 both remote health booleans still `false`. Those false values are not failures;
 they prevent local status from pretending to verify external state.
 
@@ -65,13 +72,24 @@ The following is a Feishu-side mutation. Run it only after the app publication,
 permission, document-access, and target-identity checks above are complete:
 
 ```bash
-pm events subscribe --confirm --json
+sudo systemd-run --wait --pipe --collect \
+  --unit=portfolio-feishu-subscribe-once \
+  --property=Type=oneshot \
+  --property=User=portfolio \
+  --property=WorkingDirectory=/opt/portfolio-management/current \
+  --property=EnvironmentFile=/etc/portfolio-management/portfolio-management.env \
+  --property=Environment=PM_REQUIRE_SECURE_FEISHU_CREDENTIALS=1 \
+  --property=LoadCredentialEncrypted=pm-feishu-bitable-app-secret \
+  /usr/local/bin/pm events subscribe --confirm --json
 ```
 
 This command subscribes each distinct configured Base document exactly once.
 When both tables share a Base, it performs one document subscription. It does
-not edit the app event configuration and does not enable the listener. Failure,
-partial success, or ambiguous output is a stop condition.
+not load the Conversation credential, edit the app event configuration, or
+enable the listener. `file_type=bitable` is sent and outbound `event_type` is
+omitted; the inbound registration remains exactly
+`drive.file.bitable_record_changed_v1`. Failure, partial success, or ambiguous
+output is a stop condition.
 
 ## Separately confirmed service activation
 
