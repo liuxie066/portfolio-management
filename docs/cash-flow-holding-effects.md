@@ -7,6 +7,12 @@
 `holdings` 中同账户、同券商、同币种的 `CASH` 项目。本文描述目标设计，
 不是对当前代码已实现能力的声明。
 
+> 2026-08-01 运行契约修订：Futu 的 `cn_cash/us_cash/hk_cash` 只作为来源
+> 观测证据。PM holdings 使用人民币汇总 `CNY-CASH`，Futu 同步不做分币种
+> holding 金额对账、不创建 `USD-CASH`/`HKD-CASH`，也不再创建新的
+> `broker_cash_reconciliation`。本文其它 cash-flow 台账 effect 设计属于独立
+> 工作流，不得被解释为 Futu 同步的自动修正权威。
+
 ## 1. 目标
 
 用户继续在飞书多维表手工维护外部入金、出金事实。系统发现新增或修改的
@@ -161,7 +167,7 @@ pm cash-flow reconcile \
 每个飞书记录可以有多个版本。核心字段：
 
 - `effect_id`
-- `effect_kind`：`cash_flow`、`broker_cash_reconciliation` 或
+- `effect_kind`：`cash_flow`、历史 `broker_cash_reconciliation` 或
   `cash_holding_external_change`
 - `hash_contract_version`
 - `record_id`
@@ -498,7 +504,7 @@ futu:
 
 ### 10.2 目标与告警
 
-Futu 的绝对目标为 OpenD 当前观测值：
+历史 Futu broker reconciliation 的绝对目标曾使用 OpenD 当前观测值：
 
 ```text
 target = observed_<currency>_cash
@@ -512,40 +518,19 @@ variance = target - expected_from_event
 OpenD 返回的真实负现金允许写入和参与估值。非 Futu 的估算出金仍禁止产生
 负目标。
 
-### 10.3 Futu 定时同步改造
+### 10.3 Futu 定时同步改造（2026-08-01 修订）
 
 现有 `pm futu sync` 和定时任务不再直接写任何 CASH holding：
 
 - STOCK/ETF 数量和 `average_cost` 保持现有同步。
 - MMF 保持现有独立行为，本方案不改变其业务定义。
-- CASH 改为 observe-only，只输出分币种观测与 drift。
-- CASH 写入只能由已确认的 cash-flow effect 或已确认的 reconciliation
-  effect 执行。
-
-drift 不会自动伪造一条外部 `cash_flow`。系统只在 SQLite 中创建
-`broker_cash_reconciliation` 技术事件，仍需单独预览和确认。
-
-reconciliation effect 不新增、修改或删除飞书 `cash_flow`，因此不影响外部
-资金流累计。它只表达“OpenD 绝对现金与 holding 不一致”的技术修正：
-
-- identity 为 `account + 富途 + currency + CASH`。
-- 同一 identity 的未完成 reconciliation 只保留一个当前版本。
-- 新观测目标改变时旧 preview 变为 `stale`，生成新版本并重新确认。
-- drift 为零时不创建 effect；已存在未完成 effect 时记录 resolved-by-observation，
-  不执行多余 holding 写入。
-- 未解决的 reconciliation 与未解决 cash-flow effect 一样阻断正式 NAV。
-
-同一 Futu cash identity 同时存在 cash-flow effect 和 drift 时，cash-flow
-effect 优先：
-
-- 有未完成 cash-flow effect 时不另建 reconciliation；其 preview 会重新读取
-  OpenD，并把当次精确分币种结果作为预览证据。
-- 已存在 reconciliation 后发现新的 cash-flow fact 时，下一次 observation
-  将 reconciliation 标记为 `superseded_by_cash_flow`，由 cash-flow effect
-  承接同一个绝对目标。
-- reconciliation 已进入 `compensation_pending` 时不得被 supersede；先完成
-  原绝对目标和 fresh readback，再根据最新事实创建新的待确认版本。
-- 历史 `record_only` 不占用该优先级。
+- CASH 为 observe-only，只输出并持久化分币种来源证据。
+- PM 的 `CNY-CASH` 是人民币汇总值，与原币观测不具备直接可比语义。
+- 不读取或要求 `USD-CASH`/`HKD-CASH`，不计算 drift，不创建新的
+  `broker_cash_reconciliation`，也不从 Futu 路径写 CASH。
+- 历史 reconciliation 记录仅作为审计历史，不得由新同步推进或重新生成。
+- 飞书 `cash_flow` effect 的确认与 NAV 门禁仍是独立工作流，不从 Futu
+  观测继承写入权威。
 
 ## 11. 预览和确认契约
 
@@ -649,7 +634,8 @@ account 锁，避免两个相反方向的修正发生死锁。任一锁或 fresh
 2. 检查 cash_flow 系统生成字段 reconciliation 是否完成。
 3. 检查删除和目标字段变化。
 4. 检查 SQLite cutover、最近成功 scan run 和数据库完整性。
-5. 检查 cash-flow effect 与 broker reconciliation effect 的当前状态。
+5. 检查 cash-flow effect 与历史 broker reconciliation effect 的当前状态；
+   Futu 同步不再创建新的 reconciliation。
 6. 任一不确定、扫描失败或 unresolved effect 存在时拒绝正式 NAV 写入。
 
 daily job 可提前展示同一 blocker，但 `NavRecordService` 的正式写入门禁不可
@@ -857,7 +843,7 @@ Cash Flow 回执复用当前 NAV/Futu 回执配置：
 - 绝对 target 写入、fresh readback、compensation
 - NAV fail-closed 门禁
 - Futu scheduled sync 停止直接写 CASH
-- Futu observation drift 创建可确认的 `broker_cash_reconciliation`
+- Futu observation 不创建 `broker_cash_reconciliation`
 - 每 15 分钟执行一次只读飞书扫描的 systemd timer
 - `pm cash-flow review` 人工工作台
 - 复用刘看山和当前 open_id 的 Cash Flow 发现/处理/异常回执
@@ -867,7 +853,7 @@ Cash Flow 回执复用当前 NAV/Futu 回执配置：
 ### Phase 2：可用性
 
 - 飞书变更检测的运行摘要和告警
-- reconciliation effect 的批量筛选和更清晰的操作体验
+- cash-flow effect 的批量筛选和更清晰的操作体验
 - 更清晰的多目标修改/删除预览
 - SQLite 定期备份自动化、恢复演练和诊断可视化
 
@@ -886,9 +872,10 @@ Cash Flow 回执复用当前 NAV/Futu 回执配置：
 4. broker 缺失或无法匹配时阻断。
 5. preview 后修改 account/broker/currency/amount/flow_type，旧 hash 失效。
 6. 重复 confirm 不重复加减。
-7. Futu 读取 `cn_cash/us_cash/hk_cash`，从不读取 deprecated aggregate cash。
-8. Futu 精确目标为负数时允许写入且估值能看到该负现金。
-9. Futu variance 只告警，不要求与 event delta 相等。
+7. Futu 读取 `cn_cash/us_cash/hk_cash` 作为来源证据，从不读取 deprecated
+   aggregate cash，也不与 `CNY-CASH` 金额比较。
+8. Futu 观测不读取、创建或更新 `USD-CASH`/`HKD-CASH`。
+9. Futu 观测差异不创建 CASH Effect，也不触发现金类 30 秒重查。
 10. OpenD 失败或目标币种字段缺失时阻断且不回退。
 11. `pm futu sync` 不再写 CASH，但股票和 MMF 行为不回归。
 12. 部分写入创建 compensation；每次 retry 仍要求确认。
@@ -905,12 +892,12 @@ Cash Flow 回执复用当前 NAV/Futu 回执配置：
 22. SQLite 缺失时普通 scan/NAV 不会静默创建新库，必须显式 init/recovery。
 23. scanner、review 和 NAV 使用同一主机、同一 `PM_DATA_DIR` 的 effect 状态。
 24. Futu PM account 无唯一 account profile 或 profile 指纹变化时旧 preview 失效。
-25. Futu drift 创建 reconciliation effect，不修改 cash_flow 累计，也不自动写 CASH。
+25. Futu drift 不创建 reconciliation effect，不修改 cash_flow 累计，也不自动写 CASH。
 26. cash-flow generated fields 已完成但 effect 未完成时 NAV 仍阻断；反向亦然。
 27. 同一 holding identity 有重复行时 preview 阻断。
 28. 多 identity 修正以稳定顺序获取全部 account 锁，并能从部分写入进入补偿。
 29. 回执 outbox 能抑制已成功 digest 的重复发送，并记录失败重试。
-30. Futu cash-flow effect 存在时不会为同一 identity 再创建竞争的 reconciliation。
+30. 无论是否存在 cash-flow effect，Futu 同步都不会创建 reconciliation。
 31. source 在 holding 写入窗口内被修改时，最新 correction 保持 NAV 阻断。
 32. hash contract 升级不会静默使全部历史确认失效。
 33. 历史非 CNY cash flow 不使用 reconcile 当天的当前 FX 回填。
@@ -944,14 +931,14 @@ Cash Flow 回执复用当前 NAV/Futu 回执配置：
 - 在 SQLite 缺失时由 NAV、scanner 或 review 自动创建新库并继续运行。
 - 把一次不完整的 Feishu 分页读取解释为记录被删除。
 - 让不同主机或不同 `PM_DATA_DIR` 各自维护一套可写 effect 状态。
-- 在 reconciliation 尚未实现时先停掉 Futu CASH 写入并继续记录 NAV。
+- 把 Futu 原币观测重新解释为 aggregate `CNY-CASH` 的可比目标或 effect。
 
 ## 20. 激活、备份、恢复和禁止回退
 
 激活顺序：
 
-1. 发布包含完整 gate、scanner、review、Futu observation 和 reconciliation
-   的同一版本；不能分开上线 CASH 停写与 reconciliation。
+1. 发布包含完整 gate、scanner、review 和 Futu observe-only 契约的同一版本；
+   Futu observation 不再依赖 reconciliation activation。
 2. 更新飞书 `cash_flow.broker` schema、manual view 和 schema checker。
 3. 配置唯一持久化 `PM_DATA_DIR`、cutover、Futu account profiles 和回执。
 4. 停止会写 CASH 的旧 timer/service，确认没有旧进程存活。
@@ -978,7 +965,7 @@ SQLite 备份必须产生一致快照，不能只复制主 `.sqlite3` 文件而�
 
 - legacy `deposit/withdraw/add_cash/sub_cash` 返回稳定拒绝且不写事实。
 - Futu adapter 只读取 `cn_cash/us_cash/hk_cash`，CASH observe-only；MMF 和
-  股票/ETF 仍按原职责同步。
+  股票/ETF 仍按原职责同步；原币 CASH 不与 `CNY-CASH` 对账，也不生成 effect。
 - generated-field reconcile 不会使用执行当下 FX 回填历史事件；缺历史证据时
   fail closed，人工 rate 需同日、可追溯 source 和独立确认。
 - SQLite effect store、显式 init、15 分钟 scanner、review/preview/confirm、

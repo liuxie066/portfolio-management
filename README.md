@@ -117,8 +117,10 @@ dry-run 不发消息。需要配置 `feishu.receipt.app_id`、
 `options-monitor` 的 `OM_FEISHU_BOT_APP_ID`、`OM_FEISHU_BOT_APP_SECRET`、
 `OM_FEISHU_BOT_USER_OPEN_ID`。通知失败会记录在返回值的 `receipt` 字段，
 不会覆盖已经完成的 holdings 同步结果。Futu CASH 在该命令中始终
-observe-only；只有经过 `cash-flow effects preview/confirm` 的 target 才能写
-CASH holding。
+observe-only：`cn_cash/us_cash/hk_cash` 只保留为来源证据，不与 holdings
+金额对账，也不创建 CASH Effects。PM 使用 `CNY-CASH` 保存人民币汇总现金；
+只有独立的 cash-flow 台账流程经过 `cash-flow effects preview/confirm` 后才可
+写 CASH holding。
 
 `daily-job` 是单账户和多账户的统一入口。未显式传 `--nav-date` 时，它会取运行日前最近业务日。只有带受支持 `details.finality`、明确 `status=final` 且日期匹配的同日记录才会幂等返回 `skipped_existing_nav`；旧记录、手工记录或 finality 不匹配会阻断为 `existing_nav_not_final`，不会因“行已存在”而误判完成。真实执行完成后会通过同一“刘看山”应用发送一条多账户 NAV 汇总回执；dry-run 不发送，通知失败不会覆盖 NAV 写入结果。
 

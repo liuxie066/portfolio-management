@@ -68,9 +68,11 @@ def test_futu_sync_receipt_sends_write_summary_from_liukanshan():
     assert "# PM · 回执 · sy" in calls[1][2]
     assert "类型｜持仓同步" in calls[1][2]
     assert "状态｜✅ 成功" in calls[1][2]
-    assert "CASH 仅观测" in calls[1][2]
-    assert "新增待处理 1" in calls[1][2]
-    assert "pm cash-flow review" in calls[1][2]
+    assert "富途原币余额仅观测" in calls[1][2]
+    assert "PM 使用 CNY-CASH 人民币汇总，不做金额对账" in calls[1][2]
+    assert "CASH Effects" not in calls[1][2]
+    assert "新增待处理 1" not in calls[1][2]
+    assert "pm cash-flow review" not in calls[1][2]
     assert "成本 127.52→116.68" in calls[1][2]
 
 

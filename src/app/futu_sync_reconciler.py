@@ -8,9 +8,7 @@ from typing import Any
 from src.models import (
     AssetType,
     CASH_ASSET_ID,
-    HKD_CASH_ASSET_ID,
     MMF_ASSET_ID,
-    USD_CASH_ASSET_ID,
 )
 
 _POSITION_TYPES = {
@@ -22,11 +20,7 @@ _POSITION_TYPES = {
     AssetType.HK_FUND,
     AssetType.US_FUND,
 }
-_CASH_ASSETS = {
-    "CNY": CASH_ASSET_ID,
-    "USD": USD_CASH_ASSET_ID,
-    "HKD": HKD_CASH_ASSET_ID,
-}
+_AGGREGATE_CASH_DATASET = "pm.cash_aggregate"
 
 
 class FutuSyncReconciler:
@@ -43,10 +37,10 @@ class FutuSyncReconciler:
 
     def reconcile(self, snapshot: Any, *, account: str, broker: str) -> dict[str, Any]:
         immediate = self._read_and_compare(snapshot, account=account, broker=broker)
-        mismatched = [key for key, value in immediate.items() if value["status"] != "trusted"]
+        mismatched = _retryable_mismatches(immediate)
         if not mismatched:
             return {
-                "status": "trusted",
+                "status": _overall_status(immediate),
                 "retry_performed": False,
                 "datasets": immediate,
             }
@@ -63,10 +57,9 @@ class FutuSyncReconciler:
     def reconcile_balances(self, snapshot: Any, *, account: str, broker: str) -> dict[str, Any]:
         def read() -> dict[str, Any]:
             return {
-                "pm.securities_cash": self._cash_by_currency_verdict(
+                _AGGREGATE_CASH_DATASET: self._aggregate_cash_verdict(
                     account=account,
                     broker=broker,
-                    expected=snapshot.cash_by_currency,
                 ),
                 "pm.fund_mmf": self._cash_verdict(
                     account=account,
@@ -78,9 +71,13 @@ class FutuSyncReconciler:
             }
 
         immediate = read()
-        mismatched = [key for key, value in immediate.items() if value["status"] != "trusted"]
+        mismatched = _retryable_mismatches(immediate)
         if not mismatched:
-            return {"status": "trusted", "retry_performed": False, "datasets": immediate}
+            return {
+                "status": _overall_status(immediate),
+                "retry_performed": False,
+                "datasets": immediate,
+            }
         self.wait(self.retry_seconds)
         retried = read()
         return {
@@ -119,10 +116,9 @@ class FutuSyncReconciler:
         return {
             "pm.holdings_quantity": _verdict(quantity_diff, "HOLDINGS_QUANTITY_MISMATCH"),
             "pm.cost_basis": _verdict(cost_diff, "COST_BASIS_MISMATCH"),
-            "pm.securities_cash": self._cash_by_currency_verdict(
+            _AGGREGATE_CASH_DATASET: self._aggregate_cash_verdict(
                 account=account,
                 broker=broker,
-                expected=snapshot.cash_by_currency,
             ),
             "pm.fund_mmf": self._cash_verdict(
                 account=account,
@@ -154,43 +150,51 @@ class FutuSyncReconciler:
         matches = stored is not None and _money(stored.quantity) == _money(expected)
         return _verdict([] if matches else [asset_id], reason_code)
 
-    def _cash_by_currency_verdict(
+    def _aggregate_cash_verdict(
         self,
         *,
         account: str,
         broker: str,
-        expected: Any,
     ) -> dict[str, Any]:
-        expected_by_currency = dict(expected or {})
-        differences: list[str] = []
-        for currency, asset_id in _CASH_ASSETS.items():
-            try:
-                stored = self.storage.get_holding(
-                    asset_id,
-                    account,
-                    broker=broker,
-                )
-            except Exception:
-                return {
-                    "status": "unavailable",
-                    "reason_code": "REPOSITORY_READ_FAILED",
-                    "diff_count": 0,
-                    "diff_subjects": [],
-                }
-            expected_amount = expected_by_currency.get(currency)
-            if (
-                expected_amount is None
-                or stored is None
-                or _money(stored.quantity) != _money(expected_amount)
-            ):
-                differences.append(asset_id)
-        return _verdict(differences, "SECURITIES_CASH_MISMATCH")
+        try:
+            stored = self.storage.get_holding(
+                CASH_ASSET_ID,
+                account,
+                broker=broker,
+            )
+        except Exception:
+            return {
+                "status": "unavailable",
+                "reason_code": "REPOSITORY_READ_FAILED",
+                "diff_count": 0,
+                "diff_subjects": [],
+            }
+
+        valid = bool(
+            stored is not None
+            and stored.asset_id == CASH_ASSET_ID
+            and stored.account == account
+            and (stored.broker or "") == broker
+            and stored.asset_type == AssetType.CASH
+            and str(stored.currency or "").upper() == "CNY"
+            and _finite_decimal(stored.quantity)
+        )
+        return _verdict(
+            [] if valid else [CASH_ASSET_ID],
+            "AGGREGATE_CASH_INVALID",
+            trusted_reason="AGGREGATE_CASH_STRUCTURALLY_VALID",
+        )
 
 
-def _verdict(diff: Sequence[str], reason_code: str) -> dict[str, Any]:
+def _verdict(
+    diff: Sequence[str],
+    reason_code: str,
+    *,
+    trusted_reason: str = "REPLICA_MATCHED",
+) -> dict[str, Any]:
     return {
         "status": "trusted" if not diff else "untrusted",
-        "reason_code": "REPLICA_MATCHED" if not diff else reason_code,
+        "reason_code": trusted_reason if not diff else reason_code,
         "diff_count": len(diff),
         "diff_subjects": list(diff),
     }
@@ -204,6 +208,22 @@ def _money(value: Any) -> Decimal | None:
     if value is None:
         return None
     return Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def _finite_decimal(value: Any) -> bool:
+    try:
+        return Decimal(str(value)).is_finite()
+    except (ArithmeticError, TypeError, ValueError):
+        return False
+
+
+def _retryable_mismatches(datasets: dict[str, dict[str, Any]]) -> list[str]:
+    return [
+        dataset_id
+        for dataset_id, verdict in datasets.items()
+        if dataset_id != _AGGREGATE_CASH_DATASET
+        and verdict.get("status") != "trusted"
+    ]
 
 
 def _overall_status(datasets: dict[str, dict[str, Any]]) -> str:

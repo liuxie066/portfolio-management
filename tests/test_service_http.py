@@ -23,7 +23,7 @@ class FakePortfolioService:
             "pm.account_mapping",
             "pm.holdings_quantity",
             "pm.cost_basis",
-            "pm.securities_cash",
+            "pm.cash_aggregate",
             "pm.fund_mmf",
             "pm.prices",
             "pm.fx",
@@ -445,7 +445,7 @@ def test_v1_freshness_is_unavailable_when_owner_evidence_is_missing():
     assert payload["freshness"] == {
         "status": "unavailable",
         "trust_status": "unavailable",
-        "dataset_ids": ["pm.securities_cash", "pm.fund_mmf"],
+        "dataset_ids": ["pm.cash_aggregate", "pm.fund_mmf"],
         "reason_codes": ["DATASET_EVIDENCE_MISSING"],
     }
 

@@ -975,12 +975,12 @@ class FutuBalanceSyncService:
         if reconcile["status"] != "trusted":
             result["quality_status"] = reconcile["status"]
             datasets = dict(reconcile.get("datasets") or {})
-            non_cash_untrusted = any(
+            replica_untrusted = any(
                 verdict.get("status") != "trusted"
                 for dataset_id, verdict in datasets.items()
-                if dataset_id != "pm.securities_cash"
+                if dataset_id != "pm.cash_aggregate"
             )
-            if non_cash_untrusted or not datasets:
+            if replica_untrusted or not datasets:
                 result["success"] = False
 
     @staticmethod

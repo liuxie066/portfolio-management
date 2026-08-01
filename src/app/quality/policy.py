@@ -16,7 +16,7 @@ from .futu_evidence import (
 NAV_REQUIRED_DATASETS = (
     "pm.account_mapping",
     "pm.holdings_quantity",
-    "pm.securities_cash",
+    "pm.cash_aggregate",
     "pm.fund_mmf",
     "pm.prices",
     "pm.fx",
@@ -85,8 +85,8 @@ def assert_official_nav_write_allowed(
         "pm.holdings_quantity": {
             "status": (verdicts.get("pm.holdings_quantity") or {}).get("status", "unavailable")
         },
-        "pm.securities_cash": {
-            "status": (verdicts.get("pm.securities_cash") or {}).get("status", "unavailable")
+        "pm.cash_aggregate": {
+            "status": (verdicts.get("pm.cash_aggregate") or {}).get("status", "unavailable")
         },
         "pm.fund_mmf": {
             "status": (verdicts.get("pm.fund_mmf") or {}).get("status", "unavailable")

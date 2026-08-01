@@ -140,17 +140,6 @@ class AccountNavRecorderService:
                 if not futu_sync_result.get("success"):
                     return _set_run_id(futu_sync_result, resolved_run_id)
                 project_futu_dry_run = bool(resolved_sync_futu_dry_run)
-                if not resolved_sync_futu_dry_run:
-                    from src.app.cash_flow_effect_service import (
-                        observe_futu_cash_result,
-                    )
-
-                    futu_sync_result = dict(futu_sync_result)
-                    futu_sync_result["cash_effects"] = observe_futu_cash_result(
-                        storage=self.storage,
-                        account=self.account,
-                        cash_result=futu_sync_result,
-                    )
 
             if self.holdings_preflight is not None:
                 if snapshot is not None:

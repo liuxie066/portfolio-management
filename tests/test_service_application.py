@@ -948,6 +948,7 @@ def test_portfolio_service_sync_futu_holdings_uses_resolved_account(monkeypatch)
     })
     assert calls[2][0] == "receipt"
     assert calls[2][1]["account"] == "lx"
+    assert "cash_effects" not in calls[2][1]
 
 
 def test_portfolio_service_receipt_failure_does_not_change_sync_success(monkeypatch):

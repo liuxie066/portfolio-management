@@ -106,7 +106,14 @@ def _receipt(
             "datasets": {
                 "pm.holdings_quantity": {"status": "trusted", "reason_code": "MATCH"},
                 "pm.cost_basis": {"status": cost_status, "reason_code": "MATCH" if cost_status == "trusted" else "MISMATCH"},
-                "pm.securities_cash": {"status": cash_status, "reason_code": "MATCH" if cash_status == "trusted" else "MISMATCH"},
+                "pm.cash_aggregate": {
+                    "status": cash_status,
+                    "reason_code": (
+                        "AGGREGATE_CASH_STRUCTURALLY_VALID"
+                        if cash_status == "trusted"
+                        else "AGGREGATE_CASH_INVALID"
+                    ),
+                },
                 "pm.fund_mmf": {"status": mmf_status, "reason_code": "MATCH" if mmf_status == "trusted" else "MISSING"},
             }
         },
@@ -168,7 +175,7 @@ def test_cost_basis_does_not_block_nav_but_cash_or_mmf_does():
     required = {
         "pm.account_mapping": {"status": "trusted"},
         "pm.holdings_quantity": {"status": "trusted"},
-        "pm.securities_cash": {"status": "trusted"},
+        "pm.cash_aggregate": {"status": "trusted"},
         "pm.fund_mmf": {"status": "trusted"},
         "pm.prices": {"status": "trusted"},
         "pm.fx": {"status": "trusted"},
@@ -261,7 +268,7 @@ def test_pm_quality_finality_and_partial_write_fail_closed(monkeypatch, tmp_path
     ).build(accounts=["lx"])
     datasets = {item["dataset_id"]: item for item in payload["datasets"]}
 
-    assert datasets["pm.securities_cash"]["status"] == "trusted"
+    assert datasets["pm.cash_aggregate"]["status"] == "trusted"
     assert datasets["pm.fund_mmf"]["status"] == "unavailable"
     assert datasets["pm.cash_like_assets"]["status"] == "partial"
     assert datasets["pm.nav"]["status"] == "untrusted"
@@ -294,9 +301,35 @@ def test_onboarded_nav_write_gate_uses_local_receipt_not_hub(monkeypatch, tmp_pa
             now=datetime(2026, 7, 26, 10, tzinfo=UTC),
         )
     except ValueError as exc:
-        assert "pm.securities_cash" in str(exc)
+        assert "pm.cash_aggregate" in str(exc)
     else:
         raise AssertionError("expected the onboarded NAV gate to fail closed")
+
+
+def test_old_per_currency_cash_receipt_does_not_alias_aggregate_evidence(
+    monkeypatch,
+    tmp_path: Path,
+):
+    _configure(monkeypatch, tmp_path, onboarded=True)
+    store = FutuSyncEvidenceStore(tmp_path / "receipts")
+    old_receipt = _receipt()
+    old_receipt["sync_run_id"] = "sync-old-cash-contract"
+    aggregate = old_receipt["reconciliation"]["datasets"].pop(
+        "pm.cash_aggregate"
+    )
+    old_receipt["reconciliation"]["datasets"]["pm.securities_cash"] = aggregate
+    _publish_receipt(store, old_receipt)
+
+    with pytest.raises(ValueError, match="pm.cash_aggregate"):
+        assert_official_nav_write_allowed(
+            account="lx",
+            valuation_quality={
+                "prices": {"status": "trusted"},
+                "fx": {"status": "trusted"},
+            },
+            receipt_store=store,
+            now=datetime(2026, 7, 26, 10, tzinfo=UTC),
+        )
 
 
 def test_stale_sync_receipt_marks_runtime_and_dependent_datasets_unavailable(
@@ -331,7 +364,7 @@ def test_stale_sync_receipt_marks_runtime_and_dependent_datasets_unavailable(
         "pm.futu_sync",
         "pm.holdings_quantity",
         "pm.cost_basis",
-        "pm.securities_cash",
+        "pm.cash_aggregate",
         "pm.fund_mmf",
     ):
         assert datasets[dataset_id]["status"] == "unavailable"

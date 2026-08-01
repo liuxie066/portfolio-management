@@ -98,9 +98,11 @@ The 15-minute timer, manual review, and NAV preflight all perform complete
 Feishu scans. Only the timer drains discovery/runtime receipts. Review displays
 results locally, and NAV uses its existing summary receipt.
 
-Futu CASH is observe-only in `pm futu sync`. Drift creates
-`broker_cash_reconciliation`; it never creates a Feishu cash-flow row and never
-writes CASH until the effect is individually previewed and confirmed.
+Futu CASH is observe-only in `pm futu sync`. Its original-currency values remain
+source evidence only: they are not compared with PM's CNY-denominated aggregate
+`CNY-CASH`, and they do not create `broker_cash_reconciliation` effects. This
+does not change the separately confirmed effect workflow for Feishu cash-flow
+ledger facts.
 
 If a CASH row was changed directly in Feishu, choose one explicit path:
 
@@ -116,7 +118,7 @@ pm cash-flow effects confirm --effect-id ID --preview-hash HASH \
   --external-action restore --confirm
 ```
 
-Futu external-change preview always refreshes the exact OpenD currency field.
+Legacy Futu per-currency reconciliation is not an active source of new effects.
 
 ## Compensation
 
