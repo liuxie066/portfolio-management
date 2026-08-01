@@ -440,18 +440,50 @@ def cmd_holdings_events_status(args):
     from src import config
     from src.app.holdings_event_service import HoldingsEventTarget
     from src.app.operation_state_store import OperationStateStore
+    from src.configuration.feishu_credentials import FeishuCredentialConfigError
     from src.feishu.holdings_event_adapter import FeishuHoldingsEventAdapter
 
-    target = HoldingsEventTarget.from_config()
+    target = None
+    target_error = None
+    try:
+        target = HoldingsEventTarget.from_config()
+    except FeishuCredentialConfigError as exc:
+        target_error = exc.code
+    except ValueError as exc:
+        target_error = str(exc)
     sdk_available = FeishuHoldingsEventAdapter.sdk_available()
-    app_secret_configured = bool(config.get("feishu.app_secret"))
+    credential_issues = []
+
+    def role_value_configured(key):
+        try:
+            return bool(str(config.get(key) or "").strip())
+        except FeishuCredentialConfigError as exc:
+            if exc.as_issue() not in credential_issues:
+                credential_issues.append(exc.as_issue())
+            return False
+
+    app_id_configured = role_value_configured("feishu.bitable.app_id")
+    app_secret_configured = role_value_configured("feishu.bitable.app_secret")
     result = {
-        "success": bool(sdk_available and app_secret_configured),
+        "success": bool(
+            target_error is None
+            and target
+            and not credential_issues
+            and sdk_available
+            and app_id_configured
+            and app_secret_configured
+        ),
         "read_only": True,
-        "target": target.as_dict(),
+        "target": target.as_dict() if target else None,
+        "target_status": {
+            "valid": target_error is None,
+            "error": target_error,
+        },
         "credentials": {
-            "app_id_configured": True,
+            "role": "bitable",
+            "app_id_configured": app_id_configured,
             "app_secret_configured": app_secret_configured,
+            "issues": credential_issues,
         },
         "sdk_available": sdk_available,
         "local_inbox": OperationStateStore.inspect_holding_event_status(),
@@ -517,6 +549,7 @@ def cmd_events_status(args):
     from src.app.cash_flow_event_service import CashFlowEventTarget
     from src.app.holdings_event_service import HoldingsEventTarget
     from src.app.operation_state_store import OperationStateStore
+    from src.configuration.feishu_credentials import FeishuCredentialConfigError
     from src.feishu.bitable_event_adapter import (
         FeishuBitableEventAdapter,
         validate_bitable_targets,
@@ -533,14 +566,23 @@ def cmd_events_status(args):
     except Exception as exc:
         registry_error = str(exc) or exc.__class__.__name__
     sdk_available = FeishuBitableEventAdapter.sdk_available()
-    app_id_configured = bool(str(config.get("feishu.app_id") or "").strip())
-    app_secret_configured = bool(
-        str(config.get("feishu.app_secret") or "").strip()
-    )
+    credential_issues = []
+
+    def role_value_configured(key):
+        try:
+            return bool(str(config.get(key) or "").strip())
+        except FeishuCredentialConfigError as exc:
+            if exc.as_issue() not in credential_issues:
+                credential_issues.append(exc.as_issue())
+            return False
+
+    app_id_configured = role_value_configured("feishu.bitable.app_id")
+    app_secret_configured = role_value_configured("feishu.bitable.app_secret")
     registry_valid = registry_error is None
     result = {
         "success": bool(
             registry_valid
+            and not credential_issues
             and sdk_available
             and app_id_configured
             and app_secret_configured
@@ -552,8 +594,10 @@ def cmd_events_status(args):
             "targets": [target.as_dict() for target in targets],
         },
         "credentials": {
+            "role": "bitable",
             "app_id_configured": app_id_configured,
             "app_secret_configured": app_secret_configured,
+            "issues": credential_issues,
         },
         "sdk_available": sdk_available,
         "local_inboxes": {

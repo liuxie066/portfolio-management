@@ -52,10 +52,14 @@ class FeishuBitableEventAdapter:
         self.targets = validate_bitable_targets(targets)
         self.app_id = str(self.targets[0].app_id)
         self.app_secret = str(
-            app_secret if app_secret is not None else config.get("feishu.app_secret") or ""
+            app_secret
+            if app_secret is not None
+            else config.get("feishu.bitable.app_secret") or ""
         ).strip()
         if not self.app_secret:
-            raise ValueError("missing feishu.app_secret for bitable event listener")
+            raise ValueError(
+                "missing feishu.bitable.app_secret for bitable event listener"
+            )
         self._sdk_module = sdk_module
         self._subscribe_request_class = subscribe_request_class
 

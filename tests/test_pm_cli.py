@@ -215,11 +215,17 @@ def test_pm_holdings_event_status_is_local_only_and_does_not_claim_remote_health
 
     patch = MonkeyPatch()
     stdout = io.StringIO()
+    config_keys = []
+
+    def configured(key, default=None):
+        config_keys.append(key)
+        return "secret"
+
     try:
         patch.setattr(event_module, "HoldingsEventTarget", Target)
         patch.setattr(store_module, "OperationStateStore", Store)
         patch.setattr(adapter_module, "FeishuHoldingsEventAdapter", Adapter)
-        patch.setattr(config_module, "get", lambda key, default=None: "secret")
+        patch.setattr(config_module, "get", configured)
         with redirect_stdout(stdout):
             assert pm.main(["holdings", "events", "status", "--json"]) == 0
     finally:
@@ -230,7 +236,58 @@ def test_pm_holdings_event_status_is_local_only_and_does_not_claim_remote_health
     assert result["read_only"] is True
     assert result["remote_subscription_verified"] is False
     assert result["listener_connection_verified"] is False
+    assert result["credentials"]["role"] == "bitable"
+    assert config_keys == [
+        "feishu.bitable.app_id",
+        "feishu.bitable.app_secret",
+    ]
     assert "no Feishu request" in result["note"]
+
+
+def test_pm_holdings_event_status_separates_identity_from_target_failure():
+    from src import config as config_module
+    import src.app.holdings_event_service as event_module
+    import src.app.operation_state_store as store_module
+    import src.feishu.holdings_event_adapter as adapter_module
+
+    class Target:
+        @classmethod
+        def from_config(cls):
+            raise ValueError("missing holdings table reference")
+
+    class Store:
+        @classmethod
+        def inspect_holding_event_status(cls):
+            return {"initialized": False}
+
+    class Adapter:
+        @staticmethod
+        def sdk_available():
+            return True
+
+    patch = MonkeyPatch()
+    stdout = io.StringIO()
+    try:
+        patch.setattr(event_module, "HoldingsEventTarget", Target)
+        patch.setattr(store_module, "OperationStateStore", Store)
+        patch.setattr(adapter_module, "FeishuHoldingsEventAdapter", Adapter)
+        patch.setattr(config_module, "get", lambda key, default=None: "configured")
+        with redirect_stdout(stdout):
+            assert pm.main(["holdings", "events", "status", "--json"]) == 1
+    finally:
+        patch.undo()
+
+    result = json.loads(stdout.getvalue())
+    assert result["target_status"] == {
+        "valid": False,
+        "error": "missing holdings table reference",
+    }
+    assert result["credentials"] == {
+        "role": "bitable",
+        "app_id_configured": True,
+        "app_secret_configured": True,
+        "issues": [],
+    }
 
 
 def test_pm_combined_event_status_is_local_only_and_reports_both_inboxes():
@@ -285,12 +342,18 @@ def test_pm_combined_event_status_is_local_only_and_reports_both_inboxes():
 
     patch = MonkeyPatch()
     stdout = io.StringIO()
+    config_keys = []
+
+    def configured(key, default=None):
+        config_keys.append(key)
+        return "configured"
+
     try:
         patch.setattr(holdings_event_module, "HoldingsEventTarget", HoldingsTarget)
         patch.setattr(cash_event_module, "CashFlowEventTarget", CashFlowTarget)
         patch.setattr(store_module, "OperationStateStore", Store)
         patch.setattr(adapter_module, "FeishuBitableEventAdapter", Adapter)
-        patch.setattr(config_module, "get", lambda key, default=None: "configured")
+        patch.setattr(config_module, "get", configured)
         with redirect_stdout(stdout):
             assert pm.main(["events", "status", "--json"]) == 0
     finally:
@@ -307,6 +370,79 @@ def test_pm_combined_event_status_is_local_only_and_reports_both_inboxes():
     assert result["local_inboxes"]["cash_flow"]["counts"] == {"pending": 1}
     assert result["remote_subscription_verified"] is False
     assert result["listener_connection_verified"] is False
+    assert result["credentials"] == {
+        "role": "bitable",
+        "app_id_configured": True,
+        "app_secret_configured": True,
+        "issues": [],
+    }
+    assert config_keys == [
+        "feishu.bitable.app_id",
+        "feishu.bitable.app_secret",
+    ]
+
+
+def test_pm_combined_event_status_reports_redacted_bitable_credential_issue():
+    from src import config as config_module
+    import src.app.cash_flow_event_service as cash_event_module
+    import src.app.holdings_event_service as holdings_event_module
+    import src.app.operation_state_store as store_module
+    from src.configuration.feishu_credentials import FeishuCredentialConfigError
+
+    class Target:
+        app_id = "cli_data"
+        file_token = "base"
+        event_type = "drive.file.bitable_record_changed_v1"
+
+        def __init__(self, table_id):
+            self.table_id = table_id
+
+        def as_dict(self):
+            return {"table_id": self.table_id}
+
+    class HoldingsTarget(Target):
+        @classmethod
+        def from_config(cls):
+            return cls("holdings")
+
+    class CashFlowTarget(Target):
+        @classmethod
+        def from_config(cls):
+            return cls("cash_flow")
+
+    class Store:
+        inspect_holding_event_status = classmethod(lambda cls: {"initialized": False})
+        inspect_cash_flow_event_status = classmethod(lambda cls: {"initialized": False})
+
+    def configured(key, default=None):
+        if key == "feishu.bitable.app_id":
+            return "cli_data"
+        raise FeishuCredentialConfigError("missing_secure_credential", key)
+
+    patch = MonkeyPatch()
+    stdout = io.StringIO()
+    try:
+        patch.setattr(holdings_event_module, "HoldingsEventTarget", HoldingsTarget)
+        patch.setattr(cash_event_module, "CashFlowEventTarget", CashFlowTarget)
+        patch.setattr(store_module, "OperationStateStore", Store)
+        patch.setattr(config_module, "get", configured)
+        with redirect_stdout(stdout):
+            assert pm.main(["events", "status", "--json"]) == 1
+    finally:
+        patch.undo()
+
+    result = json.loads(stdout.getvalue())
+    assert result["credentials"] == {
+        "role": "bitable",
+        "app_id_configured": True,
+        "app_secret_configured": False,
+        "issues": [
+            {
+                "key": "feishu.bitable.app_secret",
+                "error": "missing_secure_credential",
+            }
+        ],
+    }
 
 
 def test_pm_combined_event_target_collision_is_reported_and_refuses_mutations():

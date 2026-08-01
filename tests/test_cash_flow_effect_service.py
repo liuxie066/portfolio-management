@@ -481,6 +481,33 @@ def test_applied_receipt_renders_every_confirmed_cash_target():
     assert "sy · 某券商 · CNY 50.00 → 70.0" in message
 
 
+def test_cash_flow_effect_receipt_defaults_to_conversation_role(monkeypatch):
+    requested = []
+    values = {
+        "feishu.conversation.app_id": "cli_conversation",
+        "feishu.conversation.app_secret": "conversation_secret",
+        "feishu.conversation.open_id": "ou_user",
+    }
+
+    def fake_get(key, default=None):
+        requested.append(key)
+        return values.get(key, default)
+
+    monkeypatch.setattr(
+        "src.app.cash_flow_effect_receipt_service.config.get",
+        fake_get,
+    )
+
+    service = CashFlowEffectReceiptService(store=object())
+
+    assert (service.app_id, service.app_secret, service.open_id) == (
+        "cli_conversation",
+        "conversation_secret",
+        "ou_user",
+    )
+    assert requested == list(values)
+
+
 def test_remark_only_change_is_audited_by_scan_without_new_effect_version(
     tmp_path,
     monkeypatch,
