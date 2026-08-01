@@ -205,6 +205,55 @@ def test_stable_case_refresh_does_not_resend_and_semantic_change_supersedes(tmp_
     assert store.get_holding_case("case-2")["state"] == "pending_apply"
 
 
+def test_receipt_suppression_preserves_32_case_lifecycle_events(tmp_path):
+    store = OperationStateStore(tmp_path / "operations.sqlite3")
+    cases = []
+    receipts = []
+    for index in range(32):
+        account = "lx" if index < 13 else "sy"
+        candidate = {
+            **_case(f"case-{index}"),
+            "record_id": f"rec-{index}",
+            "account": account,
+            "record_digest": f"record-{index}",
+        }
+        cases.append(candidate)
+        receipts.append(_receipt(candidate))
+
+    created = store.materialize_holding_cases(
+        cases=cases,
+        discovery_receipts=receipts,
+        trigger={"mode": "daily_nav_preflight"},
+        enqueue_receipts=False,
+    )
+    closed_case_keys = []
+    for index, candidate in enumerate(cases):
+        closed = store.resolve_holding_cases_external(
+            record_id=candidate["record_id"],
+            active_case_keys=[],
+            record_digest=f"repaired-{index}",
+            current_identity={},
+            trigger={"mode": "daily_nav_preflight"},
+            enqueue_receipts=False,
+        )
+        closed_case_keys.extend(closed["closed_case_keys"])
+        assert closed["enqueued_receipt_keys"] == []
+
+    assert len(created["created_case_keys"]) == 32
+    assert created["enqueued_receipt_keys"] == []
+    assert len(closed_case_keys) == 32
+    for case_key in closed_case_keys:
+        assert store.get_holding_case(case_key)["state"] == "resolved_external"
+        assert [
+            event["event_type"]
+            for event in store.list_holding_case_events(case_key)
+        ] == ["discovered", "resolved_external"]
+    with sqlite3.connect(store.db_path) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM operation_receipt_outbox"
+        ).fetchone()[0] == 0
+
+
 def test_typed_receipt_claim_and_sending_expiry_have_distinct_safety(tmp_path):
     clock = [datetime(2026, 7, 31, 20, 0)]
     store = OperationStateStore(

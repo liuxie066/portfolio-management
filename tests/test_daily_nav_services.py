@@ -433,6 +433,107 @@ def test_daily_account_nav_service_returns_failure_when_payload_stage_raises():
     assert result["nav_result"]["nav"] == 1.2345
 
 
+def test_post_preflight_snapshot_failure_keeps_sanitized_holdings_facts():
+    class ValidatedSnapshot:
+        warnings = ()
+
+        @staticmethod
+        def to_valuation_holdings():
+            return []
+
+        @staticmethod
+        def provenance():
+            return {"normalized_holdings_digest": "digest-1"}
+
+    class PassingPreflight:
+        def prepare_account(self, **_kwargs):
+            return {
+                "success": True,
+                "status": "valid",
+                "validated_snapshot": ValidatedSnapshot(),
+                "case_keys": [],
+                "blocking_case_keys": [],
+                "workflow": {"closed_case_keys": ["case-closed"]},
+                "action_items": [],
+                "action_item_count": 0,
+                "action_item_omitted_count": 0,
+            }
+
+    class BrokenReadService:
+        def build_snapshot(self, **_kwargs):
+            raise RuntimeError("valuation failed")
+
+    result = AccountNavRecorderService(
+        account="alice",
+        storage=SimpleNamespace(),
+        portfolio=SimpleNamespace(),
+        read_service=BrokenReadService(),
+        holdings_preflight=PassingPreflight(),
+    ).record(
+        nav_date="2026-05-22",
+        dry_run=False,
+        confirm=True,
+        run_id="run-post-preflight-error",
+    )
+
+    assert result["success"] is False
+    assert result["error"] == "valuation failed"
+    assert result["holdings_preflight"]["workflow"]["closed_case_keys"] == [
+        "case-closed"
+    ]
+    assert "validated_snapshot" not in result["holdings_preflight"]
+
+
+def test_report_payload_failure_keeps_holdings_facts(monkeypatch):
+    preflight = {
+        "success": True,
+        "status": "valid",
+        "workflow": {"closed_case_keys": ["case-closed"]},
+        "case_keys": [],
+        "blocking_case_keys": [],
+        "action_items": [],
+        "action_item_count": 0,
+        "action_item_omitted_count": 0,
+    }
+
+    def fake_record(_self, **_kwargs):
+        return {
+            "success": True,
+            "account": "alice",
+            "date": "2026-05-22",
+            "run_id": "run-payload-holdings-error",
+            "snapshot": {"valuation": SimpleNamespace()},
+            "nav_record": _nav_record(),
+            "nav_result": {"success": True},
+            "holdings_preflight": preflight,
+        }
+
+    monkeypatch.setattr(AccountNavRecorderService, "record", fake_record)
+
+    class BrokenReadService:
+        def get_distribution(self, **_kwargs):
+            raise RuntimeError("payload failed")
+
+    class FakeStorage:
+        def get_nav_history(self, *_args, **_kwargs):
+            return []
+
+    result = DailyAccountNavService(
+        account="alice",
+        storage=FakeStorage(),
+        portfolio=SimpleNamespace(),
+        read_service=BrokenReadService(),
+    ).run(
+        nav_date="2026-05-22",
+        dry_run=False,
+        confirm=True,
+    )
+
+    assert result["success"] is False
+    assert result["error"] == "payload failed"
+    assert result["holdings_preflight"] == preflight
+
+
 def test_daily_nav_job_skips_non_business_day():
     result = DailyNavJobService(
         storage=SimpleNamespace(),

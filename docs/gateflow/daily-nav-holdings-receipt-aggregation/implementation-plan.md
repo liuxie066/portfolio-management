@@ -4,8 +4,8 @@
 - Base: `origin/main@02ce7f8`
 - Branch: `codex/aggregate-daily-nav-holdings-receipts`
 - Design source: confirmed user request and current repository behavior
-- Current gate: `accepted plan`
-- Next entry point: `S1 implementation`
+- Current gate: `S1 accepted`
+- Next entry point: `aggregate deepreview`
 
 ## Goal and motivation
 
@@ -103,7 +103,8 @@ duplicate counts in storage. A rendering helper derives:
 - `reopened_case_keys` -> 重开;
 - `closed_case_keys` -> 关闭;
 - `superseded_case_keys` -> 替代;
-- preflight `case_keys` -> 待处理;
+- preflight `pending_case_keys` (semantic cases minus still-valid confirmed
+  `resolved_keep` cases) -> 待处理;
 - preflight `blocking_case_keys` -> 阻断.
 
 The Daily NAV result will retain the successful global preflight result at
@@ -116,6 +117,7 @@ summary only once from the top-level value.
 workflow plan's already-frozen discovery receipt payloads. Each account/global
 scope carries:
 
+- `pending_case_keys`, excluding exact still-valid manual confirmations;
 - up to five `action_items`, each limited to Case key, record id, field, state,
   and exact frozen command;
 - `action_item_count`, the total actionable discoveries in that scope;
@@ -246,6 +248,7 @@ Expected assertions include:
 - manual and event paths: existing individual receipt counts and payloads;
 - NAV renderer: one ordered Holdings section with correct per-account/global
   counts, no empty section, and no more than five actionable items per scope;
+- confirmed `resolved_keep` cases: no pending count or repeated action command;
 - actionable blocker rendering: exact frozen command plus correct total/omitted
   counts, without raw evidence;
 - post-preflight exception paths: final item/message retains workflow counts and
