@@ -234,6 +234,49 @@ def test_nav_receipt_enforces_action_cap_and_tolerates_malformed_counts():
     assert "另有 2 条行动项未展开" in text
 
 
+def test_nav_receipt_renders_global_blocker_once_despite_account_copies():
+    global_preflight = {
+        "success": False,
+        "status": "holdings_confirmation_required",
+        "scope": "global",
+        "global_blocker": True,
+        "error": "holdings contains records without an account",
+        "case_keys": ["global-case"],
+        "pending_case_keys": ["global-case"],
+        "blocking_case_keys": ["global-case"],
+        "workflow": {"created_case_keys": ["global-case"]},
+        "action_items": [
+            {
+                "case_key": "global-case",
+                "record_id": "__global_orphan_holdings__",
+                "field": "__global__:account",
+                "state": "pending_manual_edit",
+                "command": "pm holdings reconcile --notify --confirm",
+            }
+        ],
+        "action_item_count": 1,
+        "action_item_omitted_count": 0,
+    }
+    text = NavHistoryReceiptService.build_message(
+        {
+            "success": False,
+            "status": "partial",
+            "dry_run": False,
+            "date": "2026-08-01",
+            "global_holdings_preflight": global_preflight,
+            "items": [
+                {**global_preflight, "account": "lx"},
+                {**global_preflight, "account": "sy"},
+            ],
+        },
+        executed_at=datetime(2026, 8, 1, 10, 0),
+    )
+
+    assert text.count("全局｜新增 1｜待处理 1｜阻断 1") == 1
+    assert text.count("全局｜Case global-case") == 1
+    assert text.index("## Holdings 预检") < text.index("## 账户明细")
+
+
 def test_nav_receipt_formats_negative_and_missing_ytd_nav_change():
     negative = NavHistoryReceiptService._item_row(_written("lx", ytd_nav_change=-0.0123))
     missing = NavHistoryReceiptService._item_row(_written("hb", ytd_nav_change=None))

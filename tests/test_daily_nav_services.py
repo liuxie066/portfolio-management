@@ -914,6 +914,59 @@ def test_daily_nav_job_discovers_invalid_raw_row_instead_of_skipping_account():
     assert result["summary"] == {"holdings_confirmation_required": 1}
 
 
+def test_daily_nav_job_preserves_exact_global_holdings_preflight_at_task_scope():
+    global_preflight = {
+        "success": True,
+        "status": "valid",
+        "scope": "global",
+        "case_keys": [],
+        "pending_case_keys": [],
+        "blocking_case_keys": [],
+        "workflow": {"closed_case_keys": ["global-case-closed"]},
+        "action_items": [],
+        "action_item_count": 0,
+        "action_item_omitted_count": 0,
+    }
+
+    class FakeStorage:
+        def audit_nav_history_duplicates(self, account=None):
+            return {"success": True, "duplicate_group_count": 0}
+
+        def reconcile_cash_flows(self, **_kwargs):
+            return {"success": True, "change_count": 0, "error_count": 0}
+
+        def get_nav_on_date(self, account, nav_date):
+            return None
+
+    class GlobalPreflight:
+        def scan_global_orphans(self, **_kwargs):
+            return global_preflight
+
+    class FakeRunner:
+        def __init__(self, account):
+            self.account = account
+
+        def run(self, **_kwargs):
+            return {"success": True, "status": "written", "account": self.account}
+
+    result = DailyNavJobService(
+        storage=FakeStorage(),
+        portfolio=SimpleNamespace(reporting_service=object()),
+        calendar=BusinessCalendarService(),
+        account_runner_factory=FakeRunner,
+        holdings_preflight=GlobalPreflight(),
+    ).run(
+        nav_date="2026-05-22",
+        account="alice",
+        dry_run=False,
+        confirm=True,
+    )
+
+    assert result["success"] is True
+    assert result["global_holdings_preflight"] is global_preflight
+    assert "holdings_preflight" not in result["items"][0]
+
+
 def test_daily_nav_job_raw_discovery_failure_never_becomes_no_accounts():
     class FakeStorage:
         def get_raw_holdings(self, **_kwargs):
