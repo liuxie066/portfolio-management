@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 from src import config
 from src.feishu_storage import FeishuStorage
 from src.feishu_client import FeishuBatchWriteError
+from src.feishu.repositories.nav_history_repository import NavHistoryReadIntegrityError
 from src.app.nav_finality import evaluate_nav_finality
 from src.models import NAVHistory
 
@@ -352,6 +353,7 @@ def test_single_legacy_nav_create_still_retries_without_optional_details():
     assert 'details' not in client.create_record_calls[1]['fields']
     assert nav.record_id == 'rec_nav_new_legacy'
     assert local_cache.upsert_calls == 1
+    assert local_cache.get_account('lx')['nav_history'][0]['details'] is None
 
 
 def test_single_nav_update_fails_closed_when_feishu_rejects_required_finality_details():
@@ -952,3 +954,530 @@ def test_incremental_nav_cache_roundtrip_preserves_details():
     existing = restarted_storage.get_nav_on_date('lx', date(2026, 3, 8))
 
     assert existing.details == details
+
+
+def test_public_nav_reads_preserve_complete_canonical_rows_across_cache_layers():
+    details = {
+        'finality': {
+            'version': 1,
+            'status': 'final',
+            'nav_date': '2026-03-11',
+            'valuation_as_of': '2026-03-11T08:00:00+08:00',
+            'writer': 'daily-nav-job',
+            'write_reason': 'canonical_daily_nav_job',
+            'run_id': 'run-complete-row',
+        }
+    }
+    fields = {
+        'date': '2026-03-11',
+        'account': 'lx',
+        'total_value': 1000.0,
+        'cash_value': 200.0,
+        # Persisted compatibility semantics: fund is a subset of stock_value.
+        'stock_value': 800.0,
+        'fund_value': 100.0,
+        'cn_stock_value': 450.0,
+        'us_stock_value': 250.0,
+        'hk_stock_value': 100.0,
+        'stock_weight': 0.8,
+        'cash_weight': 0.2,
+        'shares': 1000.0,
+        'nav': 1.0,
+        'cash_flow': 25.0,
+        'share_change': 25.0,
+        'mtd_nav_change': 0.03,
+        'ytd_nav_change': 0.05,
+        'pnl': 12.0,
+        'mtd_pnl': 30.0,
+        'ytd_pnl': 50.0,
+        'details': details,
+        'updated_at': '2026-03-11 08:01:00',
+    }
+    client = StubNavSingleWriteClient(initial_records=[{
+        'record_id': 'rec_nav_complete',
+        'fields': fields,
+    }])
+    local_cache = StubLocalNavIndexCache()
+    storage = FeishuStorage(client=client, local_nav_index_cache=local_cache)
+
+    fresh = storage.get_nav_history('lx', days=9999)[0]
+    memory = storage.get_latest_nav('lx')
+    first_read_count = len(client.list_records_calls)
+
+    restarted = FeishuStorage(client=client, local_nav_index_cache=local_cache)
+    disk = restarted.get_nav_on_date('lx', date(2026, 3, 11))
+    public_history = restarted.get_nav_history('lx', days=9999)
+
+    canonical_attributes = (
+        'total_value', 'cash_value', 'stock_value', 'fund_value',
+        'cn_stock_value', 'us_stock_value', 'hk_stock_value',
+        'stock_weight', 'cash_weight', 'shares', 'nav', 'cash_flow',
+        'share_change', 'mtd_nav_change', 'ytd_nav_change', 'pnl',
+        'mtd_pnl', 'ytd_pnl', 'details',
+    )
+    for candidate in (fresh, memory, disk, public_history[0]):
+        assert candidate.record_id == 'rec_nav_complete'
+        assert candidate.date == date(2026, 3, 11)
+        assert candidate.account == 'lx'
+        for attribute in canonical_attributes:
+            assert getattr(candidate, attribute) == getattr(fresh, attribute)
+
+    # A valid versioned disk row serves public reads without a second remote read.
+    assert len(client.list_records_calls) == first_read_count == 1
+    requested_fields = set(client.list_records_calls[0]['field_names'])
+    assert requested_fields == set(storage.nav_history.NAV_CANONICAL_PROJECTION_FIELDS)
+
+    cached = local_cache.get_account('lx')
+    assert cached['cache_format_version'] == storage.nav_history.NAV_CACHE_FORMAT_VERSION
+    assert cached['nav_history'][0]['cash_value'] == 200.0
+    assert cached['nav_history'][0]['share_change'] == 25.0
+    assert set(cached['date_identity_index']['2026-03-11'][0]) == {
+        'date', 'account', 'record_id', 'updated_at',
+    }
+
+
+@pytest.mark.parametrize('bad_date', [None, 'not-a-date'])
+def test_remote_nav_with_missing_or_invalid_date_fails_closed_without_cache_publication(
+    bad_date,
+):
+    fields = {
+        'account': 'lx',
+        'total_value': 1000.0,
+        'shares': 1000.0,
+        'nav': 1.0,
+    }
+    if bad_date is not None:
+        fields['date'] = bad_date
+    client = StubNavBulkClient(initial_records=[{
+        'record_id': 'rec_nav_invalid',
+        'fields': fields,
+    }])
+    local_cache = StubLocalNavIndexCache()
+    storage = FeishuStorage(client=client, local_nav_index_cache=local_cache)
+
+    with pytest.raises(
+        NavHistoryReadIntegrityError,
+        match=(
+            r'nav_history canonical read integrity failed: source=feishu, '
+            r'account=lx, record_id=rec_nav_invalid, row_index=0'
+        ),
+    ) as exc_info:
+        storage.preload_nav_index('lx', force_refresh=True)
+
+    assert exc_info.value.source == 'feishu'
+    assert exc_info.value.record_id == 'rec_nav_invalid'
+    assert local_cache.get_account('lx') == {}
+    assert 'lx' not in storage._nav_index_loaded_accounts
+    assert 'lx' not in storage._nav_index_mem_cache
+
+
+@pytest.mark.parametrize('audit_account', ['lx', None])
+def test_nav_duplicate_audit_rejects_invalid_remote_row_instead_of_reporting_success(
+    audit_account,
+):
+    client = StubNavBulkClient(initial_records=[{
+        'record_id': 'rec_nav_invalid',
+        'fields': {
+            'date': '2026-99-99',
+            'account': 'lx',
+            'total_value': 1000.0,
+            'shares': 1000.0,
+            'nav': 1.0,
+        },
+    }])
+    local_cache = StubLocalNavIndexCache()
+    storage = FeishuStorage(client=client, local_nav_index_cache=local_cache)
+
+    with pytest.raises(NavHistoryReadIntegrityError):
+        storage.audit_nav_history_duplicates(account=audit_account)
+
+    assert local_cache.get_account('lx') == {}
+
+
+@pytest.mark.parametrize(
+    ('record_id', 'source_account', 'reason'),
+    [
+        ('', 'lx', 'record_id is required'),
+        ('rec_nav_missing_account', None, 'account is required'),
+        ('rec_nav_other_account', 'other', 'account scope mismatch'),
+    ],
+)
+def test_scoped_remote_nav_rejects_missing_or_cross_account_identity(
+    record_id,
+    source_account,
+    reason,
+):
+    class UnfilteredClient(StubNavBulkClient):
+        def list_records(
+            self,
+            table_name: str,
+            filter_str: str = None,
+            field_names: List[str] = None,
+            page_size: int = 500,
+        ):
+            assert table_name == 'nav_history'
+            self.list_records_calls.append({
+                'table_name': table_name,
+                'filter_str': filter_str,
+                'field_names': list(field_names or []),
+                'page_size': page_size,
+            })
+            return [
+                {
+                    'record_id': row.get('record_id'),
+                    'fields': dict(row.get('fields') or {}),
+                }
+                for row in self._records
+            ]
+
+    fields = {
+        'date': '2026-03-14',
+        'total_value': 1000.0,
+        'shares': 1000.0,
+        'nav': 1.0,
+    }
+    if source_account is not None:
+        fields['account'] = source_account
+    client = UnfilteredClient(initial_records=[{
+        'record_id': record_id,
+        'fields': fields,
+    }])
+    local_cache = StubLocalNavIndexCache()
+    storage = FeishuStorage(client=client, local_nav_index_cache=local_cache)
+
+    with pytest.raises(NavHistoryReadIntegrityError, match=reason):
+        storage.preload_nav_index('lx', force_refresh=True)
+
+    assert local_cache.get_account('lx') == {}
+    assert 'lx' not in storage._nav_index_loaded_accounts
+
+
+@pytest.mark.parametrize(
+    ('record_id', 'source_account', 'reason'),
+    [
+        ('', 'lx', 'record_id is required'),
+        ('rec_nav_missing_account', None, 'account is required'),
+        ('rec_nav_other_account', 'other', 'account scope mismatch'),
+    ],
+)
+def test_versioned_nav_cache_rejects_missing_or_cross_account_identity(
+    record_id,
+    source_account,
+    reason,
+):
+    row = {
+        'record_id': record_id,
+        'date': '2026-03-14',
+        'total_value': 1000.0,
+        'shares': 1000.0,
+        'nav': 1.0,
+    }
+    if source_account is not None:
+        row['account'] = source_account
+    client = StubNavBulkClient()
+    local_cache = StubLocalNavIndexCache()
+    local_cache.set_account('lx', {
+        'account': 'lx',
+        'cache_format_version': 2,
+        'nav_history': [row],
+    })
+    storage = FeishuStorage(client=client, local_nav_index_cache=local_cache)
+
+    with pytest.raises(NavHistoryReadIntegrityError, match=reason):
+        storage.get_nav_on_date('lx', date(2026, 3, 14))
+
+    assert client.list_records_calls == []
+    assert local_cache.get_account('lx') == {}
+
+
+@pytest.mark.parametrize(
+    ('record_id', 'source_account'),
+    [('', 'lx'), ('rec_nav_missing_account', None)],
+)
+def test_global_duplicate_audit_rejects_missing_canonical_identity(
+    record_id,
+    source_account,
+):
+    fields = {
+        'date': '2026-03-14',
+        'total_value': 1000.0,
+        'shares': 1000.0,
+        'nav': 1.0,
+    }
+    if source_account is not None:
+        fields['account'] = source_account
+    client = StubNavBulkClient(initial_records=[{
+        'record_id': record_id,
+        'fields': fields,
+    }])
+    storage = FeishuStorage(
+        client=client,
+        local_nav_index_cache=StubLocalNavIndexCache(),
+    )
+
+    with pytest.raises(NavHistoryReadIntegrityError):
+        storage.audit_nav_history_duplicates(account=None)
+
+
+def test_nav_write_rejects_invalid_remote_row_before_any_mutation_request():
+    client = StubNavBulkClient(initial_records=[{
+        'record_id': 'rec_nav_invalid',
+        'fields': {
+            'account': 'lx',
+            'total_value': 1000.0,
+            'shares': 1000.0,
+            'nav': 1.0,
+        },
+    }])
+    local_cache = StubLocalNavIndexCache()
+    storage = FeishuStorage(client=client, local_nav_index_cache=local_cache)
+
+    with pytest.raises(NavHistoryReadIntegrityError):
+        storage.write_nav_records([
+            NAVHistory(
+                date=date(2026, 3, 14),
+                account='lx',
+                total_value=1000.0,
+                shares=1000.0,
+                nav=1.0,
+            )
+        ])
+
+    assert client.batch_update_records_calls == []
+    assert client.batch_create_records_calls == []
+    assert local_cache.get_account('lx') == {}
+
+
+def test_nav_write_rejects_missing_remote_record_id_before_any_mutation_request():
+    client = StubNavBulkClient(initial_records=[{
+        'record_id': '',
+        'fields': {
+            'date': '2026-03-14',
+            'account': 'lx',
+            'total_value': 1000.0,
+            'shares': 1000.0,
+            'nav': 1.0,
+        },
+    }])
+    local_cache = StubLocalNavIndexCache()
+    storage = FeishuStorage(client=client, local_nav_index_cache=local_cache)
+
+    with pytest.raises(NavHistoryReadIntegrityError, match='record_id is required'):
+        storage.write_nav_records([
+            NAVHistory(
+                date=date(2026, 3, 15),
+                account='lx',
+                total_value=1010.0,
+                shares=1000.0,
+                nav=1.01,
+            )
+        ])
+
+    assert client.batch_update_records_calls == []
+    assert client.batch_create_records_calls == []
+    assert local_cache.get_account('lx') == {}
+
+
+def test_corrupt_versioned_nav_cache_row_fails_closed_and_is_discarded():
+    client = StubNavBulkClient()
+    local_cache = StubLocalNavIndexCache()
+    local_cache.set_account('lx', {
+        'account': 'lx',
+        'cache_format_version': 2,
+        'nav_history': [{
+            'record_id': 'rec_nav_corrupt_cache',
+            'date': 'broken-date',
+            'account': 'lx',
+            'total_value': 1000.0,
+            'shares': 1000.0,
+            'nav': 1.0,
+        }],
+    })
+    storage = FeishuStorage(client=client, local_nav_index_cache=local_cache)
+
+    with pytest.raises(
+        NavHistoryReadIntegrityError,
+        match=r'source=versioned_cache, account=lx, record_id=rec_nav_corrupt_cache',
+    ):
+        storage.get_nav_on_date('lx', date(2026, 3, 14))
+
+    assert client.list_records_calls == []
+    assert local_cache.get_account('lx') == {}
+    assert 'lx' not in storage._nav_index_loaded_accounts
+
+
+def test_update_success_create_failure_preserves_scopes_and_rebuilds_cache():
+    class UpdateThenCreateFailureClient(StubNavBulkClient):
+        def batch_create_records(self, table_name: str, records: List[Dict[str, Any]]):
+            assert table_name == 'nav_history'
+            self.batch_create_records_calls.append([
+                {'fields': dict((record.get('fields') or {}))} for record in records
+            ])
+            raise FeishuBatchWriteError(
+                operation='create',
+                table_name=table_name,
+                chunk_offset=0,
+                reason='transport outcome unknown',
+                confirmed_results=[],
+            )
+
+    client = UpdateThenCreateFailureClient(initial_records=[{
+        'record_id': 'rec_nav_existing',
+        'fields': {
+            'date': '2026-03-12',
+            'account': 'lx',
+            'total_value': 1000.0,
+            'cash_value': 200.0,
+            'stock_value': 800.0,
+            'fund_value': 100.0,
+            'shares': 1000.0,
+            'nav': 1.0,
+        },
+    }])
+    local_cache = StubLocalNavIndexCache()
+    storage = FeishuStorage(client=client, local_nav_index_cache=local_cache)
+    existing = NAVHistory(
+        date=date(2026, 3, 12),
+        account='lx',
+        total_value=1100.0,
+        cash_value=200.0,
+        stock_value=900.0,
+        fund_value=100.0,
+        shares=1000.0,
+        nav=1.1,
+    )
+    new = NAVHistory(
+        date=date(2026, 3, 13),
+        account='lx',
+        total_value=1110.0,
+        cash_value=200.0,
+        stock_value=910.0,
+        fund_value=100.0,
+        shares=1000.0,
+        nav=1.11,
+    )
+
+    with pytest.raises(FeishuBatchWriteError) as exc_info:
+        storage.write_nav_records(
+            [existing, new],
+            mode='replace',
+            allow_partial=True,
+        )
+
+    error = exc_info.value
+    assert error.confirmed_scopes == {
+        'update': [{
+            'operation': 'update',
+            'date': '2026-03-12',
+            'record_id': 'rec_nav_existing',
+        }],
+        'create': [],
+    }
+    assert error.unknown_scopes == {
+        'update': [],
+        'create': [{
+            'operation': 'create',
+            'date': '2026-03-13',
+            'record_id': None,
+        }],
+    }
+    assert error.failed_scopes == {'update': [], 'create': []}
+    assert error.failure_stage == {
+        'operation': 'create',
+        'chunk_offset': 0,
+        'reason': (
+            'Feishu batch create failed: table=nav_history, chunk_offset=0, '
+            'confirmed=0: transport outcome unknown'
+        ),
+    }
+    assert error.partial_write_possible is True
+    assert error.cache_rebuild == {
+        'status': 'rebuilt_from_fresh_read',
+        'loaded': 1,
+    }
+    assert [row['record_id'] for row in error.confirmed_results] == ['rec_nav_existing']
+
+    # The repository publishes only the fresh remote readback, never the
+    # optimistic create row that failed to complete.
+    assert local_cache.upsert_calls == 0
+    cached_rows = local_cache.get_account('lx')['nav_history']
+    assert [(row['date'], row['total_value']) for row in cached_rows] == [
+        ('2026-03-12', 1100.0),
+    ]
+    assert len(client.list_records_calls) == 2
+
+
+def test_update_success_create_schema_rejection_marks_target_failed_not_unknown():
+    class UpdateThenCreateSchemaRejectionClient(StubNavBulkClient):
+        def batch_create_records(self, table_name: str, records: List[Dict[str, Any]]):
+            assert table_name == 'nav_history'
+            self.batch_create_records_calls.append([
+                {'fields': dict((record.get('fields') or {}))} for record in records
+            ])
+            raise Exception('FieldNameNotFound: details')
+
+    client = UpdateThenCreateSchemaRejectionClient(initial_records=[{
+        'record_id': 'rec_nav_existing',
+        'fields': {
+            'date': '2026-03-15',
+            'account': 'lx',
+            'total_value': 1000.0,
+            'shares': 1000.0,
+            'nav': 1.0,
+        },
+    }])
+    local_cache = StubLocalNavIndexCache()
+    storage = FeishuStorage(client=client, local_nav_index_cache=local_cache)
+    existing = NAVHistory(
+        date=date(2026, 3, 15),
+        account='lx',
+        total_value=1010.0,
+        shares=1000.0,
+        nav=1.01,
+    )
+    rejected_create = NAVHistory(
+        date=date(2026, 3, 16),
+        account='lx',
+        total_value=1020.0,
+        shares=1000.0,
+        nav=1.02,
+        details=_finality_details('2026-03-16'),
+    )
+
+    with pytest.raises(FeishuBatchWriteError) as exc_info:
+        storage.write_nav_records(
+            [existing, rejected_create],
+            mode='replace',
+            allow_partial=True,
+        )
+
+    error = exc_info.value
+    assert error.confirmed_scopes == {
+        'update': [{
+            'operation': 'update',
+            'date': '2026-03-15',
+            'record_id': 'rec_nav_existing',
+        }],
+        'create': [],
+    }
+    assert error.unknown_scopes == {'update': [], 'create': []}
+    assert error.failed_scopes == {
+        'update': [],
+        'create': [{
+            'operation': 'create',
+            'date': '2026-03-16',
+            'record_id': None,
+        }],
+    }
+    assert error.failure_stage['operation'] == 'create'
+    assert 'FieldNameNotFound' in error.failure_stage['reason']
+    assert error.partial_write_possible is True
+    assert error.cache_rebuild == {
+        'status': 'rebuilt_from_fresh_read',
+        'loaded': 1,
+    }
+    assert len(client.batch_create_records_calls) == 1
+    cached_rows = local_cache.get_account('lx')['nav_history']
+    assert [(row['date'], row['total_value']) for row in cached_rows] == [
+        ('2026-03-15', 1010.0),
+    ]

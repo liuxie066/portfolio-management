@@ -5,7 +5,7 @@ Extracted from skill_api.PortfolioSkill to keep the Skill class lean.
 from __future__ import annotations
 
 import json
-from datetime import date, timedelta
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -220,7 +220,8 @@ class AuditService:
             anomalies: List[str] = []
             exemptions: List[str] = []
 
-            expected_total = float(self.portfolio._quantize_money((n.stock_value or 0.0) + (n.cash_value or 0.0)))
+            non_cash_value = n.stock_value or 0.0
+            expected_total = float(self.portfolio._quantize_money(non_cash_value + (n.cash_value or 0.0)))
             if not self.portfolio._money_equal(n.total_value, expected_total):
                 anomalies.append(f"total_value != stock_value + cash_value ({n.total_value} != {expected_total})")
 

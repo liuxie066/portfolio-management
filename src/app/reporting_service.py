@@ -22,13 +22,17 @@ class ReportingService:
         if valuation.total_value_cny == 0:
             return {}
 
+        cn_exposure_value = valuation.cn_asset_value
+        us_exposure_value = valuation.us_asset_value
+        hk_exposure_value = valuation.hk_asset_value
+
         return {
             "现金": valuation.cash_value_cny / valuation.total_value_cny,
             "股票": valuation.stock_value_cny / valuation.total_value_cny,
             "基金": valuation.fund_value_cny / valuation.total_value_cny,
-            "中国资产": valuation.cn_asset_value / valuation.total_value_cny,
-            "美国资产": valuation.us_asset_value / valuation.total_value_cny,
-            "港股资产": valuation.hk_asset_value / valuation.total_value_cny,
+            "中国资产": cn_exposure_value / valuation.total_value_cny,
+            "美国资产": us_exposure_value / valuation.total_value_cny,
+            "港股资产": hk_exposure_value / valuation.total_value_cny,
         }
 
     def get_industry_distribution(self, account: str) -> Dict[str, float]:
@@ -55,14 +59,16 @@ class ReportingService:
 
         if valuation is not None:
             total_value = valuation.total_value_cny
-            stock_value = valuation.stock_value_cny
+            equity_value = valuation.stock_value_cny
             fund_value = valuation.fund_value_cny
+            non_cash_value = equity_value + fund_value
             cash_value = valuation.cash_value_cny
             return {
                 "success": True,
                 "total_value": total_value,
-                "stock_value": stock_value,
+                "stock_value": equity_value,
                 "fund_value": fund_value,
+                "non_cash_value": non_cash_value,
                 "cash_value": cash_value,
                 "stock_ratio": valuation.stock_ratio,
                 "fund_ratio": valuation.fund_ratio,
@@ -70,19 +76,24 @@ class ReportingService:
             }
 
         total_value = holdings_data.get("total_value", 0) or 0
-        stock_value = holdings_data.get("stock_value", 0) or 0
+        non_cash_value = (
+            holdings_data.get("non_cash_value")
+            if holdings_data.get("non_cash_value") is not None
+            else holdings_data.get("stock_value", 0)
+        ) or 0
         cash_value = holdings_data.get("cash_value", 0) or 0
         holdings = holdings_data.get("holdings") or []
         fund_value = sum((h.get("market_value") or 0) for h in holdings if h.get("normalized_type") == "fund")
-        stock_value = max(0, stock_value - fund_value)
+        equity_value = max(0, non_cash_value - fund_value)
 
         return {
             "success": True,
             "total_value": total_value,
-            "stock_value": stock_value,
+            "stock_value": equity_value,
             "fund_value": fund_value,
+            "non_cash_value": non_cash_value,
             "cash_value": cash_value,
-            "stock_ratio": position_data.get("stock_ratio", stock_value / total_value if total_value > 0 else 0),
+            "stock_ratio": position_data.get("stock_ratio", equity_value / total_value if total_value > 0 else 0),
             "fund_ratio": position_data.get("fund_ratio", fund_value / total_value if total_value > 0 else 0),
             "cash_ratio": position_data.get("cash_ratio", cash_value / total_value if total_value > 0 else 0),
         }

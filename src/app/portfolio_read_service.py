@@ -243,6 +243,13 @@ class PortfolioReadService:
             })
         holdings_list.sort(key=lambda x: x.get("market_value") or 0, reverse=True)
 
+        equity_value = valuation.stock_value_cny
+        fund_value = valuation.fund_value_cny
+        non_cash_value = equity_value + fund_value
+        cn_exposure_value = getattr(valuation, "cn_asset_value", 0.0)
+        us_exposure_value = getattr(valuation, "us_asset_value", 0.0)
+        hk_exposure_value = getattr(valuation, "hk_asset_value", 0.0)
+
         return {
             "snapshot_time": bj_now_naive().isoformat(),
             "valuation": valuation,
@@ -253,7 +260,14 @@ class PortfolioReadService:
                 "count": len(holdings_list),
                 "total_value": valuation.total_value_cny,
                 "cash_value": valuation.cash_value_cny,
-                "stock_value": valuation.stock_value_cny + valuation.fund_value_cny,
+                # Compatibility key: this has always fed persisted NAV
+                # ``stock_value``, whose canonical meaning is non-cash value.
+                "stock_value": non_cash_value,
+                "non_cash_value": non_cash_value,
+                "fund_value": fund_value,
+                "cn_exposure_value": cn_exposure_value,
+                "us_exposure_value": us_exposure_value,
+                "hk_exposure_value": hk_exposure_value,
                 "cash_ratio": valuation.cash_ratio,
                 "warnings": valuation.warnings,
             },

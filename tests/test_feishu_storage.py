@@ -1572,7 +1572,11 @@ class TestFeishuStorageNAVOperations:
         """测试更新现有净值记录"""
         self.mock_client.list_records.return_value = [{
             'record_id': 'existing_nav',
-            'fields': {'date': '2025-03-14', 'nav': '0.95'}
+            'fields': {
+                'date': '2025-03-14',
+                'account': '测试账户',
+                'nav': '0.95',
+            }
         }]
         self.mock_client.update_record.return_value = {
             'record_id': 'existing_nav',
@@ -1604,6 +1608,7 @@ class TestFeishuStorageNAVOperations:
                 'record_id': 'nav_1',
                 'fields': {
                     'date': today.isoformat(),
+                    'account': '测试账户',
                     'total_value': '1000000',
                     'nav': '1.0'
                 }
@@ -1612,6 +1617,7 @@ class TestFeishuStorageNAVOperations:
                 'record_id': 'nav_2',
                 'fields': {
                     'date': yesterday.isoformat(),
+                    'account': '测试账户',
                     'total_value': '990000',
                     'nav': '0.99'
                 }
@@ -1630,15 +1636,27 @@ class TestFeishuStorageNAVOperations:
         self.mock_client.list_records.return_value = [
             {
                 'record_id': 'nav_1',
-                'fields': {'date': '2025-03-13', 'nav': '0.99'}
+                'fields': {
+                    'date': '2025-03-13',
+                    'account': '测试账户',
+                    'nav': '0.99',
+                }
             },
             {
                 'record_id': 'nav_2',
-                'fields': {'date': '2025-03-14', 'nav': '1.0'}
+                'fields': {
+                    'date': '2025-03-14',
+                    'account': '测试账户',
+                    'nav': '1.0',
+                }
             },
             {
                 'record_id': 'nav_3',
-                'fields': {'date': '2025-03-12', 'nav': '0.98'}
+                'fields': {
+                    'date': '2025-03-12',
+                    'account': '测试账户',
+                    'nav': '0.98',
+                }
             }
         ]
 
@@ -1652,7 +1670,11 @@ class TestFeishuStorageNAVOperations:
         """测试获取指定日期的净值"""
         self.mock_client.list_records.return_value = [{
             'record_id': 'nav_1',
-            'fields': {'date': '2025-03-14', 'nav': '1.0'}
+            'fields': {
+                'date': '2025-03-14',
+                'account': '测试账户',
+                'nav': '1.0',
+            }
         }]
 
         result = self.storage.get_nav_on_date('测试账户', date(2025, 3, 14))
@@ -1665,11 +1687,19 @@ class TestFeishuStorageNAVOperations:
         self.mock_client.list_records.return_value = [
             {
                 'record_id': 'nav_1',
-                'fields': {'date': '2025-03-12', 'nav': '0.98'}
+                'fields': {
+                    'date': '2025-03-12',
+                    'account': '测试账户',
+                    'nav': '0.98',
+                }
             },
             {
                 'record_id': 'nav_2',
-                'fields': {'date': '2025-03-13', 'nav': '0.99'}
+                'fields': {
+                    'date': '2025-03-13',
+                    'account': '测试账户',
+                    'nav': '0.99',
+                }
             }
         ]
 
@@ -1682,7 +1712,12 @@ class TestFeishuStorageNAVOperations:
         """测试获取总份额"""
         self.mock_client.list_records.return_value = [{
             'record_id': 'nav_1',
-            'fields': {'date': '2025-03-14', 'shares': '1000000', 'nav': '1.0'}
+            'fields': {
+                'date': '2025-03-14',
+                'account': '测试账户',
+                'shares': '1000000',
+                'nav': '1.0',
+            }
         }]
 
         shares = self.storage.get_total_shares('测试账户')
