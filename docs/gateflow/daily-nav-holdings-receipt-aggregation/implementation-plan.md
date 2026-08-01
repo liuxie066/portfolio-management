@@ -4,8 +4,10 @@
 - Base: `origin/main@02ce7f8`
 - Branch: `codex/aggregate-daily-nav-holdings-receipts`
 - Design source: confirmed user request and current repository behavior
-- Current gate: `PR review accepted`
-- Next entry point: `draft-PR-pass after remote checks`
+- Current gate: `final closeout pass`
+- Work unit status: `completed`
+- Next entry point: user review and merge of Draft PR #40; release/deployment
+  remain separately authorized
 
 ## Goal and motivation
 
