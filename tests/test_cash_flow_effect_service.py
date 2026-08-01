@@ -4,6 +4,7 @@ from decimal import Decimal
 import pytest
 
 from src import config
+from src.app.cash_flow_summary_service import CashFlowSummaryService
 from src.app.cash_flow_effect_receipt_service import CashFlowEffectReceiptService
 from src.app.cash_flow_effect_service import CashFlowEffectService
 from src.app.cash_flow_effect_store import CashFlowEffectStore
@@ -205,6 +206,47 @@ def _service(tmp_path, monkeypatch, storage, *, futu_provider=None):
             if futu_provider is not None
             else None
         ),
+    )
+
+
+def test_official_dataset_effect_gate_reuses_rows_without_cash_flow_reread(
+    tmp_path,
+    monkeypatch,
+):
+    class TrackingStorage(FakeStorage):
+        def __init__(self):
+            super().__init__(flows=[], holdings=[])
+            self.raw_reads = 0
+            self.model_reads = 0
+
+        def get_raw_cash_flows(self, *, account=None):
+            assert account == "lx"
+            self.raw_reads += 1
+            return []
+
+        def get_cash_flows(self, account=None):
+            self.model_reads += 1
+            raise AssertionError("official effect gate must reuse the run dataset")
+
+    storage = TrackingStorage()
+    effect_service = _service(tmp_path, monkeypatch, storage)
+
+    dataset = CashFlowSummaryService(storage=storage).build_dataset(
+        account="lx",
+        nav_date=date(2026, 7, 26),
+        run_id="run-effect-dataset",
+        start_year=2026,
+        cash_flow_effect_service=effect_service,
+    )
+
+    assert dataset.complete is True
+    assert storage.raw_reads == 1
+    assert storage.model_reads == 0
+    assert dataset.effect_store_revision.startswith("cfs_")
+    assert dataset.effect_gate["effect_store_revision"] == dataset.effect_store_revision
+    assert (
+        dataset.effect_gate["cash_flow_financial_fingerprint"]
+        == dataset.financial_fingerprint
     )
 
 

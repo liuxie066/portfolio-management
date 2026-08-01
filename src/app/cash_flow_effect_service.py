@@ -333,17 +333,35 @@ class CashFlowEffectService:
         *,
         account: Optional[str] = None,
         enqueue_receipts: bool = False,
+        cash_flow_dataset: Any = None,
     ) -> Dict[str, Any]:
         """Complete Feishu scan; partial reads never become successful runs."""
         scope = account or "all"
         with process_lock("cash-flow-effects:scanner"):
             previous_scan = self.store.latest_scan(scope=scope)
             try:
-                # Cash-flow identity is the Feishu record_id. Read the complete
-                # source even for an account-scoped gate so an account move is
-                # treated as one correction rather than a deletion plus an
-                # unrelated new record.
-                flows = self.storage.get_cash_flows()
+                if cash_flow_dataset is None:
+                    # Nonofficial scanner workflows retain their own complete
+                    # source read. Official NAV gates pass the already-frozen
+                    # run dataset and must not perform a second cash-flow read.
+                    flows = self.storage.get_cash_flows()
+                else:
+                    if account is None:
+                        raise ValueError(
+                            "cash_flow_dataset requires an account-scoped effect scan"
+                        )
+                    if cash_flow_dataset.account != account:
+                        raise ValueError(
+                            "cash_flow_dataset account does not match effect scan scope"
+                        )
+                    if cash_flow_dataset.blockers:
+                        raise ValueError(
+                            "cash_flow_dataset blockers prevent effect scan"
+                        )
+                    flows = [
+                        facts.to_cash_flow()
+                        for facts in cash_flow_dataset.completed_rows
+                    ]
                 self._current_flow_accounts_cache = {
                     str(flow.record_id or ""): str(flow.account or "")
                     for flow in flows
@@ -2004,17 +2022,39 @@ class CashFlowEffectService:
             "integrity": self.store.integrity_check(),
         }
 
-    def nav_gate(self, *, account: str, nav_date: date) -> Dict[str, Any]:
-        scan = self.scan(account=account, enqueue_receipts=False)
+    def nav_gate(
+        self,
+        *,
+        account: str,
+        nav_date: date,
+        cash_flow_dataset: Any = None,
+    ) -> Dict[str, Any]:
+        if cash_flow_dataset is not None:
+            if cash_flow_dataset.account != account:
+                raise ValueError("cash_flow_dataset account does not match NAV gate")
+            if cash_flow_dataset.nav_date != nav_date:
+                raise ValueError("cash_flow_dataset nav_date does not match NAV gate")
+        scan = self.scan(
+            account=account,
+            enqueue_receipts=False,
+            cash_flow_dataset=cash_flow_dataset,
+        )
         blockers = self._blockers_for_account(
             account=account,
             nav_date=nav_date,
         )
+        revision = scan["scan_run"]["scan_run_id"]
         return {
             "success": not blockers,
             "account": account,
             "nav_date": nav_date.isoformat(),
-            "scan_run_id": scan["scan_run"]["scan_run_id"],
+            "scan_run_id": revision,
+            "effect_store_revision": revision,
+            "cash_flow_financial_fingerprint": (
+                cash_flow_dataset.financial_fingerprint
+                if cash_flow_dataset is not None
+                else None
+            ),
             "blocker_count": len(blockers),
             "blockers": [
                 {

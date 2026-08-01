@@ -40,7 +40,10 @@ class NavInitializationService:
     ) -> Dict[str, Any]:
         """Create the first `nav_history` row for an empty account."""
         try:
+            from src.run_id import new_run_id
+
             nav_date = parse_date(date_str) if date_str else bj_today()
+            run_id = new_run_id("init-nav", self.account)
 
             if (not dry_run) and (not confirm):
                 return {
@@ -48,6 +51,7 @@ class NavInitializationService:
                     "error": "Refuse to initialize nav_history without confirm=True (safety guard).",
                     "account": self.account,
                     "date": nav_date.isoformat(),
+                    "run_id": run_id,
                     "dry_run": dry_run,
                     "confirm": confirm,
                 }
@@ -66,6 +70,12 @@ class NavInitializationService:
                     "dry_run": dry_run,
                 }
 
+            cash_flow_dataset = self.portfolio.build_cash_flow_dataset(
+                account=self.account,
+                nav_date=nav_date,
+                run_id=run_id,
+            )
+
             snapshot = self.read_service.build_snapshot(price_timeout_seconds=price_timeout)
             valuation = snapshot["valuation"]
             if valuation.total_value_cny <= 0:
@@ -76,6 +86,7 @@ class NavInitializationService:
                     "date": nav_date.isoformat(),
                     "total_value": valuation.total_value_cny,
                     "warnings": valuation.warnings,
+                    "run_id": run_id,
                 }
 
             nav_record = self.portfolio.record_nav(
@@ -86,12 +97,15 @@ class NavInitializationService:
                 overwrite_existing=False,
                 dry_run=dry_run,
                 use_bulk_persist=use_bulk_persist,
+                run_id=run_id,
+                cash_flow_dataset=cash_flow_dataset,
                 nav_write_context=NavWriteContext(
                     status="initial",
                     writer="init-nav",
                     write_reason="nav_history_initialization",
                     nav_date=nav_date,
                     valuation_as_of=snapshot.get("snapshot_time"),
+                    run_id=run_id,
                 ),
             )
 
@@ -100,6 +114,7 @@ class NavInitializationService:
                 "account": self.account,
                 "date": nav_date.isoformat(),
                 "dry_run": dry_run,
+                "run_id": run_id,
                 "nav": nav_record.nav,
                 "shares": nav_record.shares,
                 "total_value": nav_record.total_value,
@@ -107,6 +122,7 @@ class NavInitializationService:
                 "stock_value": nav_record.stock_value,
                 "fund_value": nav_record.fund_value,
                 "snapshot_time": snapshot.get("snapshot_time"),
+                "cash_flow_dataset": cash_flow_dataset.details(),
                 "message": (
                     f"已演练初始化 {self.account} 的 nav_history: {nav_record.nav:.4f}"
                     if dry_run

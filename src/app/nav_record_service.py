@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import logging
-import json
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 
 from src import config
@@ -97,63 +97,13 @@ class NavRecordService:
         )
         return self._cash_flow_effect_service
 
-    def _assert_cash_flow_ready_for_write(self, *, account: str, nav_date: date) -> None:
-        result = None
-        reconcile = getattr(self.storage, "reconcile_cash_flows", None)
-        if callable(reconcile):
-            result = reconcile(account=account, dry_run=True)
-            if isinstance(result, dict):
-                if result.get("success") is False or int(result.get("error_count") or 0):
-                    raise ValueError(
-                        "NAV 写入拒绝：cash_flow generated fields 校验失败: "
-                        + str(result.get("error") or result.get("rows") or "unknown error")
-                    )
-                if int(result.get("change_count") or 0):
-                    raise ValueError(
-                        "NAV 写入拒绝：cash_flow generated fields 尚未确认；"
-                        "请另行执行 `pm cash-flow reconcile --apply --confirm`"
-                    )
+    def cash_flow_dataset_dependencies(self) -> dict[str, Any]:
+        """Expose builder-only dependencies without allowing downstream scans."""
 
-        effect_service = self._configured_effect_service()
-        result_rows = (
-            result.get("rows")
-            if isinstance(result, dict) and isinstance(result.get("rows"), list)
-            else []
-        )
-        foreign_rows = [
-            row
-            for row in result_rows
-            if row.get("status") != "error"
-            and row.get("requires_fx_confirmation")
-        ]
-        if foreign_rows:
-            from src.app.cash_flow_fx_confirmation import (
-                evaluate_cash_flow_fx_confirmation,
-            )
-            from src.app.operation_state_store import OperationStateStore
-
-            operation_store = self._operation_state_store or OperationStateStore()
-            operation_store.import_default_legacy_fx_confirmations()
-            for row in foreign_rows:
-                confirmation = operation_store.latest_fx_confirmation(
-                    str(row.get("record_id") or "")
-                )
-                evaluation = evaluate_cash_flow_fx_confirmation(row, confirmation)
-                if not evaluation["valid"]:
-                    raise ValueError(
-                        "NAV 写入拒绝：外币 cash_flow FX evidence "
-                        "未经本地确认或已失效: "
-                        f"record_id={row.get('record_id')}, "
-                        f"reason={evaluation['reason_code']}"
-                    )
-        if effect_service is None:
-            return
-        gate = effect_service.nav_gate(account=account, nav_date=nav_date)
-        if not gate.get("success"):
-            raise ValueError(
-                "NAV 写入拒绝：cash-flow holding effects 未解决: "
-                + json.dumps(gate, ensure_ascii=False, default=str)
-            )
+        return {
+            "cash_flow_effect_service": self._configured_effect_service(),
+            "operation_state_store": self._operation_state_store,
+        }
 
     def record_nav(
         self,
@@ -166,11 +116,27 @@ class NavRecordService:
         use_bulk_persist: bool = False,
         run_id: Optional[str] = None,
         nav_write_context: Optional[NavWriteContext] = None,
+        cash_flow_dataset: Any = None,
     ) -> NAVHistory:
         today_value = nav_date or bj_today()
         today = today_value.date() if isinstance(today_value, datetime) else today_value
-        if persist and not dry_run:
-            self._assert_cash_flow_ready_for_write(account=account, nav_date=today)
+        effective_run_id = str(
+            run_id or getattr(nav_write_context, "run_id", None) or ""
+        ).strip()
+        start_year = config.get_start_year()
+        if persist:
+            from src.domain.cash_flow_contracts import CashFlowDatasetSnapshot
+
+            if not isinstance(cash_flow_dataset, CashFlowDatasetSnapshot):
+                raise ValueError(
+                    "NAV 写入拒绝：persist=True requires CashFlowDatasetSnapshot"
+                )
+            cash_flow_dataset.assert_official_scope(
+                account=account,
+                nav_date=today,
+                run_id=effective_run_id,
+                start_year=start_year,
+            )
         if valuation is None:
             valuation = self.manager.calculate_valuation(account)
         valuation_quality = valuation_quality_evidence(valuation)
@@ -182,7 +148,6 @@ class NavRecordService:
             )
 
         current_year = today.strftime("%Y")
-        start_year = config.get_start_year()
 
         stock_value = valuation.stock_value_cny + valuation.fund_value_cny
         cash_value = valuation.cash_value_cny
@@ -208,12 +173,15 @@ class NavRecordService:
                 "end": self.manager._find_year_end_nav(all_navs, yr_str, nav_index=nav_index),
             }
 
-        cash_flow_summary = self.manager._summarize_cash_flows(
-            account=account,
-            today=today,
-            start_year=start_year,
-            last_nav=last_nav,
-        )
+        if cash_flow_dataset is not None:
+            cash_flow_summary = cash_flow_dataset.summary(last_nav=last_nav)
+        else:
+            cash_flow_summary = self.manager._summarize_cash_flows(
+                account=account,
+                today=today,
+                start_year=start_year,
+                last_nav=last_nav,
+            )
         daily_cash_flow = cash_flow_summary["daily"]
         monthly_cash_flow = cash_flow_summary["monthly"]
         yearly_cash_flow = cash_flow_summary["yearly"].get(current_year, 0.0)
@@ -264,16 +232,20 @@ class NavRecordService:
             writer="nav-record",
             write_reason="direct_nav_record",
             nav_date=today,
-            run_id=run_id,
+            run_id=effective_run_id or None,
         )
         if resolved_context.nav_date != today:
             raise ValueError(
                 f"NAV finality nav_date {resolved_context.nav_date} does not match record date {today}"
             )
-        resolved_context = resolved_context.with_runtime(run_id=run_id)
+        resolved_context = resolved_context.with_runtime(
+            run_id=effective_run_id or None
+        )
         details = dict(nav_record.details or {})
         details["finality"] = resolved_context.to_details()
         details["valuation_quality"] = valuation_quality
+        if cash_flow_dataset is not None:
+            details["cash_flow_dataset"] = cash_flow_dataset.details()
         if valuation.holdings_provenance:
             details["holdings_snapshot"] = dict(valuation.holdings_provenance)
         if resolved_context.run_id:
@@ -406,4 +378,74 @@ class NavRecordService:
                 **calc,
             )
 
+        return nav_record
+
+    def record_closed_nav(
+        self,
+        *,
+        account: str,
+        nav_date: date,
+        total_value: Any,
+        cash_value: Any,
+        stock_value: Any,
+        cash_flow_dataset: Any,
+        run_id: str,
+        overwrite_existing: bool = False,
+        dry_run: bool = True,
+        nav_write_context: Optional[NavWriteContext] = None,
+    ) -> NAVHistory:
+        """Compatibility CLOSED writer; S8 owns the final calculation invariant."""
+
+        from src.domain.cash_flow_contracts import CashFlowDatasetSnapshot
+
+        if not isinstance(cash_flow_dataset, CashFlowDatasetSnapshot):
+            raise ValueError(
+                "CLOSED NAV 写入拒绝：CashFlowDatasetSnapshot is required"
+            )
+        cash_flow_dataset.assert_official_scope(
+            account=account,
+            nav_date=nav_date,
+            run_id=run_id,
+            start_year=config.get_start_year(),
+        )
+        try:
+            total = Decimal(str(total_value))
+            cash = Decimal(str(cash_value))
+            stock = Decimal(str(stock_value))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise ValueError("CLOSED NAV values must be finite numbers") from exc
+        if not all(item.is_finite() for item in (total, cash, stock)):
+            raise ValueError("CLOSED NAV values must be finite numbers")
+
+        context = nav_write_context or NavWriteContext(
+            status="closed",
+            writer="close-nav",
+            write_reason="account_closed",
+            nav_date=nav_date,
+            run_id=run_id,
+        )
+        context = context.with_runtime(run_id=run_id)
+        nav_record = NAVHistory(
+            date=nav_date,
+            account=account,
+            total_value=round(float(total), 2),
+            cash_value=round(float(cash), 2),
+            stock_value=round(float(stock), 2),
+            shares=0.0,
+            nav=1.0,
+            details={
+                "status": "CLOSED",
+                "finality": context.to_details(),
+                "run_id": run_id,
+                "cash_flow_dataset": cash_flow_dataset.details(),
+            },
+        )
+        write_record = getattr(self.storage, "write_nav_record", None)
+        if not callable(write_record):
+            raise AttributeError("storage does not support NAV writes")
+        write_record(
+            nav_record,
+            overwrite_existing=overwrite_existing,
+            dry_run=dry_run,
+        )
         return nav_record

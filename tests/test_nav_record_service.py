@@ -1,14 +1,23 @@
+from dataclasses import replace
 from datetime import date, datetime
+import inspect
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
 from skill_api import PortfolioSkill
+from src import config
+from src.app.cash_flow_summary_service import CashFlowSummaryService
 from src.app.compensation_service import PartialWriteError
 from src.app.nav_finality import NavWriteContext
 from src.app.nav_record_service import NavRecordService
 from src.app.operation_state_store import OperationStateStore
+from src.domain.cash_flow_contracts import (
+    CompletedCashFlowFacts,
+    RawCashFlowRecord,
+    cash_flow_generated_fingerprint,
+)
 from src.models import NAVHistory, PortfolioValuation
 from src.maintenance.nav_history_repair import backfill
 from src.portfolio import PortfolioManager
@@ -32,7 +41,7 @@ def _valuation(warnings=None):
 def _storage():
     storage = Mock()
     storage.get_nav_index.return_value = {"_nav_objects": []}
-    storage.get_cash_flow_aggs.return_value = {"daily": {}, "monthly": {}, "yearly": {}}
+    storage.get_raw_cash_flows.return_value = []
 
     def write_nav(nav, **_kwargs):
         nav.record_id = nav.record_id or "nav-1"
@@ -52,42 +61,56 @@ def _manager(storage):
     return manager
 
 
+def _dataset(storage, nav_date, run_id="run-nav-test", account="a"):
+    return CashFlowSummaryService(storage=storage).build_dataset(
+        account=account,
+        nav_date=nav_date,
+        run_id=run_id,
+        start_year=config.get_start_year(),
+    )
+
+
+class _DatasetStub:
+    def details(self):
+        return {"financial_fingerprint": "stub-dataset"}
+
+
 def test_nav_cash_flow_gate_requires_local_fx_confirmation(tmp_path):
-    storage = Mock()
-    storage.reconcile_cash_flows.return_value = {
-        "success": True,
-        "change_count": 0,
-        "error_count": 0,
-        "rows": [
-            {
-                "record_id": "cf_usd",
-                "flow_date": "2026-07-01",
-                "source_hash": "hash_1",
-                "exchange_rate": 7.2,
-                "cny_amount": 72.0,
-                "requires_fx_confirmation": True,
-                "status": "ok",
-            }
-        ],
-    }
+    facts = CompletedCashFlowFacts.build(
+        flow_date=date(2026, 7, 1),
+        account="a",
+        broker="某券商",
+        amount=10,
+        currency="USD",
+        exchange_rate="7.2",
+        cny_amount="72.0",
+        source="test",
+        record_id="cf_usd",
+    )
+    storage = SimpleNamespace(
+        get_raw_cash_flows=Mock(return_value=[
+            RawCashFlowRecord.from_cash_flow(facts.to_cash_flow())
+        ])
+    )
     operation_store = OperationStateStore(tmp_path / "operations.sqlite3")
-    service = NavRecordService(
-        manager=SimpleNamespace(),
-        storage=storage,
+    service = CashFlowSummaryService(storage=storage)
+
+    blocked = service.build_dataset(
+        account="a",
+        nav_date=date(2026, 7, 1),
+        run_id="run-fx",
+        start_year=2026,
         operation_state_store=operation_store,
     )
-    service._configured_effect_service = lambda: None
-
-    with pytest.raises(ValueError, match="未经本地确认"):
-        service._assert_cash_flow_ready_for_write(
-            account="a",
-            nav_date=date(2026, 7, 1),
-        )
+    assert blocked.complete is False
+    assert {item.reason_code for item in blocked.blockers} == {
+        "fx_confirmation_missing"
+    }
 
     operation_store.record_fx_confirmation(
         confirmation_id="fx_1",
         record_id="cf_usd",
-        source_hash="hash_1",
+        source_hash=cash_flow_generated_fingerprint(facts),
         exchange_rate="7.20",
         exchange_rate_date="2026-07-01",
         exchange_rate_source="provider:example",
@@ -96,10 +119,15 @@ def test_nav_cash_flow_gate_requires_local_fx_confirmation(tmp_path):
         confirmation={"operator": "tester"},
     )
 
-    service._assert_cash_flow_ready_for_write(
+    confirmed = service.build_dataset(
         account="a",
         nav_date=date(2026, 7, 1),
+        run_id="run-fx-confirmed",
+        start_year=2026,
+        operation_state_store=operation_store,
     )
+    assert confirmed.complete is True
+    assert confirmed.fx_confirmation_fingerprint != blocked.fx_confirmation_fingerprint
 
 
 def test_nav_record_service_records_nav_through_manager_helpers():
@@ -114,6 +142,8 @@ def test_nav_record_service_records_nav_through_manager_helpers():
         nav_date=date(2026, 3, 19),
         persist=True,
         dry_run=True,
+        run_id="run-nav-test",
+        cash_flow_dataset=_dataset(storage, date(2026, 3, 19)),
     )
 
     assert result.date == date(2026, 3, 19)
@@ -138,9 +168,17 @@ def test_nav_record_service_persists_run_id_in_details():
         persist=True,
         dry_run=True,
         run_id="run-nav-1",
+        cash_flow_dataset=_dataset(storage, date(2026, 3, 19), "run-nav-1"),
     )
 
     assert result.details["run_id"] == "run-nav-1"
+    assert result.details["cash_flow_dataset"]["run_id"] == "run-nav-1"
+    assert result.details["cash_flow_dataset"]["window"] == {
+        "start": f"{config.get_start_year()}-01-01",
+        "end": "2026-03-19",
+        "start_inclusive": True,
+        "end_inclusive": True,
+    }
     assert result.details["finality"] == {
         "version": 1,
         "status": "manual",
@@ -172,6 +210,7 @@ def test_nav_record_service_persists_explicit_daily_job_finality():
             valuation_as_of="2026-03-19T18:00:00",
             run_id="daily-1:a",
         ),
+        cash_flow_dataset=_dataset(storage, date(2026, 3, 19), "daily-1:a"),
     )
 
     assert result.details["finality"]["status"] == "final"
@@ -198,9 +237,55 @@ def test_nav_record_service_persists_holdings_input_provenance():
         nav_date=date(2026, 3, 19),
         persist=True,
         dry_run=True,
+        run_id="run-holdings",
+        cash_flow_dataset=_dataset(storage, date(2026, 3, 19), "run-holdings"),
     )
 
     assert result.details["holdings_snapshot"] == valuation.holdings_provenance
+
+
+def test_nav_record_service_requires_complete_matching_dataset():
+    storage = _storage()
+    manager = _manager(storage)
+    service = NavRecordService(manager=manager, storage=storage)
+
+    with pytest.raises(ValueError, match="requires CashFlowDatasetSnapshot"):
+        service.record_nav(
+            account="a",
+            valuation=_valuation(),
+            nav_date=date(2026, 3, 19),
+            persist=True,
+            dry_run=True,
+            run_id="run-required",
+        )
+
+    base = _dataset(storage, date(2026, 3, 19), "run-match")
+    mismatches = [
+        (replace(base, run_id="run-other"), "run_id"),
+        (replace(base, account="other"), "account"),
+        (
+            replace(
+                base,
+                nav_date=date(2026, 3, 18),
+                window_end=date(2026, 3, 18),
+            ),
+            "nav_date",
+        ),
+        (replace(base, effect_store_revision="tampered"), "effect_store_revision"),
+    ]
+    for dataset, field in mismatches:
+        with pytest.raises(ValueError, match=field):
+            service.record_nav(
+                account="a",
+                valuation=_valuation(),
+                nav_date=date(2026, 3, 19),
+                persist=True,
+                dry_run=True,
+                run_id="run-match",
+                cash_flow_dataset=dataset,
+            )
+
+    storage.write_nav_record.assert_not_called()
 
 
 def test_nav_record_service_rejects_context_date_mismatch():
@@ -290,6 +375,8 @@ def test_nav_record_service_falls_back_to_current_period_start_for_nav_change():
         nav_date=date(2026, 5, 28),
         persist=True,
         dry_run=True,
+        run_id="run-period",
+        cash_flow_dataset=_dataset(storage, date(2026, 5, 28), "run-period"),
     )
 
     assert result.mtd_nav_change == 0.2
@@ -311,6 +398,8 @@ def test_nav_record_service_uses_bulk_persist_when_requested():
         dry_run=False,
         overwrite_existing=True,
         use_bulk_persist=True,
+        run_id="run-bulk",
+        cash_flow_dataset=_dataset(storage, date(2026, 3, 19), "run-bulk"),
     )
 
     storage.write_nav_records.assert_called_once_with([result], mode="replace", allow_partial=False, dry_run=False)
@@ -333,6 +422,8 @@ def test_nav_record_service_rejects_real_write_on_unreliable_valuation():
             nav_date=date(2026, 3, 19),
             persist=True,
             dry_run=False,
+            run_id="run-unreliable",
+            cash_flow_dataset=_dataset(storage, date(2026, 3, 19), "run-unreliable"),
         )
 
     storage.write_nav_record.assert_not_called()
@@ -351,6 +442,8 @@ def test_nav_record_service_logs_snapshot_failure_after_nav_write(caplog):
         valuation=_valuation(),
         nav_date=date(2026, 3, 19),
         persist=True,
+        run_id="run-snapshot-fail",
+        cash_flow_dataset=_dataset(storage, date(2026, 3, 19), "run-snapshot-fail"),
     )
 
     assert result.date == date(2026, 3, 19)
@@ -380,6 +473,12 @@ def test_nav_record_service_raises_partial_when_recovery_evidence_cannot_persist
             valuation=_valuation(),
             nav_date=date(2026, 3, 19),
             persist=True,
+            run_id="run-compensation-fail",
+            cash_flow_dataset=_dataset(
+                storage,
+                date(2026, 3, 19),
+                "run-compensation-fail",
+            ),
         )
 
     assert captured.value.operation == "NAV_RECORD"
@@ -404,6 +503,7 @@ def test_portfolio_skill_record_nav_surfaces_snapshot_partial_failure():
     skill.account = "a"
     skill.portfolio = Mock()
     skill.portfolio.record_nav.return_value = nav_record
+    skill.portfolio.build_cash_flow_dataset.return_value = _DatasetStub()
 
     result = skill.record_nav(
         snapshot={"valuation": _valuation(), "snapshot_time": "2026-03-19T12:00:00"},
@@ -416,6 +516,11 @@ def test_portfolio_skill_record_nav_surfaces_snapshot_partial_failure():
     assert result["snapshot_persisted"] is False
     assert result["snapshot_error"] == "snapshot boom"
     assert result["nav"] == 1.2
+    skill.portfolio.build_cash_flow_dataset.assert_called_once()
+    assert (
+        skill.portfolio.record_nav.call_args.kwargs["cash_flow_dataset"]
+        is skill.portfolio.build_cash_flow_dataset.return_value
+    )
 
 
 def test_portfolio_skill_record_nav_passes_price_timeout_to_snapshot_builder():
@@ -432,6 +537,7 @@ def test_portfolio_skill_record_nav_passes_price_timeout_to_snapshot_builder():
     skill.account = "a"
     skill.portfolio = Mock()
     skill.portfolio.record_nav.return_value = nav_record
+    skill.portfolio.build_cash_flow_dataset.return_value = _DatasetStub()
     skill.build_snapshot = Mock(
         side_effect=lambda price_timeout_seconds=None: calls.append(price_timeout_seconds)
         or {"valuation": _valuation(), "snapshot_time": "2026-03-19T12:00:00"}
@@ -441,6 +547,7 @@ def test_portfolio_skill_record_nav_passes_price_timeout_to_snapshot_builder():
 
     assert result["success"] is True
     assert calls == [17]
+    skill.portfolio.build_cash_flow_dataset.assert_called_once()
 
 
 def test_portfolio_manager_record_nav_delegates_to_service():
@@ -462,8 +569,12 @@ def test_portfolio_manager_record_nav_delegates_to_service():
 def test_portfolio_skill_close_nav_persists_closed_finality():
     skill = PortfolioSkill.__new__(PortfolioSkill)
     skill.account = "a"
-    skill.storage = Mock()
-    skill.storage.write_nav_record.return_value = {"fields": {}, "existing": None}
+    skill.storage = _storage()
+    skill.portfolio = _manager(skill.storage)
+    skill.portfolio.nav_record_service.cash_flow_dataset_dependencies = lambda: {
+        "cash_flow_effect_service": None,
+        "operation_state_store": None,
+    }
 
     result = skill.close_nav(
         date_str="2026-03-19",
@@ -479,6 +590,10 @@ def test_portfolio_skill_close_nav_persists_closed_finality():
     assert written.details["status"] == "CLOSED"
     assert written.details["finality"]["status"] == "closed"
     assert written.details["finality"]["writer"] == "close-nav"
+    assert written.details["cash_flow_dataset"]["financial_fingerprint"]
+    assert skill.storage.get_raw_cash_flows.call_count == 1
+    skill.storage.reconcile_cash_flows.assert_not_called()
+    assert "write_nav_record" not in inspect.getsource(PortfolioSkill.close_nav)
 
 
 def test_nav_history_backfill_classifies_recomputed_rows_as_maintenance(monkeypatch, capsys):

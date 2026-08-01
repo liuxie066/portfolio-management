@@ -6,6 +6,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from src import config
+from src.app.cash_flow_summary_service import CashFlowSummaryService
 from src.domain.cash_flow_contracts import CompletedCashFlowFacts
 from src.feishu_storage import FeishuStorage
 from src.local_cache import LocalNavIndexCache, LocalCashFlowAggCache
@@ -147,6 +149,10 @@ class StubStorageForRecordNav:
     def get_cash_flow_aggs(self, account: str):
         return self._cash_agg
 
+    def get_raw_cash_flows(self, *, account: str):
+        assert account == 'lx'
+        return []
+
     def get_nav_history(self, account: str, days: int = 365):
         self.get_nav_history_calls += 1
         return []
@@ -270,6 +276,21 @@ def test_record_nav_avoids_get_nav_history_full_scan_when_preloaded():
         warnings=[],
     )
 
-    nav = pm.record_nav('lx', valuation=valuation, nav_date=date(2026, 3, 15), persist=False)
+    nav_date = date(2026, 3, 15)
+    run_id = 'perf-nav'
+    dataset = CashFlowSummaryService(storage=storage).build_dataset(
+        account='lx',
+        nav_date=nav_date,
+        run_id=run_id,
+        start_year=config.get_start_year(),
+    )
+    nav = pm.record_nav(
+        'lx',
+        valuation=valuation,
+        nav_date=nav_date,
+        persist=False,
+        run_id=run_id,
+        cash_flow_dataset=dataset,
+    )
     assert nav.account == 'lx'
     assert storage.get_nav_history_calls == 0

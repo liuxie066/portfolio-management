@@ -196,6 +196,11 @@ class AccountNavRecorderService:
             else:
                 snapshot_ms = 0
             snapshot["run_id"] = resolved_run_id
+            cash_flow_dataset = self.portfolio.build_cash_flow_dataset(
+                account=self.account,
+                nav_date=today,
+                run_id=resolved_run_id,
+            )
             resolved_context = nav_write_context or NavWriteContext(
                 status="manual",
                 writer="nav-record",
@@ -219,6 +224,7 @@ class AccountNavRecorderService:
                 use_bulk_persist=use_bulk_persist,
                 run_id=resolved_run_id,
                 nav_write_context=resolved_context,
+                cash_flow_dataset=cash_flow_dataset,
             )
             nav_payload = format_nav_payload(nav_record)
             nav_result = {
@@ -275,6 +281,7 @@ class AccountNavRecorderService:
                     _public_holdings_preflight(holdings_preflight_result)
                 ),
                 "holdings_snapshot": holdings_snapshot,
+                "cash_flow_dataset": cash_flow_dataset.details(),
             }
         except Exception as e:
             failure = {
@@ -292,3 +299,96 @@ class AccountNavRecorderService:
             if public_preflight is not None:
                 failure["holdings_preflight"] = public_preflight
             return failure
+
+    def record_closed(
+        self,
+        *,
+        nav_date: Optional[Any] = None,
+        total_value: Any = None,
+        cash_value: Any = None,
+        stock_value: Any = 0.0,
+        overwrite_existing: bool = False,
+        dry_run: bool = True,
+        confirm: bool = False,
+        run_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Record the compatibility CLOSED target through the official dataset path."""
+
+        from src.run_id import new_run_id
+
+        today = _coerce_date(nav_date) if nav_date is not None else bj_today()
+        resolved_run_id = run_id or new_run_id("close-nav", self.account)
+        if (not dry_run) and (not confirm):
+            return {
+                "success": False,
+                "error": "Refuse to write nav_history without confirm=True (safety guard).",
+                "account": self.account,
+                "date": today.isoformat(),
+                "run_id": resolved_run_id,
+                "dry_run": dry_run,
+                "confirm": confirm,
+            }
+        try:
+            if total_value is None:
+                if cash_value is None or stock_value is None:
+                    raise ValueError(
+                        "total_value is required (or provide both cash_value and stock_value)"
+                    )
+                total_value = float(cash_value) + float(stock_value)
+            if cash_value is None and stock_value is not None:
+                cash_value = float(total_value) - float(stock_value)
+            if stock_value is None and cash_value is not None:
+                stock_value = float(total_value) - float(cash_value)
+            if cash_value is None and stock_value is None:
+                cash_value = float(total_value)
+                stock_value = 0.0
+
+            cash_flow_dataset = self.portfolio.build_cash_flow_dataset(
+                account=self.account,
+                nav_date=today,
+                run_id=resolved_run_id,
+            )
+            nav_record = self.portfolio.record_closed_nav(
+                account=self.account,
+                nav_date=today,
+                total_value=total_value,
+                cash_value=cash_value,
+                stock_value=stock_value,
+                cash_flow_dataset=cash_flow_dataset,
+                run_id=resolved_run_id,
+                overwrite_existing=overwrite_existing,
+                dry_run=dry_run,
+                nav_write_context=NavWriteContext(
+                    status="closed",
+                    writer="close-nav",
+                    write_reason="account_closed",
+                    nav_date=today,
+                    run_id=resolved_run_id,
+                ),
+            )
+            return {
+                "success": True,
+                "dry_run": dry_run,
+                "account": self.account,
+                "date": today.isoformat(),
+                "run_id": resolved_run_id,
+                "nav": nav_record.nav,
+                "shares": nav_record.shares,
+                "total_value": nav_record.total_value,
+                "cash_flow_dataset": cash_flow_dataset.details(),
+                "message": (
+                    f"已演练 {today} 清仓净值点（CLOSED）"
+                    if dry_run
+                    else f"已记录 {today} 清仓净值点（CLOSED）：shares=0, nav=1.0"
+                ),
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "error": str(exc),
+                "account": self.account,
+                "date": today.isoformat(),
+                "run_id": resolved_run_id,
+                "dry_run": dry_run,
+                "confirm": confirm,
+            }

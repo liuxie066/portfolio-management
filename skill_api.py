@@ -18,13 +18,12 @@ sys.path.insert(0, str(SKILL_DIR))
 from src.feishu_storage import FeishuStorage, FeishuClient
 from src.portfolio import PortfolioManager
 from src.price_fetcher import PriceFetcher
-from src.models import AssetType, AssetClass, Industry, Holding, NAVHistory
+from src.models import AssetType, AssetClass, Industry, Holding
 from src.asset_utils import (
     detect_asset_type,
     parse_date,
 )
 from src.app import AccountNavRecorderService, FutuBalanceSyncService, PortfolioReadService, ReportGenerationService, ReportQueryService
-from src.app.nav_finality import NavWriteContext
 from src.app.account_service import AccountService, normalize_accounts
 from src.app.audit_service import AuditService
 from src.domain.nav.performance import (
@@ -37,11 +36,6 @@ from src.domain.holding_mutations import (
     HoldingTarget,
 )
 from src.service.application import PortfolioService
-from src.write_guard import (
-    validate_and_normalize_cash_flow_input,
-    validate_and_normalize_nav_input,
-)
-from src.process_lock import account_lock_key, process_lock
 from src import config
 
 
@@ -520,88 +514,20 @@ class PortfolioSkill:
 
         安全约束：默认 dry_run=True；真正写入必须 confirm=True 且 dry_run=False。
         """
-        try:
-            nav_date = parse_date(date_str)
-
-            if (not dry_run) and (not confirm):
-                return {
-                    "success": False,
-                    "error": "Refuse to write nav_history without confirm=True (safety guard).",
-                    "date": nav_date.isoformat(),
-                    "dry_run": dry_run,
-                    "confirm": confirm,
-                }
-
-            # normalize CLOSED semantics
-            v = validate_and_normalize_nav_input(nav=None, shares=0, status='CLOSED')
-            if not v['ok']:
-                return {"success": False, "error": "invalid CLOSED nav input", "details": v}
-
-            # determine totals
-            if total_value is None:
-                if cash_value is not None and stock_value is not None:
-                    total_value = float(cash_value) + float(stock_value)
-                else:
-                    return {
-                        "success": False,
-                        "error": "total_value is required (or provide both cash_value and stock_value)",
-                    }
-
-            if cash_value is None and stock_value is not None:
-                cash_value = float(total_value) - float(stock_value)
-            if stock_value is None and cash_value is not None:
-                stock_value = float(total_value) - float(cash_value)
-
-            # If still missing, fall back to a safe split: all cash.
-            if cash_value is None and stock_value is None:
-                cash_value = float(total_value)
-                stock_value = 0.0
-
-            nav_record = NAVHistory(
-                date=nav_date,
-                account=self.account,
-                total_value=round(float(total_value), 2),
-                cash_value=round(float(cash_value), 2) if cash_value is not None else None,
-                stock_value=round(float(stock_value), 2) if stock_value is not None else None,
-                shares=0.0,
-                nav=1.0,
-                details={
-                    "status": "CLOSED",
-                    "finality": NavWriteContext(
-                        status="closed",
-                        writer="close-nav",
-                        write_reason="account_closed",
-                        nav_date=nav_date,
-                    ).to_details(),
-                },
-            )
-
-            storage_preview = self.storage.write_nav_record(nav_record, overwrite_existing=overwrite_existing, dry_run=True)
-            if dry_run:
-                return {
-                    "success": True,
-                    "dry_run": True,
-                    "date": nav_date.isoformat(),
-                    "nav": nav_record.nav,
-                    "shares": nav_record.shares,
-                    "total_value": nav_record.total_value,
-                    "fields": storage_preview.get("fields"),
-                    "existing": storage_preview.get("existing"),
-                }
-
-            # real write
-            self.storage.write_nav_record(nav_record, overwrite_existing=overwrite_existing, dry_run=False)
-            return {
-                "success": True,
-                "dry_run": False,
-                "date": nav_date.isoformat(),
-                "nav": nav_record.nav,
-                "shares": nav_record.shares,
-                "total_value": nav_record.total_value,
-                "message": f"已记录 {nav_date} 清仓净值点（CLOSED）：shares=0, nav=1.0",
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        return AccountNavRecorderService(
+            account=self.account,
+            storage=self.storage,
+            portfolio=self.portfolio,
+            read_service=None,
+        ).record_closed(
+            nav_date=parse_date(date_str),
+            total_value=total_value,
+            cash_value=cash_value,
+            stock_value=stock_value,
+            overwrite_existing=overwrite_existing,
+            dry_run=dry_run,
+            confirm=confirm,
+        )
 
     def record_nav(self, price_timeout: int = 30, snapshot: Optional[Dict[str, Any]] = None,
                    overwrite_existing: bool = False, dry_run: bool = True,

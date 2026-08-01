@@ -1,9 +1,10 @@
 """Canonical cash-flow row contracts and validation rules."""
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field as dataclass_field, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from enum import Enum
 import hashlib
 import json
 from types import MappingProxyType
@@ -14,6 +15,7 @@ from src.models import Currency
 
 CASH_FLOW_CONTRACT_VERSION = "pm.cash_flow.row.v1"
 CASH_FLOW_GENERATED_FINGERPRINT_VERSION = "pm.cash_flow.generated.v1"
+CASH_FLOW_DATASET_CONTRACT_VERSION = "pm.cash_flow.dataset.v1"
 CASH_FLOW_MONEY_QUANT = Decimal("0.01")
 CASH_FLOW_TYPES = frozenset({"DEPOSIT", "WITHDRAW"})
 CASH_FLOW_AMBIGUOUS_RATE_SOURCES = frozenset({
@@ -29,6 +31,23 @@ CASH_FLOW_AMBIGUOUS_RATE_SOURCES = frozenset({
     "unknown",
 })
 BEIJING_TZ = timezone(timedelta(hours=8))
+CASH_FLOW_FINANCIAL_FIELDS = (
+    "flow_date",
+    "account",
+    "broker",
+    "amount",
+    "currency",
+    "flow_type",
+    "cny_amount",
+    "dedup_key",
+    "exchange_rate",
+    "source",
+)
+CASH_FLOW_CANONICAL_FIELDS = (
+    *CASH_FLOW_FINANCIAL_FIELDS,
+    "remark",
+    "updated_at",
+)
 
 
 @dataclass(frozen=True)
@@ -79,11 +98,14 @@ class RawCashFlowRecord:
         object.__setattr__(
             self,
             "raw_fields",
-            MappingProxyType({str(key): value for key, value in self.raw_fields.items()}),
+            _freeze_mapping({
+                str(key): value
+                for key, value in self.raw_fields.items()
+            }),
         )
 
     def canonical_fields(self) -> dict[str, Any]:
-        return dict(self.raw_fields)
+        return _thaw_value(self.raw_fields)
 
     @classmethod
     def from_cash_flow(cls, flow: Any) -> "RawCashFlowRecord":
@@ -547,6 +569,546 @@ class CashFlowManualDatasetAudit:
 
     def issues_for(self, record_id: str) -> tuple[CashFlowValidationIssue, ...]:
         return tuple(issue for issue in self.issues if issue.record_id == record_id)
+
+
+@dataclass(frozen=True)
+class CashFlowDatasetBlocker:
+    """One immutable reason a dataset cannot authorize an official NAV."""
+
+    reason_code: str
+    message: str
+    record_id: str = ""
+    field: Optional[str] = None
+    details: Mapping[str, Any] = dataclass_field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "reason_code", str(self.reason_code or "").strip())
+        object.__setattr__(self, "message", str(self.message or "").strip())
+        object.__setattr__(self, "record_id", str(self.record_id or "").strip())
+        object.__setattr__(
+            self,
+            "details",
+            _freeze_mapping(self.details),
+        )
+        if not self.reason_code or not self.message:
+            raise ValueError("cash-flow dataset blocker requires reason_code and message")
+
+    @classmethod
+    def from_issue(cls, issue: CashFlowValidationIssue) -> "CashFlowDatasetBlocker":
+        return cls(
+            reason_code=issue.reason_code,
+            message=issue.message,
+            record_id=issue.record_id,
+            field=issue.field,
+            details={"raw_value": _json_value(issue.raw_value)},
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        payload = {
+            "reason_code": self.reason_code,
+            "message": self.message,
+            "record_id": self.record_id,
+            "field": self.field,
+        }
+        if self.details:
+            payload["details"] = _thaw_value(self.details)
+        return payload
+
+
+@dataclass(frozen=True)
+class CashFlowDatasetRowDerivation:
+    """Canonical raw-row validation result for one account dataset."""
+
+    completed_rows: tuple[CompletedCashFlowFacts, ...]
+    blockers: tuple[CashFlowDatasetBlocker, ...]
+    duplicate_groups: tuple[CashFlowDuplicateGroup, ...]
+
+
+def derive_cash_flow_dataset_rows(
+    records: Iterable[RawCashFlowRecord],
+    *,
+    account: str,
+) -> CashFlowDatasetRowDerivation:
+    """Derive validated completed rows from one complete raw account scan."""
+
+    raw_rows = tuple(records)
+    requested_account = str(account or "").strip()
+    if not requested_account:
+        raise ValueError("cash-flow dataset account is required")
+    if not all(isinstance(item, RawCashFlowRecord) for item in raw_rows):
+        raise TypeError("cash-flow dataset rows must be RawCashFlowRecord values")
+
+    audit = CashFlowManualDatasetAudit.build(raw_rows)
+    blockers = [
+        CashFlowDatasetBlocker.from_issue(issue)
+        for issue in audit.issues
+    ]
+    record_id_counts: dict[str, int] = {}
+    for raw in raw_rows:
+        if raw.record_id:
+            record_id_counts[raw.record_id] = record_id_counts.get(raw.record_id, 0) + 1
+    repeated_record_ids = {
+        record_id
+        for record_id, count in record_id_counts.items()
+        if count > 1
+    }
+    for record_id in sorted(repeated_record_ids):
+        blockers.append(CashFlowDatasetBlocker(
+            reason_code="RECORD_ID_DUPLICATE",
+            message="cash-flow source scan contains a repeated record_id",
+            record_id=record_id,
+            details={"occurrences": record_id_counts[record_id]},
+        ))
+
+    duplicate_record_ids = set(audit.duplicate_by_record_id)
+    for group in audit.duplicate_groups:
+        blockers.append(CashFlowDatasetBlocker(
+            reason_code="EXPECTED_DEDUP_KEY_DUPLICATE",
+            message="multiple cash-flow rows share one canonical manual identity",
+            details=group.as_dict(),
+        ))
+
+    completed_rows: list[CompletedCashFlowFacts] = []
+    for raw in raw_rows:
+        if not raw.record_id:
+            blockers.append(CashFlowDatasetBlocker(
+                reason_code="RECORD_ID_MISSING",
+                message="cash-flow source row has no stable record_id",
+            ))
+            continue
+        if raw.record_id in repeated_record_ids:
+            continue
+        manual = audit.valid_by_record_id.get(raw.record_id)
+        if manual is None or raw.record_id in duplicate_record_ids:
+            continue
+        if manual.account != requested_account:
+            blockers.append(CashFlowDatasetBlocker(
+                reason_code="ACCOUNT_SCOPE_MISMATCH",
+                message="cash-flow row account disagrees with requested dataset scope",
+                record_id=raw.record_id,
+                field="account",
+                details={
+                    "expected": requested_account,
+                    "actual": manual.account,
+                },
+            ))
+            continue
+        completed, issues = CompletedCashFlowFacts.validate(
+            raw,
+            manual=manual,
+        )
+        if completed is None:
+            blockers.extend(
+                CashFlowDatasetBlocker.from_issue(issue)
+                for issue in issues
+            )
+            continue
+        completed_rows.append(completed)
+
+    return CashFlowDatasetRowDerivation(
+        completed_rows=tuple(completed_rows),
+        blockers=tuple(blockers),
+        duplicate_groups=audit.duplicate_groups,
+    )
+
+
+@dataclass(frozen=True)
+class CashFlowDatasetSnapshot:
+    """Run-scoped immutable cash-flow facts used by one official NAV write."""
+
+    account: str
+    nav_date: date
+    run_id: str
+    fetched_at: datetime
+    window_start: date
+    window_end: date
+    raw_rows: tuple[RawCashFlowRecord, ...]
+    completed_rows: tuple[CompletedCashFlowFacts, ...]
+    blockers: tuple[CashFlowDatasetBlocker, ...]
+    duplicate_groups: tuple[CashFlowDuplicateGroup, ...]
+    audit_only_record_ids: tuple[str, ...]
+    daily: Mapping[str, Decimal]
+    monthly: Mapping[str, Decimal]
+    yearly: Mapping[str, Decimal]
+    cumulative: Decimal
+    financial_fingerprint: str
+    full_fingerprint: str
+    fx_confirmation_identities: tuple[Mapping[str, Any], ...]
+    fx_confirmation_fingerprint: str
+    effect_store_revision: Optional[str]
+    effect_gate: Mapping[str, Any]
+    contract_version: str = CASH_FLOW_DATASET_CONTRACT_VERSION
+
+    def __post_init__(self) -> None:
+        account = str(self.account or "").strip()
+        run_id = str(self.run_id or "").strip()
+        if not account:
+            raise ValueError("cash-flow dataset account is required")
+        if not run_id:
+            raise ValueError("cash-flow dataset run_id is required")
+        if not isinstance(self.nav_date, date) or isinstance(self.nav_date, datetime):
+            raise TypeError("cash-flow dataset nav_date must be a date")
+        if not isinstance(self.window_start, date) or isinstance(self.window_start, datetime):
+            raise TypeError("cash-flow dataset window_start must be a date")
+        if not isinstance(self.window_end, date) or isinstance(self.window_end, datetime):
+            raise TypeError("cash-flow dataset window_end must be a date")
+        if self.window_end != self.nav_date:
+            raise ValueError("cash-flow dataset window_end must equal nav_date")
+        if self.window_start > self.window_end:
+            raise ValueError("cash-flow dataset window is invalid")
+        if not isinstance(self.fetched_at, datetime):
+            raise TypeError("cash-flow dataset fetched_at must be a datetime")
+        if self.fetched_at.utcoffset() is None:
+            raise ValueError("cash-flow dataset fetched_at must be timezone-aware")
+        object.__setattr__(self, "account", account)
+        object.__setattr__(self, "run_id", run_id)
+        object.__setattr__(self, "raw_rows", tuple(self.raw_rows))
+        object.__setattr__(self, "completed_rows", tuple(self.completed_rows))
+        object.__setattr__(self, "blockers", tuple(self.blockers))
+        object.__setattr__(self, "duplicate_groups", tuple(self.duplicate_groups))
+        object.__setattr__(
+            self,
+            "audit_only_record_ids",
+            tuple(sorted(str(item or "").strip() for item in self.audit_only_record_ids)),
+        )
+        object.__setattr__(self, "daily", _freeze_decimal_mapping(self.daily))
+        object.__setattr__(self, "monthly", _freeze_decimal_mapping(self.monthly))
+        object.__setattr__(self, "yearly", _freeze_decimal_mapping(self.yearly))
+        object.__setattr__(self, "cumulative", Decimal(self.cumulative))
+        object.__setattr__(
+            self,
+            "fx_confirmation_identities",
+            tuple(_freeze_mapping(item) for item in self.fx_confirmation_identities),
+        )
+        revision = str(self.effect_store_revision or "").strip() or None
+        object.__setattr__(self, "effect_store_revision", revision)
+        object.__setattr__(self, "effect_gate", _freeze_mapping(self.effect_gate))
+
+    @property
+    def complete(self) -> bool:
+        return (
+            not self.blockers
+            and self.effect_gate.get("success") is True
+            and bool(self.effect_store_revision)
+        )
+
+    def summary(self, *, last_nav: Any = None) -> dict[str, Any]:
+        daily = self.daily.get(self.nav_date.isoformat(), Decimal("0"))
+        monthly = self.monthly.get(self.nav_date.strftime("%Y-%m"), Decimal("0"))
+        yearly = {
+            str(year): float(self.yearly.get(str(year), Decimal("0")))
+            for year in range(self.window_start.year, self.nav_date.year + 1)
+        }
+        previous_date = getattr(last_nav, "date", None) if last_nav is not None else None
+        if isinstance(previous_date, datetime):
+            previous_date = previous_date.date()
+        gap = Decimal("0")
+        for day_text, amount in self.daily.items():
+            flow_date = date.fromisoformat(day_text)
+            if previous_date is None:
+                if flow_date == self.nav_date:
+                    gap += amount
+            elif previous_date < flow_date <= self.nav_date:
+                gap += amount
+        return {
+            "daily": float(daily),
+            "monthly": float(monthly),
+            "yearly": yearly,
+            "cumulative": float(self.cumulative),
+            "gap": float(gap),
+        }
+
+    def details(self) -> dict[str, Any]:
+        return {
+            "contract_version": self.contract_version,
+            "financial_fingerprint": self.financial_fingerprint,
+            "full_fingerprint": self.full_fingerprint,
+            "fetched_at": self.fetched_at.isoformat(),
+            "window": {
+                "start": self.window_start.isoformat(),
+                "end": self.window_end.isoformat(),
+                "start_inclusive": True,
+                "end_inclusive": True,
+            },
+            "fx_confirmation_fingerprint": self.fx_confirmation_fingerprint,
+            "effect_store_revision": self.effect_store_revision,
+            "run_id": self.run_id,
+            "source_record_count": len(self.raw_rows),
+            "completed_record_count": len(self.completed_rows),
+        }
+
+    def assert_official_scope(
+        self,
+        *,
+        account: str,
+        nav_date: date,
+        run_id: str,
+        start_year: int,
+    ) -> None:
+        expected_account = str(account or "").strip()
+        expected_run_id = str(run_id or "").strip()
+        expected_start = date(int(start_year), 1, 1)
+        mismatches: list[str] = []
+        if self.contract_version != CASH_FLOW_DATASET_CONTRACT_VERSION:
+            mismatches.append("contract_version")
+        if self.account != expected_account:
+            mismatches.append("account")
+        if self.nav_date != nav_date or self.window_end != nav_date:
+            mismatches.append("nav_date")
+        if self.run_id != expected_run_id:
+            mismatches.append("run_id")
+        if self.window_start != expected_start:
+            mismatches.append("window")
+        if cash_flow_dataset_fingerprint(self.raw_rows, financial_only=True) != self.financial_fingerprint:
+            mismatches.append("financial_fingerprint")
+        if cash_flow_dataset_fingerprint(self.raw_rows, financial_only=False) != self.full_fingerprint:
+            mismatches.append("full_fingerprint")
+        derivation = derive_cash_flow_dataset_rows(
+            self.raw_rows,
+            account=self.account,
+        )
+        if self.completed_rows != derivation.completed_rows:
+            mismatches.append("completed_rows")
+        if self.duplicate_groups != derivation.duplicate_groups:
+            mismatches.append("duplicate_groups")
+        source_blockers = {
+            json.dumps(
+                item.as_dict(),
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            )
+            for item in derivation.blockers
+        }
+        embedded_blockers = {
+            json.dumps(
+                item.as_dict(),
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            )
+            for item in self.blockers
+        }
+        if not source_blockers.issubset(embedded_blockers):
+            mismatches.append("source_blockers")
+        expected_audit_only = tuple(sorted(
+            facts.record_id
+            for facts in derivation.completed_rows
+            if not self.window_start <= facts.flow_date <= self.window_end
+        ))
+        if self.audit_only_record_ids != expected_audit_only:
+            mismatches.append("audit_only_record_ids")
+        expected_fx_fingerprint = cash_flow_fx_evidence_fingerprint(
+            self.fx_confirmation_identities
+        )
+        if expected_fx_fingerprint != self.fx_confirmation_fingerprint:
+            mismatches.append("fx_confirmation_fingerprint")
+        expected_daily, expected_monthly, expected_yearly, expected_cumulative = (
+            aggregate_completed_cash_flows(
+                self.completed_rows,
+                start_date=self.window_start,
+                end_date=self.window_end,
+            )
+        )
+        if dict(self.daily) != expected_daily:
+            mismatches.append("daily")
+        if dict(self.monthly) != expected_monthly:
+            mismatches.append("monthly")
+        if dict(self.yearly) != expected_yearly:
+            mismatches.append("yearly")
+        if self.cumulative != expected_cumulative:
+            mismatches.append("cumulative")
+        gate_revision = (
+            self.effect_gate.get("effect_store_revision")
+            or self.effect_gate.get("scan_run_id")
+        )
+        if str(gate_revision or "").strip() != str(self.effect_store_revision or ""):
+            mismatches.append("effect_store_revision")
+        if self.effect_gate.get("success") is True:
+            if self.effect_gate.get("account") != self.account:
+                mismatches.append("effect_gate_account")
+            if self.effect_gate.get("nav_date") != self.nav_date.isoformat():
+                mismatches.append("effect_gate_nav_date")
+            if (
+                self.effect_gate.get("cash_flow_financial_fingerprint")
+                != self.financial_fingerprint
+            ):
+                mismatches.append("effect_gate_financial_fingerprint")
+        if mismatches:
+            raise ValueError(
+                "NAV 写入拒绝：cash-flow dataset scope/integrity mismatch: "
+                + ", ".join(sorted(set(mismatches)))
+            )
+        if self.blockers:
+            raise ValueError(
+                "NAV 写入拒绝：cash-flow dataset has blockers: "
+                + json.dumps(
+                    [item.as_dict() for item in self.blockers],
+                    ensure_ascii=False,
+                    default=str,
+                )
+            )
+        if not self.complete:
+            raise ValueError(
+                "NAV 写入拒绝：cash-flow dataset effect gate is incomplete"
+            )
+
+
+def cash_flow_dataset_fingerprint(
+    records: Iterable[RawCashFlowRecord],
+    *,
+    financial_only: bool,
+) -> str:
+    """Hash a complete raw row set with stable Missing/Null/Value states."""
+
+    field_names = (
+        CASH_FLOW_FINANCIAL_FIELDS
+        if financial_only
+        else CASH_FLOW_CANONICAL_FIELDS
+    )
+    rows = []
+    for record in records:
+        fields = record.raw_fields
+        row = {
+            "record_id": _field_state(record.record_id, present=True),
+            "fields": {
+                field: _field_state(fields.get(field), present=field in fields)
+                for field in field_names
+            },
+        }
+        if not financial_only:
+            extra_fields = sorted(set(fields) - set(CASH_FLOW_CANONICAL_FIELDS))
+            row["extra_fields"] = {
+                field: _field_state(fields.get(field), present=True)
+                for field in extra_fields
+            }
+        rows.append(row)
+    rows.sort(
+        key=lambda row: (
+            str((row["record_id"].get("value") or "")),
+            json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        )
+    )
+    payload = {
+        "contract_version": CASH_FLOW_DATASET_CONTRACT_VERSION,
+        "scope": "financial" if financial_only else "full",
+        "rows": rows,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def cash_flow_fx_evidence_fingerprint(
+    identities: Iterable[Mapping[str, Any]],
+) -> str:
+    normalized = [_json_value(dict(item)) for item in identities]
+    normalized.sort(
+        key=lambda item: json.dumps(
+            item,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+    payload = {
+        "contract_version": CASH_FLOW_DATASET_CONTRACT_VERSION,
+        "fx_confirmations": normalized,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def aggregate_completed_cash_flows(
+    completed_rows: Iterable[CompletedCashFlowFacts],
+    *,
+    start_date: date,
+    end_date: date,
+) -> tuple[dict[str, Decimal], dict[str, Decimal], dict[str, Decimal], Decimal]:
+    daily: dict[str, Decimal] = {}
+    monthly: dict[str, Decimal] = {}
+    yearly: dict[str, Decimal] = {}
+    cumulative = Decimal("0")
+    for facts in completed_rows:
+        if not start_date <= facts.flow_date <= end_date:
+            continue
+        amount = facts.cny_amount
+        day_key = facts.flow_date.isoformat()
+        month_key = facts.flow_date.strftime("%Y-%m")
+        year_key = facts.flow_date.strftime("%Y")
+        daily[day_key] = daily.get(day_key, Decimal("0")) + amount
+        monthly[month_key] = monthly.get(month_key, Decimal("0")) + amount
+        yearly[year_key] = yearly.get(year_key, Decimal("0")) + amount
+        cumulative += amount
+    return daily, monthly, yearly, cumulative
+
+
+def _field_state(value: Any, *, present: bool) -> dict[str, Any]:
+    if not present:
+        return {"state": "missing"}
+    if value is None:
+        return {"state": "null"}
+    return {"state": "value", "value": _json_value(value)}
+
+
+def _json_value(value: Any) -> Any:
+    if isinstance(value, Enum):
+        return _json_value(value.value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return _canonical_decimal_text(value)
+    if isinstance(value, Mapping):
+        return {
+            str(key): _json_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_json_value(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _freeze_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return _freeze_mapping(value)
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return tuple(_freeze_value(item) for item in value)
+    return value
+
+
+def _freeze_mapping(value: Mapping[str, Any]) -> Mapping[str, Any]:
+    return MappingProxyType({
+        str(key): _freeze_value(item)
+        for key, item in value.items()
+    })
+
+
+def _thaw_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _thaw_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_value(item) for item in value]
+    return value
+
+
+def _freeze_decimal_mapping(value: Mapping[str, Any]) -> Mapping[str, Decimal]:
+    return MappingProxyType({
+        str(key): Decimal(item)
+        for key, item in value.items()
+    })
 
 
 def expected_cash_flow_type(manual: ManualCashFlowFacts) -> str:

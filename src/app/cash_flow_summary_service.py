@@ -1,18 +1,29 @@
-"""Cash-flow aggregation read service."""
+"""Fresh cash-flow dataset builder and nonofficial summary queries."""
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from dataclasses import replace
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+import json
 from typing import Any
 
 from src.domain.cash_flow_contracts import (
-    CashFlowContractError,
+    CASH_FLOW_DATASET_CONTRACT_VERSION,
+    CashFlowDatasetBlocker,
+    CashFlowDatasetSnapshot,
     CompletedCashFlowFacts,
     RawCashFlowRecord,
+    aggregate_completed_cash_flows,
+    cash_flow_dataset_fingerprint,
+    cash_flow_fx_evidence_fingerprint,
+    cash_flow_generated_fingerprint,
+    derive_cash_flow_dataset_rows,
 )
 
 
 class CashFlowSummaryService:
+    """Own the only storage-backed builder for run-scoped cash-flow facts."""
+
     def __init__(self, storage: Any):
         self.storage = storage
 
@@ -38,119 +49,316 @@ class CashFlowSummaryService:
         )
         return float(facts.cny_amount)
 
-    def summarize(self, account: str, today: date, start_year: int, last_nav=None) -> dict:
-        agg = self._load_aggs(account, start_date=date(start_year, 1, 1), end_date=today)
+    def build_dataset(
+        self,
+        *,
+        account: str,
+        nav_date: date,
+        run_id: str,
+        start_year: int,
+        cash_flow_effect_service: Any = None,
+        operation_state_store: Any = None,
+    ) -> CashFlowDatasetSnapshot:
+        """Build one fresh, frozen source/evidence set for a target NAV run."""
 
-        daily_map = agg.get("daily") or {}
-        monthly_map = agg.get("monthly") or {}
-        yearly_map = agg.get("yearly") or {}
+        requested_account = str(account or "").strip()
+        requested_run_id = str(run_id or "").strip()
+        if not requested_account:
+            raise ValueError("cash-flow dataset account is required")
+        if not requested_run_id:
+            raise ValueError("cash-flow dataset run_id is required")
+        if isinstance(nav_date, datetime):
+            requested_nav_date = nav_date.date()
+        elif isinstance(nav_date, date):
+            requested_nav_date = nav_date
+        else:
+            requested_nav_date = date.fromisoformat(str(nav_date)[:10])
+        window_start = date(int(start_year), 1, 1)
+        if window_start > requested_nav_date:
+            raise ValueError("cash-flow dataset start_year is after nav_date")
 
-        daily = self.to_decimal(daily_map.get(today.strftime("%Y-%m-%d"), 0.0))
-        monthly = self.to_decimal(monthly_map.get(today.strftime("%Y-%m"), 0.0))
+        get_raw = getattr(self.storage, "get_raw_cash_flows", None)
+        if not callable(get_raw):
+            raise AttributeError(
+                "storage does not support fresh raw cash-flow reads"
+            )
+        raw_rows = tuple(get_raw(account=requested_account))
+        fetched_at = datetime.now(timezone.utc)
+        if not all(isinstance(item, RawCashFlowRecord) for item in raw_rows):
+            raise TypeError(
+                "get_raw_cash_flows must return RawCashFlowRecord values"
+            )
 
-        yearly = {}
-        for year in range(start_year, today.year + 1):
-            year_str = str(year)
-            yearly[year_str] = float(self.to_decimal(yearly_map.get(year_str, 0.0)))
+        row_derivation = derive_cash_flow_dataset_rows(
+            raw_rows,
+            account=requested_account,
+        )
+        blockers = list(row_derivation.blockers)
+        completed_rows = list(row_derivation.completed_rows)
+        audit_only_record_ids: list[str] = []
+        foreign_in_window: list[CompletedCashFlowFacts] = []
+        for completed in completed_rows:
+            if not window_start <= completed.flow_date <= requested_nav_date:
+                audit_only_record_ids.append(completed.record_id)
+            elif completed.currency != "CNY":
+                foreign_in_window.append(completed)
 
-        cumulative = Decimal("0")
-        for day_str, amount in daily_map.items():
-            parsed = self._parse_day(day_str)
-            if parsed is not None and date(start_year, 1, 1) <= parsed <= today:
-                cumulative += self.to_decimal(amount)
+        fx_identities: list[dict[str, Any]] = []
+        if foreign_in_window:
+            from src.app.cash_flow_fx_confirmation import (
+                evaluate_cash_flow_fx_confirmation,
+                frozen_fx_confirmation_identity,
+            )
+            from src.app.operation_state_store import OperationStateStore
 
-        gap = Decimal("0")
-        gap_start = last_nav.date if last_nav else None
-        for day_str, amount in daily_map.items():
-            parsed = self._parse_day(day_str)
-            if parsed is None or parsed > today:
-                continue
-            if gap_start is None:
-                if parsed == today:
-                    gap += self.to_decimal(amount)
-            elif parsed > gap_start:
-                gap += self.to_decimal(amount)
+            operation_store = operation_state_store or OperationStateStore()
+            operation_store.import_default_legacy_fx_confirmations()
+            for facts in foreign_in_window:
+                row = {
+                    "record_id": facts.record_id,
+                    "flow_date": facts.flow_date.isoformat(),
+                    "generated_fingerprint": cash_flow_generated_fingerprint(facts),
+                    "exchange_rate": facts.exchange_rate,
+                    "cny_amount": facts.cny_amount,
+                }
+                confirmation = operation_store.latest_fx_confirmation(
+                    facts.record_id
+                )
+                identity = frozen_fx_confirmation_identity(confirmation)
+                fx_identities.append(identity)
+                evaluation = evaluate_cash_flow_fx_confirmation(row, confirmation)
+                if not evaluation.get("valid"):
+                    blockers.append(CashFlowDatasetBlocker(
+                        reason_code=str(
+                            evaluation.get("reason_code")
+                            or "fx_confirmation_invalid"
+                        ),
+                        message=(
+                            "foreign cash-flow FX evidence is missing or stale"
+                        ),
+                        record_id=facts.record_id,
+                        field="exchange_rate",
+                        details={
+                            "evaluation": evaluation,
+                            "confirmation": identity,
+                        },
+                    ))
 
-        return {
-            "daily": float(daily),
-            "monthly": float(monthly),
-            "yearly": yearly,
-            "cumulative": float(cumulative),
-            "gap": float(gap),
-        }
+        daily, monthly, yearly, cumulative = aggregate_completed_cash_flows(
+            completed_rows,
+            start_date=window_start,
+            end_date=requested_nav_date,
+        )
+        preliminary = CashFlowDatasetSnapshot(
+            account=requested_account,
+            nav_date=requested_nav_date,
+            run_id=requested_run_id,
+            fetched_at=fetched_at,
+            window_start=window_start,
+            window_end=requested_nav_date,
+            raw_rows=raw_rows,
+            completed_rows=tuple(completed_rows),
+            blockers=tuple(blockers),
+            duplicate_groups=row_derivation.duplicate_groups,
+            audit_only_record_ids=tuple(audit_only_record_ids),
+            daily=daily,
+            monthly=monthly,
+            yearly=yearly,
+            cumulative=cumulative,
+            financial_fingerprint=cash_flow_dataset_fingerprint(
+                raw_rows,
+                financial_only=True,
+            ),
+            full_fingerprint=cash_flow_dataset_fingerprint(
+                raw_rows,
+                financial_only=False,
+            ),
+            fx_confirmation_identities=tuple(fx_identities),
+            fx_confirmation_fingerprint=cash_flow_fx_evidence_fingerprint(
+                fx_identities
+            ),
+            effect_store_revision=None,
+            effect_gate={
+                "success": False,
+                "status": "not_evaluated",
+                "effect_store_revision": None,
+            },
+            contract_version=CASH_FLOW_DATASET_CONTRACT_VERSION,
+        )
+        if blockers:
+            return preliminary
+
+        if cash_flow_effect_service is None:
+            revision = "not_activated"
+            gate = {
+                "success": True,
+                "status": "not_activated",
+                "effect_store_revision": revision,
+                "account": requested_account,
+                "nav_date": requested_nav_date.isoformat(),
+                "cash_flow_financial_fingerprint": (
+                    preliminary.financial_fingerprint
+                ),
+            }
+            return replace(
+                preliminary,
+                effect_store_revision=revision,
+                effect_gate=gate,
+            )
+
+        try:
+            gate = cash_flow_effect_service.nav_gate(
+                account=requested_account,
+                nav_date=requested_nav_date,
+                cash_flow_dataset=preliminary,
+            )
+        except Exception as exc:
+            return replace(
+                preliminary,
+                blockers=(
+                    *preliminary.blockers,
+                    CashFlowDatasetBlocker(
+                        reason_code="EFFECT_GATE_FAILED",
+                        message="cash-flow holding effect gate failed",
+                        details={"error": str(exc)},
+                    ),
+                ),
+                effect_gate={
+                    "success": False,
+                    "status": "failed",
+                    "error": str(exc),
+                    "effect_store_revision": None,
+                },
+            )
+
+        gate = dict(gate or {})
+        revision = str(
+            gate.get("effect_store_revision")
+            or gate.get("scan_run_id")
+            or ""
+        ).strip() or None
+        gate["effect_store_revision"] = revision
+        gate_blockers = list(preliminary.blockers)
+        gate_fingerprint = str(
+            gate.get("cash_flow_financial_fingerprint") or ""
+        ).strip()
+        if not revision:
+            gate_blockers.append(CashFlowDatasetBlocker(
+                reason_code="EFFECT_REVISION_MISSING",
+                message="cash-flow holding effect gate returned no revision",
+                details={"gate": gate},
+            ))
+        if gate_fingerprint != preliminary.financial_fingerprint:
+            gate_blockers.append(CashFlowDatasetBlocker(
+                reason_code="EFFECT_SOURCE_FINGERPRINT_MISMATCH",
+                message=(
+                    "cash-flow holding effect gate is not bound to the "
+                    "current dataset source"
+                ),
+                details={
+                    "expected": preliminary.financial_fingerprint,
+                    "actual": gate_fingerprint or None,
+                },
+            ))
+        if gate.get("success") is not True:
+            gate_blockers.append(CashFlowDatasetBlocker(
+                reason_code="EFFECT_GATE_BLOCKED",
+                message="cash-flow holding effects are unresolved",
+                details={"gate": gate},
+            ))
+        return replace(
+            preliminary,
+            blockers=tuple(gate_blockers),
+            effect_store_revision=revision,
+            effect_gate=gate,
+        )
+
+    def summarize(
+        self,
+        account: str,
+        today: date,
+        start_year: int,
+        last_nav=None,
+    ) -> dict:
+        dataset = self._build_nonofficial_dataset(
+            account=account,
+            nav_date=today,
+            start_year=start_year,
+            purpose="summary",
+        )
+        self._assert_queryable(dataset)
+        return dataset.summary(last_nav=last_nav)
 
     def daily(self, account: str, flow_date: date) -> float:
-        agg = self._load_aggs(account, start_date=flow_date, end_date=flow_date)
-        return float(self.to_decimal((agg.get("daily") or {}).get(flow_date.strftime("%Y-%m-%d"), 0.0)))
+        dataset = self._build_nonofficial_dataset(
+            account=account,
+            nav_date=flow_date,
+            start_year=flow_date.year,
+            purpose="daily",
+        )
+        self._assert_queryable(dataset)
+        return float(dataset.daily.get(flow_date.isoformat(), Decimal("0")))
 
     def yearly(self, account: str, year: str) -> float:
-        agg = self._load_aggs(account, start_date=date(int(year), 1, 1), end_date=date(int(year), 12, 31))
-        return float(self.to_decimal((agg.get("yearly") or {}).get(str(year), 0.0)))
+        resolved_year = int(year)
+        dataset = self._build_nonofficial_dataset(
+            account=account,
+            nav_date=date(resolved_year, 12, 31),
+            start_year=resolved_year,
+            purpose="yearly",
+        )
+        self._assert_queryable(dataset)
+        return float(dataset.yearly.get(str(resolved_year), Decimal("0")))
 
     def monthly(self, account: str, year: int, month: int) -> float:
-        month_start = date(year, month, 1)
         month_end = date(year + (month // 12), (month % 12) + 1, 1) - timedelta(days=1)
-        agg = self._load_aggs(account, start_date=month_start, end_date=month_end)
-        return float(self.to_decimal((agg.get("monthly") or {}).get(f"{year:04d}-{month:02d}", 0.0)))
+        dataset = self._build_nonofficial_dataset(
+            account=account,
+            nav_date=month_end,
+            start_year=year,
+            purpose="monthly",
+        )
+        self._assert_queryable(dataset)
+        return float(dataset.monthly.get(f"{year:04d}-{month:02d}", Decimal("0")))
 
     def period(self, account: str, start_date: date, end_date: date) -> float:
-        agg = self._load_aggs(account, start_date=start_date, end_date=end_date)
+        dataset = self._build_nonofficial_dataset(
+            account=account,
+            nav_date=end_date,
+            start_year=start_date.year,
+            purpose="period",
+        )
+        self._assert_queryable(dataset)
         total = Decimal("0")
-        for day_str, amount in (agg.get("daily") or {}).items():
-            parsed = self._parse_day(day_str)
-            if parsed is not None and start_date <= parsed <= end_date:
-                total += self.to_decimal(amount)
+        for day_text, amount in dataset.daily.items():
+            flow_date = date.fromisoformat(day_text)
+            if start_date <= flow_date <= end_date:
+                total += amount
         return float(total)
 
-    def _load_aggs(self, account: str, start_date: date | None = None, end_date: date | None = None) -> dict:
-        preload = getattr(self.storage, "preload_cash_flow_aggs", None)
-        if callable(preload):
-            try:
-                preload(account)
-            except CashFlowContractError:
-                raise
-            except Exception:
-                return self._build_aggs_from_flows(account, start_date=start_date, end_date=end_date)
-
-        get_aggs = getattr(self.storage, "get_cash_flow_aggs", None)
-        agg = get_aggs(account) if callable(get_aggs) else None
-        if isinstance(agg, dict):
-            return agg
-
-        return self._build_aggs_from_flows(account, start_date=start_date, end_date=end_date)
-
-    def _build_aggs_from_flows(self, account: str, start_date: date | None = None, end_date: date | None = None) -> dict:
-        get_flows = getattr(self.storage, "get_cash_flows", None)
-        flows = get_flows(account, start_date, end_date) if callable(get_flows) else []
-        daily: dict[str, float] = {}
-        monthly: dict[str, float] = {}
-        yearly: dict[str, float] = {}
-        cumulative = Decimal("0")
-
-        completed = [
-            CompletedCashFlowFacts.require(RawCashFlowRecord.from_cash_flow(flow))
-            for flow in (flows or [])
-        ]
-        for facts in completed:
-            amount_dec = facts.cny_amount
-            day_key = facts.flow_date.strftime("%Y-%m-%d")
-            month_key = facts.flow_date.strftime("%Y-%m")
-            year_key = facts.flow_date.strftime("%Y")
-            daily[day_key] = float(self.to_decimal(daily.get(day_key, 0.0)) + amount_dec)
-            monthly[month_key] = float(self.to_decimal(monthly.get(month_key, 0.0)) + amount_dec)
-            yearly[year_key] = float(self.to_decimal(yearly.get(year_key, 0.0)) + amount_dec)
-            cumulative += amount_dec
-
-        return {
-            "daily": daily,
-            "monthly": monthly,
-            "yearly": yearly,
-            "cumulative": float(cumulative),
-        }
+    def _build_nonofficial_dataset(
+        self,
+        *,
+        account: str,
+        nav_date: date,
+        start_year: int,
+        purpose: str,
+    ) -> CashFlowDatasetSnapshot:
+        return self.build_dataset(
+            account=account,
+            nav_date=nav_date,
+            run_id=f"nonofficial:{purpose}:{account}:{nav_date.isoformat()}",
+            start_year=start_year,
+        )
 
     @staticmethod
-    def _parse_day(day_str: str):
-        try:
-            return datetime.strptime(day_str[:10], "%Y-%m-%d").date()
-        except Exception:
-            return None
+    def _assert_queryable(dataset: CashFlowDatasetSnapshot) -> None:
+        if dataset.blockers:
+            raise ValueError(
+                "cash-flow summary dataset is blocked: "
+                + json.dumps(
+                    [item.as_dict() for item in dataset.blockers],
+                    ensure_ascii=False,
+                    default=str,
+                )
+            )

@@ -72,7 +72,7 @@ def test_reconcile_does_not_flag_money_values_equal_after_quantize():
         ytd_pnl=10.0,
     )
     skill.storage.get_nav_history = Mock(return_value=[prev, curr])
-    skill.storage.get_cash_flows = Mock(return_value=[])
+    skill.storage.get_raw_cash_flows = Mock(return_value=[])
     skill.portfolio._find_prev_month_end_nav = Mock(return_value=prev)
     skill.portfolio._find_year_end_nav = Mock(return_value=prev)
     skill.portfolio._calc_mtd_nav_change = Mock(return_value=0.0100000001)

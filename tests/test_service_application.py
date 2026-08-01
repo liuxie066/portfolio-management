@@ -10,6 +10,14 @@ from src.portfolio import PortfolioManager
 from src.service import PortfolioService
 
 
+class _CashFlowDatasetStub:
+    def __init__(self, fingerprint: str):
+        self.fingerprint = fingerprint
+
+    def details(self):
+        return {"financial_fingerprint": self.fingerprint}
+
+
 def test_portfolio_service_generate_report_uses_direct_app_service():
     storage = SimpleNamespace(get_nav_history=Mock(return_value=[]))
     portfolio = SimpleNamespace(reporting_service=object())
@@ -526,8 +534,10 @@ def test_portfolio_service_record_nav_uses_direct_portfolio_path():
     valuation = SimpleNamespace(warnings=["price warning"])
     snapshot = {"valuation": valuation, "snapshot_time": "2026-05-23T12:00:00"}
     nav_record = SimpleNamespace(nav=1.2345, total_value=1234.5, shares=1000.0, details={})
+    dataset = _CashFlowDatasetStub("service-record")
     portfolio = SimpleNamespace(
         reporting_service=object(),
+        build_cash_flow_dataset=Mock(return_value=dataset),
         record_nav=Mock(return_value=nav_record),
     )
     read_service = SimpleNamespace(build_snapshot=Mock(return_value=snapshot))
@@ -563,6 +573,12 @@ def test_portfolio_service_record_nav_uses_direct_portfolio_path():
     assert portfolio.record_nav.call_args.kwargs["overwrite_existing"] is False
     assert portfolio.record_nav.call_args.kwargs["use_bulk_persist"] is True
     assert portfolio.record_nav.call_args.kwargs["run_id"] == "run-nav-1"
+    assert portfolio.record_nav.call_args.kwargs["cash_flow_dataset"] is dataset
+    portfolio.build_cash_flow_dataset.assert_called_once_with(
+        account="alice",
+        nav_date=date.fromisoformat(result["date"]),
+        run_id="run-nav-1",
+    )
 
 
 def test_portfolio_service_init_nav_history_uses_direct_app_service():
@@ -578,8 +594,10 @@ def test_portfolio_service_init_nav_history_uses_direct_app_service():
         details={},
     )
     storage = SimpleNamespace(get_nav_history=Mock(return_value=[]))
+    dataset = _CashFlowDatasetStub("service-init")
     portfolio = SimpleNamespace(
         reporting_service=object(),
+        build_cash_flow_dataset=Mock(return_value=dataset),
         record_nav=Mock(return_value=nav_record),
     )
     read_service = SimpleNamespace(build_snapshot=Mock(return_value=snapshot))
@@ -610,6 +628,14 @@ def test_portfolio_service_init_nav_history_uses_direct_app_service():
     assert portfolio.record_nav.call_args.kwargs["dry_run"] is False
     assert portfolio.record_nav.call_args.kwargs["overwrite_existing"] is False
     assert portfolio.record_nav.call_args.kwargs["use_bulk_persist"] is True
+    assert portfolio.record_nav.call_args.kwargs["cash_flow_dataset"] is dataset
+    portfolio.build_cash_flow_dataset.assert_called_once()
+    assert portfolio.build_cash_flow_dataset.call_args.kwargs["account"] == "alice"
+    assert portfolio.build_cash_flow_dataset.call_args.kwargs["nav_date"] == date(2026, 5, 22)
+    assert (
+        portfolio.build_cash_flow_dataset.call_args.kwargs["run_id"]
+        == result["run_id"]
+    )
 
 
 def test_portfolio_service_daily_report_bundle_reuses_one_snapshot():
@@ -661,8 +687,10 @@ def test_portfolio_service_daily_report_bundle_reuses_one_snapshot():
         details=None,
     )
     storage = SimpleNamespace(get_nav_history=Mock(side_effect=[[], [latest_nav]]))
+    dataset = _CashFlowDatasetStub("service-daily")
     portfolio = SimpleNamespace(
         reporting_service=object(),
+        build_cash_flow_dataset=Mock(return_value=dataset),
         record_nav=Mock(return_value=nav_record),
     )
     read_service = SimpleNamespace(
@@ -711,6 +739,12 @@ def test_portfolio_service_daily_report_bundle_reuses_one_snapshot():
     assert portfolio.record_nav.call_args.kwargs["overwrite_existing"] is False
     assert portfolio.record_nav.call_args.kwargs["use_bulk_persist"] is True
     assert portfolio.record_nav.call_args.kwargs["run_id"] == "run-report-1"
+    assert portfolio.record_nav.call_args.kwargs["cash_flow_dataset"] is dataset
+    portfolio.build_cash_flow_dataset.assert_called_once_with(
+        account="alice",
+        nav_date=date.fromisoformat(result["date"]),
+        run_id="run-report-1",
+    )
     read_service.get_distribution.assert_any_call(holdings_data=snapshot)
 
 

@@ -250,6 +250,18 @@ def test_real_futu_sync_completes_before_fresh_account_validation(monkeypatch):
             }
 
     class FakePortfolio:
+        cash_flow_dataset = SimpleNamespace(
+            details=lambda: {"financial_fingerprint": "preflight-dataset"}
+        )
+
+        def build_cash_flow_dataset(self, **kwargs):
+            assert kwargs == {
+                "account": "lx",
+                "nav_date": date(2026, 7, 31),
+                "run_id": "run-sync-first",
+            }
+            return self.cash_flow_dataset
+
         def calculate_valuation(self, account, **kwargs):
             holdings = list(kwargs["holdings"])
             assert len(holdings) == 1
@@ -264,6 +276,7 @@ def test_real_futu_sync_completes_before_fresh_account_validation(monkeypatch):
             )
 
         def record_nav(self, account, *, valuation, nav_date, **_kwargs):
+            assert _kwargs["cash_flow_dataset"] is self.cash_flow_dataset
             assert valuation.holdings_provenance[
                 "normalized_holdings_digest"
             ]

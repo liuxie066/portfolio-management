@@ -73,6 +73,13 @@ def test_full_report_and_record_nav_share_same_snapshot():
         details={},
     )
     skill.portfolio.record_nav = Mock(return_value=saved_nav)
+    cash_flow_dataset = Mock()
+    cash_flow_dataset.details.return_value = {
+        'financial_fingerprint': 'snapshot-shared-dataset'
+    }
+    skill.portfolio.build_cash_flow_dataset = Mock(
+        return_value=cash_flow_dataset
+    )
 
     snapshot = skill.build_snapshot()
     full = skill.full_report(snapshot=snapshot)
@@ -83,6 +90,10 @@ def test_full_report_and_record_nav_share_same_snapshot():
     assert round(full['nav']['total_value'], 2) == 1000.0
     assert rec['total_value'] == 1000.0
     assert rec['nav'] == 10.0
+    assert (
+        skill.portfolio.record_nav.call_args.kwargs['cash_flow_dataset']
+        is cash_flow_dataset
+    )
 
 
 def test_repair_nav_history_metrics_dry_run_does_not_apply():
