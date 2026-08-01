@@ -117,9 +117,11 @@ Request:
 
 This independently observes authoritative per-currency CASH, synchronizes MMF,
 and synchronizes Futu LONG STOCK/ETF quantity and `average_cost`. CASH is never
-written here: its `cn_cash/us_cash/hk_cash` observations feed the durable
-cash-flow reconciliation workflow. It never uses aggregate `cash`,
-`diluted_cost`, or deprecated `cost_price`. Real MMF/stock writes require
+written or value-reconciled here: `cn_cash/us_cash/hk_cash` remain source
+evidence, while PM stores one CNY-denominated aggregate `CNY-CASH` holding.
+Futu observations do not create per-currency holdings or CASH Effects. The
+adapter never uses Futu's deprecated aggregate `cash`, `diluted_cost`, or
+deprecated `cost_price`. Real MMF/stock writes require
 `dry_run=false` and `confirm=true`. An empty eligible stock snapshot is blocked
 while existing Futu stocks are non-zero; the override also requires
 `confirm=true`.
@@ -184,8 +186,9 @@ Behavior:
 4. Block duplicate `nav_history` account/date records.
 5. For one existing row, return `recovery_required` when snapshot recovery is unresolved; return `skipped_existing_nav` only for a supported, explicit finality contract matching the NAV date; otherwise block with `existing_nav_not_final`.
 6. Block pending generated-field reconciliation in manual `cash_flow` rows.
-7. Run a fresh Cash Flow effect scan and block unresolved holding or broker
-   reconciliation effects for every affected account.
+7. Run a fresh Cash Flow effect scan and block unresolved holding effects plus
+   any historical broker reconciliation effects for every affected account;
+   Futu sync no longer creates new broker reconciliation effects.
 8. Build one priced snapshot per account and write NAV. The embedded Futu path
    observes CASH and synchronizes MMF; full holdings sync is a separate endpoint.
 
@@ -227,7 +230,8 @@ for NAV recording, report payload, and recent NAV output.
 Internal boundaries:
 
 - `FutuBalanceSyncService`: Futu per-currency CASH observation plus MMF and
-  stock/ETF quantity + average-cost sync.
+  stock/ETF quantity + average-cost sync; CASH is not compared with the PM
+  aggregate holding.
 - `CashFlowEffectService`: discovery, preview hashing, explicit multi-target
   CASH confirmation, direct-edit detection, compensation, and NAV gate.
 - `AccountNavRecorderService`: priced snapshot and NAV write; its embedded

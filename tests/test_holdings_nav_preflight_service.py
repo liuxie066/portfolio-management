@@ -276,10 +276,6 @@ def test_real_futu_sync_completes_before_fresh_account_validation(monkeypatch):
             )
 
     monkeypatch.setattr("src.app.FutuBalanceSyncService", FakeSyncService)
-    monkeypatch.setattr(
-        "src.app.cash_flow_effect_service.observe_futu_cash_result",
-        lambda **_kwargs: {"success": True},
-    )
     portfolio = FakePortfolio()
     read_service = PortfolioReadService(
         account="lx",
@@ -303,6 +299,7 @@ def test_real_futu_sync_completes_before_fresh_account_validation(monkeypatch):
     )
 
     assert result["success"] is True
+    assert "cash_effects" not in result["futu_sync_result"]
     assert result["holdings_snapshot"]["normalized_holdings_digest"]
     assert storage.raw_calls == [("lx", None)]
 

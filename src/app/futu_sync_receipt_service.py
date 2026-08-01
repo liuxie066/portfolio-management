@@ -93,20 +93,11 @@ class FutuSyncReceiptService:
             ))
         if cash_mmf:
             fields.append((
-                "CASH 观测 / MMF",
-                f"CASH 仅观测；MMF 新增 {cash_mmf.get('created', 0)}，"
+                "CASH / MMF",
+                "富途原币余额仅观测；PM 使用 CNY-CASH 人民币汇总，不做金额对账；"
+                f"MMF 新增 {cash_mmf.get('created', 0)}，"
                 f"更新 {cash_mmf.get('updated', 0)}",
             ))
-        cash_effects = sync_result.get("cash_effects") or {}
-        if cash_effects:
-            fields.append((
-                "CASH Effects",
-                f"新增待处理 {cash_effects.get('created', 0)}，"
-                f"已观测解决 {cash_effects.get('resolved', 0)}，"
-                f"由 cash flow 承接 {cash_effects.get('suppressed_by_cash_flow', 0)}",
-            ))
-            if cash_effects.get("created"):
-                fields.append(("处理", "pm cash-flow review"))
         if not success:
             fields.append(("错误", sync_result.get("error") or "unknown error"))
         if sync_result.get("partial_write_possible"):

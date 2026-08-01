@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from src.app.futu_balance_sync_service import FutuPortfolioSnapshot, FutuPositionSnapshot
 from src.app.futu_sync_reconciler import FutuSyncReconciler
 from src.models import AssetType, Holding
@@ -28,7 +30,7 @@ def _holding(asset_id: str, quantity: float, *, avg_cost: float | None = None) -
 
 def _snapshot() -> FutuPortfolioSnapshot:
     return FutuPortfolioSnapshot(
-        cash_by_currency={"CNY": 100, "USD": 0, "HKD": 0},
+        cash_by_currency={"CNY": 999, "USD": 12, "HKD": 34},
         mmf=200,
         positions=(
             FutuPositionSnapshot(
@@ -49,10 +51,9 @@ class _Storage:
     def __init__(self, position_reads: list[list[Holding]]) -> None:
         self.position_reads = position_reads
         self.read_count = 0
+        self.holding_reads = []
         self.cash = {
             "CNY-CASH": _holding("CNY-CASH", 100),
-            "USD-CASH": _holding("USD-CASH", 0),
-            "HKD-CASH": _holding("HKD-CASH", 0),
             "CNY-MMF": _holding("CNY-MMF", 200),
         }
 
@@ -62,6 +63,9 @@ class _Storage:
         return self.position_reads[index]
 
     def get_holding(self, asset_id, account, broker=None):
+        self.holding_reads.append(asset_id)
+        if asset_id in {"USD-CASH", "HKD-CASH"}:
+            raise AssertionError("Futu sync must not read per-currency CASH holdings")
         return self.cash.get(asset_id)
 
 
@@ -76,6 +80,7 @@ def test_readback_immediate_match_never_waits() -> None:
     assert result["status"] == "trusted"
     assert result["retry_performed"] is False
     assert waits == []
+    assert storage.holding_reads == ["CNY-CASH", "CNY-MMF"]
 
 
 def test_first_mismatch_then_read_only_retry_recovers() -> None:
@@ -105,7 +110,12 @@ def test_persistent_quantity_and_cost_mismatch_are_dataset_scoped() -> None:
     assert result["status"] == "untrusted"
     assert result["datasets"]["pm.holdings_quantity"]["status"] == "untrusted"
     assert result["datasets"]["pm.cost_basis"]["status"] == "untrusted"
-    assert result["datasets"]["pm.securities_cash"]["status"] == "trusted"
+    assert result["datasets"]["pm.cash_aggregate"] == {
+        "status": "trusted",
+        "reason_code": "AGGREGATE_CASH_STRUCTURALLY_VALID",
+        "diff_count": 0,
+        "diff_subjects": [],
+    }
     assert result["datasets"]["pm.fund_mmf"]["status"] == "trusted"
 
 
@@ -118,3 +128,65 @@ def test_cost_mismatch_does_not_change_quantity_verdict() -> None:
     )
     assert result["datasets"]["pm.holdings_quantity"]["status"] == "trusted"
     assert result["datasets"]["pm.cost_basis"]["status"] == "untrusted"
+
+
+def test_missing_aggregate_cash_is_untrusted_without_cash_retry() -> None:
+    storage = _Storage([[_holding("FUTU", 10, avg_cost=100.13)]])
+    storage.cash.pop("CNY-CASH")
+    waits = []
+
+    result = FutuSyncReconciler(storage, wait=waits.append).reconcile(
+        _snapshot(),
+        account="lx",
+        broker="富途",
+    )
+
+    assert result["status"] == "untrusted"
+    assert result["retry_performed"] is False
+    assert result["datasets"]["pm.cash_aggregate"] == {
+        "status": "untrusted",
+        "reason_code": "AGGREGATE_CASH_INVALID",
+        "diff_count": 1,
+        "diff_subjects": ["CNY-CASH"],
+    }
+    assert waits == []
+
+
+def test_invalid_aggregate_cash_shape_is_untrusted_without_value_comparison() -> None:
+    storage = _Storage([[_holding("FUTU", 10, avg_cost=100.13)]])
+    storage.cash["CNY-CASH"] = SimpleNamespace(
+        asset_id="CNY-CASH",
+        account="lx",
+        broker="富途",
+        asset_type=AssetType.CASH,
+        currency="USD",
+        quantity=float("inf"),
+    )
+
+    result = FutuSyncReconciler(storage, wait=lambda _seconds: None).reconcile(
+        _snapshot(),
+        account="lx",
+        broker="富途",
+    )
+
+    assert result["status"] == "untrusted"
+    assert result["retry_performed"] is False
+    assert result["datasets"]["pm.cash_aggregate"]["reason_code"] == (
+        "AGGREGATE_CASH_INVALID"
+    )
+
+
+def test_balance_readback_observes_futu_cash_without_comparing_amounts() -> None:
+    storage = _Storage([[]])
+    waits = []
+
+    result = FutuSyncReconciler(storage, wait=waits.append).reconcile_balances(
+        _snapshot(),
+        account="lx",
+        broker="富途",
+    )
+
+    assert result["status"] == "trusted"
+    assert result["datasets"]["pm.cash_aggregate"]["status"] == "trusted"
+    assert storage.holding_reads == ["CNY-CASH", "CNY-MMF"]
+    assert waits == []

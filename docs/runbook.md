@@ -21,7 +21,9 @@ If full Futu holdings sync is enabled:
 
 `pm futu sync` is dry-run by default. It observes `cn_cash/us_cash/hk_cash`,
 synchronizes MMF plus LONG STOCK/ETF quantity and Futu `average_cost`, and never
-writes CASH directly; aggregate `cash` and `diluted_cost` are never used. Run it
+writes or value-reconciles CASH directly. PM uses one CNY-denominated aggregate
+`CNY-CASH` holding; original-currency observations do not create holdings or
+CASH Effects. Futu's aggregate `cash` and `diluted_cost` are never used. Run it
 independently before `daily-job` so broker observations and non-CASH holdings
 refresh even when NAV skips an existing date.
 

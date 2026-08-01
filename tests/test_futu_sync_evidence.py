@@ -23,8 +23,6 @@ class _Storage:
             )
             for currency, asset_id, quantity in (
                 ("CNY", "CNY-CASH", 100),
-                ("USD", "USD-CASH", 0),
-                ("HKD", "HKD-CASH", 0),
             )
         }
         self.writes = []
@@ -123,7 +121,12 @@ def test_cash_success_and_mmf_failure_is_dataset_scoped_partial_write(tmp_path: 
     receipt = FutuSyncEvidenceStore(tmp_path / "receipts").latest("lx")
     assert receipt["stages"]["securities_cash"]["status"] == "succeeded"
     assert receipt["stages"]["fund_mmf"]["status"] == "failed"
-    assert receipt["reconciliation"]["datasets"]["pm.securities_cash"]["status"] == "trusted"
+    assert receipt["reconciliation"]["datasets"]["pm.cash_aggregate"] == {
+        "status": "trusted",
+        "reason_code": "AGGREGATE_CASH_STRUCTURALLY_VALID",
+        "diff_count": 0,
+        "diff_subjects": [],
+    }
     assert receipt["reconciliation"]["datasets"]["pm.fund_mmf"]["status"] == "unavailable"
 
 

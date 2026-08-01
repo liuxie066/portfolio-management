@@ -29,7 +29,7 @@ _REQUIRED_RECONCILIATION_DATASETS = frozenset(
     {
         "pm.holdings_quantity",
         "pm.cost_basis",
-        "pm.securities_cash",
+        "pm.cash_aggregate",
         "pm.fund_mmf",
     }
 )
@@ -179,7 +179,7 @@ class PMQualityService:
         )
         by_id = {item["dataset_id"]: item for item in replica}
         cash_statuses = {
-            by_id["pm.securities_cash"]["status"],
+            by_id["pm.cash_aggregate"]["status"],
             by_id["pm.fund_mmf"]["status"],
         }
         if cash_statuses == {"trusted"}:
@@ -197,17 +197,17 @@ class PMQualityService:
             observed_at=observed_at,
             reason_code="CASH_LIKE_COMPLETE" if cash_like_status == "trusted" else "CASH_LIKE_INCOMPLETE",
             evidence_refs=[
-                *by_id["pm.securities_cash"]["evidence_refs"],
+                *by_id["pm.cash_aggregate"]["evidence_refs"],
                 *by_id["pm.fund_mmf"]["evidence_refs"],
             ],
             blocked_consumers=[] if cash_like_status == "trusted" else ["official_nav"],
             blocked_by=[
                 item
-                for item in ("pm.securities_cash", "pm.fund_mmf")
+                for item in ("pm.cash_aggregate", "pm.fund_mmf")
                 if by_id[item]["status"] != "trusted"
             ],
             usable_for=["official_nav"] if cash_like_status == "trusted" else [],
-            freshness=dict(by_id["pm.securities_cash"]["freshness"]),
+            freshness=dict(by_id["pm.cash_aggregate"]["freshness"]),
         )
         valuation_datasets, nav_dataset = self._valuation_and_nav_datasets(
             account,
@@ -280,7 +280,7 @@ class PMQualityService:
             evidence_refs=evidence,
             blocked_consumers=[] if source_complete else ["futu_sync", "official_nav"],
             usable_for=["futu_sync"] if source_complete else [],
-            check_ids=["PM-SRC-001", "PM-SRC-002"],
+            check_ids=["PM-SRC-001", "PM-SRC-002", "PM-CASH-002"],
             freshness=freshness.as_payload(fallback_observed_at_utc=observed_at),
         )
         if source_complete:
@@ -433,7 +433,7 @@ class PMQualityService:
         ids = (
             "pm.holdings_quantity",
             "pm.cost_basis",
-            "pm.securities_cash",
+            "pm.cash_aggregate",
             "pm.fund_mmf",
         )
         source_complete = bool(
@@ -502,7 +502,6 @@ class PMQualityService:
                 usable_for=self._consumers(dataset_id) if status == "trusted" else [],
                 check_ids={
                     "pm.holdings_quantity": ["PM-POS-001", "PM-POS-002"],
-                    "pm.securities_cash": ["PM-CASH-001", "PM-CASH-002"],
                 }.get(dataset_id),
                 freshness=freshness.as_payload(fallback_observed_at_utc=observed_at),
             ))
@@ -778,7 +777,7 @@ class PMQualityService:
             "pm.futu_snapshot": "PM-SRC-001",
             "pm.holdings_quantity": "PM-POS-001",
             "pm.cost_basis": "PM-COST-001",
-            "pm.securities_cash": "PM-CASH-001",
+            "pm.cash_aggregate": "PM-CASH-001",
             "pm.fund_mmf": "PM-MMF-001",
             "pm.cash_like_assets": "PM-CASHLIKE-001",
             "pm.futu_sync": "PM-SYNC-001",

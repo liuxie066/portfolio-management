@@ -27,9 +27,10 @@ Business key: `(asset_id, account, broker)`
 
 Manual edit policy:
 - Non-Futu stock/fund/other holding rows are maintained manually in the manual view.
-- CASH rows are not directly maintained by scheduled sync. External cash-flow
-  effects and Futu reconciliation use an explicit preview hash and per-row CLI
-  confirmation before writing.
+- CASH rows are not directly maintained by scheduled sync. PM stores one
+  CNY-denominated aggregate `CNY-CASH` row; Futu original-currency observations
+  are neither compared with it nor split into per-currency holdings. External
+  cash-flow effects remain a separate explicit preview/confirmation workflow.
 - For `broker=富途`, `pm futu sync` observes per-currency CASH, synchronizes MMF,
   and treats Futu as the source of truth for STOCK/ETF quantity and average cost.
 - Existing Futu stock/ETF rows update only `quantity`, `avg_cost`, and `updated_at`; names and manual metadata remain unchanged. New rows use Futu name/type/currency metadata.

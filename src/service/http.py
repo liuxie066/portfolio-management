@@ -504,7 +504,7 @@ def create_app(service: Optional[PortfolioService] = None, allow_remote: Optiona
             include_details=include_details,
         ), dataset_ids=(
             "pm.holdings_quantity",
-            "pm.securities_cash",
+            "pm.cash_aggregate",
             "pm.fund_mmf",
             "pm.prices",
             "pm.fx",
@@ -521,7 +521,7 @@ def create_app(service: Optional[PortfolioService] = None, allow_remote: Optiona
     ):
         required = ["pm.holdings_quantity", "pm.cost_basis"]
         if include_cash:
-            required.extend(["pm.securities_cash", "pm.fund_mmf"])
+            required.extend(["pm.cash_aggregate", "pm.fund_mmf"])
         return _public_result(request, _service(request).get_holdings(
             account=account,
             include_cash=include_cash,
@@ -536,7 +536,7 @@ def create_app(service: Optional[PortfolioService] = None, allow_remote: Optiona
         return _public_result(
             request,
             _service(request).get_cash(account=account),
-            dataset_ids=("pm.securities_cash", "pm.fund_mmf"),
+            dataset_ids=("pm.cash_aggregate", "pm.fund_mmf"),
             accounts=(account,),
         )
 
@@ -637,7 +637,7 @@ def create_app(service: Optional[PortfolioService] = None, allow_remote: Optiona
             _service(request).get_distribution(**kwargs),
             dataset_ids=(
                 "pm.holdings_quantity",
-                "pm.securities_cash",
+                "pm.cash_aggregate",
                 "pm.fund_mmf",
                 "pm.prices",
                 "pm.fx",
@@ -658,7 +658,7 @@ def create_app(service: Optional[PortfolioService] = None, allow_remote: Optiona
             _service(request).full_report(account=account, price_timeout=price_timeout),
             dataset_ids=(
                 "pm.holdings_quantity",
-                "pm.securities_cash",
+                "pm.cash_aggregate",
                 "pm.fund_mmf",
                 "pm.prices",
                 "pm.fx",

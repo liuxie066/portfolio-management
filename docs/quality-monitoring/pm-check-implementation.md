@@ -26,8 +26,8 @@
 | `PM-POS-001` | `src/app/futu_sync_reconciler.py::FutuSyncReconciler._read_and_compare` | immediate match、30 秒只读重查、persistent quantity mismatch | NAV、持仓报告 |
 | `PM-POS-002` | `FutuOpenApiBalanceProvider._fetch_security_types`、`FutuBalanceSyncService._build_position_diff` | unknown classification、short/unknown side、duplicate identity、empty snapshot guard | holdings sync、NAV |
 | `PM-COST-001` | `FutuSyncReconciler._read_and_compare` | Decimal 存储精度比较、persistent mismatch；NAV 不依赖 cost dataset | 成本/盈亏报告 |
-| `PM-CASH-001` | `FutuOpenApiBalanceProvider._cash_from_row`、`FutuSyncReconciler._cash_verdict` | `cash` presence、0、missing、写后金额比较 | cash_like、NAV |
-| `PM-CASH-002` | `FutuOpenApiBalanceProvider.CASH_COLUMNS`、`_validate_authoritative_balances` | `available_funds`/`withdraw_cash`/`power` 不得回退测试 | cash sync、NAV |
+| `PM-CASH-001` | `FutuSyncReconciler._aggregate_cash_verdict` | `CNY-CASH` 精确 account/broker、CASH/CNY 类型与有限金额；不比较 Futu 金额 | cash_like、NAV |
+| `PM-CASH-002` | `FutuOpenApiBalanceProvider.CASH_COLUMNS`、`_validate_authoritative_balances` | `cn_cash/us_cash/hk_cash` 完整观测；`available_funds`/`withdraw_cash`/`power` 不得回退；不创建分币种 holding/effect | cash observation、NAV source evidence |
 | `PM-MMF-001` | `FutuOpenApiBalanceProvider._mmf_from_row`、`FutuSyncReconciler._cash_verdict` | `fund_assets` 0/missing/invalid、写后金额比较 | cash_like、NAV |
 | `PM-CASHLIKE-001` | `PMQualityService._account_datasets` | 两项 trusted、单项异常 partial、两项 unavailable 和 stale 传播 | 正式 NAV、流动性报告 |
 | `PM-SYNC-001` | `FutuBalanceSyncService.sync_portfolio`、durable receipt stages | positions/cash/MMF 全阶段成功、partial-write、写前失败回执 | 对应写入阶段数据集 |
@@ -46,7 +46,7 @@
 | 账户映射发现 | `pm futu accounts --market US\|HK --json` | 本机只读 `get_acc_list`；仅返回 acc_id/fingerprint/env/market，异常安全失败；结果不得记录或提交 |
 | 来源快照 | `FutuBalanceSnapshot` / `FutuPortfolioSnapshot` | 公开 evidence 不含 acc_id、金额或持仓；只公开 fingerprint、完整性标志和 payload SHA-256 |
 | 同步 receipt | `src/app/futu_sync_evidence.py` | latest/history 原子持久化；写前明确失败也覆盖 latest 为脱敏失败事实 |
-| 写后对账 | `src/app/futu_sync_reconciler.py` | 首次比较；仅在不一致时等待 30 秒后只读重查，不重复业务写 |
+| 写后对账 | `src/app/futu_sync_reconciler.py` | 股票/成本/MMF 不一致时等待 30 秒后只读重查；aggregate CASH 只查结构且不触发重试 |
 | Artifact | `src/app/quality/artifact.py` | 原子发布已校验 V1 payload |
 | CLI/HTTP | `pm quality status/refresh`、`GET /quality/status` | status/HTTP 只读已发布 artifact；refresh 只写控制面 artifact，不触发 OpenD 或业务写 |
 | 本地 NAV 门禁 | `src/app/quality/policy.py` | onboarding 后在权威写入边界执行；要求当前调度窗口内的完整本地 receipt，不依赖 Hub |
@@ -61,4 +61,3 @@
 - 目标版本：`0.1.27`。
 
 生产只读 canary、真实 OpenD baseline、失败数据重跑、Hub onboard、真实告警/恢复和 rollback 属于 Phase 5，不能由本地测试替代。
-
