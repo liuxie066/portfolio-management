@@ -136,8 +136,11 @@ def test_subscribe_deduplicates_same_file_and_reports_distinct_files():
 
     assert same["success"] is True
     assert [item["file_token"] for item in same["results"]] == ["base_portfolio"]
-    assert [item["file_token"] for item in same_state["requests"]] == [
-        "base_portfolio"
+    assert same_state["requests"] == [
+        {
+            "file_token": "base_portfolio",
+            "file_type": "bitable",
+        }
     ]
 
     split_sdk, split_state = _sdk()
@@ -148,9 +151,15 @@ def test_subscribe_deduplicates_same_file_and_reports_distinct_files():
         "base_cash",
         "base_portfolio",
     ]
-    assert [item["file_token"] for item in split_state["requests"]] == [
-        "base_cash",
-        "base_portfolio",
+    assert split_state["requests"] == [
+        {
+            "file_token": "base_cash",
+            "file_type": "bitable",
+        },
+        {
+            "file_token": "base_portfolio",
+            "file_type": "bitable",
+        },
     ]
 
 
