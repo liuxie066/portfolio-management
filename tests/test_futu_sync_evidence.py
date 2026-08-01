@@ -34,6 +34,13 @@ class _Storage:
     def get_holding_fresh(self, asset_id, account, broker):
         return self.holdings.get((asset_id, account, broker))
 
+    def get_holdings_fresh(self, *, account=None, include_empty=True):
+        return [
+            holding
+            for (_asset_id, holding_account, _broker), holding in self.holdings.items()
+            if account is None or holding_account == account
+        ]
+
     def upsert_holding(self, holding):
         self.holdings[(holding.asset_id, holding.account, holding.broker)] = holding
         self.writes.append(holding.asset_id)
@@ -138,12 +145,27 @@ def test_cash_success_and_mmf_failure_is_dataset_scoped_partial_write(tmp_path: 
         "diff_count": 0,
         "diff_subjects": [],
     }
-    assert receipt["reconciliation"]["datasets"]["pm.fund_mmf"] == {
+    mmf = receipt["reconciliation"]["datasets"]["pm.fund_mmf"]
+    assert {
+        key: mmf[key]
+        for key in ("status", "reason_code", "diff_count", "diff_subjects")
+    } == {
         "status": "untrusted",
         "reason_code": "FUND_MMF_MISMATCH",
         "diff_count": 1,
         "diff_subjects": ["CNY-MMF"],
     }
+    assert mmf["differences"] == [{
+        "identity": {
+            "asset_id": "CNY-MMF",
+            "account": "lx",
+            "broker": "富途",
+        },
+        "field": "quantity",
+        "actual": None,
+        "requested": "200",
+        "record_id": None,
+    }]
 
 
 def test_source_query_failure_replaces_latest_with_redacted_failed_attempt(

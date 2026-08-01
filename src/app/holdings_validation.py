@@ -10,7 +10,10 @@ import re
 from typing import Any, Iterable, Mapping, Optional
 
 from src.models import AssetClass, AssetType, Holding, Industry
-from src.domain.holdings import RawHoldingRecord
+from src.domain.holdings import (
+    RawHoldingRecord,
+    asset_class_for_economic_exposure,
+)
 from src.domain.holding_dates import parse_holding_date
 
 
@@ -874,7 +877,7 @@ class HoldingsValidator:
                     reason_code="ASSET_CLASS_INVALID",
                     blocks_official_nav=False,
                 )
-        proposed = _asset_class_for_type(asset_type)
+        proposed = asset_class_for_economic_exposure(asset_type)
         if current is None and proposed is not None:
             return FieldOutcome(
                 field="asset_class",
@@ -1071,20 +1074,6 @@ class HoldingsValidator:
                         },
                     )
                 )
-
-
-def _asset_class_for_type(asset_type: Optional[AssetType]) -> Optional[AssetClass]:
-    """Return a class only when instrument type proves economic exposure.
-
-    Fund domicile/distribution channel and a security's listing market do not
-    establish the geography of its underlying assets or economic exposure.
-    """
-
-    if asset_type == AssetType.A_STOCK:
-        return AssetClass.CN_ASSET
-    if asset_type in {AssetType.CASH, AssetType.MMF}:
-        return AssetClass.CASH
-    return None
 
 
 def _futu_authority_id(

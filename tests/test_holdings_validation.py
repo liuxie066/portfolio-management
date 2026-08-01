@@ -12,7 +12,11 @@ from src.app.holdings_validation import (
     HoldingsValidator,
     canonical_record_payload,
 )
-from src.domain.holdings import RawHoldingRecord
+from src.domain.holdings import (
+    RawHoldingRecord,
+    asset_class_for_economic_exposure,
+)
+from src.models import AssetClass, AssetType
 
 
 def _record(record_id: str = "rec_1", **overrides):
@@ -173,6 +177,15 @@ def test_asset_class_is_completed_only_when_instrument_type_proves_exposure(
         report.as_dict()["asset_class_policy_version"]
         == ASSET_CLASS_POLICY_VERSION
     )
+
+
+def test_asset_class_authority_is_shared_and_never_uses_listing_currency():
+    assert asset_class_for_economic_exposure(AssetType.A_STOCK) == AssetClass.CN_ASSET
+    assert asset_class_for_economic_exposure(AssetType.CASH) == AssetClass.CASH
+    assert asset_class_for_economic_exposure(AssetType.MMF) == AssetClass.CASH
+    assert asset_class_for_economic_exposure(AssetType.HK_STOCK) is None
+    assert asset_class_for_economic_exposure(AssetType.US_STOCK) is None
+    assert asset_class_for_economic_exposure(AssetType.EXCHANGE_FUND) is None
 
 
 @pytest.mark.parametrize(
