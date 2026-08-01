@@ -7,6 +7,7 @@
 - Goal artifact: `docs/gateflow/holdings-date-format/goal-confirmation.md`
 - Artifact path: `docs/gateflow/holdings-date-format/implementation-plan.md`
 - Plan review: `docs/reviews/plan-review-20260801-085712.md`
+- Plan correction review: `docs/reviews/plan-review-20260801-090530.md`
 - Status: `plan review pass`
 
 ## Goal and motivation
@@ -84,6 +85,9 @@ leave the code split intact.
 - `tests/test_holdings_validation.py`
   - Lock canonical, predecessor-compatible, missing, and malformed validation
     outcomes plus typed construction.
+- `tests/test_feishu_storage.py`
+  - Update only the two legacy holdings writer assertions exposed by the full
+    suite so they require exact canonical slash dates.
 - Add or adjust the smallest relevant local-cache/NAV preflight assertion only
   if focused execution shows an uncovered representation boundary.
 
@@ -215,6 +219,9 @@ without weakening other integrity checks.
    incident class no longer raises `HoldingsIntegrityError`; synthetic data is
    sufficient and must not contact production.
 8. Update the holdings schema documentation only.
+9. If the full suite exposes legacy holdings writer assertions outside the
+   focused files, update only those directly affected assertions to the exact
+   `YYYY/MM/DD` contract and record the scope correction in review evidence.
 
 ### Non-goals
 
