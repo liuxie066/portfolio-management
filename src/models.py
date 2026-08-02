@@ -14,6 +14,7 @@ import uuid
 from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 from enum import Enum
+from math import isfinite
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 from typing import Optional, Dict, List, Any
 
@@ -227,6 +228,81 @@ class Transaction(BaseModel):
         self._was_replayed = True
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class ArchivedTransaction(BaseModel):
+    """Strict observed row from the legacy read-only transactions table.
+
+    This model deliberately does not inherit from ``Transaction``. Archive
+    reads must preserve missing optional facts and must never activate the
+    writable model's amount calculation or BUY/CNY/zero defaults.
+    """
+
+    record_id: str
+    request_id: str
+    dedup_key: str
+
+    tx_date: date
+    tx_type: TransactionType
+    asset_id: str
+    account: str
+    quantity: float
+    price: float
+    currency: str
+
+    asset_name: Optional[str] = None
+    asset_type: Optional[str] = None
+    market: Optional[str] = None
+    amount: Optional[float] = None
+    fee: Optional[float] = None
+    remark: Optional[str] = None
+
+    @field_validator(
+        'record_id', 'request_id', 'dedup_key', 'asset_id', 'account', 'currency',
+        mode='before',
+    )
+    @classmethod
+    def require_nonblank_text(cls, value):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError('archive identity/core text must be nonblank')
+        return value
+
+    @field_validator('tx_date', mode='before')
+    @classmethod
+    def require_iso_text_date(cls, value):
+        if not isinstance(value, str):
+            raise ValueError('archive tx_date must be YYYY-MM-DD Text')
+        try:
+            parsed = date.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError('archive tx_date must be YYYY-MM-DD Text') from exc
+        if parsed.isoformat() != value:
+            raise ValueError('archive tx_date must be canonical YYYY-MM-DD Text')
+        return parsed
+
+    @field_validator('tx_type', mode='before')
+    @classmethod
+    def require_text_transaction_type(cls, value):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError('archive tx_type must be nonblank Text')
+        return value
+
+    @field_validator('quantity', 'price', 'amount', 'fee', mode='before')
+    @classmethod
+    def require_finite_number_when_present(cls, value):
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            raise ValueError('archive numeric facts must be finite numbers')
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError('archive numeric facts must be finite numbers') from exc
+        if not isfinite(parsed):
+            raise ValueError('archive numeric facts must be finite numbers')
+        return parsed
+
+    model_config = ConfigDict(from_attributes=True, frozen=True, extra='forbid')
 
 
 class CashFlow(BaseModel):

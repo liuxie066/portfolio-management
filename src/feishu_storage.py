@@ -12,9 +12,9 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import List, Optional, Dict, Any
 
 from .models import (
-    Holding, Transaction, CashFlow, NAVHistory, PriceCache,
+    Holding, CashFlow, NAVHistory, PriceCache,
     AssetType, TransactionType, AssetClass, Industry,
-    make_tx_dedup_key, make_cf_dedup_key, make_request_id, DATETIME_FORMAT
+    make_cf_dedup_key, DATETIME_FORMAT
 )
 from .snapshot_models import HoldingSnapshot
 from .feishu_client import FeishuClient
@@ -159,10 +159,8 @@ class FeishuStorage(
         self._holdings_index_loaded_all: bool = False
         self._holdings_index_loaded_accounts: set[str] = set()
 
-        # 防重缓存：本地 Set 预检，避免重复 API 查询
-        # key: request_id/dedup_key -> value: record_id (或 True 表示已存在)
-        self._request_id_cache: Dict[str, str] = {}  # transactions 表
-        self._dedup_key_cache: Dict[str, str] = {}   # transactions 和 cash_flow 表
+        # cash_flow 内容指纹缓存；transactions 是只读归档，不持有写幂等缓存。
+        self._dedup_key_cache: Dict[str, str] = {}
 
         # 本地文件价格缓存（替代飞书多维表）
         self._local_price_cache = local_price_cache or LocalPriceCache()

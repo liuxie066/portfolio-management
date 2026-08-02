@@ -14,8 +14,12 @@ def _manager(storage):
 def test_manual_trade_entrypoints_are_retired():
     assert not hasattr(TradeService, "buy")
     assert not hasattr(TradeService, "sell")
+    assert not hasattr(TradeService, "add_transaction")
+    assert not hasattr(TradeService, "delete_transaction_by_record_id")
     assert not hasattr(PortfolioManager, "buy")
     assert not hasattr(PortfolioManager, "sell")
+    assert not hasattr(PortfolioManager, "add_transaction")
+    assert not hasattr(PortfolioManager, "delete_transaction_by_record_id")
 
 
 def test_trade_service_deposit_is_stably_disabled():

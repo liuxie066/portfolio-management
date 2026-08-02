@@ -2,6 +2,8 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
+from src.models import ArchivedTransaction
+
 from src.feishu.contracts import (
     ACTIVE_REMOTE_TABLES,
     RETIRED_REMOTE_TABLES,
@@ -93,8 +95,13 @@ def test_transactions_are_structurally_readable_but_have_no_write_contract():
     table = get_table_contract("transactions")
 
     assert table.fields_by_name["tx_date"].ui_type == "Text"
+    assert table.fields_by_name["tx_type"].ui_type == "Text"
     assert table.fields_by_name["market"].schema_required is False
+    assert table.business_key == ("account", "request_id")
     assert table.write_contracts == ()
+    assert set(ArchivedTransaction.model_fields) - {"record_id"} == set(
+        table.fields_by_name
+    )
     with pytest.raises(ValueError, match="read-only table"):
         validate_write_fields("transactions", "create", {"tx_date": "2025-01-01"})
 

@@ -126,9 +126,9 @@ Write contracts:
 | `cny_price` | 2 | `Number` | `number` | `required` | `system` | `no` |  |
 | `market_value_cny` | 2 | `Number` | `number` | `required` | `system` | `no` |  |
 | `dedup_key` | 1 | `Text` | `text` | `required` | `system` | `no` |  |
-| `asset_name` | 1 | `Text` | `text` | `optional` | `system` | `no` |  |
-| `avg_cost` | 2 | `Number` | `number` | `optional` | `system` | `no` |  |
-| `source` | 1 | `Text` | `text` | `optional` | `system` | `no` |  |
+| `asset_name` | 1 | `Text` | `text` | `optional` | `system` | `yes` |  |
+| `avg_cost` | 2 | `Number` | `number` | `optional` | `system` | `yes` |  |
+| `source` | 1 | `Text` | `text` | `optional` | `system` | `yes` |  |
 | `remark` | 1 | `Text` | `text` | `optional` | `system` | `yes` |  |
 
 Write contracts:
@@ -140,7 +140,7 @@ Write contracts:
 ### `transactions` contract
 
 - Role: `optional`
-- Business key: `request_id`
+- Business key: `account`, `request_id`
 
 | Field | Type ID | UI type | Encoding | Presence | Ownership | Clearable | Select options |
 |---|---:|---|---|---|---|---|---|

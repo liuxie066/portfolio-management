@@ -267,7 +267,7 @@ _TABLES = (
         name="transactions",
         role=TableRole.OPTIONAL,
         fields=_TRANSACTION_FIELDS,
-        business_key=("request_id",),
+        business_key=("account", "request_id"),
         write_contracts=(),
     ),
     TableContract(
