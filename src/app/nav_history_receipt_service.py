@@ -61,9 +61,21 @@ class NavHistoryReceiptService:
         client_factory: Callable[..., Any] = FeishuClient,
         now_factory: Optional[Callable[[], datetime]] = None,
     ):
-        self.app_id = app_id if app_id is not None else config.get("feishu.receipt.app_id")
-        self.app_secret = app_secret if app_secret is not None else config.get("feishu.receipt.app_secret")
-        self.open_id = open_id if open_id is not None else config.get("feishu.receipt.open_id")
+        self.app_id = (
+            app_id
+            if app_id is not None
+            else config.get("feishu.conversation.app_id")
+        )
+        self.app_secret = (
+            app_secret
+            if app_secret is not None
+            else config.get("feishu.conversation.app_secret")
+        )
+        self.open_id = (
+            open_id
+            if open_id is not None
+            else config.get("feishu.conversation.open_id")
+        )
         self.client_factory = client_factory
         self.now_factory = now_factory or (lambda: datetime.now(_BEIJING))
 
@@ -80,9 +92,9 @@ class NavHistoryReceiptService:
         missing = [
             key
             for key, value in (
-                ("feishu.receipt.app_id", self.app_id),
-                ("feishu.receipt.app_secret", self.app_secret),
-                ("feishu.receipt.open_id", self.open_id),
+                ("feishu.conversation.app_id", self.app_id),
+                ("feishu.conversation.app_secret", self.app_secret),
+                ("feishu.conversation.open_id", self.open_id),
             )
             if not str(value or "").strip()
         ]

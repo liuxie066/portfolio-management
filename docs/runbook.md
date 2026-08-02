@@ -30,10 +30,12 @@ refresh even when NAV skips an existing date.
 A real write sends a success/failure receipt from the configured Feishu
 “刘看山” app. Dry-runs do not send. Check `receipt.status` in JSON output;
 notification failure does not replace the holdings sync result. Required
-configuration: `feishu.receipt.app_id`, `feishu.receipt.app_secret`, and
-`feishu.receipt.open_id`. If these are absent, the resolver accepts the
-existing options-monitor variables `OM_FEISHU_BOT_APP_ID`,
-`OM_FEISHU_BOT_APP_SECRET`, and `OM_FEISHU_BOT_USER_OPEN_ID`.
+configuration: `feishu.conversation.app_id`,
+`feishu.conversation.open_id`, and the
+`pm-feishu-conversation-app-secret` systemd credential. The Bitable identity is
+never used for receipts. Legacy `feishu.receipt.*` and `OM_FEISHU_BOT_*` names
+are migration-only; production secure mode rejects plaintext Secret fallback.
+Run `systemctl start portfolio-feishu-preflight.service` before enabling jobs.
 
 ## Read-Only Checks
 

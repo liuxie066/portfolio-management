@@ -48,9 +48,9 @@ class HoldingsEventTarget:
 
     @classmethod
     def from_config(cls) -> "HoldingsEventTarget":
-        app_id = str(config.get("feishu.app_id") or "").strip()
+        app_id = str(config.get("feishu.bitable.app_id") or "").strip()
         if not app_id:
-            raise ValueError("missing feishu.app_id for holdings event listener")
+            raise ValueError("missing feishu.bitable.app_id for holdings event listener")
         file_token, table_id = config.get_feishu_table_ref("holdings")
         return cls(app_id=app_id, file_token=file_token, table_id=table_id)
 

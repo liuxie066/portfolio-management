@@ -12,15 +12,28 @@ import argparse
 import getpass
 import json
 import os
+import shutil
+import stat
 import subprocess
+import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from src.configuration.feishu_credentials import (  # noqa: E402
+    BITABLE_APP_SECRET_CREDENTIAL,
+    CONVERSATION_APP_SECRET_CREDENTIAL,
+)
+
+
 SERVICE_NAME = "portfolio-nav-daily.service"
 TIMER_NAME = "portfolio-nav-daily.timer"
 EVENING_SERVICE_NAME = "portfolio-futu-evening.service"
@@ -33,6 +46,7 @@ QUALITY_TIMER_NAME = "portfolio-quality-refresh.timer"
 RECEIPT_SERVICE_NAME = "portfolio-receipt-dispatch.service"
 RECEIPT_TIMER_NAME = "portfolio-receipt-dispatch.timer"
 HOLDINGS_EVENT_SERVICE_NAME = "portfolio-holdings-event-listener.service"
+FEISHU_PREFLIGHT_SERVICE_NAME = "portfolio-feishu-preflight.service"
 DEFAULT_MORNING_ON_CALENDAR = "Mon..Sat *-*-* 08:10:00 Asia/Shanghai"
 DEFAULT_EVENING_ON_CALENDAR = "Mon..Fri *-*-* 17:10:00 Asia/Shanghai"
 DEFAULT_QUALITY_REFRESH_INTERVAL = "15min"
@@ -42,10 +56,23 @@ SCHEDULE_LOCK_FILE = "/var/lock/portfolio-management-scheduled.lock"
 QUALITY_LOCK_FILE = "/var/lock/portfolio-management-quality.lock"
 RECEIPT_LOCK_FILE = "/var/lock/portfolio-management-receipts.lock"
 DEFAULT_OPTIONS_MONITOR_ENV_FILE = "/etc/options-monitor/options-monitor.env"
+ENCRYPTED_CREDENTIAL_STORE_DIR = Path("/etc/credstore.encrypted")
+FEISHU_CREDENTIAL_NAMES = (
+    BITABLE_APP_SECRET_CREDENTIAL,
+    CONVERSATION_APP_SECRET_CREDENTIAL,
+)
 OPTIONS_MONITOR_FEISHU_KEYS = (
     "OM_FEISHU_BOT_APP_ID",
-    "OM_FEISHU_BOT_APP_SECRET",
     "OM_FEISHU_BOT_USER_OPEN_ID",
+)
+PLAINTEXT_FEISHU_SECRET_ENV_KEYS = frozenset(
+    {
+        "FEISHU_APP_SECRET",
+        "FEISHU_BITABLE_APP_SECRET",
+        "FEISHU_CONVERSATION_APP_SECRET",
+        "FEISHU_RECEIPT_APP_SECRET",
+        "OM_FEISHU_BOT_APP_SECRET",
+    }
 )
 
 
@@ -143,8 +170,8 @@ def render_config_yaml(paths: InstallPaths) -> str:
         },
         "finnhub_api_key": "",
         "feishu": {
-            "app_id": "",
-            "app_secret": "",
+            "bitable": {"app_id": ""},
+            "conversation": {"app_id": "", "open_id": ""},
             "app_token": "",
             "tables": {
                 "holdings": "",
@@ -159,7 +186,8 @@ def render_config_yaml(paths: InstallPaths) -> str:
     }
     header = (
         "# portfolio-management production config.\n"
-        "# Fill Feishu/Futu/API secrets before enabling the daily timer.\n\n"
+        "# Feishu App Secrets are delivered only through systemd credentials.\n"
+        "# Fill non-secret Feishu routing plus Futu/API settings before enablement.\n\n"
     )
     return header + yaml.safe_dump(payload, allow_unicode=True, sort_keys=False)
 
@@ -180,7 +208,7 @@ def _env_assignments(content: str, *, label: str) -> dict[str, int]:
 
 
 def read_options_monitor_feishu_env(path: str | Path) -> dict[str, str]:
-    """Read explicitly provided Feishu receipt values from options-monitor."""
+    """Read only non-secret conversation identity values from options-monitor."""
     source = _as_path(path)
     if not source.exists():
         return {}
@@ -200,6 +228,52 @@ def read_options_monitor_feishu_env(path: str | Path) -> dict[str, str]:
         if value not in {"", "''", '""'}:
             selected[key] = value
     return selected
+
+
+def _env_secret_key_presence(path: Path, *, location: str) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    detected = []
+    with path.open("r", encoding="utf-8") as source:
+        for line in source:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key = stripped.split("=", 1)[0].strip()
+            if key in PLAINTEXT_FEISHU_SECRET_ENV_KEYS:
+                detected.append({"location": location, "key": key})
+    return detected
+
+
+def _yaml_secret_key_presence(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8") as source:
+        for line in source:
+            stripped = line.lstrip()
+            if not stripped or stripped.startswith("#") or ":" not in stripped:
+                continue
+            if stripped.split(":", 1)[0].strip() == "app_secret":
+                return [{"location": "config_file", "key": "app_secret"}]
+    return []
+
+
+def detect_plaintext_feishu_shadows(
+    paths: InstallPaths,
+    *,
+    options_monitor_env_file: str | Path,
+) -> list[dict[str, str]]:
+    """Report legacy secret key names without retaining or returning values."""
+
+    findings = [
+        *_env_secret_key_presence(
+            _as_path(options_monitor_env_file),
+            location="options_monitor_env",
+        ),
+        *_env_secret_key_presence(paths.env_file, location="target_env"),
+        *_yaml_secret_key_presence(paths.config_file),
+    ]
+    return sorted(findings, key=lambda item: (item["location"], item["key"]))
 
 
 def render_env_file(
@@ -252,6 +326,33 @@ exec "{paths.python_bin}" "{paths.app_dir / "scripts" / "pm.py"}" "$@"
 """
 
 
+def _render_feishu_credential_directives(*roles: str) -> str:
+    credential_by_role = {
+        "bitable": BITABLE_APP_SECRET_CREDENTIAL,
+        "conversation": CONVERSATION_APP_SECRET_CREDENTIAL,
+    }
+    invalid = [role for role in roles if role not in credential_by_role]
+    if invalid:
+        raise ValueError(f"unsupported Feishu credential role: {invalid[0]}")
+    lines = ["Environment=PM_REQUIRE_SECURE_FEISHU_CREDENTIALS=1"]
+    lines.extend(
+        f"LoadCredentialEncrypted={credential_by_role[role]}"
+        for role in roles
+    )
+    return "\n".join(lines)
+
+
+def _secure_feishu_exec(command: str, *, unit_name: str) -> str:
+    """Make secure mode and the system credential path authoritative at exec."""
+
+    if not unit_name.endswith(".service") or "/" in unit_name:
+        raise ValueError("invalid systemd service name for secure Feishu exec")
+    return (
+        "/usr/bin/env PM_REQUIRE_SECURE_FEISHU_CREDENTIALS=1 "
+        f"CREDENTIALS_DIRECTORY=/run/credentials/{unit_name} {command}"
+    )
+
+
 def render_service_unit(paths: InstallPaths, *, run_user: str, mode: str) -> str:
     if mode not in {"morning", "evening"}:
         raise ValueError(f"unsupported scheduled job mode: {mode}")
@@ -260,6 +361,7 @@ def render_service_unit(paths: InstallPaths, *, run_user: str, mode: str) -> str
         if mode == "morning"
         else "portfolio-management evening Futu holdings sync"
     )
+    unit_name = SERVICE_NAME if mode == "morning" else EVENING_SERVICE_NAME
     schedule_script = paths.app_dir / "scripts" / "portfolio_scheduled_job.sh"
     return f"""[Unit]
 Description={description}
@@ -275,7 +377,8 @@ Environment=APP_DIR={paths.app_dir}
 Environment=PYTHON_BIN={paths.python_bin}
 Environment=PORTFOLIO_PM_BIN={paths.launcher_path}
 EnvironmentFile={paths.env_file}
-ExecStart=/usr/bin/flock -n {SCHEDULE_LOCK_FILE} {schedule_script} {mode}
+{_render_feishu_credential_directives("bitable", "conversation")}
+ExecStart={_secure_feishu_exec(f"/usr/bin/flock -n {SCHEDULE_LOCK_FILE} {schedule_script} {mode}", unit_name=unit_name)}
 """
 
 
@@ -291,7 +394,8 @@ User={run_user}
 WorkingDirectory={paths.app_dir}
 Environment=TZ=Asia/Shanghai
 EnvironmentFile={paths.env_file}
-ExecStart={paths.launcher_path} cash-flow effects scan --json
+{_render_feishu_credential_directives("bitable", "conversation")}
+ExecStart={_secure_feishu_exec(f"{paths.launcher_path} cash-flow effects scan --json", unit_name=CASH_FLOW_SERVICE_NAME)}
 """
 
 
@@ -307,7 +411,8 @@ User={run_user}
 WorkingDirectory={paths.app_dir}
 Environment=TZ=Asia/Shanghai
 EnvironmentFile={paths.env_file}
-ExecStart={paths.python_bin} {paths.app_dir / "scripts" / "serve.py"} --host 127.0.0.1 --port 8765
+{_render_feishu_credential_directives("bitable", "conversation")}
+ExecStart={_secure_feishu_exec(f"{paths.python_bin} {paths.app_dir / 'scripts' / 'serve.py'} --host 127.0.0.1 --port 8765", unit_name=API_SERVICE_NAME)}
 Restart=on-failure
 RestartSec=5
 
@@ -328,7 +433,8 @@ User={run_user}
 WorkingDirectory={paths.app_dir}
 Environment=TZ=Asia/Shanghai
 EnvironmentFile={paths.env_file}
-ExecStart=/usr/bin/flock -n {QUALITY_LOCK_FILE} {paths.launcher_path} quality refresh --json
+{_render_feishu_credential_directives("bitable")}
+ExecStart={_secure_feishu_exec(f"/usr/bin/flock -n {QUALITY_LOCK_FILE} {paths.launcher_path} quality refresh --json", unit_name=QUALITY_SERVICE_NAME)}
 RuntimeMaxSec=300
 """
 
@@ -345,7 +451,8 @@ User={run_user}
 WorkingDirectory={paths.app_dir}
 Environment=TZ=Asia/Shanghai
 EnvironmentFile={paths.env_file}
-ExecStart=/usr/bin/flock -n {RECEIPT_LOCK_FILE} {paths.launcher_path} receipts dispatch --limit 100 --confirm --json
+{_render_feishu_credential_directives("conversation")}
+ExecStart={_secure_feishu_exec(f"/usr/bin/flock -n {RECEIPT_LOCK_FILE} {paths.launcher_path} receipts dispatch --limit 100 --confirm --json", unit_name=RECEIPT_SERVICE_NAME)}
 RuntimeMaxSec=60
 """
 
@@ -362,12 +469,33 @@ User={run_user}
 WorkingDirectory={paths.app_dir}
 Environment=TZ=Asia/Shanghai
 EnvironmentFile={paths.env_file}
-ExecStart={paths.launcher_path} events listen --confirm --json
+{_render_feishu_credential_directives("bitable")}
+ExecStart={_secure_feishu_exec(f"{paths.launcher_path} events listen --confirm --json", unit_name=HOLDINGS_EVENT_SERVICE_NAME)}
 Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
+"""
+
+
+def render_feishu_preflight_service_unit(
+    paths: InstallPaths,
+    *,
+    run_user: str,
+) -> str:
+    return f"""[Unit]
+Description=portfolio-management local Feishu credential preflight
+
+[Service]
+Type=oneshot
+User={run_user}
+WorkingDirectory={paths.app_dir}
+Environment=TZ=Asia/Shanghai
+EnvironmentFile={paths.env_file}
+{_render_feishu_credential_directives("bitable", "conversation")}
+ExecStart={_secure_feishu_exec(f"{paths.launcher_path} config doctor --require-secure-feishu --json", unit_name=FEISHU_PREFLIGHT_SERVICE_NAME)}
+ExecStart={_secure_feishu_exec(f"{paths.launcher_path} events status --json", unit_name=FEISHU_PREFLIGHT_SERVICE_NAME)}
 """
 
 
@@ -416,6 +544,9 @@ def _unit_paths(paths: InstallPaths) -> dict[str, Path]:
         "receipt_service": paths.systemd_dir / RECEIPT_SERVICE_NAME,
         "receipt_timer": paths.systemd_dir / RECEIPT_TIMER_NAME,
         "holdings_event_service": paths.systemd_dir / HOLDINGS_EVENT_SERVICE_NAME,
+        "feishu_preflight_service": (
+            paths.systemd_dir / FEISHU_PREFLIGHT_SERVICE_NAME
+        ),
     }
 
 
@@ -443,6 +574,7 @@ def build_plan(args) -> dict:
             "receipt_service": str(units["receipt_service"]),
             "receipt_timer": str(units["receipt_timer"]),
             "holdings_event_service": str(units["holdings_event_service"]),
+            "feishu_preflight_service": str(units["feishu_preflight_service"]),
             "python_bin": str(paths.python_bin),
             "launcher": str(paths.launcher_path),
         },
@@ -505,11 +637,33 @@ def build_plan(args) -> dict:
                 "service": HOLDINGS_EVENT_SERVICE_NAME,
                 "enabled": bool(args.enable_holdings_event_listener),
             },
+            "feishu_credentials": {
+                "credential_names": list(FEISHU_CREDENTIAL_NAMES),
+                "capability": {
+                    "required": True,
+                    "verified": False,
+                    "checks": [
+                        "systemd-creds",
+                        "systemd-analyze verify",
+                        "LoadCredentialEncrypted",
+                    ],
+                },
+                "preflight_service": FEISHU_PREFLIGHT_SERVICE_NAME,
+                "preflight_enabled": False,
+            },
         },
         "feishu_receipt_env": {
             "source": str(_as_path(args.options_monitor_env_file)),
             "target": str(paths.env_file),
             "keys": list(OPTIONS_MONITOR_FEISHU_KEYS),
+            "secret_imported": False,
+        },
+        "plaintext_feishu_shadows": {
+            "detected": detect_plaintext_feishu_shadows(
+                paths,
+                options_monitor_env_file=args.options_monitor_env_file,
+            ),
+            "requires_separate_cleanup": True,
         },
     }
 
@@ -555,12 +709,108 @@ def _prepare_runtime_ownership(paths: InstallPaths, *, run_user: str) -> list[st
     return commands
 
 
+def verify_encrypted_credential_presence(
+    *,
+    store_dir: Path | None = None,
+) -> dict[str, object]:
+    """Verify only name and regular-file metadata; never read credential bytes."""
+
+    directory = store_dir or ENCRYPTED_CREDENTIAL_STORE_DIR
+    missing_or_invalid = []
+    for credential_name in FEISHU_CREDENTIAL_NAMES:
+        path = directory / credential_name
+        try:
+            metadata = path.lstat()
+        except OSError:
+            missing_or_invalid.append(credential_name)
+            continue
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_size <= 0
+        ):
+            missing_or_invalid.append(credential_name)
+    if missing_or_invalid:
+        raise RuntimeError(
+            "missing or invalid encrypted Feishu credential: "
+            + ", ".join(missing_or_invalid)
+        )
+    return {
+        "verified": True,
+        "credential_names": list(FEISHU_CREDENTIAL_NAMES),
+        "values_read": False,
+    }
+
+
+def _render_systemd_credential_capability_probe() -> str:
+    return f"""[Unit]
+Description=portfolio-management systemd credential capability probe
+
+[Service]
+Type=oneshot
+{_render_feishu_credential_directives("bitable", "conversation")}
+ExecStart=/bin/true
+"""
+
+
+def verify_systemd_credential_capability(
+    *,
+    which: Callable[[str], str | None] | None = None,
+    runner: Callable[..., object] | None = None,
+) -> dict[str, object]:
+    """Prove exact unit syntax before any installation target is written."""
+
+    command_path = which or shutil.which
+    command_runner = runner or subprocess.run
+    if not command_path("systemd-creds"):
+        raise RuntimeError(
+            "systemd credential capability unavailable: systemd-creds"
+        )
+    systemd_analyze = command_path("systemd-analyze")
+    if not systemd_analyze:
+        raise RuntimeError(
+            "systemd credential capability unavailable: systemd-analyze"
+        )
+    try:
+        with tempfile.TemporaryDirectory(prefix="pm-systemd-credential-probe-") as tmp:
+            unit_path = Path(tmp) / "portfolio-credential-probe.service"
+            unit_path.write_text(
+                _render_systemd_credential_capability_probe(),
+                encoding="utf-8",
+            )
+            completed = command_runner(
+                [systemd_analyze, "verify", str(unit_path)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+    except OSError:
+        raise RuntimeError(
+            "systemd credential capability unavailable: verify failed"
+        ) from None
+    if int(getattr(completed, "returncode", 1)) != 0:
+        raise RuntimeError(
+            "systemd credential capability unavailable: unsupported unit syntax"
+        )
+    return {
+        "required": True,
+        "verified": True,
+        "checks": [
+            "systemd-creds",
+            "systemd-analyze verify",
+            "LoadCredentialEncrypted",
+        ],
+    }
+
+
 def apply_install(args) -> dict:
     paths = build_paths(args)
     units = _unit_paths(paths)
     receipt_env = read_options_monitor_feishu_env(args.options_monitor_env_file)
     existing_env = paths.env_file.read_text(encoding="utf-8") if paths.env_file.exists() else None
     rendered_env = render_env_file(paths, receipt_env=receipt_env, existing_content=existing_env)
+    credential_presence = verify_encrypted_credential_presence()
+    credential_capability = verify_systemd_credential_capability()
     _mkdirs([paths.config_dir, paths.data_dir, paths.reports_dir, paths.systemd_dir, paths.launcher_path.parent])
     ownership_commands = _prepare_runtime_ownership(paths, run_user=args.run_user)
 
@@ -670,6 +920,15 @@ def apply_install(args) -> dict:
             mode=0o644,
             overwrite=True,
         ),
+        str(units["feishu_preflight_service"]): _write_text(
+            units["feishu_preflight_service"],
+            render_feishu_preflight_service_unit(
+                paths,
+                run_user=args.run_user,
+            ),
+            mode=0o644,
+            overwrite=True,
+        ),
     }
 
     systemd_commands = [["systemctl", "daemon-reload"]]
@@ -698,11 +957,20 @@ def apply_install(args) -> dict:
     result["dry_run"] = False
     result["writes"] = writes
     result["runtime_ownership"] = ownership_commands
-    result["feishu_receipt_env"]["status"] = "imported" if receipt_env else "source_missing"
+    result["systemd"]["feishu_credentials"]["capability"] = credential_capability
+    result["systemd"]["feishu_credentials"]["presence"] = credential_presence
+    source_exists = _as_path(args.options_monitor_env_file).exists()
+    result["feishu_receipt_env"]["status"] = (
+        "imported_nonsecret_values"
+        if receipt_env
+        else "no_nonsecret_values"
+        if source_exists
+        else "source_missing"
+    )
     result["next_steps"] = [
-        f"edit {paths.config_file} and fill Feishu/Futu credentials",
+        f"edit {paths.config_file} and fill non-secret Feishu/Futu settings",
         "fill the explicit futu.profiles mappings and cash_flow.effects.cutover_date",
-        f"{paths.launcher_path} config doctor --json",
+        f"systemctl start {FEISHU_PREFLIGHT_SERVICE_NAME}",
         f"systemctl status {TIMER_NAME} {EVENING_TIMER_NAME} {CASH_FLOW_TIMER_NAME} {RECEIPT_TIMER_NAME}",
         f"systemctl status {API_SERVICE_NAME}",
         f"systemctl status {QUALITY_TIMER_NAME}",
@@ -722,6 +990,20 @@ def _print_plan(payload: dict, *, as_json: bool) -> None:
     for name in ("morning", "evening", "cash_flow"):
         job = systemd.get(name, {})
         print(f"  {name}: {job.get('on_calendar')} -> {job.get('service')}")
+    credentials = systemd.get("feishu_credentials", {})
+    capability = credentials.get("capability", {})
+    if credentials:
+        print(
+            "  feishu credentials: "
+            f"required={capability.get('required')}, "
+            f"verified={capability.get('verified')}"
+        )
+    shadows = payload.get("plaintext_feishu_shadows", {}).get("detected", [])
+    for shadow in shadows:
+        print(
+            "  plaintext Feishu shadow: "
+            f"{shadow.get('location')}:{shadow.get('key')}"
+        )
     if payload.get("writes"):
         print("  writes:")
         for path, status in payload["writes"].items():
@@ -738,7 +1020,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--options-monitor-env-file",
         default=DEFAULT_OPTIONS_MONITOR_ENV_FILE,
-        help="source env file for the three OM_FEISHU_BOT_* receipt values",
+        help=(
+            "source env file for the two non-secret OM_FEISHU_BOT_* "
+            "conversation identity values"
+        ),
     )
     parser.add_argument("--data-dir", default="/var/lib/portfolio-management/.data", help="runtime state/cache directory")
     parser.add_argument("--reports-dir", default="/var/lib/portfolio-management/reports", help="report output directory")

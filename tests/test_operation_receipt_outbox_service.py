@@ -22,6 +22,37 @@ def _enqueue(store, key, receipt_type="holding_case_discovered"):
     )
 
 
+def test_operation_receipt_senders_default_to_conversation_role(monkeypatch):
+    requested = []
+    values = {
+        "feishu.conversation.app_id": "cli_conversation",
+        "feishu.conversation.app_secret": "conversation_secret",
+        "feishu.conversation.open_id": "ou_user",
+    }
+
+    def fake_get(key, default=None):
+        requested.append(key)
+        return values.get(key, default)
+
+    monkeypatch.setattr("src.app.holdings_receipt_service.config.get", fake_get)
+    monkeypatch.setattr("src.app.cash_flow_receipt_service.config.get", fake_get)
+
+    holdings = HoldingsReceiptService()
+    cash_flow = CashFlowReceiptService()
+
+    assert (holdings.app_id, holdings.app_secret, holdings.open_id) == (
+        "cli_conversation",
+        "conversation_secret",
+        "ou_user",
+    )
+    assert (cash_flow.app_id, cash_flow.app_secret, cash_flow.open_id) == (
+        "cli_conversation",
+        "conversation_secret",
+        "ou_user",
+    )
+    assert requested == [*values, *values]
+
+
 def test_dispatch_routes_by_receipt_type_and_persists_success(tmp_path):
     store = OperationStateStore(tmp_path / "operations.sqlite3")
     seen = []

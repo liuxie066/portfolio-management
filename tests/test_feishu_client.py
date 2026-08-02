@@ -4,6 +4,7 @@ from unittest.mock import Mock, patch
 import json
 import os
 
+from src import config
 from src.feishu.errors import FeishuRecordNotFoundError
 from src.feishu_client import FeishuBatchWriteError, FeishuClient
 
@@ -42,17 +43,43 @@ def _snapshot_create_fields(**overrides):
 class TestFeishuClientInitialization:
     """测试飞书客户端初始化"""
 
-    def test_init_with_env_vars(self):
+    def test_init_with_env_vars(self, tmp_path):
         """测试使用环境变量初始化"""
-        with patch.dict(os.environ, {
-            'FEISHU_APP_ID': 'test_app_id',
-            'FEISHU_APP_SECRET': 'test_secret',
-            'FEISHU_APP_TOKEN': 'test_token'
-        }):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("{}\n", encoding="utf-8")
+        try:
+            with patch.dict(os.environ, {
+                'PORTFOLIO_CONFIG_FILE': str(config_file),
+                'FEISHU_BITABLE_APP_ID': 'test_app_id',
+                'FEISHU_BITABLE_APP_SECRET': 'test_secret',
+                'FEISHU_APP_TOKEN': 'test_token'
+            }, clear=True):
+                config.reload_config()
+                client = FeishuClient()
+                assert client.app_id == 'test_app_id'
+                assert client.app_secret == 'test_secret'
+                assert client.default_app_token == 'test_token'
+        finally:
+            config.reload_config()
+
+    def test_default_identity_uses_only_bitable_role(self):
+        with patch("src.feishu_client.config.get") as config_get:
+            values = {
+                "feishu.bitable.app_id": "cli_data",
+                "feishu.bitable.app_secret": "data_secret",
+                "feishu.user_token": None,
+            }
+            config_get.side_effect = lambda key, default=None: values.get(key, default)
+
             client = FeishuClient()
-            assert client.app_id == 'test_app_id'
-            assert client.app_secret == 'test_secret'
-            assert client.default_app_token == 'test_token'
+
+        assert client.app_id == "cli_data"
+        assert client.app_secret == "data_secret"
+        requested = {call.args[0] for call in config_get.call_args_list}
+        assert "feishu.bitable.app_id" in requested
+        assert "feishu.bitable.app_secret" in requested
+        assert "feishu.conversation.app_id" not in requested
+        assert "feishu.conversation.app_secret" not in requested
 
     def test_init_with_params(self):
         """测试使用参数初始化"""

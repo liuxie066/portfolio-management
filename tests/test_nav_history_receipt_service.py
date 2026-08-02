@@ -489,7 +489,7 @@ def test_nav_receipt_missing_config_and_send_failure_are_reported():
     )
     assert missing["success"] is False
     assert missing["status"] == "failed"
-    assert "feishu.receipt.app_id" in missing["error"]
+    assert "feishu.conversation.app_id" in missing["error"]
 
     class FailedClient:
         def __init__(self, **_kwargs):
@@ -512,6 +512,30 @@ def test_nav_receipt_missing_config_and_send_failure_are_reported():
         "bot": "刘看山",
         "error": "send failed",
     }
+
+
+def test_nav_receipt_defaults_to_conversation_role(monkeypatch):
+    requested = []
+    values = {
+        "feishu.conversation.app_id": "cli_conversation",
+        "feishu.conversation.app_secret": "conversation_secret",
+        "feishu.conversation.open_id": "ou_user",
+    }
+
+    def fake_get(key, default=None):
+        requested.append(key)
+        return values.get(key, default)
+
+    monkeypatch.setattr("src.app.nav_history_receipt_service.config.get", fake_get)
+
+    service = NavHistoryReceiptService()
+
+    assert (service.app_id, service.app_secret, service.open_id) == (
+        "cli_conversation",
+        "conversation_secret",
+        "ou_user",
+    )
+    assert requested == list(values)
 
 
 def test_nav_receipt_formats_top_level_skip_without_account_items():
