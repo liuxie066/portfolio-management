@@ -51,7 +51,9 @@ class ReportQueryService:
             today = bj_today()
             live_total = valuation.total_value_cny
             live_cash = valuation.cash_value_cny
-            live_stock = valuation.stock_value_cny + valuation.fund_value_cny
+            live_equity_value = valuation.stock_value_cny
+            live_fund_value = valuation.fund_value_cny
+            live_non_cash_value = live_equity_value + live_fund_value
 
             working_navs = [nav for nav in all_navs if nav.date < today]
             today_nav = self._latest_nav_on(all_navs, today)
@@ -68,7 +70,9 @@ class ReportQueryService:
                     valuation=valuation,
                     live_total=live_total,
                     live_cash=live_cash,
-                    live_stock=live_stock,
+                    # NavPreviewService retains the compatibility argument name;
+                    # its value is the complete non-cash persisted amount.
+                    live_stock=live_non_cash_value,
                 )
                 if synthetic_nav is not None:
                     working_navs.append(synthetic_nav)

@@ -136,24 +136,43 @@ def test_canonical_and_legacy_non_secret_identity_conflict_fails_redacted():
         patch.undo()
 
 
+def test_credential_config_error_allows_standard_traceback_assignment():
+    error = config.FeishuCredentialConfigError(
+        "conflicting_role_configuration",
+        "feishu.bitable.app_id",
+    )
+
+    error.__traceback__ = None
+
+    assert str(error) == (
+        "conflicting_role_configuration: feishu.bitable.app_id"
+    )
+
+
 def test_equal_canonical_and_legacy_identity_is_reported_as_redundant():
-    patch = MonkeyPatch()
-    try:
-        patch.setenv("FEISHU_BITABLE_APP_ID", "cli_same")
-        patch.setenv("FEISHU_APP_ID", "cli_same")
+    with TemporaryDirectory() as tmp:
+        config_file = Path(tmp) / "config.yaml"
+        config_file.write_text("{}\n", encoding="utf-8")
+        patch = MonkeyPatch()
+        try:
+            patch.setenv(config.CONFIG_FILE_ENV, str(config_file))
+            patch.setenv("FEISHU_BITABLE_APP_ID", "cli_same")
+            patch.setenv("FEISHU_APP_ID", "cli_same")
+            config.reload_config()
 
-        inspected = config.inspect_config(keys=["feishu.bitable.app_id"])
+            inspected = config.inspect_config(keys=["feishu.bitable.app_id"])
 
-        assert inspected["success"] is True
-        assert inspected["warnings"] == [
-            {
-                "key": "feishu.bitable.app_id",
-                "warning": "redundant_legacy_configuration",
-                "sources": ["legacy-env:FEISHU_APP_ID"],
-            }
-        ]
-    finally:
-        patch.undo()
+            assert inspected["success"] is True
+            assert inspected["warnings"] == [
+                {
+                    "key": "feishu.bitable.app_id",
+                    "warning": "redundant_legacy_configuration",
+                    "sources": ["legacy-env:FEISHU_APP_ID"],
+                }
+            ]
+        finally:
+            patch.undo()
+            config.reload_config()
 
 
 def test_secure_credential_wins_without_reading_or_comparing_legacy_secret():
@@ -486,6 +505,43 @@ def test_feishu_table_ref_fails_closed_on_ambiguous_or_incomplete_config(monkeyp
     values["feishu.tables.holdings"] = "table_only"
     with pytest.raises(ValueError, match="missing feishu.app_token"):
         config.get_feishu_table_ref("holdings")
+
+
+def test_remote_price_cache_config_is_retired():
+    assert "feishu.tables.price_cache" not in config.ENV_MAP
+
+
+def test_validate_deploy_config_uses_strict_table_ref_parser():
+    with TemporaryDirectory() as tmp:
+        config_file = Path(tmp) / "config.yaml"
+        config_file.write_text(
+            """
+feishu:
+  app_id: cli_abc
+  app_secret: secret
+  app_token: shared
+  tables:
+    holdings: base/table/extra
+    nav_history: base/tbl_nav
+    cash_flow: base/tbl_cash
+    holdings_snapshot: base/tbl_snapshot
+""",
+            encoding="utf-8",
+        )
+        patch = MonkeyPatch()
+        try:
+            patch.setenv(config.CONFIG_FILE_ENV, str(config_file))
+            _clear_env(patch, *config.REQUIRED_DAILY_JOB_KEYS, "feishu.app_token")
+            config.reload_config()
+
+            payload = config.validate_deploy_config()
+
+            assert payload["success"] is False
+            issue = next(item for item in payload["issues"] if item["key"] == "feishu.tables.holdings")
+            assert "expected app_token/table_id" in issue["error"]
+        finally:
+            patch.undo()
+            config.reload_config()
 
 
 def test_validate_deploy_config_accepts_complete_yaml_config():

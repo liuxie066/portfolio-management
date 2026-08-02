@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date
 from types import SimpleNamespace
 
+import pytest
+
 from src.app.account_nav_recorder_service import AccountNavRecorderService
 from src.app.business_calendar_service import BusinessCalendarService
 from src.app.daily_account_nav_service import DailyAccountNavService
@@ -10,6 +12,7 @@ from src.app.daily_nav_job_service import DailyNavJobService
 from src.app.daily_report_payload_service import DailyReportPayloadService
 from src.app.nav_initialization_service import NavInitializationService
 from src.domain.holdings import RawHoldingRecord
+from src.domain.snapshot_contracts import NormalizedValuationSnapshot
 from src.models import AssetType
 
 
@@ -51,9 +54,27 @@ def _nav_record(account: str = "alice", nav_date: date = date(2026, 5, 22)):
     )
 
 
+class _CashFlowDatasetStub:
+    def __init__(self, fingerprint: str):
+        self.fingerprint = fingerprint
+
+    def details(self):
+        return {"financial_fingerprint": self.fingerprint}
+
+
 class _PassingGlobalHoldingsPreflight:
     def scan_global_orphans(self, **_kwargs):
         return {"success": True, "status": "valid", "scope": "global"}
+
+
+def _normalized(account: str) -> NormalizedValuationSnapshot:
+    return NormalizedValuationSnapshot.build(
+        account=account,
+        rows=(),
+        shares=100,
+        excluded_zero_keys=(),
+        source="test_fixture",
+    )
 
 
 def test_business_calendar_skips_weekend_and_configured_holiday():
@@ -87,8 +108,13 @@ def test_daily_account_nav_service_reuses_one_snapshot_and_respects_nav_date():
     calls = []
     run_pool = object()
     valuation = SimpleNamespace(warnings=[])
-    snapshot = {"valuation": valuation, "snapshot_time": "2026-05-22T18:00:00"}
+    snapshot = {
+        "valuation": valuation,
+        "normalized_valuation": _normalized("alice"),
+        "snapshot_time": "2026-05-22T18:00:00",
+    }
     nav_record = _nav_record()
+    dataset = _CashFlowDatasetStub("daily-dataset")
 
     class FakeReadService:
         def build_snapshot(self, **kwargs):
@@ -101,6 +127,10 @@ def test_daily_account_nav_service_reuses_one_snapshot_and_respects_nav_date():
 
     class FakePortfolio:
         reporting_service = object()
+
+        def build_cash_flow_dataset(self, **kwargs):
+            calls.append(("build_cash_flow_dataset", kwargs))
+            return dataset
 
         def record_nav(self, *args, **kwargs):
             calls.append(("record_nav", args, kwargs))
@@ -134,12 +164,25 @@ def test_daily_account_nav_service_reuses_one_snapshot_and_respects_nav_date():
         "build_snapshot",
         {"price_timeout_seconds": 7, "run_quote_pool": run_pool},
     )
+    assert calls[1] == (
+        "build_cash_flow_dataset",
+        {
+            "account": "alice",
+            "nav_date": date(2026, 5, 22),
+            "run_id": "run-daily-1",
+        },
+    )
     record_call = next(call for call in calls if call[0] == "record_nav")
     assert record_call[1] == ("alice",)
     assert record_call[2]["valuation"] is valuation
     assert record_call[2]["nav_date"] == date(2026, 5, 22)
     assert record_call[2]["dry_run"] is False
     assert record_call[2]["overwrite_existing"] is False
+    assert record_call[2]["cash_flow_dataset"] is dataset
+    authority = record_call[2]["snapshot_write_authority"]
+    assert authority.account == "alice"
+    assert authority.run_id == "run-daily-1"
+    assert authority.confirmed is True
     context = record_call[2]["nav_write_context"]
     assert context.status == "manual"
     assert context.writer == "daily-report"
@@ -153,8 +196,13 @@ def test_daily_account_nav_service_reuses_one_snapshot_and_respects_nav_date():
 def test_account_nav_recorder_records_nav_without_report_reads():
     calls = []
     valuation = SimpleNamespace(warnings=["price warning"])
-    snapshot = {"valuation": valuation, "snapshot_time": "2026-05-22T18:00:00"}
+    snapshot = {
+        "valuation": valuation,
+        "normalized_valuation": _normalized("alice"),
+        "snapshot_time": "2026-05-22T18:00:00",
+    }
     nav_record = _nav_record()
+    dataset = _CashFlowDatasetStub("recorder-dataset")
 
     class FakeReadService:
         def build_snapshot(self, **kwargs):
@@ -165,6 +213,10 @@ def test_account_nav_recorder_records_nav_without_report_reads():
             raise AssertionError("recorder should not build report distribution")
 
     class FakePortfolio:
+        def build_cash_flow_dataset(self, **kwargs):
+            calls.append(("build_cash_flow_dataset", kwargs))
+            return dataset
+
         def record_nav(self, *args, **kwargs):
             calls.append(("record_nav", args, kwargs))
             return nav_record
@@ -193,7 +245,8 @@ def test_account_nav_recorder_records_nav_without_report_reads():
     assert result["nav_record"] is nav_record
     assert result["nav_result"]["warnings"] == ["price warning"]
     assert calls[0] == ("build_snapshot", {"price_timeout_seconds": 7})
-    record_call = calls[1]
+    assert calls[1][0] == "build_cash_flow_dataset"
+    record_call = calls[2]
     assert record_call[0] == "record_nav"
     assert record_call[1] == ("alice",)
     assert record_call[2]["valuation"] is valuation
@@ -201,6 +254,7 @@ def test_account_nav_recorder_records_nav_without_report_reads():
     assert record_call[2]["dry_run"] is False
     assert record_call[2]["overwrite_existing"] is False
     assert record_call[2]["use_bulk_persist"] is True
+    assert record_call[2]["cash_flow_dataset"] is dataset
     context = record_call[2]["nav_write_context"]
     assert context.status == "manual"
     assert context.writer == "nav-record"
@@ -212,7 +266,12 @@ def test_account_nav_recorder_records_nav_without_report_reads():
 def test_account_nav_recorder_syncs_futu_before_snapshot_and_passes_run_pool(monkeypatch):
     calls = []
     run_pool = object()
-    snapshot = {"valuation": SimpleNamespace(warnings=[]), "snapshot_time": "2026-05-22T18:00:00"}
+    snapshot = {
+        "valuation": SimpleNamespace(warnings=[]),
+        "normalized_valuation": _normalized("lx"),
+        "snapshot_time": "2026-05-22T18:00:00",
+    }
+    dataset = _CashFlowDatasetStub("futu-dataset")
 
     class FakeSyncService:
         def __init__(self, _storage):
@@ -228,6 +287,10 @@ def test_account_nav_recorder_syncs_futu_before_snapshot_and_passes_run_pool(mon
             return snapshot
 
     class FakePortfolio:
+        def build_cash_flow_dataset(self, **kwargs):
+            calls.append(("build_cash_flow_dataset", kwargs))
+            return dataset
+
         def record_nav(self, *_args, **_kwargs):
             return _nav_record()
 
@@ -248,6 +311,14 @@ def test_account_nav_recorder_syncs_futu_before_snapshot_and_passes_run_pool(mon
     assert calls == [
         ("futu_sync", {"account": "lx", "dry_run": True}),
         ("build_snapshot", {"price_timeout_seconds": 30, "run_quote_pool": run_pool}),
+        (
+            "build_cash_flow_dataset",
+            {
+                "account": "lx",
+                "nav_date": date(2026, 5, 22),
+                "run_id": result["run_id"],
+            },
+        ),
     ]
 
 
@@ -257,7 +328,11 @@ def test_nav_initialization_service_initializes_empty_account():
         total_value_cny=1000.0,
         warnings=[],
     )
-    snapshot = {"valuation": valuation, "snapshot_time": "2026-05-22T18:00:00"}
+    snapshot = {
+        "valuation": valuation,
+        "normalized_valuation": _normalized("alice"),
+        "snapshot_time": "2026-05-22T18:00:00",
+    }
     nav_record = SimpleNamespace(
         nav=1.0,
         shares=1000.0,
@@ -267,6 +342,7 @@ def test_nav_initialization_service_initializes_empty_account():
         fund_value=0.0,
         details={},
     )
+    dataset = _CashFlowDatasetStub("init-dataset")
 
     class FakeStorage:
         def get_nav_history(self, account, days):
@@ -279,6 +355,10 @@ def test_nav_initialization_service_initializes_empty_account():
             return snapshot
 
     class FakePortfolio:
+        def build_cash_flow_dataset(self, **kwargs):
+            calls.append(("build_cash_flow_dataset", kwargs))
+            return dataset
+
         def record_nav(self, *args, **kwargs):
             calls.append(("record_nav", args, kwargs))
             return nav_record
@@ -301,17 +381,117 @@ def test_nav_initialization_service_initializes_empty_account():
     assert result["date"] == "2026-05-22"
     assert result["dry_run"] is False
     assert calls[0] == ("get_nav_history", "alice", 9999)
-    assert calls[1] == ("build_snapshot", {"price_timeout_seconds": 7})
-    assert calls[2][0] == "record_nav"
-    assert calls[2][1] == ("alice",)
-    assert calls[2][2]["nav_date"] == date(2026, 5, 22)
-    assert calls[2][2]["dry_run"] is False
-    assert calls[2][2]["use_bulk_persist"] is True
-    context = calls[2][2]["nav_write_context"]
+    assert calls[1] == (
+        "build_cash_flow_dataset",
+        {
+            "account": "alice",
+            "nav_date": date(2026, 5, 22),
+            "run_id": result["run_id"],
+        },
+    )
+    assert calls[2] == ("build_snapshot", {"price_timeout_seconds": 7})
+    assert calls[3][0] == "record_nav"
+    assert calls[3][1] == ("alice",)
+    assert calls[3][2]["nav_date"] == date(2026, 5, 22)
+    assert calls[3][2]["dry_run"] is False
+    assert calls[3][2]["use_bulk_persist"] is True
+    assert calls[3][2]["cash_flow_dataset"] is dataset
+    context = calls[3][2]["nav_write_context"]
     assert context.status == "initial"
     assert context.writer == "init-nav"
     assert context.nav_date == date(2026, 5, 22)
     assert context.valuation_as_of == "2026-05-22T18:00:00"
+
+
+@pytest.mark.parametrize(
+    ("dry_run", "details", "expected_success", "expected_status"),
+    [
+        (
+            True,
+            {
+                "snapshot_persisted": False,
+                "snapshot_status": "planned",
+                "snapshot_preview": {"to_create": 1},
+            },
+            True,
+            None,
+        ),
+        (
+            False,
+            {
+                "snapshot_persisted": False,
+                "snapshot_status": "failed",
+                "snapshot_error": "snapshot readback stale",
+                "snapshot_task_id": "repair-init",
+                "snapshot_retry_command": (
+                    "pm compensation retry --task-id repair-init --confirm"
+                ),
+            },
+            False,
+            "partial",
+        ),
+    ],
+)
+def test_nav_initialization_classifies_snapshot_preview_and_partial(
+    dry_run,
+    details,
+    expected_success,
+    expected_status,
+):
+    valuation = SimpleNamespace(total_value_cny=1000.0, warnings=[])
+    nav_record = SimpleNamespace(
+        nav=1.0,
+        shares=1000.0,
+        total_value=1000.0,
+        cash_value=100.0,
+        stock_value=900.0,
+        fund_value=0.0,
+        details=details,
+    )
+
+    class FakeStorage:
+        @staticmethod
+        def get_nav_history(_account, days):
+            assert days == 9999
+            return []
+
+    class FakeReadService:
+        @staticmethod
+        def build_snapshot(**_kwargs):
+            return {
+                "valuation": valuation,
+                "normalized_valuation": _normalized("alice"),
+                "snapshot_time": "2026-05-22T18:00:00",
+            }
+
+    class FakePortfolio:
+        @staticmethod
+        def build_cash_flow_dataset(**_kwargs):
+            return _CashFlowDatasetStub("init-dataset")
+
+        @staticmethod
+        def record_nav(*_args, **_kwargs):
+            return nav_record
+
+    result = NavInitializationService(
+        account="alice",
+        storage=FakeStorage(),
+        portfolio=FakePortfolio(),
+        read_service=FakeReadService(),
+    ).init_nav_history(
+        date_str="2026-05-22",
+        dry_run=dry_run,
+        confirm=not dry_run,
+    )
+
+    assert result["success"] is expected_success
+    if expected_status is None:
+        assert "status" not in result
+        assert "snapshot_error" not in result
+    else:
+        assert result["status"] == expected_status
+        assert result["task_id"] == "repair-init"
+        assert "repair-init" in result["retry_command"]
 
 
 def test_daily_report_payload_service_uses_existing_snapshot_and_nav_record():
@@ -389,7 +569,11 @@ def test_daily_report_payload_service_uses_dry_run_nav_record_for_recent_snapsho
 
 def test_daily_account_nav_service_returns_failure_when_payload_stage_raises():
     valuation = SimpleNamespace(warnings=[])
-    snapshot = {"valuation": valuation, "snapshot_time": "2026-05-22T18:00:00"}
+    snapshot = {
+        "valuation": valuation,
+        "normalized_valuation": _normalized("alice"),
+        "snapshot_time": "2026-05-22T18:00:00",
+    }
 
     class FakeReadService:
         def build_snapshot(self, **_kwargs):
@@ -399,6 +583,9 @@ def test_daily_account_nav_service_returns_failure_when_payload_stage_raises():
             raise RuntimeError("distribution failed")
 
     class FakePortfolio:
+        def build_cash_flow_dataset(self, **_kwargs):
+            return _CashFlowDatasetStub("payload-error-dataset")
+
         def record_nav(self, *_args, **_kwargs):
             return _nav_record()
 
@@ -613,9 +800,8 @@ def test_daily_nav_job_skips_existing_nav_when_no_overwrite():
                 details={"finality": _finality()},
             )
 
-        def reconcile_cash_flows(self, **kwargs):
-            calls.append(("reconcile_cash_flows", kwargs["account"]))
-            return {"success": True, "change_count": 0, "error_count": 0}
+        def reconcile_cash_flows(self, **_kwargs):
+            raise AssertionError("daily precheck must not reconcile cash flows")
 
     result = DailyNavJobService(
         storage=FakeStorage(),
@@ -629,7 +815,6 @@ def test_daily_nav_job_skips_existing_nav_when_no_overwrite():
     assert result["items"][0]["record_id"] == "rec_nav_1"
     assert result["items"][0]["finality"]["status"] == "final"
     assert calls == [
-        ("reconcile_cash_flows", "alice"),
         ("get_nav_on_date", "alice", date(2026, 5, 22)),
     ]
 
@@ -1030,7 +1215,9 @@ def test_daily_nav_job_raw_discovery_ignores_valid_zero_but_keeps_missing_quanti
     assert calls == ["missing"]
 
 
-def test_daily_nav_job_blocks_cash_flow_pending():
+def test_daily_nav_job_performs_no_separate_cash_flow_reconcile_scan():
+    calls = []
+
     class FakeStorage:
         def audit_nav_history_duplicates(self, account=None):
             return {"success": True, "duplicate_group_count": 0}
@@ -1039,32 +1226,46 @@ def test_daily_nav_job_blocks_cash_flow_pending():
             return None
 
         def reconcile_cash_flows(self, **kwargs):
-            return {"success": True, "account": kwargs["account"], "change_count": 1, "error_count": 0}
+            raise AssertionError("daily job must not reconcile cash flows")
+
+    class FakeRunner:
+        def __init__(self, account):
+            self.account = account
+
+        def run(self, **kwargs):
+            calls.append(("runner", self.account, kwargs["dry_run"]))
+            return {"success": True, "account": self.account}
 
     result = DailyNavJobService(
         storage=FakeStorage(),
         portfolio=SimpleNamespace(reporting_service=object()),
         calendar=BusinessCalendarService(),
-        account_runner_factory=lambda _account: (_ for _ in ()).throw(AssertionError("runner should not run")),
-    ).run(nav_date="2026-05-22", account="alice")
+        account_runner_factory=FakeRunner,
+        holdings_preflight=_PassingGlobalHoldingsPreflight(),
+    ).run(nav_date="2026-05-22", account="alice", dry_run=False, confirm=True)
 
-    assert result["success"] is False
-    assert result["status"] == "failed"
-    assert result["items"][0]["status"] == "cash_flow_pending"
+    assert result["success"] is True
+    assert calls == [("runner", "alice", False)]
 
 
-def test_daily_nav_job_converts_cash_flow_exception_and_continues_accounts():
+def test_daily_nav_job_converts_account_dataset_failure_and_continues_accounts():
     class Storage:
-        def reconcile_cash_flows(self, **kwargs):
-            if kwargs["account"] == "alice":
-                raise RuntimeError("FieldNameNotFound")
-            return {"success": True, "change_count": 0, "error_count": 0}
+        def audit_nav_history_duplicates(self, account=None):
+            return {"success": True, "duplicate_group_count": 0}
+
+        def get_nav_on_date(self, account, nav_date):
+            return None
+
+        def reconcile_cash_flows(self, **_kwargs):
+            raise AssertionError("daily job must not reconcile cash flows")
 
     class Runner:
         def __init__(self, account):
             self.account = account
 
         def run(self, **_kwargs):
+            if self.account == "alice":
+                raise RuntimeError("cash-flow dataset blocked")
             return {"success": True, "status": "dry_run", "account": self.account}
 
     result = DailyNavJobService(
@@ -1082,83 +1283,13 @@ def test_daily_nav_job_converts_cash_flow_exception_and_continues_accounts():
 
     assert result["success"] is False
     assert result["status"] == "partial"
-    assert result["items"][0]["stage"] == "cash_flow_reconcile"
+    assert result["items"][0]["stage"] == "account_nav"
     assert result["items"][0]["failure"] == {
-        "stage": "cash_flow_reconcile",
+        "stage": "account_nav",
         "exception_type": "RuntimeError",
-        "message": "FieldNameNotFound",
+        "message": "cash-flow dataset blocked",
     }
     assert result["items"][1]["success"] is True
-
-
-def test_daily_nav_job_never_applies_cash_flow_reconcile_implicitly():
-    calls = []
-
-    class FakeStorage:
-        def audit_nav_history_duplicates(self, account=None):
-            return {"success": True, "duplicate_group_count": 0}
-
-        def get_nav_on_date(self, account, nav_date):
-            return None
-
-        def reconcile_cash_flows(self, **kwargs):
-            calls.append(("reconcile_cash_flows", kwargs["account"], kwargs["dry_run"]))
-            return {
-                "success": True,
-                "account": kwargs["account"],
-                "change_count": 1,
-                "updated_count": 1,
-                "error_count": 0,
-            }
-
-    class FakeRunner:
-        def __init__(self, account):
-            self.account = account
-
-        def run(self, **kwargs):
-            calls.append(("runner", self.account, kwargs["dry_run"]))
-            return {"success": True, "account": self.account}
-
-    result = DailyNavJobService(
-        storage=FakeStorage(),
-        portfolio=SimpleNamespace(reporting_service=object()),
-        calendar=BusinessCalendarService(),
-        account_runner_factory=FakeRunner,
-    ).run(nav_date="2026-05-22", account="alice", dry_run=False, confirm=True)
-
-    assert result["success"] is False
-    assert result["summary"] == {"cash_flow_pending": 1}
-    assert calls == [
-        ("reconcile_cash_flows", "alice", True),
-    ]
-
-
-def test_daily_nav_job_blocks_cash_flow_pending_before_existing_nav_skip():
-    calls = []
-
-    class FakeStorage:
-        def audit_nav_history_duplicates(self, account=None):
-            return {"success": True, "duplicate_group_count": 0}
-
-        def get_nav_on_date(self, account, nav_date):
-            calls.append(("get_nav_on_date", account, nav_date))
-            return SimpleNamespace(record_id="rec_nav_1", nav=1.23, total_value=123.0)
-
-        def reconcile_cash_flows(self, **kwargs):
-            calls.append(("reconcile_cash_flows", kwargs["account"]))
-            return {"success": True, "account": kwargs["account"], "change_count": 1, "error_count": 0}
-
-    result = DailyNavJobService(
-        storage=FakeStorage(),
-        portfolio=SimpleNamespace(reporting_service=object()),
-        calendar=BusinessCalendarService(),
-        account_runner_factory=lambda _account: (_ for _ in ()).throw(AssertionError("runner should not run")),
-    ).run(nav_date="2026-05-22", account="alice")
-
-    assert result["success"] is False
-    assert result["status"] == "failed"
-    assert result["items"][0]["status"] == "cash_flow_pending"
-    assert calls == [("reconcile_cash_flows", "alice")]
 
 
 def test_daily_nav_job_runs_each_account_through_account_runner():

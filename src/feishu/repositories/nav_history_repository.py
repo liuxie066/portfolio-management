@@ -3,8 +3,34 @@ import json
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
+from ...feishu_client import FeishuBatchWriteError
 from ...models import NAVHistory
 from ...process_lock import nav_history_lock_key, process_lock
+from ..contracts import get_table_contract
+
+
+class NavHistoryReadIntegrityError(ValueError):
+    """A canonical NAV source row could not be reconstructed losslessly."""
+
+    def __init__(
+        self,
+        *,
+        source: str,
+        account: str,
+        record_id: Optional[str],
+        row_index: int,
+        cause: Exception,
+    ):
+        self.source = source
+        self.account = account
+        self.record_id = record_id
+        self.row_index = row_index
+        self.reason = str(cause) or cause.__class__.__name__
+        super().__init__(
+            'nav_history canonical read integrity failed: '
+            f'source={source}, account={account}, record_id={record_id or "<missing>"}, '
+            f'row_index={row_index}: {self.reason}'
+        )
 
 
 class NavHistoryRepository:
@@ -16,13 +42,19 @@ class NavHistoryRepository:
     def __getattr__(self, name: str):
         return getattr(self.storage, name)
 
-    NAV_INDEX_PROJECTION_FIELDS: List[str] = [
-        'date', 'account', 'total_value', 'shares', 'nav',
-        'cash_flow', 'pnl', 'mtd_nav_change', 'ytd_nav_change',
-        'mtd_pnl', 'ytd_pnl', 'details', 'updated_at',
+    NAV_CACHE_FORMAT_VERSION = 2
+    NAV_CANONICAL_PROJECTION_FIELDS: List[str] = [
+        field.name for field in get_table_contract('nav_history').fields
     ]
+    # Compatibility alias for callers that historically inspected this name.
+    # The projection is now the complete canonical row, not a lossy index row.
+    NAV_INDEX_PROJECTION_FIELDS = NAV_CANONICAL_PROJECTION_FIELDS
 
     NAV_DERIVED_PATCH_FIELDS = {
+        'stock_weight',
+        'cash_weight',
+        'shares',
+        'nav',
         'cash_flow',
         'share_change',
         'pnl',
@@ -31,57 +63,125 @@ class NavHistoryRepository:
         'mtd_pnl',
         'ytd_pnl',
     }
+    NAV_MAINTENANCE_PATCH_FIELDS = NAV_DERIVED_PATCH_FIELDS | {'details'}
 
-    def _build_nav_index_payload(self, account: str, records: List[Dict[str, any]]) -> Dict[str, any]:
+    def _nav_to_cache_row(
+        self,
+        nav: NAVHistory,
+        *,
+        updated_at: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Serialize one complete canonical NAV row for memory/disk replay."""
+        row = self._nav_to_dict(nav)
+        row['date'] = self._safe_date_str(nav.date)
+        row['record_id'] = nav.record_id
+        row['updated_at'] = updated_at
+        return row
+
+    @staticmethod
+    def _nav_identity_row(row: Dict[str, Any]) -> Dict[str, Any]:
+        """Project the lightweight date/identity facts used by internal indexes."""
+        return {
+            'date': row.get('date'),
+            'account': row.get('account'),
+            'record_id': row.get('record_id'),
+            'updated_at': row.get('updated_at'),
+        }
+
+    @staticmethod
+    def _validate_nav_source_identity(
+        row: Dict[str, Any],
+        *,
+        scoped_account: str,
+    ) -> None:
+        """Require observed record/account identity without manufacturing it."""
+        record_id = row.get('record_id')
+        if not isinstance(record_id, str) or not record_id.strip():
+            raise ValueError('record_id is required')
+
+        source_account = row.get('account')
+        if not isinstance(source_account, str) or not source_account.strip():
+            raise ValueError('account is required')
+        if scoped_account and source_account != scoped_account:
+            raise ValueError(
+                'account scope mismatch: '
+                f'expected={scoped_account}, actual={source_account}'
+            )
+
+    def _build_nav_payload_from_cache_rows(
+        self,
+        account: str,
+        rows: List[Dict[str, Any]],
+        *,
+        source: str = 'versioned_cache',
+    ) -> Dict[str, Any]:
         navs: List[NAVHistory] = []
-        nav_records: List[Dict[str, any]] = []
+        nav_records: List[Dict[str, Any]] = []
 
-        for record in records:
-            raw_fields = record.get('fields') or {}
-            fields = self._from_feishu_fields(raw_fields, 'nav_history')
-            if account and not fields.get('account'):
-                fields['account'] = account
-            fields['record_id'] = record.get('record_id')
-            nav = self._dict_to_nav(fields)
+        for row_index, raw_row in enumerate(rows):
+            record_id = raw_row.get('record_id') if isinstance(raw_row, dict) else None
+            try:
+                if not isinstance(raw_row, dict):
+                    raise TypeError('canonical row must be an object')
+                row = dict(raw_row)
+                self._validate_nav_source_identity(
+                    row,
+                    scoped_account=account,
+                )
+                nav = self._dict_to_nav(row)
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise NavHistoryReadIntegrityError(
+                    source=source,
+                    account=account,
+                    record_id=record_id,
+                    row_index=row_index,
+                    cause=exc,
+                ) from exc
             if not nav.date:
-                continue
+                raise NavHistoryReadIntegrityError(
+                    source=source,
+                    account=account,
+                    record_id=record_id,
+                    row_index=row_index,
+                    cause=ValueError('date is required'),
+                )
             navs.append(nav)
-            nav_records.append({
-                'date': self._safe_date_str(nav.date),
-                'record_id': nav.record_id,
-                'total_value': nav.total_value,
-                'shares': nav.shares,
-                'nav': nav.nav,
-                'cash_flow': nav.cash_flow,
-                'pnl': nav.pnl,
-                'mtd_nav_change': nav.mtd_nav_change,
-                'ytd_nav_change': nav.ytd_nav_change,
-                'mtd_pnl': nav.mtd_pnl,
-                'ytd_pnl': nav.ytd_pnl,
-                'details': nav.details,
-                'updated_at': self._extract_updated_at_str(raw_fields),
-            })
+            nav_records.append(
+                self._nav_to_cache_row(
+                    nav,
+                    updated_at=self._extract_updated_at_str(row),
+                )
+            )
 
-        nav_records.sort(key=lambda x: x.get('date') or '')
-        navs.sort(key=lambda x: x.date)
+        nav_records.sort(key=lambda item: item.get('date') or '')
+        navs.sort(key=lambda item: item.date)
 
-        month_end_base: Dict[str, Dict[str, any]] = {}
-        year_end_base: Dict[str, Dict[str, any]] = {}
+        month_end_base: Dict[str, Dict[str, Any]] = {}
+        year_end_base: Dict[str, Dict[str, Any]] = {}
+        date_identity_index: Dict[str, List[Dict[str, Any]]] = {}
+        identity_rows: List[Dict[str, Any]] = []
         for row in nav_records:
             ds = row.get('date')
             if not ds:
                 continue
+            identity = self._nav_identity_row(row)
+            identity_rows.append(identity)
+            date_identity_index.setdefault(ds, []).append(dict(identity))
             d = datetime.strptime(ds, '%Y-%m-%d').date()
-            month_end_base[d.strftime('%Y-%m')] = dict(row)
-            year_end_base[str(d.year)] = dict(row)
+            month_end_base[d.strftime('%Y-%m')] = dict(identity)
+            year_end_base[str(d.year)] = dict(identity)
 
-        inception_base = dict(nav_records[0]) if nav_records else None
-        last_record = dict(nav_records[-1]) if nav_records else None
+        inception_base = dict(identity_rows[0]) if identity_rows else None
+        last_record = dict(identity_rows[-1]) if identity_rows else None
 
         return {
             'account': account,
+            'cache_format_version': self.NAV_CACHE_FORMAT_VERSION,
             'record_count': len(nav_records),
+            # Public reads replay these complete rows.
             'nav_history': nav_records,
+            # Internal lookup structures intentionally carry identity only.
+            'date_identity_index': date_identity_index,
             'month_end_base': month_end_base,
             'year_end_base': year_end_base,
             'inception_base': inception_base,
@@ -89,6 +189,55 @@ class NavHistoryRepository:
             'latest_updated_at': (last_record or {}).get('updated_at') if last_record else None,
             '_nav_objects': navs,
         }
+
+    def _build_nav_index_payload(
+        self,
+        account: str,
+        records: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        canonical_rows: List[Dict[str, Any]] = []
+        for row_index, record in enumerate(records):
+            record_id = record.get('record_id') if isinstance(record, dict) else None
+            try:
+                if not isinstance(record, dict):
+                    raise TypeError('remote record must be an object')
+                raw_fields = record.get('fields') or {}
+                if not isinstance(raw_fields, dict):
+                    raise TypeError('remote record fields must be an object')
+                fields = self._from_feishu_fields(raw_fields, 'nav_history')
+                fields['record_id'] = record_id
+                self._validate_nav_source_identity(
+                    fields,
+                    scoped_account=account,
+                )
+                nav = self._dict_to_nav(fields)
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise NavHistoryReadIntegrityError(
+                    source='feishu',
+                    account=account,
+                    record_id=record_id,
+                    row_index=row_index,
+                    cause=exc,
+                ) from exc
+            if not nav.date:
+                raise NavHistoryReadIntegrityError(
+                    source='feishu',
+                    account=account,
+                    record_id=record_id,
+                    row_index=row_index,
+                    cause=ValueError('date is required'),
+                )
+            canonical_rows.append(
+                self._nav_to_cache_row(
+                    nav,
+                    updated_at=self._extract_updated_at_str(raw_fields),
+                )
+            )
+        return self._build_nav_payload_from_cache_rows(
+            account,
+            canonical_rows,
+            source='feishu_canonical_row',
+        )
 
     @staticmethod
     def _nav_index_fingerprint(payload: Dict[str, any]) -> Dict[str, tuple]:
@@ -185,12 +334,15 @@ class NavHistoryRepository:
             else:
                 raise
 
+        try:
+            payload = self._build_nav_index_payload(account or '', records)
+        except NavHistoryReadIntegrityError:
+            if account:
+                self._clear_nav_index_authority(account)
+            raise
         duplicates = self._nav_duplicate_groups_from_rows(records, default_account=account)
         if account:
-            self._store_nav_index_payload(
-                account,
-                self._build_nav_index_payload(account, records),
-            )
+            self._store_nav_index_payload(account, payload)
         return {
             'success': True,
             'account': account,
@@ -231,7 +383,11 @@ class NavHistoryRepository:
             else:
                 raise
 
-        payload = self._build_nav_index_payload(account, records)
+        try:
+            payload = self._build_nav_index_payload(account, records)
+        except NavHistoryReadIntegrityError:
+            self._clear_nav_index_authority(account)
+            raise
         invalidated = False
 
         if cached_local:
@@ -258,39 +414,25 @@ class NavHistoryRepository:
             return
 
         cached_local = self._local_nav_index_cache.get_account(account)
-        if cached_local:
-            navs: List[NAVHistory] = []
-            for row in cached_local.get('nav_history') or []:
-                ds = row.get('date')
-                if not ds:
-                    continue
-                try:
-                    d = datetime.strptime(ds[:10], '%Y-%m-%d').date()
-                except Exception:
-                    continue
-                navs.append(NAVHistory(
-                    record_id=row.get('record_id'),
-                    date=d,
-                    account=account,
-                    total_value=float(row.get('total_value') or 0.0),
-                    shares=float(row['shares']) if row.get('shares') is not None else None,
-                    nav=float(row['nav']) if row.get('nav') is not None else None,
-                    cash_flow=float(row['cash_flow']) if row.get('cash_flow') is not None else None,
-                    pnl=float(row['pnl']) if row.get('pnl') is not None else None,
-                    mtd_nav_change=float(row['mtd_nav_change']) if row.get('mtd_nav_change') is not None else None,
-                    ytd_nav_change=float(row['ytd_nav_change']) if row.get('ytd_nav_change') is not None else None,
-                    mtd_pnl=float(row['mtd_pnl']) if row.get('mtd_pnl') is not None else None,
-                    ytd_pnl=float(row['ytd_pnl']) if row.get('ytd_pnl') is not None else None,
-                    details=row.get('details'),
-                ))
-
-            payload = dict(cached_local)
-            payload['_nav_objects'] = sorted(navs, key=lambda x: x.date)
+        if (
+            cached_local
+            and cached_local.get('cache_format_version') == self.NAV_CACHE_FORMAT_VERSION
+        ):
+            try:
+                payload = self._build_nav_payload_from_cache_rows(
+                    account,
+                    list(cached_local.get('nav_history') or []),
+                )
+            except NavHistoryReadIntegrityError:
+                self._clear_nav_index_authority(account)
+                raise
             self._nav_index_mem_cache[account] = payload
             self._nav_index_loaded_accounts.add(account)
             return
 
-        self.preload_nav_index(account)
+        # Older cache payloads contain only a partial NAV projection and cannot
+        # serve a public read safely. Replace them from the remote canonical row.
+        self.preload_nav_index(account, force_refresh=True)
 
     def get_nav_index(self, account: str) -> Dict[str, any]:
         self._ensure_nav_index_loaded(account)
@@ -310,6 +452,11 @@ class NavHistoryRepository:
         self._nav_index_loaded_accounts.discard(account)
         self._nav_index_mem_cache.pop(account, None)
 
+    def _clear_nav_index_authority(self, account: str) -> None:
+        """Discard memory/disk authority before rebuilding after a write fault."""
+        self._invalidate_nav_index(account)
+        self._local_nav_index_cache.set_account(account, {}, _flush=True)
+
     def _normalize_nav_date(self, nav_date) -> date:
         if isinstance(nav_date, datetime):
             return nav_date.date()
@@ -318,27 +465,26 @@ class NavHistoryRepository:
         return nav_date
 
     def _nav_to_index_row(self, nav: NAVHistory, updated_at: Optional[str] = None) -> Dict[str, any]:
-        return {
-            'date': self._safe_date_str(nav.date),
-            'record_id': nav.record_id,
-            'total_value': nav.total_value,
-            'shares': nav.shares,
-            'nav': nav.nav,
-            'cash_flow': nav.cash_flow,
-            'pnl': nav.pnl,
-            'mtd_nav_change': nav.mtd_nav_change,
-            'ytd_nav_change': nav.ytd_nav_change,
-            'mtd_pnl': nav.mtd_pnl,
-            'ytd_pnl': nav.ytd_pnl,
-            'details': nav.details,
-            'updated_at': updated_at,
-        }
+        """Compatibility name for a complete row used by incremental cache updates."""
+        return self._nav_to_cache_row(nav, updated_at=updated_at)
 
     def _apply_nav_rows_to_local_cache(self, account: str, rows: List[Dict[str, any]]):
         """增量更新本地 NAV 索引缓存，并失效内存镜像。"""
         if not rows:
             return
         self._local_nav_index_cache.upsert_nav_records(account, rows, _flush=True)
+        cached = self._local_nav_index_cache.get_account(account)
+        rebuilt = self._build_nav_payload_from_cache_rows(
+            account,
+            list(cached.get('nav_history') or []),
+        )
+        persist_payload = dict(rebuilt)
+        persist_payload.pop('_nav_objects', None)
+        self._local_nav_index_cache.set_account(
+            account,
+            persist_payload,
+            _flush=True,
+        )
         self._invalidate_nav_index(account)
 
     def _validate_nav_write(self, nav: NAVHistory):
@@ -421,6 +567,146 @@ class NavHistoryRepository:
             f'refusing {operation} retry without required details.finality'
         ) from cause
 
+    @staticmethod
+    def _batch_scope_row(
+        operation: str,
+        cache_row: Dict[str, Any],
+        *,
+        record_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return {
+            'operation': operation,
+            'date': cache_row.get('date'),
+            'record_id': record_id or cache_row.get('record_id'),
+        }
+
+    def _stage_aware_batch_error(
+        self,
+        *,
+        account: str,
+        failed_operation: str,
+        unconfirmed_outcome: str,
+        cause: Exception,
+        update_rows: List[Dict[str, Any]],
+        create_rows: List[Dict[str, Any]],
+        confirmed_update_results: Optional[List[Dict[str, Any]]] = None,
+        confirmed_create_results: Optional[List[Dict[str, Any]]] = None,
+    ) -> FeishuBatchWriteError:
+        """Preserve cross-stage facts and replace optimistic cache authority."""
+        if unconfirmed_outcome not in {'failed', 'unknown'}:
+            raise ValueError(
+                "unconfirmed_outcome must be either 'failed' or 'unknown'"
+            )
+        update_results = list(confirmed_update_results or [])
+        create_results = list(confirmed_create_results or [])
+
+        update_row_by_id = {
+            str(row.get('record_id')): row
+            for row in update_rows
+            if row.get('record_id')
+        }
+        confirmed_update_scopes: List[Dict[str, Any]] = []
+        confirmed_update_ids = set()
+        for result in update_results:
+            record_id = str((result or {}).get('record_id') or '').strip()
+            if not record_id:
+                continue
+            confirmed_update_ids.add(record_id)
+            confirmed_update_scopes.append(
+                self._batch_scope_row(
+                    'update',
+                    update_row_by_id.get(record_id) or {'record_id': record_id},
+                    record_id=record_id,
+                )
+            )
+
+        confirmed_create_scopes: List[Dict[str, Any]] = []
+        for index, result in enumerate(create_results):
+            row = create_rows[index] if index < len(create_rows) else {}
+            record_id = str((result or {}).get('record_id') or '').strip() or None
+            confirmed_create_scopes.append(
+                self._batch_scope_row('create', row, record_id=record_id)
+            )
+
+        unconfirmed_update_scopes = [
+            self._batch_scope_row('update', row)
+            for row in update_rows
+            if str(row.get('record_id') or '') not in confirmed_update_ids
+        ]
+        unconfirmed_create_scopes = [
+            self._batch_scope_row('create', row)
+            for row in create_rows[len(confirmed_create_scopes):]
+        ]
+        if unconfirmed_outcome == 'unknown':
+            unknown_update_scopes = unconfirmed_update_scopes
+            unknown_create_scopes = unconfirmed_create_scopes
+            failed_update_scopes: List[Dict[str, Any]] = []
+            failed_create_scopes: List[Dict[str, Any]] = []
+        else:
+            unknown_update_scopes = []
+            unknown_create_scopes = []
+            failed_update_scopes = unconfirmed_update_scopes
+            failed_create_scopes = unconfirmed_create_scopes
+
+        chunk_offset = int(getattr(cause, 'chunk_offset', 0) or 0)
+        reason = str(cause) or cause.__class__.__name__
+        error = FeishuBatchWriteError(
+            operation='nav_history_full_write',
+            table_name='nav_history',
+            chunk_offset=chunk_offset,
+            reason=(
+                f'account={account}, failed_operation={failed_operation}, '
+                f'confirmed_update={len(confirmed_update_scopes)}, '
+                f'confirmed_create={len(confirmed_create_scopes)}, '
+                f'failed_update={len(failed_update_scopes)}, '
+                f'failed_create={len(failed_create_scopes)}, '
+                f'unknown_update={len(unknown_update_scopes)}, '
+                f'unknown_create={len(unknown_create_scopes)}: {reason}'
+            ),
+            confirmed_results=[*update_results, *create_results],
+        )
+        error.account = account
+        error.confirmed_scopes = {
+            'update': confirmed_update_scopes,
+            'create': confirmed_create_scopes,
+        }
+        error.unknown_scopes = {
+            'update': unknown_update_scopes,
+            'create': unknown_create_scopes,
+        }
+        error.failed_scopes = {
+            'update': failed_update_scopes,
+            'create': failed_create_scopes,
+        }
+        error.failure_stage = {
+            'operation': failed_operation,
+            'chunk_offset': chunk_offset,
+            'reason': reason,
+        }
+        error.partial_write_possible = bool(
+            confirmed_update_scopes
+            or confirmed_create_scopes
+            or unknown_update_scopes
+            or unknown_create_scopes
+        )
+
+        cache_rebuild: Dict[str, Any]
+        try:
+            self._clear_nav_index_authority(account)
+            rebuilt = self.preload_nav_index(account, force_refresh=True)
+            cache_rebuild = {
+                'status': 'rebuilt_from_fresh_read',
+                'loaded': int(rebuilt.get('loaded', 0) or 0),
+            }
+        except Exception as rebuild_error:
+            self._invalidate_nav_index(account)
+            cache_rebuild = {
+                'status': 'failed',
+                'error': str(rebuild_error) or rebuild_error.__class__.__name__,
+            }
+        error.cache_rebuild = cache_rebuild
+        return error
+
     def _execute_single_nav_write(self, nav: NAVHistory, existing_row: Optional[Dict[str, Any]], preserve_none_for_update: bool, dry_run: bool = False) -> Dict[str, Any]:
         """Execute one full nav write with the same semantics as bulk replace/upsert."""
         existing_record_id = (existing_row or {}).get('record_id')
@@ -440,6 +726,7 @@ class NavHistoryRepository:
             }
 
         used_fields = feishu_fields
+        compatibility_dropped_details = False
         try:
             if existing_record_id:
                 self.client.update_record('nav_history', existing_record_id, feishu_fields)
@@ -462,6 +749,7 @@ class NavHistoryRepository:
             fallback_fields = dict(feishu_fields)
             fallback_fields.pop('details', None)
             used_fields = fallback_fields
+            compatibility_dropped_details = True
 
             if existing_record_id:
                 self.client.update_record('nav_history', existing_record_id, fallback_fields)
@@ -471,6 +759,12 @@ class NavHistoryRepository:
                 nav.record_id = result['record_id']
 
         cache_row = self._nav_to_index_row(nav, updated_at=used_fields.get('updated_at'))
+        if compatibility_dropped_details:
+            cache_row['details'] = (
+                (existing_row or {}).get('details')
+                if existing_record_id
+                else None
+            )
         if existing_record_id and (not preserve_none_for_update):
             existing_cache_row = dict(existing_row or {})
             merged_row = dict(existing_cache_row)
@@ -585,46 +879,130 @@ class NavHistoryRepository:
                                 updated_records = self.client.batch_update_records('nav_history', update_payloads)
                             except Exception as e:
                                 msg = str(e)
-                                if 'FieldNameNotFound' not in msg or getattr(e, 'confirmed_results', None):
-                                    raise
-                                self._fail_closed_if_finality_would_be_dropped(
-                                    update_payloads,
-                                    operation='batch update',
-                                    cause=e,
-                                )
-                                fallback_updates = []
-                                fallback_rows = []
-                                for p, row in zip(update_payloads, update_rows_for_cache):
-                                    f = dict(p.get('fields') or {})
-                                    f.pop('details', None)
-                                    fallback_updates.append({'record_id': p['record_id'], 'fields': f})
-                                    r = dict(row)
-                                    r['updated_at'] = f.get('updated_at')
-                                    fallback_rows.append(r)
-                                updated_records = self.client.batch_update_records('nav_history', fallback_updates)
-                                update_rows_for_cache = fallback_rows
+                                confirmed_updates = list(getattr(e, 'confirmed_results', None) or [])
+                                if 'FieldNameNotFound' in msg and not confirmed_updates:
+                                    self._fail_closed_if_finality_would_be_dropped(
+                                        update_payloads,
+                                        operation='batch update',
+                                        cause=e,
+                                    )
+                                    fallback_updates = []
+                                    fallback_rows = []
+                                    for p, row in zip(update_payloads, update_rows_for_cache):
+                                        f = dict(p.get('fields') or {})
+                                        f.pop('details', None)
+                                        fallback_updates.append({'record_id': p['record_id'], 'fields': f})
+                                        r = dict(row)
+                                        r['updated_at'] = f.get('updated_at')
+                                        existing_for_date = existing_row_by_date.get(
+                                            str(r.get('date') or '')
+                                        ) or {}
+                                        r['details'] = existing_for_date.get('details')
+                                        fallback_rows.append(r)
+                                    try:
+                                        updated_records = self.client.batch_update_records(
+                                            'nav_history',
+                                            fallback_updates,
+                                        )
+                                    except Exception as fallback_error:
+                                        raise self._stage_aware_batch_error(
+                                            account=account,
+                                            failed_operation='update',
+                                            unconfirmed_outcome=(
+                                                'failed'
+                                                if 'FieldNameNotFound' in str(fallback_error)
+                                                else 'unknown'
+                                            ),
+                                            cause=fallback_error,
+                                            update_rows=fallback_rows,
+                                            create_rows=[],
+                                            confirmed_update_results=list(
+                                                getattr(fallback_error, 'confirmed_results', None) or []
+                                            ),
+                                        ) from fallback_error
+                                    update_rows_for_cache = fallback_rows
+                                else:
+                                    raise self._stage_aware_batch_error(
+                                        account=account,
+                                        failed_operation='update',
+                                        unconfirmed_outcome=(
+                                            'failed' if 'FieldNameNotFound' in msg else 'unknown'
+                                        ),
+                                        cause=e,
+                                        update_rows=update_rows_for_cache,
+                                        create_rows=[],
+                                        confirmed_update_results=confirmed_updates,
+                                    ) from e
 
                         if create_payloads:
                             try:
                                 created_records = self.client.batch_create_records('nav_history', create_payloads)
                             except Exception as e:
                                 msg = str(e)
-                                if 'FieldNameNotFound' not in msg or getattr(e, 'confirmed_results', None):
-                                    raise
-                                self._fail_closed_if_finality_would_be_dropped(
-                                    create_payloads,
-                                    operation='batch create',
-                                    cause=e,
-                                )
-                                fallback_creates = []
-                                for p in create_payloads:
-                                    f = dict((p.get('fields') or {}))
-                                    f.pop('details', None)
-                                    fallback_creates.append({'fields': f})
-                                created_records = self.client.batch_create_records('nav_history', fallback_creates)
-                                for i, p in enumerate(fallback_creates):
-                                    if i < len(create_rows_for_cache):
-                                        create_rows_for_cache[i]['updated_at'] = (p.get('fields') or {}).get('updated_at')
+                                confirmed_creates = list(getattr(e, 'confirmed_results', None) or [])
+                                if 'FieldNameNotFound' in msg and not confirmed_creates:
+                                    try:
+                                        self._fail_closed_if_finality_would_be_dropped(
+                                            create_payloads,
+                                            operation='batch create',
+                                            cause=e,
+                                        )
+                                    except RuntimeError as finality_error:
+                                        if updated_records:
+                                            raise self._stage_aware_batch_error(
+                                                account=account,
+                                                failed_operation='create',
+                                                unconfirmed_outcome='failed',
+                                                cause=finality_error,
+                                                update_rows=update_rows_for_cache,
+                                                create_rows=create_rows_for_cache,
+                                                confirmed_update_results=updated_records,
+                                            ) from finality_error
+                                        raise
+                                    fallback_creates = []
+                                    for p in create_payloads:
+                                        f = dict((p.get('fields') or {}))
+                                        f.pop('details', None)
+                                        fallback_creates.append({'fields': f})
+                                    try:
+                                        created_records = self.client.batch_create_records(
+                                            'nav_history',
+                                            fallback_creates,
+                                        )
+                                    except Exception as fallback_error:
+                                        raise self._stage_aware_batch_error(
+                                            account=account,
+                                            failed_operation='create',
+                                            unconfirmed_outcome=(
+                                                'failed'
+                                                if 'FieldNameNotFound' in str(fallback_error)
+                                                else 'unknown'
+                                            ),
+                                            cause=fallback_error,
+                                            update_rows=update_rows_for_cache,
+                                            create_rows=create_rows_for_cache,
+                                            confirmed_update_results=updated_records,
+                                            confirmed_create_results=list(
+                                                getattr(fallback_error, 'confirmed_results', None) or []
+                                            ),
+                                        ) from fallback_error
+                                    for i, p in enumerate(fallback_creates):
+                                        if i < len(create_rows_for_cache):
+                                            create_rows_for_cache[i]['updated_at'] = (p.get('fields') or {}).get('updated_at')
+                                            create_rows_for_cache[i]['details'] = None
+                                else:
+                                    raise self._stage_aware_batch_error(
+                                        account=account,
+                                        failed_operation='create',
+                                        unconfirmed_outcome=(
+                                            'failed' if 'FieldNameNotFound' in msg else 'unknown'
+                                        ),
+                                        cause=e,
+                                        update_rows=update_rows_for_cache,
+                                        create_rows=create_rows_for_cache,
+                                        confirmed_update_results=updated_records,
+                                        confirmed_create_results=confirmed_creates,
+                                    ) from e
 
                             for rec, nav, cache_row in zip(created_records, created_navs, create_rows_for_cache):
                                 nav.record_id = rec['record_id']
@@ -675,7 +1053,13 @@ class NavHistoryRepository:
             except Exception as e:
                 err = {'account': account, 'error': str(e), 'count': len(navs)}
                 errors.append(err)
-                if not allow_partial:
+                if (
+                    not allow_partial
+                    or (
+                        isinstance(e, FeishuBatchWriteError)
+                        and hasattr(e, 'confirmed_scopes')
+                    )
+                ):
                     raise
                 account_results[account] = {
                     'updated': 0, 'created': 0, 'total': len(navs), 'error': str(e),
@@ -751,7 +1135,6 @@ class NavHistoryRepository:
         from ...time_utils import bj_today
         start_date = bj_today() - timedelta(days=days)
 
-        self.preload_nav_index(account)
         idx = self.get_nav_index(account)
         navs: List[NAVHistory] = list(idx.get('_nav_objects') or [])
         if not navs:
@@ -783,6 +1166,79 @@ class NavHistoryRepository:
 
         return matches[0] if matches else None
 
+    def read_nav_maintenance_rows(self, account: str) -> List[Dict[str, Any]]:
+        """Fresh-read complete NAV rows while retaining Missing/Null/Value state."""
+
+        filter_str = f'CurrentValue.[account] = "{self._escape_filter_value(account)}"'
+        try:
+            records = self.client.list_records(
+                'nav_history',
+                filter_str=filter_str,
+                field_names=self.NAV_CANONICAL_PROJECTION_FIELDS,
+            )
+        except Exception as exc:
+            if 'FieldNameNotFound' not in str(exc):
+                raise
+            records = self.client.list_records(
+                'nav_history',
+                filter_str=filter_str,
+                field_names=[
+                    field
+                    for field in self.NAV_CANONICAL_PROJECTION_FIELDS
+                    if field != 'updated_at'
+                ],
+            )
+
+        try:
+            payload = self._build_nav_index_payload(account, records)
+        except NavHistoryReadIntegrityError:
+            self._clear_nav_index_authority(account)
+            raise
+        result: List[Dict[str, Any]] = []
+        failure_record_id: Optional[str] = None
+        failure_row_index = -1
+        try:
+            for row_index, record in enumerate(records):
+                failure_row_index = row_index
+                failure_record_id = record.get('record_id')
+                raw_fields = record.get('fields') or {}
+                fields = self._from_feishu_fields(raw_fields, 'nav_history')
+                fields['record_id'] = record.get('record_id')
+                nav = self._dict_to_nav(fields)
+                states: Dict[str, Dict[str, Any]] = {}
+                for field in self.NAV_CANONICAL_PROJECTION_FIELDS:
+                    if field not in raw_fields:
+                        states[field] = {'state': 'missing'}
+                    elif raw_fields.get(field) in (None, ''):
+                        states[field] = {'state': 'null'}
+                    elif fields.get(field) is None:
+                        raise ValueError(
+                            f'non-null field failed canonical parsing: {field}'
+                        )
+                    else:
+                        states[field] = {
+                            'state': 'value',
+                            'value': fields.get(field),
+                        }
+                result.append({
+                    'nav': nav,
+                    'record_id': nav.record_id,
+                    'date': nav.date,
+                    'field_states': states,
+                })
+        except (TypeError, ValueError) as exc:
+            self._clear_nav_index_authority(account)
+            raise NavHistoryReadIntegrityError(
+                source='feishu_maintenance',
+                account=account,
+                record_id=failure_record_id,
+                row_index=failure_row_index,
+                cause=exc,
+            ) from exc
+        result.sort(key=lambda item: item['date'])
+        self._store_nav_index_payload(account, payload)
+        return result
+
     def _patch_nav_fields(
         self,
         record_id: str,
@@ -797,10 +1253,12 @@ class NavHistoryRepository:
 
         normalized = {}
         for k, v in fields.items():
-            if k in ('mtd_nav_change', 'ytd_nav_change') and v is not None:
+            if k in ('nav', 'mtd_nav_change', 'ytd_nav_change') and v is not None:
                 normalized[k] = self._quantize_nav(v)
-            elif k in ('mtd_pnl', 'ytd_pnl', 'pnl', 'cash_flow', 'share_change') and v is not None:
+            elif k in ('shares', 'mtd_pnl', 'ytd_pnl', 'pnl', 'cash_flow', 'share_change') and v is not None:
                 normalized[k] = self._quantize_money(v)
+            elif k in ('stock_weight', 'cash_weight') and v is not None:
+                normalized[k] = self._quantize_weight(v)
             else:
                 normalized[k] = v
 
@@ -820,6 +1278,64 @@ class NavHistoryRepository:
                 fields,
                 dry_run=dry_run,
                 allowed_fields=self.NAV_DERIVED_PATCH_FIELDS,
+            )
+
+    def patch_nav_maintenance_fields(
+        self,
+        record_id: str,
+        field_states: Dict[str, Dict[str, Any]],
+        dry_run: bool = False,
+    ):
+        """Apply one derived/details-only maintenance patch.
+
+        The explicit state envelope keeps an absent field distinct from a
+        present null in the journal and CAS preflight.  Both missing and null
+        are sent as a clear operation because Feishu has no separate update
+        instruction for physical key removal.
+        """
+
+        illegal = sorted(set(field_states) - self.NAV_MAINTENANCE_PATCH_FIELDS)
+        if illegal:
+            raise ValueError(
+                f"nav maintenance patch contains non-derived fields: {illegal}"
+            )
+        fields: Dict[str, Any] = {}
+        for field, envelope in field_states.items():
+            if not isinstance(envelope, dict):
+                raise TypeError(f"nav maintenance field state must be an object: {field}")
+            state = envelope.get('state')
+            if state not in {'missing', 'null', 'value'}:
+                raise ValueError(f"invalid nav maintenance field state: {field}={state}")
+            if state == 'value' and 'value' not in envelope:
+                raise ValueError(f"nav maintenance value state has no value: {field}")
+            value = envelope.get('value') if state == 'value' else None
+            if field == 'details' and isinstance(value, dict):
+                evidence_version = str(value.get('evidence_version') or '').strip().lower()
+                snapshot_evidence = value.get('snapshot_evidence')
+                snapshot_version = (
+                    str((snapshot_evidence or {}).get('version') or '').strip().lower()
+                    if isinstance(snapshot_evidence, dict)
+                    else ''
+                )
+                snapshot_status = (
+                    str((snapshot_evidence or {}).get('status') or '').strip().lower()
+                    if isinstance(snapshot_evidence, dict)
+                    else ''
+                )
+                if evidence_version in {'2', 'v2'} or (
+                    snapshot_version in {'2', 'v2'} and snapshot_status == 'complete'
+                ):
+                    raise ValueError(
+                        'derived-only NAV maintenance cannot claim snapshot v2 complete'
+                    )
+            fields[field] = value
+
+        with process_lock(nav_history_lock_key()):
+            return self._patch_nav_fields(
+                record_id,
+                fields,
+                dry_run=dry_run,
+                allowed_fields=self.NAV_MAINTENANCE_PATCH_FIELDS,
             )
 
     def patch_nav_details(self, record_id: str, details: Dict[str, any], dry_run: bool = False):

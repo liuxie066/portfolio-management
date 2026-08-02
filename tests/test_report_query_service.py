@@ -7,15 +7,21 @@ from src.domain.nav_calculator import NavCalculator
 from src.models import NAVHistory
 
 
-def _snapshot(total_value=1000.0, cash_value=100.0, stock_value=900.0):
+def _snapshot(
+    total_value=1000.0,
+    cash_value=100.0,
+    stock_value=900.0,
+    fund_value=0.0,
+):
+    non_cash_value = stock_value + fund_value
     return {
         "snapshot_time": "2026-03-20T15:00:00",
         "valuation": SimpleNamespace(
             total_value_cny=total_value,
             cash_value_cny=cash_value,
             stock_value_cny=stock_value,
-            fund_value_cny=0.0,
-            cn_asset_value=stock_value,
+            fund_value_cny=fund_value,
+            cn_asset_value=non_cash_value,
             us_asset_value=0.0,
             hk_asset_value=0.0,
         ),
@@ -24,12 +30,14 @@ def _snapshot(total_value=1000.0, cash_value=100.0, stock_value=900.0):
             "holdings": [],
             "total_value": total_value,
             "cash_value": cash_value,
-            "stock_value": stock_value,
+            "stock_value": non_cash_value,
+            "non_cash_value": non_cash_value,
+            "fund_value": fund_value,
         },
         "position_data": {
             "cash_ratio": cash_value / total_value,
             "stock_ratio": stock_value / total_value,
-            "fund_ratio": 0.0,
+            "fund_ratio": fund_value / total_value,
         },
     }
 
@@ -127,13 +135,22 @@ def test_full_report_synthetic_nav_reuses_core_nav_calculation():
         patch("src.app.report_query_service.bj_now_naive", return_value=datetime(2026, 3, 20, 15, 0, 0)),
         patch("src.app.report_query_service.config.get_start_year", return_value=2026),
     ):
-        report = service.full_report(snapshot=_snapshot(total_value=1100.0, cash_value=200.0, stock_value=900.0), navs=[previous])
+        report = service.full_report(
+            snapshot=_snapshot(
+                total_value=1100.0,
+                cash_value=200.0,
+                stock_value=800.0,
+                fund_value=100.0,
+            ),
+            navs=[previous],
+        )
 
     assert report["success"] is True
     assert report["nav"]["shares"] == 100.0
     assert report["nav"]["nav"] == 11.0
     assert report["nav"]["share_change"] == 10.0
     assert report["nav"]["pnl"] == 100.0
+    assert report["nav"]["stock_value"] == 900.0
     assert report["nav"]["details"]["is_synthetic"] is True
     calc_mock.assert_called_once()
     build_mock.assert_called_once()

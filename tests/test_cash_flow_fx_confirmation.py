@@ -10,7 +10,7 @@ from src.app.cash_flow_fx_confirmation import (
 
 ROW = {
     "record_id": "rec-fx-1",
-    "source_hash": "hash-1",
+    "generated_fingerprint": "fingerprint-1",
     "flow_date": "2026-07-31",
     "exchange_rate": "7.200",
     "cny_amount": "720.00",
@@ -21,7 +21,7 @@ def _confirmation(**overrides):
     value = {
         "confirmation_id": "fx-1",
         "record_id": "rec-fx-1",
-        "source_hash": "hash-1",
+        "source_hash": "fingerprint-1",
         "exchange_rate": "7.2",
         "cny_amount": "720",
         "exchange_rate_date": "2026-07-31",
@@ -47,11 +47,13 @@ def test_fx_confirmation_requires_local_evidence():
     ("overrides", "mismatch_field"),
     [
         ({"record_id": "rec-other"}, "record_id"),
-        ({"source_hash": "hash-old"}, "source_hash"),
+        ({"source_hash": "fingerprint-old"}, "generated_fingerprint"),
         ({"exchange_rate_date": "2026-07-30"}, "exchange_rate_date"),
         ({"exchange_rate": "7.19"}, "exchange_rate_or_cny_amount"),
         ({"cny_amount": "719"}, "exchange_rate_or_cny_amount"),
         ({"exchange_rate_source": ""}, "evidence_authority"),
+        ({"exchange_rate_source": "unknown"}, "evidence_authority"),
+        ({"exchange_rate_source": "n/a"}, "evidence_authority"),
         ({"exchange_rate_evidence_type": "guess"}, "evidence_authority"),
     ],
 )
@@ -91,5 +93,6 @@ def test_frozen_identity_excludes_operator_and_timestamps():
 
     assert identity["confirmation_id"] == "fx-1"
     assert identity["record_id"] == "rec-fx-1"
+    assert identity["generated_fingerprint"] == "fingerprint-1"
     assert "confirmed_at" not in identity
     assert "confirmation" not in identity

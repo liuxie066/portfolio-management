@@ -4,12 +4,97 @@ from datetime import date
 from decimal import Decimal
 from unittest.mock import Mock, patch
 
+from src import config
+from src.app.cash_flow_summary_service import CashFlowSummaryService
+from src.app.valuation_service import ValuationService
+from src.domain.cash_flow_contracts import (
+    CompletedCashFlowFacts,
+    RawCashFlowRecord,
+)
 from src.portfolio import PortfolioManager
 from src.models import (
-    Holding, CashFlow, NAVHistory, PortfolioValuation,
+    Holding, NAVHistory,
     AssetType, AssetClass, Industry
 )
 from src.asset_utils import detect_asset_type
+
+
+def _completed_cash_flow(flow_date: date, amount: float):
+    return CompletedCashFlowFacts.build(
+        flow_date=flow_date,
+        account='测试账户',
+        broker='测试券商',
+        amount=amount,
+        currency='CNY',
+        source='test',
+        record_id=f"cf-{flow_date.isoformat()}-{amount}",
+    ).to_cash_flow()
+
+
+def _raw_cash_flows(*flows):
+    return [RawCashFlowRecord.from_cash_flow(flow) for flow in flows]
+
+
+def _cash_flow_dataset(storage, nav_date: date, run_id: str):
+    return CashFlowSummaryService(storage=storage).build_dataset(
+        account='测试账户',
+        nav_date=nav_date,
+        run_id=run_id,
+        start_year=config.get_start_year(),
+    )
+
+
+def _normalized_valuation(*, total_value: float, cash_value: float, stock_value: float):
+    assert total_value == cash_value + stock_value
+    inputs = (
+        (
+            Holding(
+                asset_id="CNY-CASH",
+                asset_name="人民币现金",
+                asset_type=AssetType.CASH,
+                account="测试账户",
+                broker="测试券商",
+                quantity=cash_value,
+                currency="CNY",
+                asset_class=AssetClass.CASH,
+            ),
+            "cash",
+        ),
+        (
+            Holding(
+                asset_id="TEST-EQUITY",
+                asset_name="测试权益",
+                asset_type=AssetType.A_STOCK,
+                account="测试账户",
+                broker="测试券商",
+                quantity=stock_value,
+                currency="CNY",
+                asset_class=AssetClass.CN_ASSET,
+            ),
+            "equity",
+        ),
+    )
+    holdings = [holding for holding, _normalized_type in inputs]
+    price_snapshot = {
+        holding.asset_id: {
+            "price": "1",
+            "cny_price": "1",
+            "currency": "CNY",
+            "source": "test_fixture",
+        }
+        for holding, _normalized_type in inputs
+    }
+    normalized = ValuationService(
+        manager=None,
+        storage=Mock(),
+        price_fetcher=None,
+    ).calculate_normalized_valuation(
+        account="测试账户",
+        holdings=holdings,
+        price_snapshot=price_snapshot,
+        total_shares=0,
+    )
+    return normalized.to_portfolio_valuation()
 
 
 class TestPortfolioManagerInitialization:
@@ -306,6 +391,7 @@ class TestPortfolioManagerNAVRecord:
 
     def setup_method(self):
         self.mock_storage = Mock()
+        self.mock_storage.get_raw_cash_flows.return_value = []
         self.mock_fetcher = Mock()
         self.manager = PortfolioManager(
             storage=self.mock_storage,
@@ -314,18 +400,28 @@ class TestPortfolioManagerNAVRecord:
 
     def test_record_nav_first_time(self):
         """测试首次记录净值"""
-        valuation = PortfolioValuation(
-            account='测试账户',
-            total_value_cny=1000000.0,
-            cash_value_cny=100000.0,
-            stock_value_cny=900000.0
+        valuation = _normalized_valuation(
+            total_value=1000000.0,
+            cash_value=100000.0,
+            stock_value=900000.0,
         )
-        self.mock_storage.get_cash_flows.return_value = []
         self.mock_storage.write_nav_record.return_value = None
         self.mock_storage.get_nav_history.return_value = []  # 无历史记录
         self.mock_storage.get_latest_nav_before.return_value = None  # 无之前记录
 
-        result = self.manager.record_nav('测试账户', valuation, nav_date=date(2025, 3, 14))
+        run_id = "portfolio-first"
+        result = self.manager.record_nav(
+            '测试账户',
+            valuation,
+            nav_date=date(2025, 3, 14),
+            persist=False,
+            run_id=run_id,
+            cash_flow_dataset=_cash_flow_dataset(
+                self.mock_storage,
+                date(2025, 3, 14),
+                run_id,
+            ),
+        )
 
         assert result is not None
         assert result.total_value == 1000000.0
@@ -338,11 +434,10 @@ class TestPortfolioManagerNAVRecord:
 
     def test_record_nav_with_existing(self):
         """测试已有净值记录"""
-        valuation = PortfolioValuation(
-            account='测试账户',
-            total_value_cny=1100000.0,
-            cash_value_cny=100000.0,
-            stock_value_cny=1000000.0
+        valuation = _normalized_valuation(
+            total_value=1100000.0,
+            cash_value=100000.0,
+            stock_value=1000000.0,
         )
         # 模拟已有净值记录
         existing_nav = NAVHistory(
@@ -353,11 +448,22 @@ class TestPortfolioManagerNAVRecord:
             shares=1000000.0
         )
         self.mock_storage.get_latest_nav_before.return_value = existing_nav
-        self.mock_storage.get_cash_flows.return_value = []
         self.mock_storage.write_nav_record.return_value = None
         self.mock_storage.get_nav_history.return_value = [existing_nav]
 
-        result = self.manager.record_nav('测试账户', valuation, nav_date=date(2025, 3, 14))
+        run_id = "portfolio-existing"
+        result = self.manager.record_nav(
+            '测试账户',
+            valuation,
+            nav_date=date(2025, 3, 14),
+            persist=False,
+            run_id=run_id,
+            cash_flow_dataset=_cash_flow_dataset(
+                self.mock_storage,
+                date(2025, 3, 14),
+                run_id,
+            ),
+        )
 
         assert result is not None
         # 无资金变动，份额不变
@@ -366,11 +472,10 @@ class TestPortfolioManagerNAVRecord:
 
     def test_record_nav_with_cash_flow(self):
         """测试有出入金的净值记录"""
-        valuation = PortfolioValuation(
-            account='测试账户',
-            total_value_cny=1050000.0,
-            cash_value_cny=150000.0,
-            stock_value_cny=900000.0
+        valuation = _normalized_valuation(
+            total_value=1050000.0,
+            cash_value=150000.0,
+            stock_value=900000.0,
         )
         existing_nav = NAVHistory(
             date=date(2025, 3, 13),
@@ -379,18 +484,34 @@ class TestPortfolioManagerNAVRecord:
             nav=1.0,
             shares=1000000.0
         )
-        deposit = CashFlow(flow_date=date(2025, 3, 14), account='测试账户', amount=50000, currency='CNY', cny_amount=50000, flow_type='DEPOSIT')
-        self.mock_storage.get_cash_flows.return_value = [deposit]
+        deposit = _completed_cash_flow(date(2025, 3, 14), 50000)
+        self.mock_storage.get_raw_cash_flows.return_value = _raw_cash_flows(
+            deposit
+        )
         self.mock_storage.write_nav_record.return_value = None
         self.mock_storage.get_nav_history.return_value = [existing_nav]
 
-        result = self.manager.record_nav('测试账户', valuation, nav_date=date(2025, 3, 14))
+        run_id = "portfolio-cash-flow"
+        result = self.manager.record_nav(
+            '测试账户',
+            valuation,
+            nav_date=date(2025, 3, 14),
+            persist=False,
+            run_id=run_id,
+            cash_flow_dataset=_cash_flow_dataset(
+                self.mock_storage,
+                date(2025, 3, 14),
+                run_id,
+            ),
+        )
 
         # 份额变动 = 50000 / 1.0 = 50000
         assert result.shares == 1050000.0
         # 净值 = 1050000 / 1050000 = 1.0
         assert result.nav == 1.0
-        self.mock_storage.get_cash_flows.assert_called_once()
+        self.mock_storage.get_raw_cash_flows.assert_called_once_with(
+            account='测试账户'
+        )
 
     def test_get_last_day_nav(self):
         """测试获取昨日净值"""
@@ -409,10 +530,10 @@ class TestPortfolioManagerNAVRecord:
 
     def test_get_daily_cash_flow(self):
         """测试获取当日资金变动"""
-        self.mock_storage.get_cash_flows.return_value = [
-            CashFlow(flow_date=date(2025, 3, 14), account='测试账户', amount=50000, currency='CNY', cny_amount=50000, flow_type='DEPOSIT'),
-            CashFlow(flow_date=date(2025, 3, 14), account='测试账户', amount=-10000, currency='CNY', cny_amount=-10000, flow_type='WITHDRAW')
-        ]
+        self.mock_storage.get_raw_cash_flows.return_value = _raw_cash_flows(
+            _completed_cash_flow(date(2025, 3, 14), 50000),
+            _completed_cash_flow(date(2025, 3, 14), -10000),
+        )
 
         result = self.manager._get_daily_cash_flow('测试账户', date(2025, 3, 14))
 
@@ -421,11 +542,13 @@ class TestPortfolioManagerNAVRecord:
     def test_summarize_cash_flows(self):
         """测试 record_nav 资金变动一次取数后内存汇总"""
         flows = [
-            CashFlow(flow_date=date(2024, 12, 31), account='测试账户', amount=10000, currency='CNY', cny_amount=10000, flow_type='DEPOSIT'),
-            CashFlow(flow_date=date(2025, 3, 1), account='测试账户', amount=20000, currency='CNY', cny_amount=20000, flow_type='DEPOSIT'),
-            CashFlow(flow_date=date(2025, 3, 14), account='测试账户', amount=5000, currency='CNY', cny_amount=5000, flow_type='DEPOSIT'),
+            _completed_cash_flow(date(2024, 12, 31), 10000),
+            _completed_cash_flow(date(2025, 3, 1), 20000),
+            _completed_cash_flow(date(2025, 3, 14), 5000),
         ]
-        self.mock_storage.get_cash_flows.return_value = flows
+        self.mock_storage.get_raw_cash_flows.return_value = _raw_cash_flows(
+            *flows
+        )
         last_nav = NAVHistory(date=date(2025, 3, 13), account='测试账户', total_value=1000000.0, nav=1.0, shares=1000000.0)
 
         result = self.manager._summarize_cash_flows(
@@ -441,14 +564,16 @@ class TestPortfolioManagerNAVRecord:
         assert result['yearly']['2025'] == 25000
         assert result['cumulative'] == 35000
         assert result['gap'] == 5000
-        self.mock_storage.get_cash_flows.assert_called_once_with('测试账户', date(2024, 1, 1), date(2025, 3, 14))
+        self.mock_storage.get_raw_cash_flows.assert_called_once_with(
+            account='测试账户'
+        )
 
     def test_get_yearly_cash_flow(self):
         """测试获取当年资金变动"""
-        self.mock_storage.get_cash_flows.return_value = [
-            CashFlow(flow_date=date(2025, 1, 15), account='测试账户', amount=100000, currency='CNY', cny_amount=100000, flow_type='DEPOSIT'),
-            CashFlow(flow_date=date(2025, 2, 15), account='测试账户', amount=50000, currency='CNY', cny_amount=50000, flow_type='DEPOSIT')
-        ]
+        self.mock_storage.get_raw_cash_flows.return_value = _raw_cash_flows(
+            _completed_cash_flow(date(2025, 1, 15), 100000),
+            _completed_cash_flow(date(2025, 2, 15), 50000),
+        )
 
         result = self.manager._get_yearly_cash_flow('测试账户', '2025')
 

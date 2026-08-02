@@ -1,19 +1,24 @@
 """Observe Futu CASH and synchronize MMF plus stock/ETF holdings."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 import json
 import uuid
-from math import isfinite
 from typing import Any, Dict, Optional, Protocol, Sequence
 
 from src import config
+from src.domain.holdings import (
+    ProviderNumericFact,
+    ProviderValueState,
+    asset_class_for_economic_exposure,
+)
 from src.models import (
     AssetClass,
     AssetType,
+    Currency,
     MMF_ASSET_ID,
     Holding,
 )
@@ -54,13 +59,57 @@ class FutuPositionSnapshot:
     asset_id: str
     asset_name: str
     security_type: str
-    quantity: float
+    quantity: Optional[float]
     average_cost: Optional[float]
     currency: str
     market: str
-    position_side: str = "LONG"
+    position_side: str = "N/A"
     raw_code: str = ""
     currency_explicit: bool = True
+    quantity_fact: ProviderNumericFact = field(init=False, repr=False)
+    average_cost_fact: ProviderNumericFact = field(init=False, repr=False)
+    currency_valid: bool = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        quantity_fact = ProviderNumericFact.parse(self.quantity)
+        average_cost_fact = ProviderNumericFact.parse(self.average_cost)
+        market = str(self.market or "").strip().upper()
+        raw_currency = (
+            ""
+            if self.currency is None
+            else str(self.currency).strip().upper()
+        )
+        normalized_currency = _normalize_currency(raw_currency, market)
+        currency_explicit = bool(
+            self.currency_explicit
+            and raw_currency
+            and raw_currency != "N/A"
+        )
+        object.__setattr__(self, "asset_id", str(self.asset_id or "").strip())
+        object.__setattr__(self, "asset_name", str(self.asset_name or "").strip())
+        object.__setattr__(
+            self,
+            "security_type",
+            str(self.security_type or "").strip().upper(),
+        )
+        object.__setattr__(self, "quantity", quantity_fact.value)
+        object.__setattr__(self, "average_cost", average_cost_fact.value)
+        object.__setattr__(self, "currency", normalized_currency)
+        object.__setattr__(self, "currency_explicit", currency_explicit)
+        object.__setattr__(
+            self,
+            "currency_valid",
+            bool(currency_explicit and _valid_currency(normalized_currency)),
+        )
+        object.__setattr__(self, "market", market)
+        object.__setattr__(
+            self,
+            "position_side",
+            str(self.position_side or "").strip().upper(),
+        )
+        object.__setattr__(self, "raw_code", str(self.raw_code or "").strip())
+        object.__setattr__(self, "quantity_fact", quantity_fact)
+        object.__setattr__(self, "average_cost_fact", average_cost_fact)
 
 
 @dataclass(frozen=True)
@@ -422,6 +471,8 @@ class FutuOpenApiBalanceProvider:
             if not raw_code:
                 continue
             market = _market_from_code(raw_code, row.get("position_market"))
+            if not market:
+                continue
             codes_by_market.setdefault(market, []).append(raw_code)
 
         result: dict[str, str] = {}
@@ -439,28 +490,25 @@ class FutuOpenApiBalanceProvider:
                 if code:
                     result[code] = str(row.get("stock_type") or "N/A").upper()
 
-        missing_nonzero = [
-            str(row.get("code") or "")
-            for row in position_rows
-            if _to_float(row.get("qty"), default=0.0) != 0
-            and str(row.get("code") or "") not in result
-        ]
-        if missing_nonzero:
-            raise RuntimeError(f"Futu security classification missing for: {', '.join(sorted(missing_nonzero))}")
         return result
 
     def _position_snapshot(self, row: dict[str, Any], security_type: Optional[str]) -> FutuPositionSnapshot:
         raw_code = str(row.get("code") or "").strip()
         market = _market_from_code(raw_code, row.get("position_market"))
-        raw_currency = str(row.get("currency") or "").strip().upper()
+        raw_currency_value = row.get("currency")
+        raw_currency = (
+            ""
+            if raw_currency_value is None
+            else str(raw_currency_value).strip().upper()
+        )
         currency_explicit = bool(raw_currency and raw_currency != "N/A")
         return FutuPositionSnapshot(
             asset_id=_normalize_futu_code(raw_code),
             asset_name=str(row.get("stock_name") or _normalize_futu_code(raw_code)),
             security_type=str(security_type or "N/A").upper(),
-            quantity=_to_float(row.get("qty"), default=0.0),
-            average_cost=_optional_float(row.get("average_cost")),
-            currency=_normalize_currency(row.get("currency"), market),
+            quantity=row.get("qty"),
+            average_cost=row.get("average_cost"),
+            currency=row.get("currency"),
             market=market,
             position_side=str(row.get("position_side") or "N/A").upper(),
             raw_code=raw_code,
@@ -617,6 +665,7 @@ class FutuBalanceSyncService:
 
         snapshot = self._fetch_portfolio(account)
         self._validate_authoritative_balances(snapshot)
+        self._validate_authoritative_positions(snapshot)
         return snapshot
 
     def sync_portfolio(
@@ -639,6 +688,7 @@ class FutuBalanceSyncService:
         try:
             snapshot = self._fetch_portfolio(account)
             self._validate_authoritative_balances(snapshot)
+            self._validate_authoritative_positions(snapshot)
         except Exception as exc:
             failure = self._failure(account, broker, dry_run, str(exc))
             if not dry_run and (
@@ -1042,6 +1092,61 @@ class FutuBalanceSyncService:
         if snapshot.pagination_complete is not True:
             raise RuntimeError("Futu snapshot pagination is incomplete")
 
+    @classmethod
+    def _validate_authoritative_positions(cls, snapshot: Any) -> None:
+        """Validate the complete position slice before any holding diff exists."""
+
+        positions = tuple(getattr(snapshot, "positions", ()) or ())
+        errors: list[str] = []
+        seen: set[str] = set()
+        for index, position in enumerate(positions):
+            if not isinstance(position, FutuPositionSnapshot):
+                errors.append(f"row[{index}]=invalid_position_contract")
+                continue
+            subject = position.raw_code or position.asset_id or f"row[{index}]"
+            if not position.asset_id or not position.raw_code:
+                errors.append(f"{subject}:identity_missing")
+            elif position.asset_id in seen:
+                errors.append(f"{subject}:duplicate_normalized_identity")
+            else:
+                seen.add(position.asset_id)
+            if position.quantity_fact.state != ProviderValueState.VALID:
+                errors.append(
+                    f"{subject}:quantity_{position.quantity_fact.state.value}"
+                )
+                continue
+            quantity = float(position.quantity)
+            if not position.market:
+                errors.append(f"{subject}:market_missing")
+            if not position.security_type or position.security_type == "N/A":
+                errors.append(f"{subject}:security_type_missing")
+                continue
+            if position.security_type not in cls.ELIGIBLE_SECURITY_TYPES:
+                continue
+            if position.position_side == "SHORT" or quantity < 0:
+                errors.append(f"{subject}:short stock/ETF position")
+            elif position.position_side != "LONG":
+                errors.append(f"{subject}:position_side_unknown")
+            if position.average_cost_fact.state == ProviderValueState.INVALID:
+                errors.append(f"{subject}:average_cost_invalid")
+            elif quantity != 0:
+                if position.average_cost_fact.state != ProviderValueState.VALID:
+                    errors.append(f"{subject}:average_cost_missing")
+                elif float(position.average_cost) < 0:
+                    errors.append(f"{subject}:average_cost_negative")
+            if position.currency_explicit and not position.currency_valid:
+                errors.append(f"{subject}:currency_invalid")
+            if position.market:
+                try:
+                    _target_descriptor(position)
+                except ValueError:
+                    errors.append(f"{subject}:market_unsupported")
+        if errors:
+            raise ValueError(
+                "invalid authoritative Futu position slice: "
+                + "; ".join(errors)
+            )
+
     @staticmethod
     def _public_source_metadata(snapshot: Any) -> dict[str, Any]:
         position_snapshot_included = hasattr(snapshot, "positions")
@@ -1085,8 +1190,12 @@ class FutuBalanceSyncService:
                 "asset_id": str(item.asset_id),
                 "security_type": str(item.security_type),
                 "quantity": str(item.quantity),
+                "quantity_state": item.quantity_fact.state.value,
                 "average_cost": None if item.average_cost is None else str(item.average_cost),
+                "average_cost_state": item.average_cost_fact.state.value,
                 "currency": str(item.currency),
+                "currency_explicit": item.currency_explicit,
+                "currency_valid": item.currency_valid,
                 "market": str(item.market),
                 "position_side": str(item.position_side),
             }
@@ -1135,27 +1244,16 @@ class FutuBalanceSyncService:
         for position in positions:
             if position.security_type not in self.ELIGIBLE_SECURITY_TYPES:
                 continue
-            if position.position_side == "SHORT" or position.quantity < 0:
-                raise ValueError(f"short stock/ETF position blocks sync: {position.raw_code or position.asset_id}")
-            if position.quantity == 0:
-                continue
-            if position.position_side != "LONG":
-                raise ValueError(
-                    f"unknown position side blocks sync: {position.raw_code or position.asset_id}={position.position_side}"
-                )
-            if not position.asset_id:
-                raise ValueError(f"empty normalized Futu code: {position.raw_code}")
             if position.asset_id in eligible:
                 raise ValueError(f"duplicate normalized Futu position: {position.asset_id}")
-            if position.average_cost is None or not isfinite(position.average_cost) or position.average_cost < 0:
-                raise ValueError(
-                    f"valid Futu average_cost required for non-zero position: {position.raw_code or position.asset_id}"
-                )
             eligible[position.asset_id] = position
 
         matchable_types = self.STOCK_SYNC_ASSET_TYPES | self.LEGACY_ETF_ASSET_TYPES
         existing: dict[str, Holding] = {}
-        for holding in self.storage.get_holdings(account=account, include_empty=True):
+        for holding in self.storage.get_holdings_fresh(
+            account=account,
+            include_empty=True,
+        ):
             if (holding.broker or "") != broker or holding.asset_type not in matchable_types:
                 continue
             if holding.asset_id in existing:
@@ -1180,21 +1278,40 @@ class FutuBalanceSyncService:
             current_quantity = float(current.quantity if current else 0)
             target_quantity = float(target.quantity if target else 0)
             current_cost = current.avg_cost if current else None
-            target_cost = self.quantize_money(target.average_cost) if target else None
+            target_cost = (
+                self.quantize_money(target.average_cost)
+                if target is not None and target_quantity != 0
+                else None
+            )
             quantity_changed = _decimal(current_quantity) != _decimal(target_quantity)
             cost_changed = current_cost != target_cost
 
-            if current is None:
+            if current is None and target_quantity == 0:
+                action = "unchanged"
+            elif current is None:
                 action = "create"
-            elif target is None and (quantity_changed or cost_changed):
+            elif target_quantity == 0 and (quantity_changed or cost_changed):
                 action = "zero"
             elif quantity_changed or cost_changed:
                 action = "update"
             else:
                 action = "unchanged"
 
+            if current is not None and not _valid_currency(current.currency):
+                raise ValueError(
+                    f"existing holding currency is invalid: {asset_id}"
+                )
             if target is not None:
                 target_type, target_currency, target_asset_class = _target_descriptor(target)
+                if (
+                    current is None
+                    and action == "create"
+                    and not target.currency_explicit
+                ):
+                    raise ValueError(
+                        "explicit Futu currency required for new holding: "
+                        f"{target.raw_code or target.asset_id}"
+                    )
                 asset_type = current.asset_type if current else target_type
                 currency = current.currency if current else target_currency
                 asset_class = current.asset_class if current else target_asset_class
@@ -1313,7 +1430,9 @@ class FutuBalanceSyncService:
         }
 
 
-def _target_descriptor(position: FutuPositionSnapshot) -> tuple[AssetType, str, AssetClass]:
+def _target_descriptor(
+    position: FutuPositionSnapshot,
+) -> tuple[AssetType, str, Optional[AssetClass]]:
     market = position.market.upper()
     currency = _normalize_currency(position.currency, market)
     if position.security_type == "ETF":
@@ -1327,12 +1446,7 @@ def _target_descriptor(position: FutuPositionSnapshot) -> tuple[AssetType, str, 
     else:
         raise ValueError(f"unsupported Futu market for stock sync: {market}")
 
-    if currency == "USD":
-        asset_class = AssetClass.US_ASSET
-    elif currency == "HKD":
-        asset_class = AssetClass.HK_ASSET
-    else:
-        asset_class = AssetClass.CN_ASSET
+    asset_class = asset_class_for_economic_exposure(asset_type)
     return asset_type, currency, asset_class
 
 
@@ -1351,7 +1465,7 @@ def _market_from_code(code: str, fallback: Any = None) -> str:
     if "." in value:
         return value.split(".", 1)[0].upper()
     fallback_value = str(fallback or "").strip().upper()
-    return fallback_value if fallback_value and fallback_value != "N/A" else "US"
+    return fallback_value if fallback_value and fallback_value != "N/A" else ""
 
 
 def _normalize_currency(value: Any, market: str) -> str:
@@ -1367,14 +1481,13 @@ def _normalize_currency(value: Any, market: str) -> str:
     return "CNY"
 
 
-def _optional_float(value: Any) -> Optional[float]:
-    if value in (None, "", "N/A"):
-        return None
+def _valid_currency(value: Any) -> bool:
+    candidate = str(value or "").strip().upper()
     try:
-        result = float(value)
-    except (TypeError, ValueError):
-        return None
-    return result if isfinite(result) else None
+        Currency(candidate)
+    except ValueError:
+        return False
+    return True
 
 
 def _optional_int(value: Any) -> Optional[int]:
@@ -1382,11 +1495,6 @@ def _optional_int(value: Any) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError):
         return None
-
-
-def _to_float(value: Any, *, default: float) -> float:
-    result = _optional_float(value)
-    return default if result is None else result
 
 
 def _decimal(value: Any) -> Decimal:

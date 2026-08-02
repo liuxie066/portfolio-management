@@ -5,6 +5,8 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Optional
 
+from src.domain.cash_flow_contracts import normalize_cash_flow_rate_source
+
 
 ALLOWED_FX_EVIDENCE_TYPES = frozenset({"provider", "manual_supplement"})
 
@@ -29,9 +31,17 @@ def evaluate_cash_flow_fx_confirmation(
             str(confirmation.get("record_id") or "").strip(),
             record_id,
         ),
-        "source_hash": (
-            str(confirmation.get("source_hash") or ""),
-            str(row.get("source_hash") or ""),
+        "generated_fingerprint": (
+            str(
+                confirmation.get("generated_fingerprint")
+                or confirmation.get("source_hash")
+                or ""
+            ),
+            str(
+                row.get("generated_fingerprint")
+                or row.get("source_hash")
+                or ""
+            ),
         ),
         "exchange_rate_date": (
             str(confirmation.get("exchange_rate_date") or ""),
@@ -48,11 +58,19 @@ def evaluate_cash_flow_fx_confirmation(
                 "confirmation_id": confirmation_id,
             }
     try:
+        confirmation_rate = Decimal(str(confirmation.get("exchange_rate")))
+        row_rate = Decimal(str(row.get("exchange_rate")))
+        confirmation_cny = Decimal(str(confirmation.get("cny_amount")))
+        row_cny = Decimal(str(row.get("cny_amount")))
         numeric_matches = (
-            Decimal(str(confirmation.get("exchange_rate")))
-            == Decimal(str(row.get("exchange_rate")))
-            and Decimal(str(confirmation.get("cny_amount")))
-            == Decimal(str(row.get("cny_amount")))
+            confirmation_rate.is_finite()
+            and row_rate.is_finite()
+            and confirmation_rate > 0
+            and row_rate > 0
+            and confirmation_cny.is_finite()
+            and row_cny.is_finite()
+            and confirmation_rate == row_rate
+            and confirmation_cny == row_cny
         )
     except (InvalidOperation, TypeError, ValueError):
         numeric_matches = False
@@ -64,11 +82,21 @@ def evaluate_cash_flow_fx_confirmation(
             "record_id": record_id,
             "confirmation_id": confirmation_id,
         }
-    source = str(confirmation.get("exchange_rate_source") or "").strip()
     evidence_type = str(
         confirmation.get("exchange_rate_evidence_type") or ""
     ).strip()
-    if not source or evidence_type not in ALLOWED_FX_EVIDENCE_TYPES:
+    try:
+        normalize_cash_flow_rate_source(
+            confirmation.get("exchange_rate_source")
+        )
+    except ValueError:
+        source_is_traceable = False
+    else:
+        source_is_traceable = True
+    if (
+        not source_is_traceable
+        or evidence_type not in ALLOWED_FX_EVIDENCE_TYPES
+    ):
         return {
             "valid": False,
             "reason_code": "fx_confirmation_stale",
@@ -95,7 +123,10 @@ def frozen_fx_confirmation_identity(
         "state": "confirmation",
         "confirmation_id": confirmation.get("confirmation_id"),
         "record_id": confirmation.get("record_id"),
-        "source_hash": confirmation.get("source_hash"),
+        "generated_fingerprint": (
+            confirmation.get("generated_fingerprint")
+            or confirmation.get("source_hash")
+        ),
         "exchange_rate": confirmation.get("exchange_rate"),
         "cny_amount": confirmation.get("cny_amount"),
         "exchange_rate_date": confirmation.get("exchange_rate_date"),

@@ -142,11 +142,34 @@ def test_reporting_service_build_position_uses_valuation():
         "total_value": 200.0,
         "stock_value": 100.0,
         "fund_value": 50.0,
+        "non_cash_value": 150.0,
         "cash_value": 50.0,
         "stock_ratio": 0.5,
         "fund_ratio": 0.25,
         "cash_ratio": 0.25,
     }
+
+
+def test_reporting_service_regional_exposure_can_include_classified_funds():
+    manager = Mock()
+    manager.calculate_valuation.return_value = PortfolioValuation(
+        account="a",
+        total_value_cny=200.0,
+        cash_value_cny=50.0,
+        stock_value_cny=100.0,
+        fund_value_cny=50.0,
+        # The CN exposure includes both the equity and classified fund.
+        cn_asset_value=150.0,
+        us_asset_value=0.0,
+        hk_asset_value=0.0,
+    )
+    service = ReportingService(manager=manager, storage=Mock())
+
+    result = service.get_asset_distribution("a")
+
+    assert result["股票"] == 0.5
+    assert result["基金"] == 0.25
+    assert result["中国资产"] == 0.75
 
 
 def test_reporting_service_build_distribution_uses_snapshot_holdings():

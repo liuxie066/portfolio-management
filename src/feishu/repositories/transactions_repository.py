@@ -1,12 +1,9 @@
 """Repository for the Feishu transactions table."""
-from datetime import date, datetime
-from typing import Dict, List, Optional
+from datetime import date
+from typing import List, NoReturn, Optional
 
-from ...models import (
-    Transaction, TransactionType, AssetType,
-    make_tx_dedup_key, make_request_id, DATETIME_FORMAT,
-)
-from ...process_lock import process_lock
+from ...models import ArchivedTransaction, Transaction
+from ..errors import LegacyReadOnlyError
 
 
 class TransactionsRepository:
@@ -29,79 +26,57 @@ class TransactionsRepository:
             '不存在' in msg
         )
 
-    def add_transaction(self, tx: Transaction) -> Transaction:
-        """Add one transaction with same-host atomic idempotency."""
-        if not tx.dedup_key:
-            # Compute content identity before assigning a random fallback request ID.
-            tx.dedup_key = make_tx_dedup_key(tx)
+    def add_transaction(self, _tx: Transaction) -> NoReturn:
+        """Reject writes to the retired transactions archive before transport."""
+        raise LegacyReadOnlyError(table="transactions", operation="create")
 
-        claim = tx.request_id or tx.dedup_key
-        lock_key = f"transactions:{tx.account}:{claim}"
-        with process_lock(lock_key):
-            if tx.request_id:
-                existing = self._find_by_request_id(tx.request_id)
-                if existing:
-                    print(f"[幂等性保护] 发现重复请求(request_id={tx.request_id})，跳过创建")
-                    existing.mark_replayed()
-                    return existing
+    def find_archived_transaction_by_request_id(
+        self,
+        *,
+        account: str,
+        request_id: str,
+    ) -> Optional[ArchivedTransaction]:
+        """Read one archived transaction by its account-scoped request key."""
+        if not isinstance(account, str) or not account.strip():
+            raise ValueError("archive transaction lookup requires nonblank account")
+        if not isinstance(request_id, str) or not request_id.strip():
+            raise ValueError("archive transaction lookup requires nonblank request_id")
 
-            if tx.dedup_key:
-                existing_record_id = self._find_by_dedup_key('transactions', tx.dedup_key)
-                if existing_record_id:
-                    print(f"[防重保护] 发现相同内容交易(dedup_key={tx.dedup_key})，跳过创建")
-                    existing = self.get_transaction(existing_record_id)
-                    if existing is None:
-                        raise RuntimeError(f"replayed transaction could not be loaded: record_id={existing_record_id}")
-                    existing.mark_replayed()
-                    return existing
-
-            if not tx.request_id:
-                tx.request_id = make_request_id(prefix="tx")
-
-            fields = self._transaction_to_dict(tx)
-            feishu_fields = self._to_feishu_fields(fields, 'transactions')
-            try:
-                result = self.client.create_record('transactions', feishu_fields)
-            except Exception as exc:
-                if self._is_missing_field_error(exc):
-                    raise ValueError(
-                        "Feishu transactions 表缺少 request_id/dedup_key 等幂等字段，已拒绝降级写入；请先补齐表字段"
-                    ) from exc
-                raise
-
-            tx.record_id = result['record_id']
-            self._request_id_cache[tx.request_id] = tx.record_id
-            self._dedup_key_cache[f"transactions:{tx.dedup_key}"] = tx.record_id
-            return tx
-
-    def _find_by_request_id(self, request_id: str) -> Optional[Transaction]:
-        """通过 request_id 查找交易记录（用于幂等性检查，带本地缓存）"""
-        if not request_id:
-            return None
-
-        cached_record_id = self._request_id_cache.get(request_id)
-        if cached_record_id:
-            try:
-                record = self.client.get_record_strict('transactions', cached_record_id)
-                fields = self._from_feishu_fields(record['fields'], 'transactions')
-                fields['record_id'] = record['record_id']
-                return self._dict_to_transaction(fields)
-            except Exception:
-                self._request_id_cache.pop(request_id, None)
-
-        filter_str = f'CurrentValue.[request_id] = "{self._escape_filter_value(request_id)}"'
+        filter_str = (
+            f'CurrentValue.[account] = "{self._escape_filter_value(account)}"'
+            f' AND CurrentValue.[request_id] = "{self._escape_filter_value(request_id)}"'
+        )
         try:
             records = self.client.list_records('transactions', filter_str=filter_str)
-            if records:
-                record_id = records[0]['record_id']
-                self._request_id_cache[request_id] = record_id
-                fields = self._from_feishu_fields(records[0]['fields'], 'transactions')
-                fields['record_id'] = record_id
-                return self._dict_to_transaction(fields)
         except Exception as e:
             if self._is_missing_field_error(e):
-                raise ValueError("Feishu transactions 表缺少 request_id 字段，无法保证幂等性；请先补齐表字段") from e
-            raise RuntimeError(f"transaction idempotency lookup failed for request_id={request_id}") from e
+                raise ValueError(
+                    "Feishu transactions 表缺少 account/request_id 字段，"
+                    "无法按归档业务键读取"
+                ) from e
+            raise RuntimeError(
+                "transaction archive lookup failed for "
+                f"account={account}, request_id={request_id}"
+            ) from e
+
+        matches: list[ArchivedTransaction] = []
+        for record in records:
+            archived = self._record_to_archived_transaction(record)
+            if archived.account != account or archived.request_id != request_id:
+                raise ValueError(
+                    "transaction archive lookup returned an out-of-scope row: "
+                    f"requested=({account}, {request_id}), "
+                    f"actual=({archived.account}, {archived.request_id})"
+                )
+            matches.append(archived)
+
+        if len(matches) > 1:
+            raise ValueError(
+                "transaction archive business key is ambiguous: "
+                f"account={account}, request_id={request_id}, matches={len(matches)}"
+            )
+        if matches:
+            return matches[0]
 
         return None
 
@@ -138,21 +113,18 @@ class TransactionsRepository:
 
         return None
 
-    def get_transaction(self, record_id: str) -> Optional[Transaction]:
-        """获取单条交易记录（通过 record_id）"""
+    def get_transaction(self, record_id: str) -> Optional[ArchivedTransaction]:
+        """Read one strict archived transaction by record id."""
         record = self._read_record('transactions', record_id)
         if not record:
             return None
-
-        fields = self._from_feishu_fields(record['fields'], 'transactions')
-        fields['record_id'] = record['record_id']
-        return self._dict_to_transaction(fields)
+        return self._record_to_archived_transaction(record)
 
     def get_transactions(self, account: Optional[str] = None,
                         start_date: Optional[date] = None,
                         end_date: Optional[date] = None,
-                        tx_type: Optional[str] = None) -> List[Transaction]:
-        """获取交易记录列表（日期过滤推到飞书服务端）"""
+                        tx_type: Optional[str] = None) -> List[ArchivedTransaction]:
+        """Read strict archive rows with ISO Text date filters pushed down."""
         conditions = []
 
         if account:
@@ -167,66 +139,18 @@ class TransactionsRepository:
         filter_str = ' AND '.join(conditions) if conditions else None
         records = self.client.list_records('transactions', filter_str=filter_str)
 
-        transactions = []
+        transactions: list[ArchivedTransaction] = []
         for record in records:
-            fields = self._from_feishu_fields(record['fields'], 'transactions')
-            fields['record_id'] = record['record_id']
-            tx = self._dict_to_transaction(fields)
-            transactions.append(tx)
+            transactions.append(self._record_to_archived_transaction(record))
 
-        transactions.sort(key=lambda t: t.tx_date or date.min, reverse=True)
+        transactions.sort(key=lambda transaction: transaction.tx_date, reverse=True)
         return transactions
 
-    def _transaction_to_dict(self, tx: Transaction) -> Dict:
-        """Transaction 转字典"""
-        result = {
-            'tx_date': tx.tx_date,
-            'tx_type': tx.tx_type,
-            'asset_id': tx.asset_id,
-            'asset_name': tx.asset_name,
-            'asset_type': tx.asset_type,
-            'broker': tx.broker,
-            'account': tx.account,
-            'quantity': tx.quantity,
-            'price': tx.price,
-            'amount': tx.amount,
-            'currency': tx.currency,
-            'fee': tx.fee,
-            'remark': tx.remark,
-            'request_id': tx.request_id,
-            'dedup_key': tx.dedup_key,
-        }
-        return {k: v for k, v in result.items() if v is not None and v != ''}
+    def _record_to_archived_transaction(self, record: dict) -> ArchivedTransaction:
+        fields = self._from_feishu_fields(record.get('fields') or {}, 'transactions')
+        fields['record_id'] = record.get('record_id')
+        return ArchivedTransaction.model_validate(fields)
 
-    def _dict_to_transaction(self, data: Dict) -> Transaction:
-        """字典转 Transaction"""
-        tx_date = data.get('tx_date')
-        if isinstance(tx_date, (int, float)):
-            tx_date = datetime.fromtimestamp(tx_date / 1000, tz=self.FEISHU_DATE_TZ).date()
-        elif isinstance(tx_date, str):
-            tx_date = datetime.strptime(tx_date, '%Y-%m-%d').date()
-
-        return Transaction(
-            record_id=data.get('record_id'),
-            request_id=data.get('request_id'),
-            tx_date=tx_date,
-            tx_type=TransactionType(data.get('tx_type')) if data.get('tx_type') else TransactionType.BUY,
-            asset_id=data.get('asset_id', ''),
-            asset_name=data.get('asset_name'),
-            asset_type=AssetType(data.get('asset_type')) if data.get('asset_type') else None,
-            broker=data.get('broker'),
-            account=data.get('account', ''),
-            quantity=float(data.get('quantity', 0)),
-            price=float(data.get('price', 0)),
-            amount=float(data.get('amount')) if data.get('amount') is not None else None,
-            currency=data.get('currency', 'CNY'),
-            fee=float(data.get('fee', 0)),
-            tax=float(data.get('tax', 0)),
-            related_account=data.get('related_account'),
-            remark=data.get('remark'),
-            source=data.get('source', 'manual')
-        )
-
-    def delete_transaction_by_record_id(self, record_id: str) -> bool:
-        """通过记录ID删除交易"""
-        return self.client.delete_record('transactions', record_id)
+    def delete_transaction_by_record_id(self, _record_id: str) -> NoReturn:
+        """Reject deletes from the retired transactions archive before transport."""
+        raise LegacyReadOnlyError(table="transactions", operation="delete")

@@ -20,7 +20,7 @@ _TRUE_VALUES = {"1", "true", "yes", "y", "on"}
 _FALSE_VALUES = {"0", "false", "no", "n", "off"}
 
 
-@dataclass(frozen=True)
+@dataclass
 class FeishuCredentialConfigError(ValueError):
     """Redacted configuration error safe for operator-facing output."""
 

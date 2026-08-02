@@ -86,6 +86,7 @@ def test_get_holdings_falls_through_when_cache_not_loaded():
     mixin.client = Mock()
     mixin.client.list_records.return_value = []
     mixin._local_holdings_index_cache = Mock()
+    mixin._local_holdings_index_cache.load_all.return_value = {}
     mixin.HOLDING_PROJECTION_FIELDS = ['asset_id', 'asset_name']
     mixin._escape_filter_value = lambda v: v
 

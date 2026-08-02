@@ -172,37 +172,6 @@ class DailyNavJobService:
             ),
         }
 
-    def _cash_flow_blocker(self, account: str) -> Optional[Dict[str, Any]]:
-        reconcile = getattr(self.storage, "reconcile_cash_flows", None)
-        if not callable(reconcile):
-            return None
-        result = reconcile(account=account, dry_run=True)
-        if result.get("success") is False:
-            return {
-                "status": "cash_flow_check_failed",
-                "success": False,
-                "account": account,
-                "error": result.get("error") or "cash-flow reconcile failed",
-                "cash_flow_reconcile": result,
-            }
-        if int(result.get("error_count") or 0) > 0:
-            return {
-                "status": "cash_flow_error",
-                "success": False,
-                "account": account,
-                "error": "cash_flow has invalid manual rows",
-                "cash_flow_reconcile": result,
-            }
-        if int(result.get("change_count") or 0) > 0:
-            return {
-                "status": "cash_flow_pending",
-                "success": False,
-                "account": account,
-                "error": "cash_flow has generated fields pending; run pm cash-flow reconcile --apply --confirm",
-                "cash_flow_reconcile": result,
-            }
-        return None
-
     @staticmethod
     def _summarize(items: list[Dict[str, Any]]) -> Dict[str, int]:
         summary: Dict[str, int] = {}
@@ -293,11 +262,6 @@ class DailyNavJobService:
                     "error": "nav_history has duplicate account/date records; repair before NAV write",
                     "duplicate_audit": duplicate_audit,
                 }
-            stage = "cash_flow_reconcile"
-            cash_flow_blocker = self._cash_flow_blocker(target_account)
-            if cash_flow_blocker:
-                cash_flow_blocker.setdefault("date", resolved_nav_date.isoformat())
-                return cash_flow_blocker
             stage = "existing_nav_check"
             if not overwrite_existing:
                 return self._existing_nav_item(
@@ -467,9 +431,6 @@ class DailyNavJobService:
         summary = self._summarize(items)
         blocking_statuses = {
             "failed",
-            "cash_flow_check_failed",
-            "cash_flow_error",
-            "cash_flow_pending",
             "nav_history_duplicate",
             "recovery_required",
             "existing_nav_not_final",

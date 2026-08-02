@@ -5,11 +5,21 @@ import getpass
 import socket
 import uuid
 from contextlib import ExitStack
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Callable, Dict, Optional
 
 from src import config
+from src.domain.cash_flow_contracts import (
+    CompletedCashFlowFacts,
+    RawCashFlowRecord,
+)
+from src.domain.holding_mutations import (
+    HOLDING_REQUIRED_VALUE_FIELDS,
+    HoldingTarget,
+    canonical_holding,
+    holding_owned_fields_match,
+)
 from src.models import (
     CASH_ASSET_ID,
     HKD_CASH_ASSET_ID,
@@ -150,49 +160,54 @@ class CashFlowEffectService:
 
     @classmethod
     def source_from_cash_flow(cls, flow: CashFlow) -> Dict[str, Any]:
-        account = str(flow.account or "").strip()
-        broker = str(flow.broker or "").strip()
-        currency = str(flow.currency or "").strip().upper()
-        flow_type = str(flow.flow_type or "").strip().upper()
-        amount = cls._decimal(flow.amount)
+        facts = CompletedCashFlowFacts.require(
+            RawCashFlowRecord.from_cash_flow(flow)
+        )
         if not flow.record_id:
             raise ValueError("cash_flow record_id is required")
-        if not account:
-            raise ValueError("cash_flow account is required")
-        if not broker:
-            raise ValueError("cash_flow broker is required")
-        if currency not in CASH_ASSETS:
-            raise ValueError(f"unsupported cash_flow currency: {currency}")
-        if amount == 0:
-            raise ValueError("cash_flow amount must be non-zero")
-        if flow_type not in {"DEPOSIT", "WITHDRAW"}:
-            raise ValueError(f"unsupported cash_flow flow_type: {flow_type}")
-        if flow_type == "DEPOSIT" and amount <= 0:
-            raise ValueError("DEPOSIT amount must be positive")
-        if flow_type == "WITHDRAW" and amount >= 0:
-            raise ValueError("WITHDRAW amount must be negative")
         return {
             "record_id": str(flow.record_id),
-            "flow_date": flow.flow_date.isoformat(),
-            "account": account,
-            "broker": broker,
-            "currency": currency,
-            "flow_type": flow_type,
-            "signed_amount": cls._money(amount),
+            "flow_date": facts.flow_date.isoformat(),
+            "account": facts.account,
+            "broker": facts.broker,
+            "currency": facts.currency,
+            "flow_type": facts.flow_type,
+            "signed_amount": cls._money(facts.amount),
+            "cny_amount": cls._money(facts.cny_amount),
+            "exchange_rate": format(facts.exchange_rate, "f"),
+            "dedup_key": facts.dedup_key,
+            "source": facts.source,
+            "remark": facts.remark,
+            "updated_at": cls._source_value(facts.updated_at),
         }
 
     @classmethod
     def _raw_source(cls, flow: CashFlow) -> Dict[str, Any]:
         return {
             "record_id": str(flow.record_id or ""),
-            "flow_date": flow.flow_date.isoformat() if flow.flow_date else "",
-            "account": str(flow.account or "").strip(),
-            "broker": str(flow.broker or "").strip(),
-            "currency": str(flow.currency or "").strip().upper(),
-            "flow_type": str(flow.flow_type or "").strip().upper(),
-            "signed_amount": str(flow.amount),
-            "remark": str(flow.remark or ""),
+            "flow_date": cls._source_value(flow.flow_date),
+            "account": cls._source_value(flow.account),
+            "broker": cls._source_value(flow.broker),
+            "currency": cls._source_value(flow.currency),
+            "flow_type": cls._source_value(flow.flow_type),
+            "signed_amount": cls._source_value(flow.amount),
+            "cny_amount": cls._source_value(flow.cny_amount),
+            "exchange_rate": cls._source_value(flow.exchange_rate),
+            "dedup_key": cls._source_value(flow.dedup_key),
+            "source": cls._source_value(flow.source),
+            "remark": cls._source_value(flow.remark),
+            "updated_at": cls._source_value(flow.updated_at),
         }
+
+    @staticmethod
+    def _source_value(value: Any) -> Any:
+        if isinstance(value, (date, datetime)):
+            return value.isoformat()
+        if isinstance(value, Decimal):
+            return format(value, "f")
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        return str(value)
 
     def _has_nav_history(self, account: str) -> bool:
         if account in self._nav_history_cache:
@@ -318,17 +333,35 @@ class CashFlowEffectService:
         *,
         account: Optional[str] = None,
         enqueue_receipts: bool = False,
+        cash_flow_dataset: Any = None,
     ) -> Dict[str, Any]:
         """Complete Feishu scan; partial reads never become successful runs."""
         scope = account or "all"
         with process_lock("cash-flow-effects:scanner"):
             previous_scan = self.store.latest_scan(scope=scope)
             try:
-                # Cash-flow identity is the Feishu record_id. Read the complete
-                # source even for an account-scoped gate so an account move is
-                # treated as one correction rather than a deletion plus an
-                # unrelated new record.
-                flows = self.storage.get_cash_flows()
+                if cash_flow_dataset is None:
+                    # Nonofficial scanner workflows retain their own complete
+                    # source read. Official NAV gates pass the already-frozen
+                    # run dataset and must not perform a second cash-flow read.
+                    flows = self.storage.get_cash_flows()
+                else:
+                    if account is None:
+                        raise ValueError(
+                            "cash_flow_dataset requires an account-scoped effect scan"
+                        )
+                    if cash_flow_dataset.account != account:
+                        raise ValueError(
+                            "cash_flow_dataset account does not match effect scan scope"
+                        )
+                    if cash_flow_dataset.blockers:
+                        raise ValueError(
+                            "cash_flow_dataset blockers prevent effect scan"
+                        )
+                    flows = [
+                        facts.to_cash_flow()
+                        for facts in cash_flow_dataset.completed_rows
+                    ]
                 self._current_flow_accounts_cache = {
                     str(flow.record_id or ""): str(flow.account or "")
                     for flow in flows
@@ -1611,17 +1644,51 @@ class CashFlowEffectService:
             )
 
         targets: list[Holding] = []
+        mutation_targets: list[HoldingTarget] = []
         befores: list[Optional[Holding]] = []
         compensation_targets: list[Dict[str, Any]] = []
-        for target_data in recomputed["targets"]:
-            target = Holding(**target_data)
+        for target_data, target_row in zip(
+            recomputed["targets"],
+            recomputed["target_rows"],
+            strict=True,
+        ):
+            confirmed_target = Holding(**target_data)
             target_source = {
-                "account": target.account,
-                "broker": target.broker,
-                "currency": target.currency,
+                "account": confirmed_target.account,
+                "broker": confirmed_target.broker,
+                "currency": confirmed_target.currency,
             }
             before = self._fresh_holding(target_source)
+            if self._holding_payload(before) != target_row["before"]:
+                raise ValueError(
+                    "cash holding changed after preview hash validation; "
+                    "preview and confirm again"
+                )
+            owned_fields = (
+                {"quantity"}
+                if before is not None
+                else set(HOLDING_REQUIRED_VALUE_FIELDS) | {
+                    "asset_class",
+                    "industry",
+                }
+            )
+            target = (
+                canonical_holding(before).model_copy(
+                    update={"quantity": confirmed_target.quantity}
+                )
+                if before is not None
+                else confirmed_target
+            )
+            mutation_target = HoldingTarget.from_holdings(
+                base=before,
+                target=target,
+                owned_fields=owned_fields,
+            )
+            target_payload = CompensationService.serialize_holding(target)
+            if target_payload is None:
+                raise RuntimeError("cash mutation target serialization failed")
             targets.append(target)
+            mutation_targets.append(mutation_target)
             befores.append(before)
             compensation_targets.append({
                 "type": "CASH_TARGET_SET",
@@ -1631,7 +1698,8 @@ class CashFlowEffectService:
                     target.broker,
                 ),
                 "before": CompensationService.serialize_holding(before),
-                "target": target_data,
+                "target": target_payload,
+                "mutation": mutation_target.to_payload(),
             })
 
         self.store.update_effect(
@@ -1649,14 +1717,17 @@ class CashFlowEffectService:
         already_applied = True
         readbacks: list[Optional[Holding]] = []
         try:
-            for target, target_data, before in zip(
+            for target, mutation_target, before in zip(
                 targets,
-                recomputed["targets"],
+                mutation_targets,
                 befores,
+                strict=True,
             ):
-                current_payload = CompensationService.serialize_holding(before)
-                if current_payload != target_data:
-                    self.storage.replace_holding(target)
+                if (
+                    before is None
+                    or not holding_owned_fields_match(before, mutation_target)
+                ):
+                    self.storage.replace_holding(mutation_target)
                     already_applied = False
                 target_source = {
                     "account": target.account,
@@ -1665,7 +1736,10 @@ class CashFlowEffectService:
                 }
                 readback = self._fresh_holding(target_source)
                 readbacks.append(readback)
-                if CompensationService.serialize_holding(readback) != target_data:
+                if (
+                    readback is None
+                    or not holding_owned_fields_match(readback, mutation_target)
+                ):
                     raise RuntimeError(
                         "holding fresh readback does not match confirmed target: "
                         f"{self._identity(target.asset_id, target.account, target.broker)}"
@@ -1814,17 +1888,21 @@ class CashFlowEffectService:
             return effect
         targets = list((task.get("payload") or {}).get("targets") or [])
         for target_spec in targets:
-            target_data = target_spec.get("target")
-            if not isinstance(target_data, dict):
+            mutation_payload = target_spec.get("mutation")
+            if not isinstance(mutation_payload, dict):
                 raise RuntimeError("resolved compensation target is invalid")
-            target = Holding(**target_data)
+            mutation = HoldingTarget.from_payload(mutation_payload)
+            target = mutation.to_holding()
             source = {
                 "account": target.account,
                 "broker": target.broker,
                 "currency": target.currency,
             }
             readback = self._fresh_holding(source)
-            if CompensationService.serialize_holding(readback) != target_data:
+            if (
+                readback is None
+                or not holding_owned_fields_match(readback, mutation)
+            ):
                 raise RuntimeError(
                     "resolved compensation fresh readback does not match target"
                 )
@@ -1944,17 +2022,39 @@ class CashFlowEffectService:
             "integrity": self.store.integrity_check(),
         }
 
-    def nav_gate(self, *, account: str, nav_date: date) -> Dict[str, Any]:
-        scan = self.scan(account=account, enqueue_receipts=False)
+    def nav_gate(
+        self,
+        *,
+        account: str,
+        nav_date: date,
+        cash_flow_dataset: Any = None,
+    ) -> Dict[str, Any]:
+        if cash_flow_dataset is not None:
+            if cash_flow_dataset.account != account:
+                raise ValueError("cash_flow_dataset account does not match NAV gate")
+            if cash_flow_dataset.nav_date != nav_date:
+                raise ValueError("cash_flow_dataset nav_date does not match NAV gate")
+        scan = self.scan(
+            account=account,
+            enqueue_receipts=False,
+            cash_flow_dataset=cash_flow_dataset,
+        )
         blockers = self._blockers_for_account(
             account=account,
             nav_date=nav_date,
         )
+        revision = scan["scan_run"]["scan_run_id"]
         return {
             "success": not blockers,
             "account": account,
             "nav_date": nav_date.isoformat(),
-            "scan_run_id": scan["scan_run"]["scan_run_id"],
+            "scan_run_id": revision,
+            "effect_store_revision": revision,
+            "cash_flow_financial_fingerprint": (
+                cash_flow_dataset.financial_fingerprint
+                if cash_flow_dataset is not None
+                else None
+            ),
             "blocker_count": len(blockers),
             "blockers": [
                 {

@@ -155,7 +155,8 @@ class PortfolioManager:
                             holdings: list[Any] | None = None,
                             price_snapshot: Dict[str, Any] | None = None,
                             price_warnings: list[str] | None = None,
-                            total_shares: Any = None) -> PortfolioValuation:
+                            total_shares: Any = None,
+                            holdings_provenance: Dict[str, Any] | None = None) -> PortfolioValuation:
         """计算账户估值
 
         Args:
@@ -178,6 +179,44 @@ class PortfolioManager:
             price_snapshot=price_snapshot,
             price_warnings=price_warnings,
             total_shares=total_shares,
+            holdings_provenance=holdings_provenance,
+        )
+
+    def calculate_normalized_valuation(
+        self,
+        account: str,
+        fetch_prices: bool = True,
+        price_timeout_seconds: int = 25,
+        allow_stale_price_fallback: bool = True,
+        price_market_closed_ttl_multiplier: float = 1.0,
+        run_quote_pool: Any = None,
+        supplemental_codes: list[str] | None = None,
+        deadline: float | None = None,
+        holdings: list[Any] | None = None,
+        price_snapshot: Dict[str, Any] | None = None,
+        price_warnings: list[str] | None = None,
+        total_shares: Any = None,
+        holdings_provenance: Dict[str, Any] | None = None,
+    ) -> Any:
+        """Build the immutable source used by NAV and snapshot persistence."""
+
+        self.valuation_service.price_fetcher = self.price_fetcher
+        return self.valuation_service.calculate_normalized_valuation(
+            account=account,
+            fetch_prices=fetch_prices,
+            price_timeout_seconds=price_timeout_seconds,
+            allow_stale_price_fallback=allow_stale_price_fallback,
+            price_market_closed_ttl_multiplier=(
+                price_market_closed_ttl_multiplier
+            ),
+            run_quote_pool=run_quote_pool,
+            supplemental_codes=supplemental_codes,
+            deadline=deadline,
+            holdings=holdings,
+            price_snapshot=price_snapshot,
+            price_warnings=price_warnings,
+            total_shares=total_shares,
+            holdings_provenance=holdings_provenance,
         )
 
     def fetch_price_snapshot(
@@ -205,7 +244,11 @@ class PortfolioManager:
                    nav_date: Optional[date] = None, persist: bool = True,
                    overwrite_existing: bool = False, dry_run: bool = False,
                    use_bulk_persist: bool = False, run_id: Optional[str] = None,
-                   nav_write_context: Optional[NavWriteContext] = None) -> NAVHistory:
+                   nav_write_context: Optional[NavWriteContext] = None,
+                   cash_flow_dataset: Any = None,
+                   nav_history_snapshot: Optional[tuple[NAVHistory, ...]] = None,
+                   normalized_valuation: Any = None,
+                   snapshot_write_authority: Any = None) -> NAVHistory:
         """
         记录每日净值（按Excel账户净值sheet逻辑）
         计算字段：股票市值、现金结余、账户净值、占比、份额变动、涨幅、资产升值
@@ -224,6 +267,58 @@ class PortfolioManager:
             use_bulk_persist=use_bulk_persist,
             run_id=run_id,
             nav_write_context=nav_write_context,
+            cash_flow_dataset=cash_flow_dataset,
+            nav_history_snapshot=nav_history_snapshot,
+            normalized_valuation=normalized_valuation,
+            snapshot_write_authority=snapshot_write_authority,
+        )
+
+    def build_cash_flow_dataset(
+        self,
+        *,
+        account: str,
+        nav_date: date,
+        run_id: str,
+    ) -> Any:
+        """Build official run facts at the approved application boundary."""
+
+        return self.cash_flow_summary_service.build_dataset(
+            account=account,
+            nav_date=nav_date,
+            run_id=run_id,
+            start_year=config.get_start_year(),
+            **self.nav_record_service.cash_flow_dataset_dependencies(),
+        )
+
+    def record_closed_nav(
+        self,
+        *,
+        account: str,
+        nav_date: date,
+        total_value: Any,
+        cash_value: Any,
+        stock_value: Any,
+        cash_flow_dataset: Any,
+        run_id: str,
+        overwrite_existing: bool = False,
+        dry_run: bool = True,
+        nav_write_context: Optional[NavWriteContext] = None,
+        normalized_valuation: Any = None,
+        snapshot_write_authority: Any = None,
+    ) -> NAVHistory:
+        return self.nav_record_service.record_closed_nav(
+            account=account,
+            nav_date=nav_date,
+            total_value=total_value,
+            cash_value=cash_value,
+            stock_value=stock_value,
+            cash_flow_dataset=cash_flow_dataset,
+            run_id=run_id,
+            overwrite_existing=overwrite_existing,
+            dry_run=dry_run,
+            nav_write_context=nav_write_context,
+            normalized_valuation=normalized_valuation,
+            snapshot_write_authority=snapshot_write_authority,
         )
 
     @classmethod
@@ -409,7 +504,7 @@ class PortfolioManager:
         return self.storage.get_nav_on_date(account, current_date - timedelta(days=1))
 
     def _summarize_cash_flows(self, account: str, today: date, start_year: int, last_nav=None) -> dict:
-        """使用预加载聚合缓存计算资金变动口径。"""
+        """使用非官方的新鲜数据集计算资金变动口径。"""
         return self.cash_flow_summary_service.summarize(account, today, start_year, last_nav=last_nav)
 
     def _get_daily_cash_flow(self, account: str, flow_date: date) -> float:

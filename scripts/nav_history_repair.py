@@ -2,7 +2,7 @@
 """Canonical nav_history repair CLI entrypoint.
 
 Subcommands:
-- backfill: recompute derived NAV fields and persist through bulk upsert.
+- backfill: recompute derived NAV fields and persist through restricted patches.
 - patch: apply a validated field patch file.
 
 New automation should use this entrypoint so all nav_history writes are easy to
@@ -46,7 +46,12 @@ def build_parser() -> argparse.ArgumentParser:
     patch_write.add_argument("--rollback-journal")
     patch.add_argument("--backup-file", default=None)
     patch.add_argument("--no-validate", action="store_true")
-    patch.add_argument("--validate-level", choices=["basic", "full"], default="basic")
+    patch.add_argument(
+        "--validate-level",
+        choices=["basic", "full"],
+        default="basic",
+        help="compatibility option; both levels enforce canonical invariants",
+    )
     patch.add_argument("--validate-scope", choices=["changed", "patched", "all"], default="changed")
 
     return parser
@@ -59,8 +64,8 @@ def main(argv=None) -> int:
     if args.command == "backfill":
         from src.maintenance.nav_history_repair import backfill
 
-        backfill.run(args)
-        return 0
+        result = backfill.run(args)
+        return 0 if not isinstance(result, dict) or result.get("success") else 1
 
     if args.command == "patch":
         from src.maintenance.nav_history_repair import patch

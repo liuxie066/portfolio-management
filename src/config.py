@@ -18,6 +18,7 @@ from src.configuration.feishu_credentials import (
     read_systemd_credential,
     secure_feishu_credentials_required,
 )
+from src.feishu.contracts import parse_table_ref
 
 # 项目根目录（config.yaml 所在目录）
 _PROJECT_ROOT = Path(__file__).parent.parent
@@ -72,7 +73,6 @@ ENV_MAP = {
     "feishu.receipt.open_id": "FEISHU_RECEIPT_OPEN_ID",
     "feishu.tables.holdings": "FEISHU_TABLE_HOLDINGS",
     "feishu.tables.transactions": "FEISHU_TABLE_TRANSACTIONS",
-    "feishu.tables.price_cache": "FEISHU_TABLE_PRICE_CACHE",
     "feishu.tables.nav_history": "FEISHU_TABLE_NAV_HISTORY",
     "feishu.tables.cash_flow": "FEISHU_TABLE_CASH_FLOW",
     "feishu.tables.holdings_snapshot": "FEISHU_TABLE_HOLDINGS_SNAPSHOT",
@@ -620,10 +620,18 @@ def validate_deploy_config(
         "feishu.tables.holdings_snapshot",
     ):
         value = resolved(key)
-        if value and "/" not in str(value) and not app_token:
+        if not value:
+            continue
+        try:
+            parse_table_ref(
+                value,
+                default_app_token=app_token,
+                table_name=key.removeprefix("feishu.tables."),
+            )
+        except ValueError as exc:
             issues.append({
                 "key": key,
-                "error": "table id requires feishu.app_token unless value is app_token/table_id",
+                "error": str(exc),
                 "env": ENV_MAP.get(key),
             })
 
@@ -867,22 +875,10 @@ def get_feishu_table_ref(table_name: str) -> tuple[str, str]:
     resolved_name = str(table_name or "").strip()
     if not resolved_name:
         raise ValueError("Feishu table name is required")
-    raw_value = str(get(f"feishu.tables.{resolved_name}") or "").strip()
-    if not raw_value:
-        raise ValueError(f"missing Feishu table configuration: {resolved_name}")
-    if "/" in raw_value:
-        parts = raw_value.split("/")
-        if len(parts) != 2 or not all(part.strip() for part in parts):
-            raise ValueError(
-                f"invalid Feishu table reference for {resolved_name}; "
-                "expected app_token/table_id"
-            )
-        app_token, table_id = (part.strip() for part in parts)
-    else:
-        app_token = str(get("feishu.app_token") or "").strip()
-        table_id = raw_value
-    if not app_token:
-        raise ValueError(
-            f"missing feishu.app_token for table configuration: {resolved_name}"
-        )
+    app_token, table_id = parse_table_ref(
+        get(f"feishu.tables.{resolved_name}"),
+        default_app_token=get("feishu.app_token"),
+        table_name=resolved_name,
+    )
+    assert app_token is not None
     return app_token, table_id

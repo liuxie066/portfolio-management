@@ -4,12 +4,18 @@ from __future__ import annotations
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
+from src.domain.holding_mutations import (
+    HOLDING_REQUIRED_VALUE_FIELDS,
+    HoldingTarget,
+    canonical_holding,
+)
 from src.models import (
     AssetClass,
     AssetType,
     CASH_ASSET_ID,
     Currency,
     HKD_CASH_ASSET_ID,
+    Industry,
     MMF_ASSET_ID,
     USD_CASH_ASSET_ID,
     Holding,
@@ -55,7 +61,7 @@ class CashService:
         asset_name: str,
         asset_type: AssetType,
         target: float,
-        broker: str = "",
+        broker: str,
         dry_run: bool = False,
     ) -> dict[str, Any]:
         """Sync a cash-like holding to an absolute target balance.
@@ -66,20 +72,24 @@ class CashService:
         if asset_type == AssetType.CASH:
             raise RuntimeError("cash_effect_confirmation_required")
         target_qty = float(self.quantize_money(target))
-        existing = self.storage.get_holding(asset_id, account, broker)
+        existing = self.storage.get_holding_fresh(asset_id, account, broker)
         current_qty = float(self.quantize_money(existing.quantity if existing else 0))
         delta = float(self.quantize_money(target_qty - current_qty))
         created = existing is None
-        replacement = Holding(
-            asset_id=asset_id,
-            asset_name=asset_name,
-            asset_type=asset_type,
-            account=account,
-            broker=broker,
-            quantity=target_qty,
-            currency="CNY",
-            asset_class=AssetClass.CASH,
-            industry="现金",
+        replacement = (
+            canonical_holding(existing)
+            if existing is not None
+            else Holding(
+                asset_id=asset_id,
+                asset_name=asset_name,
+                asset_type=asset_type,
+                account=account,
+                broker=broker,
+                quantity=target_qty,
+                currency="CNY",
+                asset_class=AssetClass.CASH,
+                industry="现金",
+            )
         )
 
         field_updates = {}
@@ -89,29 +99,37 @@ class CashService:
                 "asset_type": asset_type,
                 "currency": "CNY",
                 "asset_class": AssetClass.CASH,
-                "industry": "现金",
+                "industry": Industry.CASH,
             }
-            for field, target_value in comparable_fields.items():
+            for field, declared_target_value in comparable_fields.items():
                 current_value = getattr(existing, field, None)
                 if hasattr(current_value, "value"):
                     current_value = current_value.value
+                target_value = declared_target_value
                 if hasattr(target_value, "value"):
                     target_value = target_value.value
                 if current_value != target_value:
                     field_updates[field] = target_value
+                    setattr(replacement, field, declared_target_value)
+            replacement.quantity = target_qty
 
         fields_changed = bool(field_updates)
         updated = bool(created or delta != 0 or fields_changed)
 
         if not dry_run and updated:
-            if existing:
-                replace_holding = getattr(self.storage, "replace_holding", None)
-                if callable(replace_holding) and hasattr(type(self.storage), "replace_holding"):
-                    replace_holding(replacement)
-                else:
-                    self.storage.update_holding_quantity(asset_id, account, delta, broker)
-            else:
-                self.storage.upsert_holding(replacement)
+            owned_fields = (
+                ({"quantity"} if delta != 0 else set()) | set(field_updates)
+                if existing is not None
+                else set(HOLDING_REQUIRED_VALUE_FIELDS) | {
+                    "asset_class",
+                    "industry",
+                }
+            )
+            self.storage.replace_holding(HoldingTarget.from_holdings(
+                base=existing,
+                target=replacement,
+                owned_fields=owned_fields,
+            ))
 
         return {
             "asset_id": asset_id,
@@ -138,9 +156,9 @@ class CashService:
             },
         }
 
-    def get_cash_like_holdings(self, account: str):
-        cash_holding = self.storage.get_holding(CASH_ASSET_ID, account)
-        mmf_holding = self.storage.get_holding(MMF_ASSET_ID, account)
+    def get_cash_like_holdings(self, account: str, broker: str):
+        cash_holding = self.storage.get_holding_fresh(CASH_ASSET_ID, account, broker)
+        mmf_holding = self.storage.get_holding_fresh(MMF_ASSET_ID, account, broker)
         return cash_holding, mmf_holding
 
     def get_cash(self, account: str) -> dict[str, Any]:
@@ -177,10 +195,16 @@ class CashService:
         replacement.quantity = float(quantity)
         return replacement
 
-    def plan_cash_holding_target(self, account: str, amount: float, currency: str) -> tuple[Holding | None, Holding]:
+    def plan_cash_holding_target(
+        self,
+        account: str,
+        amount: float,
+        currency: str,
+        broker: str,
+    ) -> tuple[Holding | None, Holding]:
         """Return the current and absolute target cash holding without writing."""
         asset_id = self.cash_asset_id_for_currency(currency)
-        before = self.storage.get_holding(asset_id, account)
+        before = self.storage.get_holding_fresh(asset_id, account, broker)
         delta = self.quantize_money(amount)
         if before:
             target = self._copy_with_quantity(before, self.quantize_money(self.to_decimal(before.quantity) + delta))
@@ -190,6 +214,7 @@ class CashService:
                 asset_name=f"{currency}现金",
                 asset_type=AssetType.CASH,
                 account=account,
+                broker=broker,
                 quantity=float(delta),
                 currency=currency,
                 asset_class=AssetClass.CASH,
@@ -197,13 +222,23 @@ class CashService:
             )
         return before, target
 
-    def plan_add_cash_target(self, account: str, amount: float) -> tuple[Holding | None, Holding]:
-        return self.plan_cash_holding_target(account, amount, "CNY")
+    def plan_add_cash_target(
+        self,
+        account: str,
+        amount: float,
+        broker: str,
+    ) -> tuple[Holding | None, Holding]:
+        return self.plan_cash_holding_target(account, amount, "CNY", broker)
 
-    def plan_deduct_cash_targets(self, account: str, amount: float) -> list[tuple[Holding, Holding]]:
+    def plan_deduct_cash_targets(
+        self,
+        account: str,
+        amount: float,
+        broker: str,
+    ) -> list[tuple[Holding, Holding]]:
         """Plan absolute CASH/MMF targets in the same order as cash deduction."""
         remaining = self.to_decimal(amount)
-        cash_holding, mmf_holding = self.get_cash_like_holdings(account)
+        cash_holding, mmf_holding = self.get_cash_like_holdings(account, broker)
         total_available = sum(
             (self.to_decimal(holding.quantity) for holding in (cash_holding, mmf_holding) if holding and holding.quantity > 0),
             Decimal("0"),
@@ -224,12 +259,12 @@ class CashService:
             remaining -= deduction
         return targets
 
-    def deduct_cash(self, account: str, amount: float) -> bool:
+    def deduct_cash(self, account: str, amount: float, broker: str) -> bool:
         if amount <= 0:
             return True
 
         remaining = self.to_decimal(amount)
-        cash_holding, mmf_holding = self.get_cash_like_holdings(account)
+        cash_holding, mmf_holding = self.get_cash_like_holdings(account, broker)
 
         # Pre-validate: check total available before any writes
         total_available = Decimal("0")
@@ -244,14 +279,24 @@ class CashService:
         if cash_holding and cash_holding.quantity > 0:
             cash_qty = self.to_decimal(cash_holding.quantity)
             deduct_from_cash = min(cash_qty, remaining)
-            self.storage.update_holding_quantity(CASH_ASSET_ID, account, float(-self.quantize_money(deduct_from_cash)))
+            self.storage.update_holding_quantity(
+                CASH_ASSET_ID,
+                account,
+                float(-self.quantize_money(deduct_from_cash)),
+                broker,
+            )
             remaining -= deduct_from_cash
             print(f"  从 {CASH_ASSET_ID} 扣除: ¥{float(self.quantize_money(deduct_from_cash)):,.2f}")
 
         if remaining > 0 and mmf_holding and mmf_holding.quantity > 0:
             mmf_qty = self.to_decimal(mmf_holding.quantity)
             deduct_from_mmf = min(mmf_qty, remaining)
-            self.storage.update_holding_quantity(MMF_ASSET_ID, account, float(-self.quantize_money(deduct_from_mmf)))
+            self.storage.update_holding_quantity(
+                MMF_ASSET_ID,
+                account,
+                float(-self.quantize_money(deduct_from_mmf)),
+                broker,
+            )
             remaining -= deduct_from_mmf
             print(f"  从 {MMF_ASSET_ID} 扣除: ¥{float(self.quantize_money(deduct_from_mmf)):,.2f}")
 

@@ -1,9 +1,9 @@
 """Compatibility facade for Feishu transactions operations."""
 
 from datetime import date
-from typing import List, Optional
+from typing import List, NoReturn, Optional
 
-from ..models import Transaction
+from ..models import ArchivedTransaction, Transaction
 from .repositories.transactions_repository import TransactionsRepository
 
 
@@ -22,16 +22,25 @@ class TransactionsMixin:
             self._transactions_repository = repo
         return repo
 
-    def add_transaction(self, tx: Transaction) -> Transaction:
+    def add_transaction(self, tx: Transaction) -> NoReturn:
+        """Compatibility tombstone: transactions is a read-only archive."""
         return self.transactions.add_transaction(tx)
 
-    def _find_by_request_id(self, request_id: str) -> Optional[Transaction]:
-        return self.transactions._find_by_request_id(request_id)
+    def find_archived_transaction_by_request_id(
+        self,
+        *,
+        account: str,
+        request_id: str,
+    ) -> Optional[ArchivedTransaction]:
+        return self.transactions.find_archived_transaction_by_request_id(
+            account=account,
+            request_id=request_id,
+        )
 
     def _find_by_dedup_key(self, table: str, dedup_key: str) -> Optional[str]:
         return self.transactions._find_by_dedup_key(table, dedup_key)
 
-    def get_transaction(self, record_id: str) -> Optional[Transaction]:
+    def get_transaction(self, record_id: str) -> Optional[ArchivedTransaction]:
         return self.transactions.get_transaction(record_id)
 
     def get_transactions(
@@ -40,7 +49,7 @@ class TransactionsMixin:
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
         tx_type: Optional[str] = None,
-    ) -> List[Transaction]:
+    ) -> List[ArchivedTransaction]:
         return self.transactions.get_transactions(
             account=account,
             start_date=start_date,
@@ -48,11 +57,6 @@ class TransactionsMixin:
             tx_type=tx_type,
         )
 
-    def _transaction_to_dict(self, tx: Transaction) -> dict:
-        return self.transactions._transaction_to_dict(tx)
-
-    def _dict_to_transaction(self, data: dict) -> Transaction:
-        return self.transactions._dict_to_transaction(data)
-
-    def delete_transaction_by_record_id(self, record_id: str) -> bool:
+    def delete_transaction_by_record_id(self, record_id: str) -> NoReturn:
+        """Compatibility tombstone: transactions is a read-only archive."""
         return self.transactions.delete_transaction_by_record_id(record_id)

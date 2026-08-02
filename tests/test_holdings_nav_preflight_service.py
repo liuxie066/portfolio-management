@@ -18,6 +18,7 @@ from src.app.business_calendar_service import BusinessCalendarService
 from src.app.daily_nav_job_service import DailyNavJobService
 from src.app.operation_state_store import OperationStateStore
 from src.app.portfolio_read_service import PortfolioReadService
+from src.app.valuation_service import ValuationService
 from src.domain.holdings import RawHoldingRecord
 from src.models import AssetType, NAVHistory, PortfolioValuation
 
@@ -250,20 +251,47 @@ def test_real_futu_sync_completes_before_fresh_account_validation(monkeypatch):
             }
 
     class FakePortfolio:
+        cash_flow_dataset = SimpleNamespace(
+            details=lambda: {"financial_fingerprint": "preflight-dataset"}
+        )
+
+        def build_cash_flow_dataset(self, **kwargs):
+            assert kwargs == {
+                "account": "lx",
+                "nav_date": date(2026, 7, 31),
+                "run_id": "run-sync-first",
+            }
+            return self.cash_flow_dataset
+
         def calculate_valuation(self, account, **kwargs):
             holdings = list(kwargs["holdings"])
             assert len(holdings) == 1
             assert holdings[0].asset_type == AssetType.MMF
             assert holdings[0].currency == "CNY"
             assert holdings[0].quantity == 20
-            return PortfolioValuation(
+            normalized = ValuationService(
+                manager=None,
+                storage=Mock(),
+                price_fetcher=None,
+            ).calculate_normalized_valuation(
                 account=account,
-                total_value_cny=20,
-                cash_value_cny=20,
                 holdings=holdings,
+                price_snapshot={
+                    "CNY-MMF": {
+                        "price": 1,
+                        "cny_price": 1,
+                        "currency": "CNY",
+                        "source": "test_fixture",
+                    }
+                },
+                total_shares=0,
             )
+            return normalized.to_portfolio_valuation()
 
         def record_nav(self, account, *, valuation, nav_date, **_kwargs):
+            assert _kwargs["cash_flow_dataset"] is self.cash_flow_dataset
+            assert _kwargs["normalized_valuation"].official_eligible is True
+            assert _kwargs["snapshot_write_authority"].confirmed is True
             assert valuation.holdings_provenance[
                 "normalized_holdings_digest"
             ]

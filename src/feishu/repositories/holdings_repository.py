@@ -3,10 +3,29 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 import json
 from math import isfinite
-from typing import Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from ...domain.holding_dates import format_holding_date, parse_holding_date
+from ...domain.holding_mutations import (
+    AmbiguousHoldingIdentityError,
+    HOLDING_REQUIRED_VALUE_FIELDS,
+    HOLDING_VALUE_FIELDS,
+    HoldingIdentity,
+    HoldingMutationConflictError,
+    HoldingMutationProofError,
+    HoldingPatch,
+    HoldingRepairPatch,
+    HoldingTarget,
+    canonical_holding,
+    canonical_holding_value,
+    explicit_holding_owned_fields,
+    holding_owned_fields_match,
+    raw_holding_state_digest,
+    holding_state_digest,
+    holding_values,
+)
 from ...domain.holdings import RawHoldingRecord
+from ..contracts import get_table_contract
 from ...models import (
     Holding, AssetType, AssetClass, Industry,
 )
@@ -30,17 +49,16 @@ class HoldingsRepository:
     def __getattr__(self, name: str):
         return getattr(self.storage, name)
 
-    def _get_holding_cache_key(self, asset_id: str, account: str, broker: Optional[str]) -> str:
+    def _get_holding_cache_key(self, asset_id: str, account: str, broker: str) -> str:
         """生成持仓缓存 key"""
-        return f"{asset_id}:{account}:{broker or ''}"
+        return HoldingIdentity(asset_id, account, broker).cache_key()
 
-    HOLDING_PROJECTION_FIELDS: List[str] = [
-        'asset_id', 'asset_name', 'asset_type', 'account', 'broker',
-        'quantity', 'avg_cost', 'currency', 'asset_class', 'industry', 'tag',
-        'created_at', 'updated_at'
-    ]
+    HOLDING_PROJECTION_FIELDS: List[str] = list(
+        get_table_contract("holdings").fields_by_name
+    )
 
     def _snapshot_for_persistent_cache(self, holding: Holding) -> Dict[str, any]:
+        holding = canonical_holding(holding)
         return {
             'validation_policy_version': 'holdings-validation.v1',
             'record_id': holding.record_id,
@@ -64,6 +82,7 @@ class HoldingsRepository:
         entries = self._local_holdings_index_cache.load_all()
         if not entries:
             return
+        migrated = False
         for bk, fields in entries.items():
             if not fields or not fields.get('record_id'):
                 continue
@@ -76,9 +95,22 @@ class HoldingsRepository:
             asset_id = fields.get('asset_id', '')
             account = fields.get('account', '')
             broker = fields.get('broker') or ''
-            cache_key = self._get_holding_cache_key(asset_id, account, broker or None)
+            try:
+                cache_key = self._get_holding_cache_key(asset_id, account, broker)
+            except ValueError:
+                continue
+            canonical_snapshot = self._snapshot_for_persistent_cache(holding)
             self._holding_id_cache[cache_key] = holding.record_id
-            self._holding_fields_cache[cache_key] = dict(fields)
+            self._holding_fields_cache[cache_key] = dict(canonical_snapshot)
+            if bk != cache_key or fields != canonical_snapshot:
+                self._local_holdings_index_cache.delete(bk)
+                self._local_holdings_index_cache.upsert(
+                    cache_key,
+                    canonical_snapshot,
+                )
+                migrated = True
+        if migrated:
+            self._flush_persistent_holdings_index()
 
     def _flush_persistent_holdings_index(self):
         """将内存持仓索引刷写到本地缓存。"""
@@ -94,7 +126,7 @@ class HoldingsRepository:
         if flush_persistent:
             self._flush_persistent_holdings_index()
 
-    def _invalidate_holding_cache(self, asset_id: str, account: str, broker: Optional[str], *, flush_persistent: bool = False):
+    def _invalidate_holding_cache(self, asset_id: str, account: str, broker: str, *, flush_persistent: bool = False):
         cache_key = self._get_holding_cache_key(asset_id, account, broker)
         self._holding_id_cache.pop(cache_key, None)
         self._holding_fields_cache.pop(cache_key, None)
@@ -104,36 +136,40 @@ class HoldingsRepository:
 
     def _put_holding_cache(self, holding: Holding, *, flush_persistent: bool = False):
         """Store holding into all cache layers (memory + persistent)."""
-        self._validate_writable_holding(holding)
-        if not holding.record_id:
+        canonical = canonical_holding(holding)
+        if not canonical.record_id:
             return
 
-        cache_key = self._get_holding_cache_key(holding.asset_id, holding.account, holding.broker)
-        self._holding_id_cache[cache_key] = holding.record_id
+        cache_key = self._get_holding_cache_key(
+            canonical.asset_id,
+            canonical.account,
+            canonical.broker,
+        )
+        self._holding_id_cache[cache_key] = canonical.record_id
         self._holding_fields_cache[cache_key] = {
-            'record_id': holding.record_id,
-            'asset_id': holding.asset_id,
-            'asset_name': holding.asset_name,
-            'asset_type': holding.asset_type.value if holding.asset_type else None,
-            'broker': holding.broker or '',
-            'account': holding.account,
-            'quantity': holding.quantity,
-            'avg_cost': holding.avg_cost,
-            'currency': holding.currency,
-            'asset_class': holding.asset_class.value if holding.asset_class else None,
-            'industry': holding.industry.value if holding.industry else None,
-            'tag': holding.tag,
-            'created_at': format_holding_date(holding.created_at) if holding.created_at else None,
-            'updated_at': format_holding_date(holding.updated_at) if holding.updated_at else None,
+            'record_id': canonical.record_id,
+            'asset_id': canonical.asset_id,
+            'asset_name': canonical.asset_name,
+            'asset_type': canonical.asset_type.value if canonical.asset_type else None,
+            'broker': canonical.broker,
+            'account': canonical.account,
+            'quantity': canonical.quantity,
+            'avg_cost': canonical.avg_cost,
+            'currency': canonical.currency,
+            'asset_class': canonical.asset_class.value if canonical.asset_class else None,
+            'industry': canonical.industry.value if canonical.industry else None,
+            'tag': canonical.tag,
+            'created_at': format_holding_date(canonical.created_at) if canonical.created_at else None,
+            'updated_at': format_holding_date(canonical.updated_at) if canonical.updated_at else None,
         }
 
         self._local_holdings_index_cache.upsert(
             cache_key,
-            self._snapshot_for_persistent_cache(holding),
+            self._snapshot_for_persistent_cache(canonical),
             _flush=flush_persistent,
         )
 
-    def _get_holding_from_cache(self, asset_id: str, account: str, broker: Optional[str]) -> Optional[Holding]:
+    def _get_holding_from_cache(self, asset_id: str, account: str, broker: str) -> Optional[Holding]:
         cache_key = self._get_holding_cache_key(asset_id, account, broker)
         fields = self._holding_fields_cache.get(cache_key)
         if not fields:
@@ -141,40 +177,207 @@ class HoldingsRepository:
         return self._dict_to_holding(fields)
 
     def _get_holding_from_cache_any_market(self, asset_id: str, account: str) -> Optional[Holding]:
-        prefix = f"{asset_id}:{account}:"
-        best = None
-        for k, fields in self._holding_fields_cache.items():
-            if k.startswith(prefix):
-                h = self._dict_to_holding(fields)
-                if best is None:
-                    best = h
-                elif not (h.broker or ''):
-                    best = h
-                    break
-        return best
+        requested_asset_id = str(asset_id or '').strip()
+        requested_account = str(account or '').strip()
+        if not requested_asset_id or not requested_account:
+            raise ValueError("asset_id and account are required")
+        candidates = [
+            self._dict_to_holding(fields)
+            for fields in self._holding_fields_cache.values()
+            if str(fields.get('asset_id') or '').strip() == requested_asset_id
+            and str(fields.get('account') or '').strip() == requested_account
+        ]
+        if len(candidates) > 1:
+            brokers = sorted({item.broker for item in candidates})
+            raise AmbiguousHoldingIdentityError(
+                "holding lookup requires broker; "
+                f"asset_id={requested_asset_id}, account={requested_account}, "
+                f"brokers={brokers}"
+            )
+        return candidates[0] if candidates else None
+
+    def _invalidate_holding_account_cache(
+        self,
+        account: str,
+        *,
+        flush_persistent: bool = False,
+    ) -> None:
+        requested_account = str(account or '').strip()
+        if not requested_account:
+            raise ValueError("account is required")
+        persistent_entries = self._local_holdings_index_cache.load_all()
+        keys_to_remove = {
+            key
+            for key, fields in self._holding_fields_cache.items()
+            if str(fields.get('account') or '').strip() == requested_account
+        }
+        keys_to_remove.update(
+            key
+            for key, fields in persistent_entries.items()
+            if str((fields or {}).get('account') or '').strip() == requested_account
+        )
+        for key in keys_to_remove:
+            self._holding_id_cache.pop(key, None)
+            self._holding_fields_cache.pop(key, None)
+            self._local_holdings_index_cache.delete(key)
+        self._holdings_index_loaded_accounts.discard(requested_account)
+        self._holdings_index_loaded_all = False
+        if flush_persistent:
+            self._flush_persistent_holdings_index()
+
+    def _publish_holding_account_slice(
+        self,
+        account: str,
+        holdings: Iterable[Holding],
+    ) -> None:
+        requested_account = str(account or '').strip()
+        rows = [canonical_holding(item) for item in holdings]
+        if any(item.account != requested_account for item in rows):
+            raise RuntimeError("cannot publish an out-of-scope holdings account slice")
+        self._invalidate_holding_account_cache(requested_account)
+        for holding in rows:
+            self._put_holding_cache(holding)
+        self._flush_persistent_holdings_index()
+        self._holdings_index_loaded_accounts.add(requested_account)
+
+    def _publish_all_holding_slices(self, holdings: Iterable[Holding]) -> None:
+        rows = [canonical_holding(item) for item in holdings]
+        keys_to_remove = set(self._holding_fields_cache)
+        keys_to_remove.update(self._local_holdings_index_cache.load_all())
+        for key in keys_to_remove:
+            self._holding_id_cache.pop(key, None)
+            self._holding_fields_cache.pop(key, None)
+            self._local_holdings_index_cache.delete(key)
+        self._holdings_index_loaded_accounts.clear()
+        for holding in rows:
+            self._put_holding_cache(holding)
+        self._flush_persistent_holdings_index()
+        self._holdings_index_loaded_accounts.update(
+            item.account for item in rows
+        )
+        self._holdings_index_loaded_all = True
+
+    def _read_fresh_holding_account_slice(self, account: str) -> List[Holding]:
+        requested_account = str(account or '').strip()
+        if not requested_account:
+            raise ValueError("account is required")
+        return self._convert_raw_holdings(
+            self.get_raw_holdings(account=requested_account)
+        )
+
+    @staticmethod
+    def _find_holding_identity(
+        holdings: Iterable[Holding],
+        identity: HoldingIdentity,
+    ) -> Optional[Holding]:
+        matches = [
+            item
+            for item in holdings
+            if HoldingIdentity.from_holding(item) == identity
+        ]
+        if len(matches) > 1:
+            raise RuntimeError(f"duplicate holding identity: {identity}")
+        return matches[0] if matches else None
+
+    def _fresh_base_for_target(
+        self,
+        target: HoldingTarget,
+    ) -> tuple[List[Holding], Optional[Holding]]:
+        try:
+            fresh = self._read_fresh_holding_account_slice(
+                target.identity.account,
+            )
+            current = self._find_holding_identity(fresh, target.identity)
+            if target.base_record_id is None:
+                if current is not None:
+                    raise HoldingMutationConflictError(
+                        "holding create base is no longer empty: "
+                        f"{target.identity}"
+                    )
+                return fresh, None
+            if current is None:
+                raise HoldingMutationConflictError(
+                    f"holding base disappeared: {target.identity}"
+                )
+            if current.record_id != target.base_record_id:
+                raise HoldingMutationConflictError(
+                    "holding base record changed: "
+                    f"expected={target.base_record_id}, actual={current.record_id}"
+                )
+            if holding_state_digest(current) != target.base_digest:
+                raise HoldingMutationConflictError(
+                    f"holding fresh base digest changed: {target.identity}"
+                )
+            return fresh, current
+        except Exception:
+            self._invalidate_holding_account_cache(
+                target.identity.account,
+                flush_persistent=True,
+            )
+            raise
+
+    def _prove_holding_targets_and_publish(
+        self,
+        account: str,
+        targets: Iterable[tuple[HoldingTarget, Optional[str]]],
+    ) -> Dict[HoldingIdentity, Holding]:
+        expected = list(targets)
+        try:
+            fresh = self._read_fresh_holding_account_slice(account)
+            proven: Dict[HoldingIdentity, Holding] = {}
+            for target, expected_record_id in expected:
+                actual = self._find_holding_identity(fresh, target.identity)
+                if actual is None:
+                    raise HoldingMutationProofError(
+                        f"holding fresh readback is missing: {target.identity}"
+                    )
+                if expected_record_id and actual.record_id != expected_record_id:
+                    raise HoldingMutationProofError(
+                        "holding fresh readback record changed: "
+                        f"expected={expected_record_id}, actual={actual.record_id}"
+                    )
+                if not holding_owned_fields_match(actual, target):
+                    raise HoldingMutationProofError(
+                        "holding fresh readback disagrees with owned fields: "
+                        f"identity={target.identity}, owned={sorted(target.owned_fields)}"
+                    )
+                proven[target.identity] = canonical_holding(actual)
+        except Exception:
+            self._invalidate_holding_account_cache(
+                account,
+                flush_persistent=True,
+            )
+            raise
+        self._publish_holding_account_slice(account, fresh)
+        return proven
+
+    def _prove_holding_deleted_and_publish(
+        self,
+        identity: HoldingIdentity,
+    ) -> None:
+        try:
+            fresh = self._read_fresh_holding_account_slice(identity.account)
+            if self._find_holding_identity(fresh, identity) is not None:
+                raise HoldingMutationProofError(
+                    f"holding fresh readback still contains deleted identity: {identity}"
+                )
+        except Exception:
+            self._invalidate_holding_account_cache(
+                identity.account,
+                flush_persistent=True,
+            )
+            raise
+        self._publish_holding_account_slice(identity.account, fresh)
 
     def preload_holdings_index(self, account: Optional[str] = None) -> Dict[str, any]:
         """预加载持仓索引到内存和本地缓存。"""
         records = self.get_raw_holdings(account=account)
         converted = self._convert_raw_holdings(records)
 
-        keys_to_remove = [
-            key
-            for key, fields in self._holding_fields_cache.items()
-            if account is None or fields.get('account') == account
-        ]
-        for key in keys_to_remove:
-            self._holding_id_cache.pop(key, None)
-            self._holding_fields_cache.pop(key, None)
-            self._local_holdings_index_cache.delete(key)
-        for holding in converted:
-            self._put_holding_cache(holding)
-        self._flush_persistent_holdings_index()
-
         if account:
-            self._holdings_index_loaded_accounts.add(account)
+            self._publish_holding_account_slice(account, converted)
         else:
-            self._holdings_index_loaded_all = True
+            self._publish_all_holding_slices(converted)
 
         return {
             'account': account or 'all',
@@ -279,122 +482,166 @@ class HoldingsRepository:
 
     def patch_holding_record(
         self,
-        *,
-        record_id: str,
-        fields: Dict[str, object],
+        patch: HoldingRepairPatch,
     ) -> RawHoldingRecord:
         """Narrow absolute patch used only by confirmed reconciliation flows."""
 
         from ...time_utils import bj_now_naive
 
-        resolved_record_id = str(record_id or '').strip()
-        if not resolved_record_id:
-            raise ValueError("record_id is required")
-        allowed = {'asset_name', 'asset_type', 'currency', 'asset_class'}
-        supplied = {str(key): value for key, value in dict(fields).items()}
-        if not supplied:
-            raise ValueError("holding patch requires at least one target field")
-        unsupported = sorted(set(supplied) - allowed)
-        if unsupported:
-            raise ValueError(
-                "unsupported holdings reconciliation fields: "
-                + ", ".join(unsupported)
+        if not isinstance(patch, HoldingRepairPatch):
+            raise TypeError("patch_holding_record requires HoldingRepairPatch")
+        identity = patch.identity
+        resolved_record_id = patch.record_id
+        current_identity: Optional[HoldingIdentity] = None
+        try:
+            base_records = self.get_raw_holdings(record_id=resolved_record_id)
+            if len(base_records) != 1:
+                raise RuntimeError(
+                    "holding patch lookup did not return one record: "
+                    f"{resolved_record_id}"
+                )
+            base_fields = base_records[0].canonical_fields()
+            current_identity = HoldingIdentity(
+                base_fields.get('asset_id'),
+                base_fields.get('account'),
+                base_fields.get('broker'),
             )
-        if any(value is None or (isinstance(value, str) and not value.strip()) for value in supplied.values()):
-            raise ValueError("holdings reconciliation patch cannot write blank values")
+            if (
+                current_identity != identity
+                or raw_holding_state_digest(
+                    resolved_record_id,
+                    base_fields,
+                ) != patch.base_digest
+            ):
+                raise HoldingMutationConflictError(
+                    f"holding repair base changed: {identity}"
+                )
+        except Exception:
+            accounts = {identity.account}
+            if current_identity is not None:
+                accounts.add(current_identity.account)
+            for account in accounts:
+                self._invalidate_holding_account_cache(
+                    account,
+                    flush_persistent=True,
+                )
+            raise
+        canonical_supplied = dict(patch.values)
         update_fields = {
-            **supplied,
+            **canonical_supplied,
             'updated_at': format_holding_date(bj_now_naive()),
         }
-        feishu_fields = self._to_feishu_fields(update_fields, 'holdings')
+        feishu_fields = self._to_feishu_fields(
+            update_fields,
+            'holdings',
+            preserve_none=True,
+        )
+        readback_identity: Optional[HoldingIdentity] = None
         try:
             self.client.update_record('holdings', resolved_record_id, feishu_fields)
-        finally:
-            self._invalidate_holding_cache_by_record_id(
-                resolved_record_id,
-                flush_persistent=True,
+            records = self.get_raw_holdings(record_id=resolved_record_id)
+            if len(records) != 1:
+                raise RuntimeError(
+                    "holding patch readback did not return one record: "
+                    f"{resolved_record_id}"
+                )
+            readback_fields = records[0].canonical_fields()
+            readback_identity = HoldingIdentity(
+                readback_fields.get('asset_id'),
+                readback_fields.get('account'),
+                readback_fields.get('broker'),
             )
-        records = self.get_raw_holdings(record_id=resolved_record_id)
-        if len(records) != 1:
-            raise RuntimeError(
-                f"holding patch readback did not return one record: {resolved_record_id}"
-            )
+            if (
+                readback_identity != identity
+                or any(
+                    readback_fields.get(field_name) != value
+                    for field_name, value in canonical_supplied.items()
+                )
+            ):
+                raise HoldingMutationProofError(
+                    "holding patch readback disagrees with requested fields: "
+                    f"{identity}"
+                )
+            fresh = self._read_fresh_holding_account_slice(identity.account)
+            self._publish_holding_account_slice(identity.account, fresh)
+        except Exception:
+            accounts = {identity.account}
+            if readback_identity is not None:
+                accounts.add(readback_identity.account)
+            for account in accounts:
+                self._invalidate_holding_account_cache(
+                    account,
+                    flush_persistent=True,
+                )
+            raise
         return records[0]
 
     # ========== holdings CRUD ==========
 
     def get_holding(self, asset_id: str, account: str, broker: Optional[str] = None) -> Optional[Holding]:
-        """获取单个持仓（优先使用内存索引与快照）"""
-        if not str(asset_id or '').strip() or not str(account or '').strip():
+        """Read one cached holding; omitted broker is allowed only if unique."""
+        requested_asset_id = str(asset_id or '').strip()
+        requested_account = str(account or '').strip()
+        if not requested_asset_id or not requested_account:
             raise ValueError("asset_id and account are required")
-        cached_holding = self._get_holding_from_cache(asset_id, account, broker)
-        if not cached_holding and broker is None:
-            cached_holding = self._get_holding_from_cache_any_market(asset_id, account)
+        requested_broker = str(broker or '').strip() if broker is not None else None
+        if broker is not None and not requested_broker:
+            raise ValueError("broker must not be blank")
+
+        # A broker-less compatibility lookup is a uniqueness decision, so it
+        # may only inspect a complete account slice.  A restored persistent
+        # cache is an acceleration hint, not proof that no second broker row
+        # exists remotely.
+        if (
+            requested_broker is None
+            and not self._holdings_index_loaded_all
+            and requested_account not in self._holdings_index_loaded_accounts
+        ):
+            self.preload_holdings_index(account=requested_account)
+
+        cached_holding = (
+            self._get_holding_from_cache(
+                requested_asset_id,
+                requested_account,
+                requested_broker,
+            )
+            if requested_broker is not None
+            else self._get_holding_from_cache_any_market(
+                requested_asset_id,
+                requested_account,
+            )
+        )
         if cached_holding:
             return cached_holding
 
-        if account and (not self._holdings_index_loaded_all) and (account not in self._holdings_index_loaded_accounts):
-            self.preload_holdings_index(account=account)
-            cached_holding = self._get_holding_from_cache(asset_id, account, broker)
-            if not cached_holding and broker is None:
-                cached_holding = self._get_holding_from_cache_any_market(asset_id, account)
+        if (
+            not self._holdings_index_loaded_all
+            and requested_account not in self._holdings_index_loaded_accounts
+        ):
+            self.preload_holdings_index(account=requested_account)
+            cached_holding = (
+                self._get_holding_from_cache(
+                    requested_asset_id,
+                    requested_account,
+                    requested_broker,
+                )
+                if requested_broker is not None
+                else self._get_holding_from_cache_any_market(
+                    requested_asset_id,
+                    requested_account,
+                )
+            )
             if cached_holding:
                 return cached_holding
-
-        if self._holdings_index_loaded_all or (account in self._holdings_index_loaded_accounts):
-            return None
         return None
 
     def get_holding_fresh(self, asset_id: str, account: str, broker: str) -> Optional[Holding]:
-        """Read one exact holding identity from Feishu, bypassing every cache.
-
-        Cash-flow confirmation uses this method so a preview can never be
-        applied against a stale local holding snapshot.
-        """
-        if not broker:
-            raise ValueError("broker is required for an exact fresh holding read")
-        filter_str = (
-            f'CurrentValue.[asset_id] = "{self._escape_filter_value(asset_id)}" '
-            f'AND CurrentValue.[account] = "{self._escape_filter_value(account)}" '
-            f'AND CurrentValue.[broker] = "{self._escape_filter_value(broker)}"'
-        )
-        records = self.client.list_records(
-            'holdings',
-            filter_str=filter_str,
-            field_names=self.HOLDING_PROJECTION_FIELDS,
-        )
-        if len(records) > 1:
-            raise RuntimeError(
-                f"duplicate holding identity: asset_id={asset_id}, account={account}, broker={broker}"
-            )
-        self._invalidate_holding_cache(asset_id, account, broker)
-        if not records:
-            return None
-
-        raw = records[0]
-        raw_fields = raw.get('fields')
-        resolved_record_id = str(raw.get('record_id') or '').strip()
-        if not resolved_record_id or not isinstance(raw_fields, dict) or any(
-            str(raw_fields.get(field_name) or '').strip() != expected
-            for field_name, expected in (
-                ('asset_id', str(asset_id).strip()),
-                ('account', str(account).strip()),
-                ('broker', str(broker).strip()),
-            )
-        ):
-            raise RuntimeError("exact holding read returned an identity mismatch")
-        holding = self._convert_raw_holdings(
-            [
-                RawHoldingRecord(
-                    record_id=resolved_record_id,
-                    raw_fields=dict(raw_fields),
-                    source='feishu',
-                    fetched_at=datetime.now(UTC),
-                )
-            ]
-        )[0]
-        self._put_holding_cache(holding)
-        return holding
+        """Read and publish one complete fresh account slice, then select exactly."""
+        identity = HoldingIdentity(asset_id, account, broker)
+        fresh = self._read_fresh_holding_account_slice(identity.account)
+        holding = self._find_holding_identity(fresh, identity)
+        self._publish_holding_account_slice(identity.account, fresh)
+        return canonical_holding(holding) if holding is not None else None
 
     def get_holdings_fresh(
         self,
@@ -405,10 +652,10 @@ class HoldingsRepository:
     ) -> List[Holding]:
         """Read a complete holdings slice directly from Feishu."""
         converted = self._convert_raw_holdings(self.get_raw_holdings(account=account))
-        for holding in converted:
-            identity = (holding.asset_id, holding.account, holding.broker)
-            self._invalidate_holding_cache(*identity)
-            self._put_holding_cache(holding)
+        if account is not None:
+            self._publish_holding_account_slice(str(account).strip(), converted)
+        else:
+            self._publish_all_holding_slices(converted)
         holdings: List[Holding] = []
         for holding in converted:
             if asset_type and holding.asset_type.value != str(asset_type).strip().lower():
@@ -427,14 +674,18 @@ class HoldingsRepository:
 
     def get_holdings(self, account: Optional[str] = None, asset_type: Optional[str] = None, include_empty: bool = False) -> List[Holding]:
         """获取持仓列表（优先使用内存缓存索引）"""
+        requested_account = str(account).strip() if account is not None else None
+        if account is not None and not requested_account:
+            raise ValueError("account must not be blank")
         loaded = self._holdings_index_loaded_all or (
-            account is not None and account in self._holdings_index_loaded_accounts
+            requested_account is not None
+            and requested_account in self._holdings_index_loaded_accounts
         )
         if not loaded:
-            self.preload_holdings_index(account=account)
+            self.preload_holdings_index(account=requested_account)
         holdings = []
         for fields in self._holding_fields_cache.values():
-            if account and fields.get('account') != account:
+            if requested_account is not None and fields.get('account') != requested_account:
                 continue
             holding = self._dict_to_holding(fields)
             if asset_type and holding.asset_type.value != str(asset_type).strip().lower():
@@ -448,271 +699,575 @@ class HoldingsRepository:
         holdings.sort(key=lambda h: (h.asset_type.value if h.asset_type else '', h.asset_id))
         return holdings
 
-    def upsert_holding(self, holding: Holding) -> Holding:
-        """插入或更新持仓（优先使用预加载索引与内存快照）"""
+    @staticmethod
+    def _wire_mutation_values(values: Dict[str, Any]) -> Dict[str, Any]:
+        normalized = dict(values)
+        if isinstance(normalized.get('tag'), tuple):
+            normalized['tag'] = list(normalized['tag'])
+        return normalized
+
+    def _apply_holding_target(self, target: HoldingTarget) -> Holding:
+        """Apply one canonical target and return only fresh remote proof."""
         from ...time_utils import bj_now_naive
 
-        self._validate_writable_holding(holding)
+        if not isinstance(target, HoldingTarget):
+            raise TypeError("replace_holding requires HoldingTarget")
+        _fresh, current = self._fresh_base_for_target(target)
         now = bj_now_naive()
-        now_text = format_holding_date(now)
-        existing = self.get_holding(holding.asset_id, holding.account, holding.broker)
-
-        if existing and existing.record_id:
-            is_cash_like = (existing.asset_type and existing.asset_type.value in ('cash', 'mmf'))
-            new_quantity = (
-                self._quantize_money(existing.quantity + holding.quantity)
-                if is_cash_like else (existing.quantity + holding.quantity)
-            )
-            update_fields = {
-                'quantity': new_quantity,
-                'updated_at': now_text,
+        if current is not None:
+            raw_update = {
+                field_name: target.values[field_name]
+                for field_name in target.owned_fields
             }
-
-            new_name = holding.asset_name or existing.asset_name
-            if new_name and new_name != (existing.asset_name or ''):
-                update_fields['asset_name'] = new_name
-                print(f"[持仓名称更新] {existing.asset_name} -> {new_name}")
-
-            feishu_update_fields = self._to_feishu_fields(update_fields, 'holdings')
+            raw_update['updated_at'] = format_holding_date(now)
+            payload = self._to_feishu_fields(
+                self._wire_mutation_values(raw_update),
+                'holdings',
+                preserve_none=True,
+            )
             try:
-                self.client.update_record('holdings', existing.record_id, feishu_update_fields)
+                self.client.update_record(
+                    'holdings',
+                    target.base_record_id,
+                    payload,
+                )
             except Exception:
-                self._invalidate_holding_cache(holding.asset_id, holding.account, holding.broker, flush_persistent=True)
+                self._invalidate_holding_account_cache(
+                    target.identity.account,
+                    flush_persistent=True,
+                )
                 raise
-
-            existing.quantity = new_quantity
-            existing.updated_at = now
-            if 'asset_name' in update_fields:
-                existing.asset_name = update_fields['asset_name']
-
-            holding.record_id = existing.record_id
-            holding.updated_at = now
-            self._put_holding_cache(existing)
-            return holding
-
-        holding.created_at = now
-        holding.updated_at = now
-        fields = self._holding_to_dict(holding)
-        feishu_fields = self._to_feishu_fields(fields, 'holdings')
-        result = self.client.create_record('holdings', feishu_fields)
-        holding.record_id = result['record_id']
-        self._put_holding_cache(holding)
-        return holding
-
-    def replace_holding(self, holding: Holding) -> Holding:
-        """Replace one holding row by business key.
-
-        Unlike ``upsert_holding`` this treats ``quantity`` as the absolute
-        target value and refreshes the canonical descriptor fields. CASH
-        callers must enforce their confirmed effect boundary before invoking it.
-        """
-        from ...time_utils import bj_now_naive
-
-        self._validate_writable_holding(holding)
-        now = bj_now_naive()
-        existing = self.get_holding(holding.asset_id, holding.account, holding.broker)
-
-        if existing and existing.record_id:
-            replacement = Holding(**holding.model_dump())
-            replacement.record_id = existing.record_id
-            replacement.created_at = existing.created_at
-            replacement.updated_at = now
-            fields = self._holding_to_dict(replacement)
-            feishu_fields = self._to_feishu_fields(fields, 'holdings')
+            expected_record_id = target.base_record_id
+        else:
+            raw_create: Dict[str, Any] = {
+                **target.identity.as_dict(),
+                **{
+                    field_name: target.values[field_name]
+                    for field_name in target.owned_fields
+                    if target.values[field_name] is not None
+                },
+                'created_at': format_holding_date(now),
+                'updated_at': format_holding_date(now),
+            }
+            payload = self._to_feishu_fields(
+                self._wire_mutation_values(raw_create),
+                'holdings',
+            )
             try:
-                self.client.update_record('holdings', existing.record_id, feishu_fields)
+                result = self.client.create_record('holdings', payload)
             except Exception:
-                self._invalidate_holding_cache(holding.asset_id, holding.account, holding.broker, flush_persistent=True)
+                self._invalidate_holding_account_cache(
+                    target.identity.account,
+                    flush_persistent=True,
+                )
                 raise
-            self._put_holding_cache(replacement)
-            return replacement
+            expected_record_id = str(result.get('record_id') or '').strip()
+            if not expected_record_id:
+                self._invalidate_holding_account_cache(
+                    target.identity.account,
+                    flush_persistent=True,
+                )
+                raise RuntimeError("holding create response lacks record_id")
+        return self._prove_holding_targets_and_publish(
+            target.identity.account,
+            [(target, expected_record_id)],
+        )[target.identity]
 
-        new_holding = Holding(**holding.model_dump())
-        new_holding.created_at = now
-        new_holding.updated_at = now
-        fields = self._holding_to_dict(new_holding)
-        feishu_fields = self._to_feishu_fields(fields, 'holdings')
-        result = self.client.create_record('holdings', feishu_fields)
-        new_holding.record_id = result['record_id']
-        self._put_holding_cache(new_holding)
-        return new_holding
+    def apply_holding_patch(self, patch: HoldingPatch) -> Holding:
+        """Apply only explicitly set patch fields against the bound fresh base."""
+        if not isinstance(patch, HoldingPatch):
+            raise TypeError("apply_holding_patch requires HoldingPatch")
+        try:
+            fresh = self._read_fresh_holding_account_slice(
+                patch.identity.account,
+            )
+            current = self._find_holding_identity(fresh, patch.identity)
+            if current is None or current.record_id != patch.base_record_id:
+                raise HoldingMutationConflictError(
+                    f"holding patch base is missing or changed: {patch.identity}"
+                )
+            if holding_state_digest(current) != patch.base_digest:
+                raise HoldingMutationConflictError(
+                    f"holding patch fresh base digest changed: {patch.identity}"
+                )
+        except Exception:
+            self._invalidate_holding_account_cache(
+                patch.identity.account,
+                flush_persistent=True,
+            )
+            raise
+        desired = canonical_holding(current)
+        for field_name, value in patch.values.items():
+            setattr(
+                desired,
+                field_name,
+                list(value) if field_name == 'tag' else value,
+            )
+        target = HoldingTarget.from_holdings(
+            base=current,
+            target=desired,
+            owned_fields=patch.owned_fields,
+        )
+        return self._apply_holding_target(target)
 
-    def upsert_holdings_bulk(self, holdings: List[Holding], mode: str = 'additive') -> Dict[str, any]:
-        """批量 upsert 持仓，减少 HTTP 调用。"""
+    def _legacy_replace_target(self, holding: Holding) -> HoldingTarget:
+        """Safely adapt an old Holding payload without granting defaults authority."""
+        canonical = canonical_holding(holding)
+        identity = HoldingIdentity.from_holding(canonical)
+        fresh = self._read_fresh_holding_account_slice(identity.account)
+        base = self._find_holding_identity(fresh, identity)
+        explicit = explicit_holding_owned_fields(holding)
+        owned = set(explicit & {
+            'asset_name', 'asset_type', 'quantity', 'currency',
+        })
+        for optional_field in ('avg_cost', 'asset_class', 'industry'):
+            if optional_field in explicit:
+                owned.add(optional_field)
+        if 'tag' in explicit:
+            owned.add('tag')
+        if base is None:
+            owned.update(HOLDING_REQUIRED_VALUE_FIELDS)
+            for optional_field in ('avg_cost', 'asset_class', 'industry'):
+                if getattr(canonical, optional_field) is not None:
+                    owned.add(optional_field)
+            if canonical.tag:
+                owned.add('tag')
+            desired = canonical
+        else:
+            desired = canonical_holding(base)
+            incoming_values = holding_values(canonical)
+            for field_name in owned:
+                setattr(
+                    desired,
+                    field_name,
+                    list(incoming_values[field_name])
+                    if field_name == 'tag'
+                    else incoming_values[field_name],
+                )
+        return HoldingTarget.from_holdings(
+            base=base,
+            target=desired,
+            owned_fields=owned,
+        )
+
+    def upsert_holding(self, holding: Holding) -> Holding:
+        """Compatibility additive upsert with fresh base and fresh proof."""
+        canonical = canonical_holding(holding)
+        identity = HoldingIdentity.from_holding(canonical)
+        fresh = self._read_fresh_holding_account_slice(identity.account)
+        base = self._find_holding_identity(fresh, identity)
+        if base is None:
+            owned = set(HOLDING_REQUIRED_VALUE_FIELDS)
+            for optional_field in ('avg_cost', 'asset_class', 'industry'):
+                if getattr(canonical, optional_field) is not None:
+                    owned.add(optional_field)
+            if canonical.tag:
+                owned.add('tag')
+            return self._apply_holding_target(HoldingTarget.from_holdings(
+                base=None,
+                target=canonical,
+                owned_fields=owned,
+            ))
+        is_cash_like = base.asset_type in {AssetType.CASH, AssetType.MMF}
+        quantity = (
+            self._quantize_money(base.quantity + canonical.quantity)
+            if is_cash_like
+            else base.quantity + canonical.quantity
+        )
+        desired = canonical_holding(base)
+        desired.quantity = quantity
+        owned = {'quantity'}
+        if canonical.asset_name and canonical.asset_name != base.asset_name:
+            desired.asset_name = canonical.asset_name
+            owned.add('asset_name')
+        return self._apply_holding_target(HoldingTarget.from_holdings(
+            base=base,
+            target=desired,
+            owned_fields=owned,
+        ))
+
+    def replace_holding(self, target: HoldingTarget | Holding) -> Holding:
+        """Replace an absolute target; Holding is a narrow compatibility input."""
+        mutation = (
+            target
+            if isinstance(target, HoldingTarget)
+            else self._legacy_replace_target(target)
+            if isinstance(target, Holding)
+            else None
+        )
+        if mutation is None:
+            raise TypeError("replace_holding requires HoldingTarget or Holding")
+        return self._apply_holding_target(mutation)
+
+    def upsert_holdings_bulk(self, holdings: List[Holding], mode: str = 'additive') -> Dict[str, Any]:
+        """Plan one mutation per identity, batch it, then prove full account slices."""
         from ...time_utils import bj_now_naive
 
         if mode not in ('additive', 'replace'):
             raise ValueError(f"unsupported mode={mode}, expected 'additive' or 'replace'")
-
         if not holdings:
             return {'mode': mode, 'updated': 0, 'created': 0, 'preloaded_accounts': []}
 
-        for holding in holdings:
-            self._validate_writable_holding(holding)
+        incoming_rows = [
+            (item, canonical_holding(item))
+            for item in holdings
+        ]
+        accounts = sorted({item.account for _, item in incoming_rows})
+        try:
+            bases_by_account = {
+                account: self._read_fresh_holding_account_slice(account)
+                for account in accounts
+            }
+        except Exception:
+            for account in accounts:
+                self._invalidate_holding_account_cache(
+                    account,
+                    flush_persistent=True,
+                )
+            raise
+        original_by_identity: Dict[HoldingIdentity, Holding] = {}
+        working_by_identity: Dict[HoldingIdentity, Holding] = {}
+        owned_by_identity: Dict[HoldingIdentity, set[str]] = {}
+        for account, rows in bases_by_account.items():
+            for row in rows:
+                identity = HoldingIdentity.from_holding(row)
+                original_by_identity[identity] = canonical_holding(row)
+                working_by_identity[identity] = canonical_holding(row)
 
-        preloaded_accounts: List[str] = []
-        if mode == 'additive':
-            accounts_to_preload = set()
-            for h in holdings:
-                cache_key = self._get_holding_cache_key(h.asset_id, h.account, h.broker)
-                has_cache = cache_key in self._holding_fields_cache
-                if (not has_cache) and h.account and (not self._holdings_index_loaded_all) and (h.account not in self._holdings_index_loaded_accounts):
-                    accounts_to_preload.add(h.account)
-            for account in sorted(accounts_to_preload):
-                self.preload_holdings_index(account=account)
-                preloaded_accounts.append(account)
+        for original_input, incoming in incoming_rows:
+            identity = HoldingIdentity.from_holding(incoming)
+            working = working_by_identity.get(identity)
+            if working is None:
+                working_by_identity[identity] = canonical_holding(incoming)
+                owned = set(HOLDING_REQUIRED_VALUE_FIELDS)
+                for optional_field in ('avg_cost', 'asset_class', 'industry'):
+                    if getattr(incoming, optional_field) is not None:
+                        owned.add(optional_field)
+                if incoming.tag:
+                    owned.add('tag')
+                owned_by_identity[identity] = owned
+                continue
 
-        now = bj_now_naive()
-        now_text = format_holding_date(now)
-        update_payloads: List[Dict[str, any]] = []
-        update_targets: List[Holding] = []
-        create_payloads: List[Dict[str, any]] = []
-        create_targets: List[Holding] = []
-
-        working_existing: Dict[str, Holding] = {}
-
-        for incoming in holdings:
-            cache_key = self._get_holding_cache_key(incoming.asset_id, incoming.account, incoming.broker)
-            existing = working_existing.get(cache_key)
-            if existing is None:
-                existing = self.get_holding(incoming.asset_id, incoming.account, incoming.broker)
-                if existing:
-                    working_existing[cache_key] = Holding(**existing.model_dump())
-                    existing = working_existing[cache_key]
-
-            if existing and existing.record_id:
-                if mode == 'replace':
-                    new_quantity = incoming.quantity
-                else:
-                    is_cash_like = (existing.asset_type and existing.asset_type.value in ('cash', 'mmf'))
-                    new_quantity = (
-                        self._quantize_money(existing.quantity + incoming.quantity)
-                        if is_cash_like else (existing.quantity + incoming.quantity)
-                    )
-
-                update_fields = {
-                    'quantity': new_quantity,
-                    'updated_at': now_text,
-                }
-                if mode == 'replace':
-                    # Broker snapshots replace the current quantity and average
-                    # cost together. None explicitly clears cost after exit.
-                    update_fields['avg_cost'] = incoming.avg_cost
-                new_name = incoming.asset_name or existing.asset_name
-                if new_name and new_name != (existing.asset_name or ''):
-                    update_fields['asset_name'] = new_name
-
-                update_payloads.append({
-                    'record_id': existing.record_id,
-                    'fields': self._to_feishu_fields(
-                        update_fields,
-                        'holdings',
-                        preserve_none=True,
-                    ),
-                })
-
-                existing.quantity = new_quantity
-                existing.updated_at = now
-                if mode == 'replace':
-                    existing.avg_cost = incoming.avg_cost
-                if 'asset_name' in update_fields:
-                    existing.asset_name = update_fields['asset_name']
-                update_targets.append(Holding(**existing.model_dump()))
+            explicit = explicit_holding_owned_fields(original_input)
+            owned = owned_by_identity.setdefault(identity, set())
+            if mode == 'replace':
+                if 'quantity' in explicit:
+                    working.quantity = incoming.quantity
+                    owned.add('quantity')
+                if 'avg_cost' in explicit:
+                    working.avg_cost = incoming.avg_cost
+                    owned.add('avg_cost')
             else:
-                new_holding = Holding(**incoming.model_dump())
-                new_holding.created_at = now
-                new_holding.updated_at = now
-                fields = self._holding_to_dict(new_holding)
-                feishu_fields = self._to_feishu_fields(fields, 'holdings')
-                create_payloads.append({'fields': feishu_fields})
-                create_targets.append(new_holding)
+                if 'quantity' in explicit:
+                    is_cash_like = working.asset_type in {AssetType.CASH, AssetType.MMF}
+                    working.quantity = (
+                        self._quantize_money(working.quantity + incoming.quantity)
+                        if is_cash_like
+                        else working.quantity + incoming.quantity
+                    )
+                    owned.add('quantity')
+            if (
+                'asset_name' in explicit
+                and incoming.asset_name
+                and incoming.asset_name != working.asset_name
+            ):
+                working.asset_name = incoming.asset_name
+                owned.add('asset_name')
 
-        updated_records: List[Dict[str, any]] = []
-        created_records: List[Dict[str, any]] = []
+        targets: List[HoldingTarget] = []
+        for identity, desired in working_by_identity.items():
+            if not owned_by_identity.get(identity):
+                continue
+            targets.append(HoldingTarget.from_holdings(
+                base=original_by_identity.get(identity),
+                target=desired,
+                owned_fields=owned_by_identity[identity],
+            ))
+        targets.sort(key=lambda item: item.identity)
 
-        if update_payloads:
-            try:
-                updated_records = self.client.batch_update_records('holdings', update_payloads)
-            except Exception:
-                for h in update_targets:
-                    self._invalidate_holding_cache(h.asset_id, h.account, h.broker)
-                self._flush_persistent_holdings_index()
-                raise
-            for h in update_targets:
-                self._put_holding_cache(h)
+        # Bind the batch to a second fresh base check immediately before the
+        # first transport mutation.  No cache participates in this decision.
+        try:
+            for account in accounts:
+                latest = self._read_fresh_holding_account_slice(account)
+                for target in [
+                    item
+                    for item in targets
+                    if item.identity.account == account
+                ]:
+                    current = self._find_holding_identity(
+                        latest,
+                        target.identity,
+                    )
+                    if target.base_record_id is None:
+                        if current is not None:
+                            raise HoldingMutationConflictError(
+                                "holding bulk create base changed: "
+                                f"{target.identity}"
+                            )
+                    elif (
+                        current is None
+                        or current.record_id != target.base_record_id
+                        or holding_state_digest(current) != target.base_digest
+                    ):
+                        raise HoldingMutationConflictError(
+                            f"holding bulk base changed: {target.identity}"
+                        )
+        except Exception:
+            for account in accounts:
+                self._invalidate_holding_account_cache(
+                    account,
+                    flush_persistent=True,
+                )
+            raise
 
-        if create_payloads:
-            created_records = self.client.batch_create_records('holdings', create_payloads)
-            for rec, h in zip(created_records, create_targets):
-                h.record_id = rec['record_id']
-                self._put_holding_cache(h)
+        now_text = format_holding_date(bj_now_naive())
+        update_targets = [item for item in targets if item.base_record_id is not None]
+        create_targets = [item for item in targets if item.base_record_id is None]
+        update_payloads = [
+            {
+                'record_id': target.base_record_id,
+                'fields': self._to_feishu_fields(
+                    self._wire_mutation_values({
+                        **{
+                            field_name: target.values[field_name]
+                            for field_name in target.owned_fields
+                        },
+                        'updated_at': now_text,
+                    }),
+                    'holdings',
+                    preserve_none=True,
+                ),
+            }
+            for target in update_targets
+        ]
+        create_payloads = [
+            {
+                'fields': self._to_feishu_fields(
+                    self._wire_mutation_values({
+                        **target.identity.as_dict(),
+                        **{
+                            field_name: target.values[field_name]
+                            for field_name in target.owned_fields
+                            if target.values[field_name] is not None
+                        },
+                        'created_at': now_text,
+                        'updated_at': now_text,
+                    }),
+                    'holdings',
+                )
+            }
+            for target in create_targets
+        ]
+        updated_records: List[Dict[str, Any]] = []
+        created_records: List[Dict[str, Any]] = []
+        try:
+            if update_payloads:
+                updated_records = self.client.batch_update_records(
+                    'holdings',
+                    update_payloads,
+                )
+            if create_payloads:
+                created_records = self.client.batch_create_records(
+                    'holdings',
+                    create_payloads,
+                )
+        except Exception:
+            for account in accounts:
+                self._invalidate_holding_account_cache(
+                    account,
+                    flush_persistent=True,
+                )
+            raise
+        if len(updated_records) != len(update_targets) or len(created_records) != len(create_targets):
+            for account in accounts:
+                self._invalidate_holding_account_cache(
+                    account,
+                    flush_persistent=True,
+                )
+            raise RuntimeError("holdings batch response count mismatch")
 
-        if update_payloads or create_payloads:
-            self._flush_persistent_holdings_index()
-
+        expected_record_ids: Dict[HoldingIdentity, str] = {
+            target.identity: str(target.base_record_id)
+            for target in update_targets
+        }
+        for target, record in zip(create_targets, created_records):
+            record_id = str(record.get('record_id') or '').strip()
+            if not record_id:
+                for account in accounts:
+                    self._invalidate_holding_account_cache(
+                        account,
+                        flush_persistent=True,
+                    )
+                raise RuntimeError("holding batch create response lacks record_id")
+            expected_record_ids[target.identity] = record_id
+        for account in accounts:
+            self._prove_holding_targets_and_publish(
+                account,
+                [
+                    (target, expected_record_ids[target.identity])
+                    for target in targets
+                    if target.identity.account == account
+                ],
+            )
         return {
             'mode': mode,
             'updated': len(updated_records),
             'created': len(created_records),
-            'preloaded_accounts': preloaded_accounts,
+            'preloaded_accounts': accounts,
         }
 
-    def update_holding_quantity(self, asset_id: str, account: str, quantity_change: float, broker: Optional[str] = None):
-        """更新持仓数量（优先使用预加载索引与内存快照）"""
-        from ...time_utils import bj_now_naive
-
-        holding = self.get_holding(asset_id, account, broker)
+    def update_holding_quantity(
+        self,
+        asset_id: str,
+        account: str,
+        quantity_change: float,
+        broker: str,
+    ) -> Holding:
+        """Update one exact identity through a fresh-base HoldingPatch."""
+        identity = HoldingIdentity(asset_id, account, broker)
+        fresh = self._read_fresh_holding_account_slice(identity.account)
+        holding = self._find_holding_identity(fresh, identity)
         if not holding or not holding.record_id:
-            raise ValueError(f"holding not found: asset_id={asset_id}, account={account}, broker={broker or ''}")
-
-        is_cash_like = (holding.asset_type and holding.asset_type.value in ('cash', 'mmf'))
-        new_quantity = self._quantize_money(holding.quantity + quantity_change) if is_cash_like else (holding.quantity + quantity_change)
+            self._publish_holding_account_slice(identity.account, fresh)
+            raise ValueError(f"holding not found: {identity}")
+        change = self._strict_holding_number(
+            quantity_change,
+            field_name='quantity_change',
+        )
+        is_cash_like = holding.asset_type in {AssetType.CASH, AssetType.MMF}
+        new_quantity = (
+            self._quantize_money(holding.quantity + change)
+            if is_cash_like
+            else holding.quantity + change
+        )
         if new_quantity < -1e-8:
             raise ValueError(
-                f"holding quantity would become negative: asset_id={asset_id}, current={holding.quantity}, change={quantity_change}"
+                "holding quantity would become negative: "
+                f"asset_id={identity.asset_id}, current={holding.quantity}, change={change}"
             )
         if abs(new_quantity) <= 1e-8:
             new_quantity = 0.0
-        now = bj_now_naive()
-        now_text = format_holding_date(now)
-        update_fields = {
-            'quantity': new_quantity,
-            'updated_at': now_text,
-        }
-        feishu_update_fields = self._to_feishu_fields(update_fields, 'holdings')
+        return self.apply_holding_patch(HoldingPatch.from_base(
+            holding,
+            quantity=new_quantity,
+        ))
+
+    def delete_holding_if_zero(
+        self,
+        asset_id: str,
+        account: str,
+        broker: str,
+    ) -> bool:
+        """Delete an exact zero identity and prove absence with a fresh slice."""
+        identity = HoldingIdentity(asset_id, account, broker)
+        fresh = self._read_fresh_holding_account_slice(identity.account)
+        holding = self._find_holding_identity(fresh, identity)
+        if holding is None or abs(holding.quantity) > 1e-8:
+            self._publish_holding_account_slice(identity.account, fresh)
+            return False
+        if not holding.record_id:
+            raise RuntimeError(f"holding delete target lacks record_id: {identity}")
+        target = HoldingTarget.from_holdings(
+            base=holding,
+            target=holding,
+            owned_fields={'quantity'},
+        )
+        return self.delete_holding_target_if_zero(target)
+
+    def delete_holding_target_if_zero(self, target: HoldingTarget) -> bool:
+        """Delete only the zero row bound to a canonical fresh-base target."""
+
+        if not isinstance(target, HoldingTarget):
+            raise TypeError("delete_holding_target_if_zero requires HoldingTarget")
+        if target.base_record_id is None:
+            raise ValueError("holding zero-delete target requires an existing base")
+        if abs(float(target.values['quantity'])) > 1e-8:
+            raise ValueError("holding zero-delete target quantity must be zero")
+        _fresh, holding = self._fresh_base_for_target(target)
+        if holding is None:
+            raise HoldingMutationConflictError(
+                f"holding zero-delete base disappeared: {target.identity}"
+            )
+        if abs(holding.quantity) > 1e-8:
+            raise HoldingMutationConflictError(
+                f"holding zero-delete base is not zero: {target.identity}"
+            )
         try:
-            self.client.update_record('holdings', holding.record_id, feishu_update_fields)
+            confirmed = self.client.delete_record(
+                'holdings',
+                target.base_record_id,
+            )
         except Exception:
-            self._invalidate_holding_cache(asset_id, account, holding.broker, flush_persistent=True)
+            self._invalidate_holding_account_cache(
+                target.identity.account,
+                flush_persistent=True,
+            )
             raise
-
-        holding.quantity = new_quantity
-        holding.updated_at = now
-        self._put_holding_cache(holding)
-        return holding
-
-    def delete_holding_if_zero(self, asset_id: str, account: str, broker: Optional[str] = None):
-        """如果持仓为0则删除（容忍极小浮点残值）"""
-        holding = self.get_holding(asset_id, account, broker)
-        if holding and holding.record_id and abs(holding.quantity) <= 1e-8:
-            if not self.client.delete_record('holdings', holding.record_id):
-                raise RuntimeError(f"Feishu holding delete was not confirmed: record_id={holding.record_id}")
-            self._invalidate_holding_cache(asset_id, account, holding.broker, flush_persistent=True)
+        if not confirmed:
+            self._invalidate_holding_account_cache(
+                target.identity.account,
+                flush_persistent=True,
+            )
+            raise RuntimeError(
+                "Feishu holding delete was not confirmed: "
+                f"record_id={target.base_record_id}"
+            )
+        self._prove_holding_deleted_and_publish(target.identity)
+        return True
 
     def delete_holding_by_record_id(self, record_id: str) -> bool:
-        """通过记录ID删除持仓"""
-        ok = self.client.delete_record('holdings', record_id)
-        if ok:
-            self._invalidate_holding_cache_by_record_id(record_id, flush_persistent=True)
-        return ok
+        """Compatibility delete that derives and verifies the complete identity."""
+        resolved_record_id = str(record_id or '').strip()
+        if not resolved_record_id:
+            raise ValueError("record_id is required")
+        raw = self.get_raw_holdings(record_id=resolved_record_id)
+        if len(raw) != 1:
+            raise RuntimeError(
+                f"holding delete lookup did not return one record: {resolved_record_id}"
+            )
+        holding = self._convert_raw_holdings(raw)[0]
+        identity = HoldingIdentity.from_holding(holding)
+        try:
+            fresh = self._read_fresh_holding_account_slice(identity.account)
+            current = self._find_holding_identity(fresh, identity)
+            if current is None or current.record_id != resolved_record_id:
+                raise HoldingMutationConflictError(
+                    f"holding delete base changed: {identity}"
+                )
+        except Exception:
+            self._invalidate_holding_account_cache(
+                identity.account,
+                flush_persistent=True,
+            )
+            raise
+        try:
+            confirmed = self.client.delete_record('holdings', resolved_record_id)
+        except Exception:
+            self._invalidate_holding_account_cache(
+                identity.account,
+                flush_persistent=True,
+            )
+            raise
+        if not confirmed:
+            self._invalidate_holding_account_cache(
+                identity.account,
+                flush_persistent=True,
+            )
+            raise RuntimeError(
+                f"Feishu holding delete was not confirmed: record_id={resolved_record_id}"
+            )
+        self._prove_holding_deleted_and_publish(identity)
+        return True
 
     def _holding_to_dict(self, holding: Holding) -> Dict:
         """Holding 转字典"""
+        holding = canonical_holding(holding)
         result = {
             'asset_id': holding.asset_id,
             'asset_name': holding.asset_name,
             'asset_type': holding.asset_type,
-            'broker': holding.broker or '',
+            'broker': holding.broker,
             'account': holding.account,
             'quantity': holding.quantity,
             'avg_cost': holding.avg_cost,
@@ -729,28 +1284,16 @@ class HoldingsRepository:
 
         return result
 
-    @staticmethod
-    def _validate_writable_holding(holding: Holding) -> None:
-        missing = [
-            field_name
-            for field_name in ('asset_id', 'account', 'broker', 'currency')
-            if not str(getattr(holding, field_name, '') or '').strip()
-        ]
-        if missing:
-            raise ValueError(
-                "missing required holdings fields: " + ", ".join(sorted(missing))
-            )
-        currency = str(holding.currency).strip().upper()
-        if not currency.isascii() or not currency.isalpha() or not 3 <= len(currency) <= 5:
-            raise ValueError(f"invalid currency: {holding.currency}")
-        if not isfinite(float(holding.quantity)):
-            raise ValueError(f"invalid quantity: {holding.quantity}")
-        if holding.avg_cost is not None and not isfinite(float(holding.avg_cost)):
-            raise ValueError(f"invalid avg_cost: {holding.avg_cost}")
-
     def _dict_to_holding(self, data: Dict) -> Holding:
         """Convert already validated fields without manufacturing defaults."""
-        required_text = ('asset_id', 'asset_type', 'account', 'broker', 'currency')
+        required_text = (
+            'asset_id',
+            'asset_name',
+            'asset_type',
+            'account',
+            'broker',
+            'currency',
+        )
         missing = [
             field
             for field in required_text
@@ -787,7 +1330,7 @@ class HoldingsRepository:
         return Holding(
             record_id=data.get('record_id'),
             asset_id=str(data['asset_id']).strip(),
-            asset_name=str(data.get('asset_name') or ''),
+            asset_name=str(data['asset_name']).strip(),
             asset_type=asset_type,
             broker=str(data['broker']).strip(),
             account=str(data['account']).strip(),

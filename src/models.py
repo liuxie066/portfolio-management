@@ -14,6 +14,7 @@ import uuid
 from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 from enum import Enum
+from math import isfinite
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 from typing import Optional, Dict, List, Any
 
@@ -101,6 +102,7 @@ class TransactionType(str, Enum):
 
 class Industry(str, Enum):
     """行业分类"""
+    AI = "AI"
     ZHONGGAI = "中概"
     CONSUMPTION = "消费"
     ENERGY = "能源"
@@ -228,26 +230,104 @@ class Transaction(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-class CashFlow(BaseModel):
-    """出入金记录
+class ArchivedTransaction(BaseModel):
+    """Strict observed row from the legacy read-only transactions table.
 
-    防重机制: dedup_key（内容指纹自动生成）
+    This model deliberately does not inherit from ``Transaction``. Archive
+    reads must preserve missing optional facts and must never activate the
+    writable model's amount calculation or BUY/CNY/zero defaults.
+    """
+
+    record_id: str
+    request_id: str
+    dedup_key: str
+
+    tx_date: date
+    tx_type: TransactionType
+    asset_id: str
+    account: str
+    quantity: float
+    price: float
+    currency: str
+
+    asset_name: Optional[str] = None
+    asset_type: Optional[str] = None
+    market: Optional[str] = None
+    amount: Optional[float] = None
+    fee: Optional[float] = None
+    remark: Optional[str] = None
+
+    @field_validator(
+        'record_id', 'request_id', 'dedup_key', 'asset_id', 'account', 'currency',
+        mode='before',
+    )
+    @classmethod
+    def require_nonblank_text(cls, value):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError('archive identity/core text must be nonblank')
+        return value
+
+    @field_validator('tx_date', mode='before')
+    @classmethod
+    def require_iso_text_date(cls, value):
+        if not isinstance(value, str):
+            raise ValueError('archive tx_date must be YYYY-MM-DD Text')
+        try:
+            parsed = date.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError('archive tx_date must be YYYY-MM-DD Text') from exc
+        if parsed.isoformat() != value:
+            raise ValueError('archive tx_date must be canonical YYYY-MM-DD Text')
+        return parsed
+
+    @field_validator('tx_type', mode='before')
+    @classmethod
+    def require_text_transaction_type(cls, value):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError('archive tx_type must be nonblank Text')
+        return value
+
+    @field_validator('quantity', 'price', 'amount', 'fee', mode='before')
+    @classmethod
+    def require_finite_number_when_present(cls, value):
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            raise ValueError('archive numeric facts must be finite numbers')
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError('archive numeric facts must be finite numbers') from exc
+        if not isfinite(parsed):
+            raise ValueError('archive numeric facts must be finite numbers')
+        return parsed
+
+    model_config = ConfigDict(from_attributes=True, frozen=True, extra='forbid')
+
+
+class CashFlow(BaseModel):
+    """出入金记录输运对象。
+
+    读取边界必须保留缺失状态，因此原始字段都允许 ``None``。
+    业务代码不应直接把本模型当作可写或可聚合事实；应先通过
+    ``CompletedCashFlowFacts`` 完成领域校验。
     """
     record_id: Optional[str] = None
     _was_replayed: bool = PrivateAttr(default=False)
     dedup_key: Optional[str] = Field(None, description="内容指纹，自动生成")
 
     # 核心字段
-    flow_date: date = Field(..., description="日期")
-    account: str = Field(..., description="账户")
-    broker: str = Field("", description="券商（现金目标的必选路由）")
-    amount: float = Field(..., description="金额(正数入金,负数出金)")
-    currency: str = Field(..., description="币种")
+    flow_date: Optional[date] = Field(None, description="日期")
+    account: Optional[str] = Field(None, description="账户")
+    broker: Optional[str] = Field(None, description="券商（现金目标的必选路由）")
+    amount: Optional[float] = Field(None, description="金额(正数入金,负数出金)")
+    currency: Optional[str] = Field(None, description="币种")
     cny_amount: Optional[float] = None
     exchange_rate: Optional[float] = None
-    flow_type: str = Field(..., description="DEPOSIT/WITHDRAW")
+    flow_type: Optional[str] = Field(None, description="DEPOSIT/WITHDRAW")
     source: Optional[str] = None
     remark: Optional[str] = None
+    updated_at: Optional[Any] = None
 
     @field_validator('amount', 'cny_amount', mode='before')
     @classmethod
@@ -460,5 +540,15 @@ def make_cf_dedup_key(cf: CashFlow) -> str:
     基于 (account, broker, flow_date, flow_type, amount, currency) 生成 SHA256 前16位。
     同一天、同金额、同币种的出入金会生成相同的 key。
     """
-    raw = f"{cf.account}|{cf.broker}|{cf.flow_date}|{cf.flow_type}|{cf.amount}|{cf.currency}"
-    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+    from src.domain.cash_flow_contracts import (
+        expected_cash_flow_dedup_key_from_values,
+    )
+
+    return expected_cash_flow_dedup_key_from_values(
+        flow_date=cf.flow_date,
+        account=cf.account,
+        broker=cf.broker,
+        amount=cf.amount,
+        currency=cf.currency,
+        flow_type=cf.flow_type,
+    )

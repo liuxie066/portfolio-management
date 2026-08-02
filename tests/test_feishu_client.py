@@ -1,27 +1,66 @@
 """测试飞书客户端"""
 import pytest
-from datetime import datetime
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 import json
 import os
 
+from src import config
+from src.feishu.errors import FeishuRecordNotFoundError
 from src.feishu_client import FeishuBatchWriteError, FeishuClient
+
+
+def _holding_create_fields(asset_id='000001', quantity=1, **overrides):
+    fields = {
+        'asset_id': str(asset_id),
+        'asset_name': f'Asset {asset_id}',
+        'asset_type': 'us_stock',
+        'account': 'lx',
+        'broker': 'IBKR',
+        'quantity': quantity,
+        'currency': 'USD',
+    }
+    fields.update(overrides)
+    return fields
+
+
+def _snapshot_create_fields(**overrides):
+    fields = {
+        'as_of': '2026-08-01',
+        'account': 'lx',
+        'asset_id': 'AAPL',
+        'broker': 'IBKR',
+        'quantity': 1,
+        'currency': 'USD',
+        'price': 200,
+        'cny_price': 1440,
+        'market_value_cny': 1440,
+        'dedup_key': 'lx:2026-08-01:IBKR:AAPL',
+    }
+    fields.update(overrides)
+    return fields
 
 
 class TestFeishuClientInitialization:
     """测试飞书客户端初始化"""
 
-    def test_init_with_env_vars(self):
+    def test_init_with_env_vars(self, tmp_path):
         """测试使用环境变量初始化"""
-        with patch.dict(os.environ, {
-            'FEISHU_BITABLE_APP_ID': 'test_app_id',
-            'FEISHU_BITABLE_APP_SECRET': 'test_secret',
-            'FEISHU_APP_TOKEN': 'test_token'
-        }):
-            client = FeishuClient()
-            assert client.app_id == 'test_app_id'
-            assert client.app_secret == 'test_secret'
-            assert client.default_app_token == 'test_token'
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("{}\n", encoding="utf-8")
+        try:
+            with patch.dict(os.environ, {
+                'PORTFOLIO_CONFIG_FILE': str(config_file),
+                'FEISHU_BITABLE_APP_ID': 'test_app_id',
+                'FEISHU_BITABLE_APP_SECRET': 'test_secret',
+                'FEISHU_APP_TOKEN': 'test_token'
+            }, clear=True):
+                config.reload_config()
+                client = FeishuClient()
+                assert client.app_id == 'test_app_id'
+                assert client.app_secret == 'test_secret'
+                assert client.default_app_token == 'test_token'
+        finally:
+            config.reload_config()
 
     def test_default_identity_uses_only_bitable_role(self):
         with patch("src.feishu_client.config.get") as config_get:
@@ -84,6 +123,15 @@ class TestFeishuClientInitialization:
             assert client.table_configs['holdings']['table_id'] == 'tbl1'
             assert client.table_configs['transactions']['app_token'] == 'base2'
             assert client.table_configs['transactions']['table_id'] == 'tbl2'
+
+    def test_retired_remote_price_cache_is_not_registered(self):
+        with patch.dict(os.environ, {
+            'FEISHU_APP_TOKEN': 'base_token',
+            'FEISHU_TABLE_PRICE_CACHE': 'tbl_prices',
+        }):
+            client = FeishuClient()
+
+        assert 'price_cache' not in client.table_configs
 
 
 class TestFeishuClientToken:
@@ -245,6 +293,57 @@ class TestFeishuClientRequest:
             client._request('POST', '/test/endpoint')
         assert '飞书 API 错误' in str(exc_info.value)
 
+    @patch('src.feishu_client.requests.Session.request')
+    @patch('src.feishu_client.FeishuClient._get_headers')
+    def test_request_maps_only_structured_record_not_found(self, mock_headers, mock_request):
+        mock_headers.return_value = {'Authorization': 'Bearer token'}
+        response = Mock(status_code=404)
+        response.json.return_value = {
+            'code': 1254043,
+            'msg': 'RecordIdNotFound',
+        }
+        response.raise_for_status = Mock(side_effect=AssertionError('must classify first'))
+        mock_request.return_value = response
+
+        client = FeishuClient(app_id='test', app_secret='test')
+
+        with pytest.raises(FeishuRecordNotFoundError) as exc_info:
+            client._request('GET', '/test/record')
+
+        assert exc_info.value.code == 1254043
+
+    @pytest.mark.parametrize(
+        ("payload", "message"),
+        [
+            ({}, "missing code"),
+            ({'data': {}}, "missing code"),
+            ({'code': None, 'data': {}}, "invalid code"),
+            ({'code': False, 'data': {}}, "invalid code"),
+            ({'code': 0.5, 'data': {}}, "invalid code"),
+            ({'code': '0', 'data': {}}, "invalid code"),
+            ({'code': 0}, "invalid data"),
+            ({'code': 0, 'data': []}, "invalid data"),
+        ],
+    )
+    @patch('src.feishu_client.requests.Session.request')
+    @patch('src.feishu_client.FeishuClient._get_headers')
+    def test_request_rejects_malformed_success_envelope(
+        self,
+        mock_headers,
+        mock_request,
+        payload,
+        message,
+    ):
+        mock_headers.return_value = {'Authorization': 'Bearer token'}
+        response = Mock(status_code=200)
+        response.json.return_value = payload
+        response.raise_for_status = Mock()
+        mock_request.return_value = response
+        client = FeishuClient(app_id='test', app_secret='test')
+
+        with pytest.raises(RuntimeError, match=message):
+            client._request('GET', '/test/endpoint')
+
     @patch('src.feishu_client.time.sleep')
     @patch('src.feishu_client.requests.Session.request')
     @patch('src.feishu_client.FeishuClient._get_headers')
@@ -359,7 +458,7 @@ class TestFeishuClientRecords:
         }
 
         client = FeishuClient(app_id='test', app_secret='test')
-        records = client.list_records('holdings', filter_str='asset_id = "000001"')
+        client.list_records('holdings', filter_str='asset_id = "000001"')
 
         # 验证_filter参数被正确传递
         call_args = mock_request.call_args
@@ -440,11 +539,13 @@ class TestFeishuClientRecords:
         mock_request.return_value = mock_response
 
         client = FeishuClient(app_id='test', app_secret='test')
-        result = client.create_record('holdings', {
-            'asset_id': '000001',
-            'account': '测试账户',
-            'quantity': 100
-        })
+        result = client.create_record(
+            'holdings',
+            _holding_create_fields(
+                account='测试账户',
+                quantity=100,
+            ),
+        )
 
         assert result['record_id'] == 'new_rec_123'
 
@@ -458,6 +559,76 @@ class TestFeishuClientRecords:
         with pytest.raises(ValueError) as exc_info:
             client.create_record('holdings', {'asset_name': '测试'})
         assert '缺少必填字段' in str(exc_info.value)
+        assert 'table=holdings operation=create' in str(exc_info.value)
+        mock_request.assert_not_called()
+
+    @patch('src.feishu_client.FeishuClient._request')
+    @patch('src.feishu_client.FeishuClient._get_table_config')
+    def test_single_and_batch_create_share_row_validation(self, mock_config, mock_request):
+        mock_config.return_value = ('app_token', 'table_id')
+        client = FeishuClient(app_id='test', app_secret='test')
+
+        with pytest.raises(ValueError) as single:
+            client.create_record('holdings', {'asset_id': '000001', 'quantity': 1})
+        with pytest.raises(ValueError) as batch:
+            client.batch_create_records('holdings', [{
+                'fields': {'asset_id': '000001', 'quantity': 1}
+            }])
+
+        assert '缺少必填字段: account' in str(single.value)
+        assert '缺少必填字段: account' in str(batch.value)
+        assert 'row_index=0' in str(batch.value)
+        mock_request.assert_not_called()
+
+    @patch('src.feishu_client.FeishuClient._request')
+    @patch('src.feishu_client.FeishuClient._get_table_config')
+    def test_single_and_batch_create_reject_blank_required_text(
+        self,
+        mock_config,
+        mock_request,
+    ):
+        mock_config.return_value = ('app_token', 'table_id')
+        client = FeishuClient(app_id='test', app_secret='test')
+        fields = _holding_create_fields(asset_name='   ')
+
+        with pytest.raises(ValueError, match='缺少必填字段: asset_name'):
+            client.create_record('holdings', fields)
+        with pytest.raises(ValueError, match='缺少必填字段: asset_name'):
+            client.batch_create_records('holdings', [{'fields': fields}])
+
+        mock_request.assert_not_called()
+
+    @patch('src.feishu_client.FeishuClient._request')
+    @patch('src.feishu_client.FeishuClient._get_table_config')
+    @pytest.mark.parametrize('missing_field', [
+        'account',
+        'asset_id',
+        'broker',
+        'price',
+        'cny_price',
+        'market_value_cny',
+        'dedup_key',
+    ])
+    def test_snapshot_single_and_batch_create_share_required_validation(
+        self,
+        mock_config,
+        mock_request,
+        missing_field,
+    ):
+        mock_config.return_value = ('app_token', 'table_id')
+        client = FeishuClient(app_id='test', app_secret='test')
+        fields = _snapshot_create_fields()
+        fields.pop(missing_field)
+
+        with pytest.raises(ValueError, match=f'缺少必填字段: {missing_field}'):
+            client.create_record('holdings_snapshot', fields)
+        with pytest.raises(ValueError, match=f'缺少必填字段: {missing_field}'):
+            client.batch_create_records(
+                'holdings_snapshot',
+                [{'fields': fields}],
+            )
+
+        mock_request.assert_not_called()
 
     @patch('src.feishu_client.FeishuClient._request')
     @patch('src.feishu_client.FeishuClient._get_table_config')
@@ -478,6 +649,35 @@ class TestFeishuClientRecords:
 
     @patch('src.feishu_client.FeishuClient._request')
     @patch('src.feishu_client.FeishuClient._get_table_config')
+    def test_update_record_preserves_explicit_null(self, mock_config, mock_request):
+        mock_config.return_value = ('app_token', 'table_id')
+        mock_request.return_value = {
+            'record': {'record_id': 'rec_123', 'fields': {'avg_cost': None}}
+        }
+        client = FeishuClient(app_id='test', app_secret='test')
+
+        client.update_record('holdings', 'rec_123', {'avg_cost': None})
+
+        assert mock_request.call_args.kwargs['json'] == {'fields': {'avg_cost': None}}
+
+    def test_transactions_transport_is_read_only(self):
+        client = FeishuClient(app_id='test', app_secret='test')
+
+        with pytest.raises(ValueError, match='read-only table'):
+            client.create_record('transactions', {
+                'tx_date': '2025-03-14',
+                'tx_type': 'BUY',
+                'asset_id': '000001',
+                'account': 'lx',
+                'quantity': 1,
+                'price': 1,
+                'currency': 'CNY',
+                'request_id': 'req',
+                'dedup_key': 'dedup',
+            })
+
+    @patch('src.feishu_client.FeishuClient._request')
+    @patch('src.feishu_client.FeishuClient._get_table_config')
     def test_delete_record(self, mock_config, mock_request):
         """测试删除记录"""
         mock_config.return_value = ('app_token', 'table_id')
@@ -486,7 +686,7 @@ class TestFeishuClientRecords:
         client = FeishuClient(app_id='test', app_secret='test')
         result = client.delete_record('holdings', 'rec_123')
 
-        assert result == True
+        assert result is True
 
     @patch('src.feishu_client.FeishuClient._request')
     @patch('src.feishu_client.FeishuClient._get_table_config')
@@ -544,8 +744,8 @@ class TestFeishuClientBatchOperations:
 
         client = FeishuClient(app_id='test', app_secret='test')
         records = [
-            {'fields': {'asset_id': '000001'}},
-            {'fields': {'asset_id': '000002'}}
+            {'fields': _holding_create_fields('000001', 1)},
+            {'fields': _holding_create_fields('000002', 2)},
         ]
         results = client.batch_create_records('holdings', records)
 
@@ -629,7 +829,9 @@ class TestFeishuClientBatchOperations:
         client = FeishuClient(app_id='test', app_secret='test')
 
         with pytest.raises(FeishuBatchWriteError) as exc_info:
-            client.batch_create_records('holdings', [{'fields': {'asset_id': '000001'}}])
+            client.batch_create_records('holdings', [{
+                'fields': _holding_create_fields('000001', 1)
+            }])
 
         assert exc_info.value.operation == 'create'
         assert exc_info.value.table_name == 'holdings'
@@ -643,7 +845,10 @@ class TestFeishuClientBatchOperations:
         first_chunk = {'records': [{'record_id': f'rec_{i}'} for i in range(500)]}
         mock_request.side_effect = [first_chunk, TimeoutError('read timeout')]
         client = FeishuClient(app_id='test', app_secret='test')
-        records = [{'fields': {'asset_id': str(i)}} for i in range(501)]
+        records = [
+            {'fields': _holding_create_fields(str(i), i)}
+            for i in range(501)
+        ]
 
         with pytest.raises(FeishuBatchWriteError) as exc_info:
             client.batch_create_records('holdings', records)

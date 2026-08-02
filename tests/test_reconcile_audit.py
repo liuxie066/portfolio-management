@@ -2,7 +2,7 @@ from datetime import date
 from unittest.mock import Mock
 
 from skill_api import PortfolioSkill
-from src.models import NAVHistory, CashFlow
+from src.models import NAVHistory
 
 
 def _nav(d, total, cash, stock, shares, nav, *, mtd=None, ytd=None, pnl=None, mtd_pnl=None, ytd_pnl=None):
@@ -36,7 +36,7 @@ def test_reconcile_marks_anomaly_for_inconsistent_total():
     skill = PortfolioSkill(account='lx')
     bad = _nav(date(2025, 3, 14), total=1200.0, cash=100.0, stock=1000.0, shares=1200.0, nav=1.0)
     skill.storage.get_nav_history = Mock(return_value=[bad])
-    skill.storage.get_cash_flows = Mock(return_value=[])
+    skill.storage.get_raw_cash_flows = Mock(return_value=[])
 
     result = skill.audit_nav_history_reconcile(write_report=False)
 
@@ -51,7 +51,7 @@ def test_reconcile_marks_exempt_for_initial_record_without_bases():
     skill = PortfolioSkill(account='lx')
     first = _nav(date(2025, 1, 2), total=1000.0, cash=100.0, stock=900.0, shares=1000.0, nav=1.0)
     skill.storage.get_nav_history = Mock(return_value=[first])
-    skill.storage.get_cash_flows = Mock(return_value=[])
+    skill.storage.get_raw_cash_flows = Mock(return_value=[])
     skill.portfolio._find_prev_month_end_nav = Mock(return_value=None)
     skill.portfolio._find_year_end_nav = Mock(return_value=None)
 
@@ -80,7 +80,7 @@ def test_reconcile_marks_ok_for_consistent_consecutive_record():
         ytd_pnl=None,
     )
     skill.storage.get_nav_history = Mock(return_value=[prev, curr])
-    skill.storage.get_cash_flows = Mock(return_value=[])
+    skill.storage.get_raw_cash_flows = Mock(return_value=[])
     skill.portfolio._find_prev_month_end_nav = Mock(return_value=prev)
     skill.portfolio._find_year_end_nav = Mock(return_value=None)
 

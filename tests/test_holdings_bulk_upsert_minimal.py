@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from src.domain.holding_mutations import HoldingMutationConflictError
 from src.feishu_storage import FeishuStorage
 from src.models import AssetType, Holding
 
@@ -128,16 +129,17 @@ def test_bulk_upsert_additive_preloads_once_per_account_and_batches_updates():
 
     result = storage.upsert_holdings_bulk(payload, mode='additive')
 
-    # Preload happens at most once per account involved (lx + sy)
-    assert len(client.list_records_calls) == 2
+    # Each account is read for planning, rebound immediately before write, and
+    # read again for proof.  No cache is accepted as mutation evidence.
+    assert len(client.list_records_calls) == 6
     assert all('CurrentValue.[account] = "' in (c.get('filter_str') or '') for c in client.list_records_calls)
 
-    # One batch_update call with 3 updates
+    # Repeated identities collapse to one absolute batch target.
     assert len(client.batch_update_records_calls) == 1
-    assert len(client.batch_update_records_calls[0]) == 3
+    assert len(client.batch_update_records_calls[0]) == 2
     for row in client.batch_update_records_calls[0]:
         _assert_canonical_holding_date(row['fields']['updated_at'])
-    assert result['updated'] == 3
+    assert result['updated'] == 2
     assert result['created'] == 0
 
     # cache updated with accumulated quantity snapshots
@@ -183,8 +185,8 @@ def test_bulk_upsert_replace_mixed_update_create_updates_caches():
 
     result = storage.upsert_holdings_bulk(payload, mode='replace')
 
-    # replace mode: no additional preloads after explicit preload
-    assert len(client.list_records_calls) == 1
+    # Explicit preload is cache-only; replace still uses plan/base/proof reads.
+    assert len(client.list_records_calls) == 4
 
     assert len(client.batch_update_records_calls) == 1
     assert len(client.batch_update_records_calls[0]) == 1
@@ -272,6 +274,24 @@ def test_bulk_replace_updates_and_clears_avg_cost_without_touching_manual_metada
             asset_type=AssetType.US_STOCK,
             account='lx',
             broker='富途',
+            quantity=9,
+            currency='USD',
+        )
+    ], mode='replace')
+
+    partial_fields = client.batch_update_records_calls[-1][0]['fields']
+    assert partial_fields['quantity'] == 9
+    assert 'avg_cost' not in partial_fields
+    cached = storage.get_holding('FUTU', 'lx', '富途')
+    assert cached.avg_cost == 100.25
+
+    storage.upsert_holdings_bulk([
+        Holding(
+            asset_id='FUTU',
+            asset_name='人工名称',
+            asset_type=AssetType.US_STOCK,
+            account='lx',
+            broker='富途',
             quantity=0,
             avg_cost=None,
             currency='USD',
@@ -285,3 +305,60 @@ def test_bulk_replace_updates_and_clears_avg_cost_without_touching_manual_metada
     assert cached.quantity == 0
     assert cached.avg_cost is None
     assert local_idx.items[key]['avg_cost'] is None
+
+
+def test_bulk_prewrite_conflict_invalidates_all_account_cache_layers():
+    class DriftBeforeWriteClient(StubBulkClient):
+        def list_records(self, *args, **kwargs):
+            if len(self.list_records_calls) == 2:
+                self._records[0]['fields']['quantity'] = 11
+            return super().list_records(*args, **kwargs)
+
+    client = DriftBeforeWriteClient(
+        initial_records=[
+            {
+                'record_id': 'rec_aapl',
+                'fields': {
+                    'asset_id': 'AAPL',
+                    'asset_name': 'Apple',
+                    'asset_type': 'us_stock',
+                    'account': 'lx',
+                    'broker': 'IBKR',
+                    'quantity': 10,
+                    'currency': 'USD',
+                },
+            }
+        ]
+    )
+    local_idx = StubLocalHoldingsIndexCache()
+    storage = FeishuStorage(client=client, local_holdings_index_cache=local_idx)
+    storage.preload_holdings_index(account='lx')
+    cache_key = storage._get_holding_cache_key('AAPL', 'lx', 'IBKR')
+    assert cache_key in storage._holding_fields_cache
+    assert cache_key in local_idx.items
+
+    try:
+        storage.upsert_holdings_bulk(
+            [
+                Holding(
+                    asset_id='AAPL',
+                    asset_name='Apple',
+                    asset_type=AssetType.US_STOCK,
+                    account='lx',
+                    broker='IBKR',
+                    quantity=5,
+                    currency='USD',
+                )
+            ],
+            mode='replace',
+        )
+    except HoldingMutationConflictError as exc:
+        assert 'bulk base changed' in str(exc)
+    else:
+        raise AssertionError('expected bulk prewrite conflict')
+
+    assert client.batch_update_records_calls == []
+    assert client.batch_create_records_calls == []
+    assert cache_key not in storage._holding_fields_cache
+    assert cache_key not in local_idx.items
+    assert local_idx.flush_calls >= 1

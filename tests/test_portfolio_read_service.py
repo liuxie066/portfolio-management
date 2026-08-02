@@ -122,6 +122,40 @@ def test_build_snapshot_passes_optional_run_quote_pool_to_valuation():
     )
 
 
+def test_build_snapshot_names_runtime_non_cash_and_regional_exposure_explicitly():
+    valuation = SimpleNamespace(
+        holdings=[],
+        total_value_cny=1000.0,
+        cash_value_cny=200.0,
+        stock_value_cny=700.0,
+        fund_value_cny=100.0,
+        cn_asset_value=500.0,
+        us_asset_value=200.0,
+        hk_asset_value=100.0,
+        cash_ratio=0.2,
+        stock_ratio=0.7,
+        fund_ratio=0.1,
+        warnings=[],
+    )
+    portfolio = SimpleNamespace(calculate_valuation=Mock(return_value=valuation))
+    service = PortfolioReadService(
+        account="lx",
+        storage=Mock(),
+        portfolio=portfolio,
+        reporting_service=Mock(),
+    )
+
+    result = service.build_snapshot()
+
+    holdings_data = result["holdings_data"]
+    assert holdings_data["stock_value"] == 800.0
+    assert holdings_data["non_cash_value"] == 800.0
+    assert holdings_data["fund_value"] == 100.0
+    assert holdings_data["cn_exposure_value"] == 500.0
+    assert holdings_data["us_exposure_value"] == 200.0
+    assert holdings_data["hk_exposure_value"] == 100.0
+
+
 def test_build_valuation_evidence_preserves_quote_and_fx_provenance():
     valuation = SimpleNamespace(
         holdings=[

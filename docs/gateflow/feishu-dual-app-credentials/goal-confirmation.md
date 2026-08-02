@@ -75,4 +75,3 @@ Secrets Manager implementation behind the same logical configuration contract.
 
 None. Real secrets will be rotated and provisioned only during a separately
 authorized deployment.
-

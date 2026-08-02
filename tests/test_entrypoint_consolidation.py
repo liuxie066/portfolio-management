@@ -5,6 +5,7 @@ import pytest
 from scripts import nav_history_repair
 from scripts import pm
 from scripts.migrate_schema import parse_docs_schema, run_schema_check, schema_expectations
+from src.feishu.contracts import TABLE_CONTRACTS
 
 
 def test_nav_history_repair_runs_backfill_module(monkeypatch):
@@ -67,6 +68,30 @@ def test_nav_history_repair_returns_nonzero_for_partial_result(monkeypatch):
     monkeypatch.setattr(patch, "run", lambda _args: {"success": False, "status": "partial"})
 
     assert nav_history_repair.main(["patch", "--patch-file", "audit/x.json", "--apply"]) == 1
+
+
+def test_nav_history_backfill_returns_nonzero_for_missing_evidence(monkeypatch):
+    from src.maintenance.nav_history_repair import backfill
+
+    monkeypatch.setattr(
+        backfill,
+        "run",
+        lambda _args: {
+            "success": False,
+            "status": "historical_evidence_required",
+        },
+    )
+
+    assert nav_history_repair.main([
+        "backfill",
+        "--account",
+        "lx",
+        "--from",
+        "2026-01-01",
+        "--to",
+        "2026-01-01",
+        "--dry-run",
+    ]) == 1
 
 
 def test_nav_history_repair_rejects_unknown_args():
@@ -147,16 +172,25 @@ def test_schema_check_does_not_block_on_missing_optional_tables(monkeypatch):
         }
 
         fields = {
-            "holdings": {"asset_id", "asset_name", "asset_type", "account", "broker", "quantity", "currency"},
-            "cash_flow": {
-                "flow_date", "account", "broker", "amount", "currency",
-                "flow_type", "cny_amount", "dedup_key",
-            },
-            "nav_history": {"date", "account", "total_value", "shares", "nav"},
-            "holdings_snapshot": {
-                "as_of", "account", "asset_id", "broker", "quantity",
-                "currency", "price", "cny_price", "market_value_cny", "dedup_key",
-            },
+            table_name: [
+                {
+                    "field_name": field.name,
+                    "type": field.type_id,
+                    "ui_type": field.ui_type,
+                    **(
+                        {"property": {"options": [
+                            {"name": option} for option in field.select_options
+                        ]}}
+                        if field.select_options
+                        else {}
+                    ),
+                }
+                for field in TABLE_CONTRACTS[table_name].fields
+                if field.schema_required
+            ]
+            for table_name in (
+                "holdings", "cash_flow", "nav_history", "holdings_snapshot",
+            )
         }
 
         def _get_table_config(self, table_name):
@@ -174,7 +208,7 @@ def test_schema_check_does_not_block_on_missing_optional_tables(monkeypatch):
                 "tbl_nav_history": "nav_history",
                 "tbl_snapshots": "holdings_snapshot",
             }[table_id]
-            return {"items": [{"field_name": name} for name in self.fields[table_name]]}
+            return {"items": self.fields[table_name], "has_more": False}
 
     monkeypatch.setattr("scripts.migrate_schema.FeishuClient", FakeClient)
 
@@ -185,4 +219,5 @@ def test_schema_check_does_not_block_on_missing_optional_tables(monkeypatch):
     assert result["all_ok"] is False
     assert result["tables"]["transactions"]["configured"] is False
     assert result["tables"]["transactions"]["blocking"] is False
-    assert result["tables"]["transactions"]["ok"] is True
+    assert result["tables"]["transactions"]["status"] == "skipped_unconfigured"
+    assert result["tables"]["transactions"]["ok"] is None

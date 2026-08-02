@@ -42,7 +42,7 @@ class _CashFlowStorage:
             "currency": self.currency,
             "exchange_rate": rate,
             "cny_amount": "100" if self.currency == "CNY" else "720",
-            "source_hash": "hash-1",
+            "generated_fingerprint": "fingerprint-1" if self.complete else None,
             "source": "manual",
             "updated_at": "2026-07-31T23:30:00",
             "status": "error" if self.error else "ok",
@@ -101,7 +101,7 @@ def _record_valid_fx(store):
     store.record_fx_confirmation(
         confirmation_id="fx-1",
         record_id="rec-cf-1",
-        source_hash="hash-1",
+        source_hash="fingerprint-1",
         exchange_rate="7.20",
         exchange_rate_date="2026-07-31",
         exchange_rate_source="provider:example",
@@ -194,22 +194,22 @@ def test_foreign_row_without_confirmation_requires_attention(tmp_path):
     assert all(call["dry_run"] for call in storage.calls)
 
 
-def test_matching_foreign_confirmation_allows_safe_exact_record_apply(tmp_path):
-    storage = _CashFlowStorage(currency="USD")
+def test_matching_foreign_confirmation_allows_completed_foreign_row(tmp_path):
+    storage = _CashFlowStorage(currency="USD", complete=True)
     service = _service(tmp_path, storage)
     _record_valid_fx(service.operation_store)
 
     result = service.process_record(record_id="rec-cf-1", trigger=_trigger())
 
-    assert result["status"] == "completed"
+    assert result["status"] == "already_complete"
     assert result["currency"] == "USD"
-    assert any(call["dry_run"] is False for call in storage.calls)
+    assert all(call["dry_run"] is True for call in storage.calls)
 
 
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("source_hash", "hash-changed"),
+        ("generated_fingerprint", "fingerprint-changed"),
         ("amount", "101"),
     ],
 )

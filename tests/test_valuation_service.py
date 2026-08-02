@@ -4,6 +4,7 @@ import pytest
 
 from src.app.valuation_service import ValuationService
 from src.app.run_quote_pool import RunQuotePool
+from src.domain.snapshot_contracts import attached_normalized_valuation, digest_payload
 from src.models import AssetClass, AssetType, Holding
 from src.portfolio import PortfolioManager
 
@@ -52,7 +53,55 @@ def test_valuation_service_uses_explicit_holdings_without_storage_reread():
 
     storage.get_holdings.assert_not_called()
     assert result.total_value_cny == 10
-    assert result.holdings is supplied or result.holdings[0] is supplied[0]
+    assert result.holdings[0] is not supplied[0]
+    assert supplied[0].market_value_cny is None
+    assert result.holdings[0].market_value_cny == 10
+
+
+def test_valuation_service_excludes_zero_rows_with_digest_provenance():
+    storage = Mock()
+    storage.get_total_shares.return_value = 10
+    fetcher = Mock()
+    fetcher.fetch_batch.return_value = {}
+    supplied = [
+        Holding(
+            asset_id="ZERO",
+            asset_name="Zero",
+            asset_type=AssetType.A_STOCK,
+            account="a",
+            broker="IBKR",
+            quantity=0,
+            currency="CNY",
+            asset_class=AssetClass.CN_ASSET,
+        ),
+        Holding(
+            asset_id="CNY-CASH",
+            asset_name="Cash",
+            asset_type=AssetType.CASH,
+            account="a",
+            broker="IBKR",
+            quantity=10,
+            currency="CNY",
+            asset_class=AssetClass.CASH,
+        ),
+    ]
+    service = ValuationService(
+        manager=_manager(storage, fetcher),
+        storage=storage,
+        price_fetcher=fetcher,
+    )
+
+    result = service.calculate_valuation("a", holdings=supplied)
+    normalized = attached_normalized_valuation(result)
+
+    assert normalized is not None
+    assert normalized.official_eligible is True
+    assert [row.asset_id for row in normalized.rows] == ["CNY-CASH"]
+    assert normalized.excluded_zero_count == 1
+    assert normalized.excluded_zero_key_digest == digest_payload([
+        "a:IBKR:ZERO"
+    ])
+    assert [holding.asset_id for holding in result.holdings] == ["CNY-CASH"]
 
 
 def test_valuation_service_values_holdings_with_prices():

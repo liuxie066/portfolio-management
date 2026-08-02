@@ -7,7 +7,12 @@ from decimal import Decimal
 from typing import Any
 
 from src.asset_utils import normalize_code
-from src.models import AssetClass, AssetType, PortfolioValuation
+from src.domain.snapshot_contracts import (
+    NormalizedValuationRow,
+    NormalizedValuationSnapshot,
+    normalize_quantity,
+)
+from src.models import AssetType, PortfolioValuation
 from src.pricing.payload import positive_finite_decimal
 from src.reporting_utils import normalize_holding_type
 
@@ -38,7 +43,43 @@ class ValuationService:
         price_snapshot: Mapping[str, Any] | None = None,
         price_warnings: Sequence[str] | None = None,
         total_shares: Any = None,
+        holdings_provenance: Mapping[str, Any] | None = None,
     ) -> PortfolioValuation:
+        normalized = self.calculate_normalized_valuation(
+            account=account,
+            fetch_prices=fetch_prices,
+            price_timeout_seconds=price_timeout_seconds,
+            allow_stale_price_fallback=allow_stale_price_fallback,
+            price_market_closed_ttl_multiplier=(
+                price_market_closed_ttl_multiplier
+            ),
+            run_quote_pool=run_quote_pool,
+            supplemental_codes=supplemental_codes,
+            deadline=deadline,
+            holdings=holdings,
+            price_snapshot=price_snapshot,
+            price_warnings=price_warnings,
+            total_shares=total_shares,
+            holdings_provenance=holdings_provenance,
+        )
+        return normalized.to_portfolio_valuation()
+
+    def calculate_normalized_valuation(
+        self,
+        account: str,
+        fetch_prices: bool = True,
+        price_timeout_seconds: int = 25,
+        allow_stale_price_fallback: bool = True,
+        price_market_closed_ttl_multiplier: float = 1.0,
+        run_quote_pool: Any = None,
+        supplemental_codes: list[str] | None = None,
+        deadline: float | None = None,
+        holdings: Sequence[Any] | None = None,
+        price_snapshot: Mapping[str, Any] | None = None,
+        price_warnings: Sequence[str] | None = None,
+        total_shares: Any = None,
+        holdings_provenance: Mapping[str, Any] | None = None,
+    ) -> NormalizedValuationSnapshot:
         account_holdings = (
             list(holdings)
             if holdings is not None
@@ -52,14 +93,18 @@ class ValuationService:
             )
         )
         if not account_holdings and not supplemental:
-            return PortfolioValuation(
+            return NormalizedValuationSnapshot._from_valuation_service(
                 account=account,
-                total_value_cny=0,
+                rows=(),
+                shares=total_shares,
+                holdings_provenance=holdings_provenance,
                 warnings=[
                     str(value)
                     for value in (price_warnings or [])
                     if str(value).strip()
                 ],
+                excluded_zero_keys=(),
+                source_provenance={"price_mode": "empty"},
             )
 
         prices: dict[str, Any] = dict(price_snapshot or {})
@@ -93,13 +138,8 @@ class ValuationService:
                 price_lookup.setdefault(upper, payload)
                 price_lookup.setdefault(normalize_code(upper), payload)
 
-        total_value_cny = Decimal("0")
-        cash_value_cny = Decimal("0")
-        stock_value_cny = Decimal("0")
-        fund_value_cny = Decimal("0")
-        cn_asset_value = Decimal("0")
-        us_asset_value = Decimal("0")
-        hk_asset_value = Decimal("0")
+        normalized_rows: list[NormalizedValuationRow] = []
+        excluded_zero_keys: list[str] = []
         price_meta = {
             "from_cache": 0,
             "from_realtime": 0,
@@ -110,6 +150,18 @@ class ValuationService:
 
         for holding in account_holdings:
             holding_code = str(holding.asset_id).strip()
+            quantity_dec = normalize_quantity(holding.quantity)
+            if quantity_dec == 0:
+                excluded_zero_keys.append(
+                    ":".join(
+                        (
+                            account,
+                            str(holding.broker or "").strip(),
+                            holding_code,
+                        )
+                    )
+                )
+                continue
             price = (
                 price_lookup.get(holding.asset_id)
                 or price_lookup.get(holding_code.upper())
@@ -128,7 +180,6 @@ class ValuationService:
                 if warning not in normalization_warnings:
                     normalization_warnings.append(warning)
 
-            quantity_dec = self.manager._to_decimal(holding.quantity)
             valid_price = False
             price_dec = None
             cny_price_dec = None
@@ -157,10 +208,6 @@ class ValuationService:
                 if isinstance(price, dict) and price.get("is_from_run_pool"):
                     price_meta["run_reused"] += 1
 
-                holding.current_price = float(price_dec)
-                holding.cny_price = float(cny_price_dec)
-                market_value_dec = self.manager._quantize_money(quantity_dec * cny_price_dec)
-                holding.market_value_cny = float(market_value_dec)
             else:
                 price_meta["missing"] += 1
                 can_use_unit_price = currency == "CNY" and raw_type in (
@@ -168,48 +215,40 @@ class ValuationService:
                     AssetType.MMF.value,
                 )
                 if can_use_unit_price:
-                    holding.current_price = 1.0
-                    holding.cny_price = 1.0
-                    market_value_dec = self.manager._quantize_money(quantity_dec)
-                    holding.market_value_cny = float(market_value_dec)
+                    price_dec = Decimal("1")
+                    cny_price_dec = Decimal("1")
                 else:
-                    holding.current_price = None
-                    holding.cny_price = None
-                    market_value_dec = Decimal("0")
-                    holding.market_value_cny = None
+                    price_dec = None
+                    cny_price_dec = None
                     if normalized_type == "cash" and currency != "CNY":
                         price_errors.append(f"{holding.asset_name}({holding.asset_id}): 无法获取汇率")
                     elif holding.quantity != 0:
                         price_errors.append(f"{holding.asset_name}({holding.asset_id}): 价格缺失，无法可靠估值")
 
-            total_value_cny += market_value_dec
-            if normalized_type == "cash":
-                cash_value_cny += market_value_dec
-            elif normalized_type == "fund":
-                fund_value_cny += market_value_dec
-            else:
-                stock_value_cny += market_value_dec
-
-            if holding.asset_class == AssetClass.CN_ASSET:
-                cn_asset_value += market_value_dec
-            elif holding.asset_class == AssetClass.US_ASSET:
-                us_asset_value += market_value_dec
-            elif holding.asset_class == AssetClass.HK_ASSET:
-                hk_asset_value += market_value_dec
-
-        for holding in account_holdings:
-            if total_value_cny > 0 and holding.market_value_cny is not None:
-                weight_dec = self.manager._to_decimal(holding.market_value_cny) / total_value_cny
-                holding.weight = float(self.manager._quantize_weight(weight_dec))
+            normalized_rows.append(
+                NormalizedValuationRow.from_holding(
+                    holding,
+                    account=account,
+                    normalized_type=normalized_type,
+                    price=price_dec,
+                    cny_price=cny_price_dec,
+                    source=(
+                        str(self._price_field(price, "source", "record_nav"))
+                        if price
+                        else (
+                            "fixed_identity"
+                            if price_dec is not None
+                            else "missing_price"
+                        )
+                    ),
+                )
+            )
 
         resolved_total_shares = (
             self.storage.get_total_shares(account)
             if total_shares is None
             else total_shares
         )
-        total_shares_dec = self.manager._to_decimal(resolved_total_shares)
-        nav = float(self.manager._quantize_nav(total_value_cny / total_shares_dec)) if total_shares_dec > 0 else None
-
         warnings = [*normalization_warnings, *price_errors]
         tencent_meta = getattr(self.price_fetcher, "_last_tencent_batch_meta", None) if self.price_fetcher else None
         extra = ""
@@ -225,24 +264,22 @@ class ValuationService:
             f"run_reused={price_meta['run_reused']}" + extra
         )
 
-        return PortfolioValuation(
+        return NormalizedValuationSnapshot._from_valuation_service(
             account=account,
-            total_value_cny=float(self.manager._quantize_money(total_value_cny)),
-            cash_value_cny=float(self.manager._quantize_money(cash_value_cny)),
-            stock_value_cny=float(self.manager._quantize_money(stock_value_cny)),
-            fund_value_cny=float(self.manager._quantize_money(fund_value_cny)),
-            cn_asset_value=float(self.manager._quantize_money(cn_asset_value)),
-            us_asset_value=float(self.manager._quantize_money(us_asset_value)),
-            hk_asset_value=float(self.manager._quantize_money(hk_asset_value)),
+            rows=normalized_rows,
             shares=resolved_total_shares,
-            nav=nav,
-            holdings=account_holdings,
             price_evidence={
                 str(code): dict(payload)
                 for code, payload in prices.items()
                 if isinstance(payload, dict)
             },
+            holdings_provenance=holdings_provenance,
             warnings=warnings,
+            excluded_zero_keys=excluded_zero_keys,
+            source_provenance={
+                "fetch_prices": bool(fetch_prices),
+                "price_snapshot_supplied": price_snapshot is not None,
+            },
         )
 
     def fetch_price_snapshot(

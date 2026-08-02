@@ -6,11 +6,13 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
+import pytest
 from pytest import MonkeyPatch
 
 from src import config
 from src.app import FutuBalanceSnapshot, FutuBalanceSyncService
 from src.app.futu_balance_sync_service import FutuOpenApiBalanceProvider
+from src.domain.holding_mutations import HoldingTarget
 from src.models import AssetType, Holding
 from skill_api import PortfolioSkill
 
@@ -39,6 +41,12 @@ class FakeStorage:
     def get_holding(self, asset_id, account, broker=None):
         return self.holdings.get((asset_id, account, broker))
 
+    def get_holding_fresh(self, asset_id, account, broker):
+        holding = self.holdings.get((asset_id, account, broker))
+        if holding is not None and not holding.record_id:
+            holding.record_id = f"rec_{asset_id}_{account}_{broker}"
+        return holding
+
     def update_holding_quantity(self, asset_id, account, quantity_change, broker=None):
         self.updates.append((asset_id, account, quantity_change, broker))
         holding = self.holdings[(asset_id, account, broker)]
@@ -49,6 +57,33 @@ class FakeStorage:
         self.holdings[(holding.asset_id, holding.account, holding.broker)] = holding
         return holding
 
+    def replace_holding(self, target):
+        assert isinstance(target, HoldingTarget)
+        key = (
+            target.identity.asset_id,
+            target.identity.account,
+            target.identity.broker,
+        )
+        current = self.holdings.get(key)
+        replacement = target.to_holding(
+            record_id=(
+                current.record_id
+                if current is not None
+                else f"rec_{target.identity.asset_id}_{target.identity.account}"
+            )
+        )
+        if current is None:
+            self.creates.append(replacement)
+        else:
+            self.updates.append((
+                replacement.asset_id,
+                replacement.account,
+                replacement.quantity - current.quantity,
+                replacement.broker,
+            ))
+        self.holdings[key] = replacement
+        return replacement
+
 
 class FakeReplaceStorage(FakeStorage):
     def __init__(self):
@@ -57,6 +92,8 @@ class FakeReplaceStorage(FakeStorage):
 
     def replace_holding(self, holding):
         self.replacements.append(holding)
+        if isinstance(holding, HoldingTarget):
+            return super().replace_holding(holding)
         existing = self.holdings.get((holding.asset_id, holding.account, holding.broker))
         holding.record_id = getattr(existing, "record_id", None)
         self.holdings[(holding.asset_id, holding.account, holding.broker)] = holding
@@ -381,10 +418,19 @@ class FakePortfolioStorage:
     def __init__(self, holdings=None):
         self.holdings = list(holdings or [])
         self.bulk_calls = []
+        self.fresh_reads = 0
 
     def get_holdings(self, account=None, include_empty=False, asset_type=None):
         rows = [h for h in self.holdings if account is None or h.account == account]
         return rows if include_empty else [h for h in rows if h.quantity > 0]
+
+    def get_holdings_fresh(self, account=None, include_empty=False, asset_type=None):
+        self.fresh_reads += 1
+        return self.get_holdings(
+            account=account,
+            include_empty=include_empty,
+            asset_type=asset_type,
+        )
 
     def get_holding(self, asset_id, account, broker=None):
         for holding in self.holdings:
@@ -406,6 +452,7 @@ def _position(
     position_side="LONG",
     currency="USD",
     market="US",
+    currency_explicit=True,
 ):
     from src.app.futu_balance_sync_service import FutuPositionSnapshot
 
@@ -419,6 +466,7 @@ def _position(
         market=market,
         position_side=position_side,
         raw_code=code,
+        currency_explicit=currency_explicit,
     )
 
 
@@ -461,6 +509,324 @@ def test_position_snapshot_marks_market_currency_fallback_as_non_authoritative()
 
     assert snapshot.currency == "HKD"
     assert snapshot.currency_explicit is False
+
+
+@pytest.mark.parametrize(
+    ("raw_quantity", "expected_state"),
+    [
+        ("", "missing"),
+        ("N/A", "missing"),
+        ("not-a-number", "invalid"),
+        ("NaN", "invalid"),
+        ("Inf", "invalid"),
+        ("1e10000", "invalid"),
+        ("1,2", "invalid"),
+        ("10,,5", "invalid"),
+        ("1_0", "invalid"),
+    ],
+)
+def test_position_snapshot_preserves_invalid_and_missing_quantity_state(
+    raw_quantity,
+    expected_state,
+):
+    snapshot = FutuOpenApiBalanceProvider()._position_snapshot(
+        {
+            "code": "US.BAD",
+            "stock_name": "Bad row",
+            "qty": raw_quantity,
+            "average_cost": 1,
+            "currency": "USD",
+            "position_side": "LONG",
+        },
+        "STOCK",
+    )
+
+    assert snapshot.quantity is None
+    assert snapshot.quantity_fact.state.value == expected_state
+
+
+@pytest.mark.parametrize("invalid_quantity", ["", "N/A", "NaN", "Inf", "1,2"])
+def test_mixed_valid_and_invalid_quantity_blocks_the_complete_slice_before_write(
+    invalid_quantity,
+):
+    storage = FakePortfolioStorage([
+        Holding(
+            asset_id="BAD",
+            asset_name="Existing",
+            asset_type=AssetType.US_STOCK,
+            account="lx",
+            broker="富途",
+            quantity=7,
+            avg_cost=10,
+            currency="USD",
+        )
+    ])
+    service = FutuBalanceSyncService(
+        storage,
+        FakePortfolioProvider([
+            _position(code="US.FUTU", quantity=1),
+            _position(code="US.BAD", quantity=invalid_quantity),
+        ]),
+    )
+
+    result = service.sync_portfolio(
+        account="lx",
+        dry_run=False,
+        confirm=True,
+    )
+
+    assert result["success"] is False
+    assert "quantity_" in result["error"]
+    assert storage.fresh_reads == 0
+    assert storage.bulk_calls == []
+
+
+def test_explicit_zero_closes_position_and_clears_average_cost():
+    existing = Holding(
+        record_id="rec_futu",
+        asset_id="FUTU",
+        asset_name="Manual name",
+        asset_type=AssetType.US_STOCK,
+        account="lx",
+        broker="富途",
+        quantity=10,
+        avg_cost=100,
+        currency="USD",
+        asset_class="中国资产",
+        tag=["manual"],
+    )
+    storage = FakePortfolioStorage([existing])
+    result = FutuBalanceSyncService(
+        storage,
+        FakePortfolioProvider([
+            _position(quantity=0, average_cost="N/A"),
+        ]),
+    ).sync_portfolio(account="lx", dry_run=False, confirm=True)
+
+    assert result["success"] is True
+    assert result["positions"][0]["action"] == "zero"
+    replacement = storage.bulk_calls[0][0][0]
+    assert replacement.quantity == 0
+    assert replacement.avg_cost is None
+    assert replacement.asset_class.value == "中国资产"
+    assert replacement.tag == ["manual"]
+
+
+def test_new_position_requires_explicit_provider_currency_but_existing_preserves_it():
+    missing_currency = _position(
+        code="HK.00700",
+        currency="",
+        market="HK",
+        currency_explicit=False,
+    )
+    new_storage = FakePortfolioStorage()
+
+    blocked = FutuBalanceSyncService(
+        new_storage,
+        FakePortfolioProvider([missing_currency]),
+    ).sync_portfolio(account="lx", dry_run=False, confirm=True)
+
+    assert blocked["success"] is False
+    assert "explicit Futu currency required" in blocked["error"]
+    assert new_storage.bulk_calls == []
+
+    current = Holding(
+        record_id="rec_tencent",
+        asset_id="00700",
+        asset_name="Manual Tencent",
+        asset_type=AssetType.HK_STOCK,
+        account="lx",
+        broker="富途",
+        quantity=8,
+        avg_cost=290,
+        currency="HKD",
+        asset_class="中国资产",
+    )
+    existing_storage = FakePortfolioStorage([current])
+    applied = FutuBalanceSyncService(
+        existing_storage,
+        FakePortfolioProvider([missing_currency]),
+    ).sync_portfolio(account="lx", dry_run=False, confirm=True)
+
+    assert applied["success"] is True
+    replacement = existing_storage.bulk_calls[0][0][0]
+    assert replacement.currency == "HKD"
+    assert replacement.asset_class.value == "中国资产"
+
+
+@pytest.mark.parametrize(
+    "invalid_currency",
+    ["??", "USDD", "BAD", "NAN", 0, False],
+)
+def test_invalid_explicit_provider_currency_blocks_complete_slice(invalid_currency):
+    storage = FakePortfolioStorage()
+    result = FutuBalanceSyncService(
+        storage,
+        FakePortfolioProvider([
+            _position(currency=invalid_currency, currency_explicit=True),
+        ]),
+    ).sync_portfolio(account="lx", dry_run=False, confirm=True)
+
+    assert result["success"] is False
+    assert "currency_invalid" in result["error"]
+    assert storage.fresh_reads == 0
+    assert storage.bulk_calls == []
+
+
+@pytest.mark.parametrize("invalid_cost", ["1,2", "NaN", "Inf"])
+def test_invalid_average_cost_blocks_complete_slice_before_diff(invalid_cost):
+    storage = FakePortfolioStorage()
+    result = FutuBalanceSyncService(
+        storage,
+        FakePortfolioProvider([_position(average_cost=invalid_cost)]),
+    ).sync_portfolio(account="lx", dry_run=False, confirm=True)
+
+    assert result["success"] is False
+    assert "average_cost_invalid" in result["error"]
+    assert storage.fresh_reads == 0
+    assert storage.bulk_calls == []
+
+
+def test_missing_position_side_is_unknown_not_long_default():
+    from src.app.futu_balance_sync_service import FutuPositionSnapshot
+
+    position = FutuPositionSnapshot(
+        asset_id="FUTU",
+        asset_name="Futu Holdings",
+        security_type="STOCK",
+        quantity=1,
+        average_cost=100,
+        currency="USD",
+        market="US",
+        raw_code="US.FUTU",
+    )
+    storage = FakePortfolioStorage()
+
+    result = FutuBalanceSyncService(
+        storage,
+        FakePortfolioProvider([position]),
+    ).sync_portfolio(account="lx", dry_run=False, confirm=True)
+
+    assert result["success"] is False
+    assert "position_side_unknown" in result["error"]
+    assert storage.fresh_reads == 0
+    assert storage.bulk_calls == []
+
+
+def test_missing_market_is_not_defaulted_to_us_before_source_validation():
+    position = FutuOpenApiBalanceProvider()._position_snapshot(
+        {
+            "code": "FUTU",
+            "stock_name": "Futu Holdings",
+            "qty": 1,
+            "average_cost": 100,
+            "currency": "USD",
+            "position_side": "LONG",
+            "position_market": "",
+        },
+        "STOCK",
+    )
+    storage = FakePortfolioStorage()
+
+    result = FutuBalanceSyncService(
+        storage,
+        FakePortfolioProvider([position]),
+    ).sync_portfolio(account="lx", dry_run=False, confirm=True)
+
+    assert position.market == ""
+    assert result["success"] is False
+    assert "market_missing" in result["error"]
+    assert storage.fresh_reads == 0
+    assert storage.bulk_calls == []
+
+
+def test_absent_position_with_invalid_existing_currency_cannot_be_zeroed():
+    storage = FakePortfolioStorage([
+        Holding(
+            asset_id="OLD",
+            asset_name="Old holding",
+            asset_type=AssetType.US_STOCK,
+            account="lx",
+            broker="富途",
+            quantity=3,
+            avg_cost=10,
+            currency="BAD",
+        )
+    ])
+    result = FutuBalanceSyncService(
+        storage,
+        FakePortfolioProvider([_position(code="US.FUTU")]),
+    ).sync_portfolio(account="lx", dry_run=False, confirm=True)
+
+    assert result["success"] is False
+    assert "existing holding currency is invalid: OLD" in result["error"]
+    assert storage.bulk_calls == []
+
+
+def test_unsupported_stock_market_fails_source_validation_before_diff_read():
+    storage = FakePortfolioStorage()
+    result = FutuBalanceSyncService(
+        storage,
+        FakePortfolioProvider([
+            _position(code="SG.D05", currency="USD", market="SG"),
+        ]),
+    ).sync_portfolio(account="lx", dry_run=False, confirm=True)
+
+    assert result["success"] is False
+    assert "market_unsupported" in result["error"]
+    assert storage.fresh_reads == 0
+    assert storage.bulk_calls == []
+
+
+@pytest.mark.parametrize(
+    ("position", "expected_asset_class"),
+    [
+        (
+            _position(
+                code="HK.02800",
+                security_type="ETF",
+                currency="HKD",
+                market="HK",
+            ),
+            None,
+        ),
+        (
+            _position(
+                code="US.KWEB",
+                security_type="ETF",
+                currency="USD",
+                market="US",
+            ),
+            None,
+        ),
+        (
+            _position(
+                code="SH.600519",
+                security_type="STOCK",
+                currency="CNY",
+                market="SH",
+            ),
+            "中国资产",
+        ),
+    ],
+)
+def test_new_position_asset_class_uses_economic_exposure_authority(
+    position,
+    expected_asset_class,
+):
+    storage = FakePortfolioStorage()
+    result = FutuBalanceSyncService(
+        storage,
+        FakePortfolioProvider([position]),
+    ).sync_portfolio(account="lx", dry_run=False, confirm=True)
+
+    assert result["success"] is True
+    replacement = storage.bulk_calls[0][0][0]
+    assert (
+        replacement.asset_class.value
+        if replacement.asset_class is not None
+        else None
+    ) == expected_asset_class
 
 
 def test_sync_portfolio_detects_cost_only_change_and_preserves_manual_metadata():
@@ -656,6 +1022,10 @@ def test_sync_portfolio_holds_account_lock_across_diff_and_all_writes(monkeypatc
         def get_holding(self, *args, **kwargs):
             assert state["locked"] is True
             return super().get_holding(*args, **kwargs)
+
+        def get_holdings_fresh(self, *args, **kwargs):
+            assert state["locked"] is True
+            return super().get_holdings_fresh(*args, **kwargs)
 
         def upsert_holdings_bulk(self, *args, **kwargs):
             assert state["locked"] is True

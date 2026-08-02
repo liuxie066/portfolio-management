@@ -3,6 +3,7 @@
 from datetime import date
 from typing import Any, Dict, List, Optional
 
+from ..domain.cash_flow_contracts import CompletedCashFlowFacts, RawCashFlowRecord
 from ..models import CashFlow
 from .repositories.cash_flow_repository import CashFlowRepository
 
@@ -21,11 +22,22 @@ class CashFlowMixin:
             self._cash_flow_repository = repo
         return repo
 
-    def add_cash_flow(self, cf: CashFlow) -> CashFlow:
-        return self.cash_flow.add_cash_flow(cf)
+    def add_cash_flow(self, facts: CompletedCashFlowFacts) -> CashFlow:
+        return self.cash_flow.add_cash_flow(facts)
 
     def get_cash_flow(self, record_id: str) -> Optional[CashFlow]:
         return self.cash_flow.get_cash_flow(record_id)
+
+    def get_raw_cash_flows(
+        self,
+        *,
+        account: Optional[str] = None,
+        record_id: Optional[str] = None,
+    ) -> List[RawCashFlowRecord]:
+        return self.cash_flow.get_raw_cash_flows(
+            account=account,
+            record_id=record_id,
+        )
 
     def preload_cash_flow_aggs(
         self,
@@ -117,8 +129,11 @@ class CashFlowMixin:
     def _invalidate_cash_flow_agg_cache(self, accounts: set[str]):
         return self.cash_flow._invalidate_cash_flow_agg_cache(accounts)
 
-    def _cash_flow_to_dict(self, cf: CashFlow) -> Dict[str, Any]:
-        return self.cash_flow._cash_flow_to_dict(cf)
+    def _cash_flow_to_dict(
+        self,
+        facts: CompletedCashFlowFacts,
+    ) -> Dict[str, Any]:
+        return self.cash_flow._cash_flow_to_dict(facts)
 
     def _dict_to_cash_flow(self, data: Dict[str, Any]) -> CashFlow:
         return self.cash_flow._dict_to_cash_flow(data)

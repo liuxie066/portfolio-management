@@ -5,9 +5,22 @@ from datetime import date
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+from src.domain.snapshot_contracts import (
+    NormalizedValuationRow,
+    NormalizedValuationSnapshot,
+    SnapshotWriteAuthority,
+)
 from src.models import AssetClass, AssetType, Holding
 from src.portfolio import PortfolioManager
 from src.service import PortfolioService
+
+
+class _CashFlowDatasetStub:
+    def __init__(self, fingerprint: str):
+        self.fingerprint = fingerprint
+
+    def details(self):
+        return {"financial_fingerprint": self.fingerprint}
 
 
 def test_portfolio_service_generate_report_uses_direct_app_service():
@@ -523,11 +536,22 @@ def test_portfolio_service_get_cash_uses_direct_cash_service():
 
 
 def test_portfolio_service_record_nav_uses_direct_portfolio_path():
-    valuation = SimpleNamespace(warnings=["price warning"])
-    snapshot = {"valuation": valuation, "snapshot_time": "2026-05-23T12:00:00"}
+    normalized, valuation = _wiring_valuation(
+        account="alice",
+        cash_value=234.5,
+        stock_value=1000.0,
+        warnings=("price warning",),
+    )
+    snapshot = {
+        "normalized_valuation": normalized,
+        "valuation": valuation,
+        "snapshot_time": "2026-05-23T12:00:00",
+    }
     nav_record = SimpleNamespace(nav=1.2345, total_value=1234.5, shares=1000.0, details={})
+    dataset = _CashFlowDatasetStub("service-record")
     portfolio = SimpleNamespace(
         reporting_service=object(),
+        build_cash_flow_dataset=Mock(return_value=dataset),
         record_nav=Mock(return_value=nav_record),
     )
     read_service = SimpleNamespace(build_snapshot=Mock(return_value=snapshot))
@@ -563,11 +587,29 @@ def test_portfolio_service_record_nav_uses_direct_portfolio_path():
     assert portfolio.record_nav.call_args.kwargs["overwrite_existing"] is False
     assert portfolio.record_nav.call_args.kwargs["use_bulk_persist"] is True
     assert portfolio.record_nav.call_args.kwargs["run_id"] == "run-nav-1"
+    assert portfolio.record_nav.call_args.kwargs["cash_flow_dataset"] is dataset
+    assert portfolio.record_nav.call_args.kwargs["normalized_valuation"] is normalized
+    authority = portfolio.record_nav.call_args.kwargs["snapshot_write_authority"]
+    assert isinstance(authority, SnapshotWriteAuthority)
+    assert authority.confirmed is True
+    portfolio.build_cash_flow_dataset.assert_called_once_with(
+        account="alice",
+        nav_date=date.fromisoformat(result["date"]),
+        run_id="run-nav-1",
+    )
 
 
 def test_portfolio_service_init_nav_history_uses_direct_app_service():
-    valuation = SimpleNamespace(total_value_cny=1000.0, warnings=[])
-    snapshot = {"valuation": valuation, "snapshot_time": "2026-05-22T12:00:00"}
+    normalized, valuation = _wiring_valuation(
+        account="alice",
+        cash_value=200.0,
+        stock_value=800.0,
+    )
+    snapshot = {
+        "normalized_valuation": normalized,
+        "valuation": valuation,
+        "snapshot_time": "2026-05-22T12:00:00",
+    }
     nav_record = SimpleNamespace(
         nav=1.0,
         shares=1000.0,
@@ -578,8 +620,10 @@ def test_portfolio_service_init_nav_history_uses_direct_app_service():
         details={},
     )
     storage = SimpleNamespace(get_nav_history=Mock(return_value=[]))
+    dataset = _CashFlowDatasetStub("service-init")
     portfolio = SimpleNamespace(
         reporting_service=object(),
+        build_cash_flow_dataset=Mock(return_value=dataset),
         record_nav=Mock(return_value=nav_record),
     )
     read_service = SimpleNamespace(build_snapshot=Mock(return_value=snapshot))
@@ -610,20 +654,29 @@ def test_portfolio_service_init_nav_history_uses_direct_app_service():
     assert portfolio.record_nav.call_args.kwargs["dry_run"] is False
     assert portfolio.record_nav.call_args.kwargs["overwrite_existing"] is False
     assert portfolio.record_nav.call_args.kwargs["use_bulk_persist"] is True
+    assert portfolio.record_nav.call_args.kwargs["cash_flow_dataset"] is dataset
+    assert portfolio.record_nav.call_args.kwargs["normalized_valuation"] is normalized
+    authority = portfolio.record_nav.call_args.kwargs["snapshot_write_authority"]
+    assert isinstance(authority, SnapshotWriteAuthority)
+    assert authority.confirmed is True
+    portfolio.build_cash_flow_dataset.assert_called_once()
+    assert portfolio.build_cash_flow_dataset.call_args.kwargs["account"] == "alice"
+    assert portfolio.build_cash_flow_dataset.call_args.kwargs["nav_date"] == date(2026, 5, 22)
+    assert (
+        portfolio.build_cash_flow_dataset.call_args.kwargs["run_id"]
+        == result["run_id"]
+    )
 
 
 def test_portfolio_service_daily_report_bundle_reuses_one_snapshot():
-    valuation = SimpleNamespace(
-        total_value_cny=150.0,
-        cash_value_cny=30.0,
-        stock_value_cny=105.0,
-        fund_value_cny=15.0,
-        cn_asset_value=0.0,
-        us_asset_value=105.0,
-        hk_asset_value=0.0,
-        warnings=[],
+    normalized, valuation = _wiring_valuation(
+        account="alice",
+        cash_value=30.0,
+        stock_value=105.0,
+        fund_value=15.0,
     )
     snapshot = _snapshot(total_value=150, cash_ratio=0.2, stock_ratio=0.7, fund_ratio=0.1)
+    snapshot["normalized_valuation"] = normalized
     snapshot["valuation"] = valuation
     nav_record = SimpleNamespace(
         date=date(2026, 5, 23),
@@ -661,8 +714,10 @@ def test_portfolio_service_daily_report_bundle_reuses_one_snapshot():
         details=None,
     )
     storage = SimpleNamespace(get_nav_history=Mock(side_effect=[[], [latest_nav]]))
+    dataset = _CashFlowDatasetStub("service-daily")
     portfolio = SimpleNamespace(
         reporting_service=object(),
+        build_cash_flow_dataset=Mock(return_value=dataset),
         record_nav=Mock(return_value=nav_record),
     )
     read_service = SimpleNamespace(
@@ -711,6 +766,16 @@ def test_portfolio_service_daily_report_bundle_reuses_one_snapshot():
     assert portfolio.record_nav.call_args.kwargs["overwrite_existing"] is False
     assert portfolio.record_nav.call_args.kwargs["use_bulk_persist"] is True
     assert portfolio.record_nav.call_args.kwargs["run_id"] == "run-report-1"
+    assert portfolio.record_nav.call_args.kwargs["cash_flow_dataset"] is dataset
+    assert portfolio.record_nav.call_args.kwargs["normalized_valuation"] is normalized
+    authority = portfolio.record_nav.call_args.kwargs["snapshot_write_authority"]
+    assert isinstance(authority, SnapshotWriteAuthority)
+    assert authority.confirmed is True
+    portfolio.build_cash_flow_dataset.assert_called_once_with(
+        account="alice",
+        nav_date=date.fromisoformat(result["date"]),
+        run_id="run-report-1",
+    )
     read_service.get_distribution.assert_any_call(holdings_data=snapshot)
 
 
@@ -872,6 +937,75 @@ def test_portfolio_service_full_report_uses_direct_app_service():
     read_service.build_snapshot.assert_called_once_with(price_timeout_seconds=12)
     read_service.get_distribution.assert_called_once_with(holdings_data=snapshot["holdings_data"])
     storage.get_nav_history.assert_called_once_with("alice", days=9999)
+
+
+def _wiring_valuation(
+    *,
+    account: str,
+    cash_value: float,
+    stock_value: float,
+    fund_value: float = 0.0,
+    warnings: tuple[str, ...] = (),
+):
+    rows = []
+    specs = (
+        (
+            "CNY-CASH",
+            "现金",
+            AssetType.CASH,
+            AssetClass.CASH,
+            "cash",
+            cash_value,
+        ),
+        (
+            "TEST-EQUITY",
+            "测试权益",
+            AssetType.A_STOCK,
+            AssetClass.CN_ASSET,
+            "stock",
+            stock_value,
+        ),
+        (
+            "TEST-FUND",
+            "测试基金",
+            AssetType.FUND,
+            AssetClass.CN_ASSET,
+            "fund",
+            fund_value,
+        ),
+    )
+    for asset_id, name, asset_type, asset_class, normalized_type, value in specs:
+        if value == 0:
+            continue
+        holding = Holding(
+            asset_id=asset_id,
+            asset_name=name,
+            asset_type=asset_type,
+            account=account,
+            broker="测试券商",
+            quantity=value,
+            currency="CNY",
+            asset_class=asset_class,
+        )
+        rows.append(
+            NormalizedValuationRow.from_holding(
+                holding,
+                account=account,
+                normalized_type=normalized_type,
+                price=1,
+                cny_price=1,
+                source="test_fixture",
+            )
+        )
+    normalized = NormalizedValuationSnapshot.build(
+        account=account,
+        rows=rows,
+        shares=100,
+        warnings=warnings,
+        source="test_fixture",
+        source_provenance={"fixture": "service_application"},
+    )
+    return normalized, normalized.to_portfolio_valuation()
 
 
 def _snapshot(*, total_value: float, cash_ratio: float, stock_ratio: float, fund_ratio: float):

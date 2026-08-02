@@ -788,6 +788,8 @@ def cmd_cash_flow_reconcile(args):
     )
     manual_evidence = any(value not in (None, "") for value in manual_values)
     if manual_evidence:
+        from src.domain.cash_flow_contracts import normalize_cash_flow_rate_source
+
         if not getattr(args, "record_id", None):
             raise SystemExit("manual FX evidence requires --record-id")
         if any(value in (None, "") for value in manual_values):
@@ -798,6 +800,10 @@ def cmd_cash_flow_reconcile(args):
             rate_date = date.fromisoformat(str(args.rate_date))
         except ValueError as exc:
             raise SystemExit("--rate-date must be YYYY-MM-DD") from exc
+        try:
+            normalize_cash_flow_rate_source(str(args.rate_source))
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
     else:
         rate_date = None
 
@@ -805,7 +811,6 @@ def cmd_cash_flow_reconcile(args):
         from src.feishu_storage import FeishuStorage
         from src.app.cash_flow_effect_service import CashFlowEffectService
         from src.app.operation_state_store import OperationStateStore
-        from src.models import make_cf_dedup_key
 
         operation_store = None
         if manual_evidence and bool(args.apply):
@@ -820,6 +825,8 @@ def cmd_cash_flow_reconcile(args):
             rate_source=getattr(args, "rate_source", None),
         )
         if manual_evidence and bool(args.apply):
+            if result.get("success") is False:
+                return result
             rows = [
                 row
                 for row in result.get("rows") or []
@@ -834,12 +841,13 @@ def cmd_cash_flow_reconcile(args):
             evidence = dict(row.get("fx_evidence") or {})
             if evidence.get("exchange_rate_evidence_type") != "manual_supplement":
                 raise RuntimeError("manual FX confirmation lacks local evidence payload")
-            readback = storage.get_cash_flow(str(row["record_id"]))
+            generated_fingerprint = str(
+                row.get("generated_fingerprint") or ""
+            ).strip()
             if (
-                readback is None
-                or str(readback.exchange_rate) != str(float(row["exchange_rate"]))
-                or str(readback.cny_amount) != str(float(row["cny_amount"]))
-                or make_cf_dedup_key(readback) != str(row["source_hash"])
+                row.get("completion_state") != "completed"
+                or not bool(row.get("readback_verified"))
+                or not generated_fingerprint
             ):
                 raise RuntimeError(
                     "manual FX confirmation refused: Feishu readback does not "
@@ -848,7 +856,7 @@ def cmd_cash_flow_reconcile(args):
             confirmation_id = operation_store.record_fx_confirmation(
                 confirmation_id=uuid4().hex,
                 record_id=str(row["record_id"]),
-                source_hash=str(row["source_hash"]),
+                source_hash=generated_fingerprint,
                 exchange_rate=str(row["exchange_rate"]),
                 exchange_rate_date=str(evidence["exchange_rate_date"]),
                 exchange_rate_source=str(evidence["exchange_rate_source"]),
@@ -863,6 +871,21 @@ def cmd_cash_flow_reconcile(args):
     res = _call_backend(args, direct)
     _emit_cash_flow_reconcile(res, args.json)
     return res
+
+
+def cmd_cash_flow_duplicates(args):
+    """Fresh read-only expected-key duplicate audit."""
+
+    def direct():
+        from src.feishu_storage import FeishuStorage
+
+        return FeishuStorage().cash_flow.audit_cash_flow_duplicates(
+            account=getattr(args, "account", None),
+        )
+
+    result = _call_backend(args, direct)
+    _dump(result, bool(getattr(args, "json", False)))
+    return result
 
 
 def cmd_cash_flow_fx_import_legacy(args):
@@ -1828,6 +1851,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_cash_flow = sp.add_parser("cash-flow", help="cash-flow ledger maintenance")
     cash_flow_sub = p_cash_flow.add_subparsers(dest="cash_flow_cmd", required=True)
+    p_cash_flow_duplicates = cash_flow_sub.add_parser(
+        "duplicates",
+        help="fresh read-only audit of canonical cash-flow duplicate groups",
+    )
+    p_cash_flow_duplicates.add_argument(
+        "--account",
+        default=argparse.SUPPRESS,
+        help="account to audit; defaults to all accounts",
+    )
+    p_cash_flow_duplicates.add_argument(
+        "--json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="output JSON",
+    )
+    p_cash_flow_duplicates.set_defaults(func=cmd_cash_flow_duplicates)
+
     p_cash_flow_reconcile = cash_flow_sub.add_parser(
         "reconcile",
         help="fill generated fields for manually entered cash_flow rows",

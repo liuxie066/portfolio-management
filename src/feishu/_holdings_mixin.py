@@ -2,6 +2,11 @@
 
 from typing import Any, Dict, List, Optional
 
+from ..domain.holding_mutations import (
+    HoldingPatch,
+    HoldingRepairPatch,
+    HoldingTarget,
+)
 from ..domain.holdings import RawHoldingRecord
 from ..models import Holding
 from .repositories.holdings_repository import HoldingsRepository
@@ -20,7 +25,7 @@ class HoldingsMixin:
             self._holdings_repository = repo
         return repo
 
-    def _get_holding_cache_key(self, asset_id: str, account: str, broker: Optional[str]) -> str:
+    def _get_holding_cache_key(self, asset_id: str, account: str, broker: str) -> str:
         return self.holdings._get_holding_cache_key(asset_id, account, broker)
 
     def _snapshot_for_persistent_cache(self, holding: Holding) -> Dict[str, Any]:
@@ -47,7 +52,7 @@ class HoldingsMixin:
         self,
         asset_id: str,
         account: str,
-        broker: Optional[str],
+        broker: str,
         *,
         flush_persistent: bool = False,
     ):
@@ -68,7 +73,7 @@ class HoldingsMixin:
         self,
         asset_id: str,
         account: str,
-        broker: Optional[str],
+        broker: str,
     ) -> Optional[Holding]:
         return self.holdings._get_holding_from_cache(asset_id, account, broker)
 
@@ -88,14 +93,9 @@ class HoldingsMixin:
 
     def patch_holding_record(
         self,
-        *,
-        record_id: str,
-        fields: Dict[str, object],
+        patch: HoldingRepairPatch,
     ) -> RawHoldingRecord:
-        return self.holdings.patch_holding_record(
-            record_id=record_id,
-            fields=fields,
-        )
+        return self.holdings.patch_holding_record(patch)
 
     def get_holding(
         self,
@@ -136,8 +136,11 @@ class HoldingsMixin:
     def upsert_holding(self, holding: Holding) -> Holding:
         return self.holdings.upsert_holding(holding)
 
-    def replace_holding(self, holding: Holding) -> Holding:
-        return self.holdings.replace_holding(holding)
+    def apply_holding_patch(self, patch: HoldingPatch) -> Holding:
+        return self.holdings.apply_holding_patch(patch)
+
+    def replace_holding(self, target: HoldingTarget | Holding) -> Holding:
+        return self.holdings.replace_holding(target)
 
     def upsert_holdings_bulk(
         self,
@@ -151,7 +154,7 @@ class HoldingsMixin:
         asset_id: str,
         account: str,
         quantity_change: float,
-        broker: Optional[str] = None,
+        broker: str,
     ):
         return self.holdings.update_holding_quantity(
             asset_id,
@@ -164,9 +167,12 @@ class HoldingsMixin:
         self,
         asset_id: str,
         account: str,
-        broker: Optional[str] = None,
+        broker: str,
     ):
         return self.holdings.delete_holding_if_zero(asset_id, account, broker)
+
+    def delete_holding_target_if_zero(self, target: HoldingTarget) -> bool:
+        return self.holdings.delete_holding_target_if_zero(target)
 
     def delete_holding_by_record_id(self, record_id: str) -> bool:
         return self.holdings.delete_holding_by_record_id(record_id)

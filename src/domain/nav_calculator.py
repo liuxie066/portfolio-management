@@ -1,16 +1,96 @@
-"""Pure NAV calculation and validation helpers."""
+"""Canonical NAV calculation, projection, and invariant helpers."""
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Any, Dict, Optional
+from typing import Any, Mapping, Optional
 
-from src.models import NAVHistory
+from src.domain.nav_finality_contract import (
+    finality_validation_reason,
+)
+from src.models import NAVHistory, PortfolioValuation
+
+
+@dataclass(frozen=True)
+class NavValuationProjection:
+    """Canonical mapping from runtime valuation facts to persisted NAV values.
+
+    ``PortfolioValuation.stock_value_cny`` is the equity component.  The
+    persisted compatibility column ``stock_value`` is the complete non-cash
+    value and therefore already includes ``fund_value``.
+    """
+
+    cash_value: Decimal
+    non_cash_value: Decimal
+    fund_value: Decimal
+    total_value: Decimal
+    cn_exposure_value: Decimal
+    us_exposure_value: Decimal
+    hk_exposure_value: Decimal
+    stock_weight: Decimal
+    cash_weight: Decimal
+
+
+@dataclass(frozen=True)
+class ClosedNavTarget:
+    """Validated, exactly decomposed target for a compatibility CLOSED row."""
+
+    total_value: Decimal
+    cash_value: Decimal
+    non_cash_value: Decimal
+    shares: Decimal = Decimal("0.00")
+    nav: Decimal = Decimal("1.000000")
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        total_value: Any,
+        cash_value: Any,
+        non_cash_value: Any,
+    ) -> "ClosedNavTarget":
+        values = {
+            "total_value": total_value,
+            "cash_value": cash_value,
+            "non_cash_value": non_cash_value,
+        }
+        parsed: dict[str, Decimal] = {}
+        for field, value in values.items():
+            if value is None:
+                raise ValueError(f"CLOSED NAV {field} is required")
+            try:
+                item = Decimal(str(value))
+            except Exception as exc:
+                raise ValueError("CLOSED NAV values must be finite numbers") from exc
+            if not item.is_finite():
+                raise ValueError("CLOSED NAV values must be finite numbers")
+            parsed[field] = item
+
+        if parsed["total_value"] != parsed["cash_value"] + parsed["non_cash_value"]:
+            raise ValueError(
+                "CLOSED NAV decomposition mismatch: "
+                "total_value must equal cash_value + non_cash_value"
+            )
+
+        quantized = {
+            field: NavCalculator.quantize_money(value)
+            for field, value in parsed.items()
+        }
+        if quantized["total_value"] != quantized["cash_value"] + quantized["non_cash_value"]:
+            raise ValueError(
+                "CLOSED NAV decomposition is not stable at persisted money precision"
+            )
+        if quantized["total_value"] <= 0:
+            raise ValueError("CLOSED NAV total_value must be > 0")
+        return cls(**quantized)
 
 
 class NavCalculator:
     MONEY_QUANT = Decimal("0.01")
     NAV_QUANT = Decimal("0.000001")
     WEIGHT_QUANT = Decimal("0.000001")
+    CASH_FLOW_BASIS_VERSION = 1
 
     @staticmethod
     def to_decimal(value: Any) -> Decimal:
@@ -31,6 +111,98 @@ class NavCalculator:
     @classmethod
     def quantize_weight(cls, value: Any) -> Decimal:
         return cls.to_decimal(value).quantize(cls.WEIGHT_QUANT, rounding=ROUND_HALF_UP)
+
+    @classmethod
+    def _finite_decimal(cls, value: Any, *, field: str) -> Decimal:
+        try:
+            parsed = Decimal(str(value))
+        except Exception as exc:
+            raise ValueError(f"{field} must be a finite number") from exc
+        if not parsed.is_finite():
+            raise ValueError(f"{field} must be a finite number")
+        return parsed
+
+    @classmethod
+    def project_valuation(cls, valuation: PortfolioValuation) -> NavValuationProjection:
+        """Return the sole runtime-to-persisted valuation projection."""
+
+        observed_total = cls._finite_decimal(
+            valuation.total_value_cny,
+            field="total_value_cny",
+        )
+        cash = cls._finite_decimal(valuation.cash_value_cny, field="cash_value_cny")
+        equity = cls._finite_decimal(valuation.stock_value_cny, field="stock_value_cny")
+        fund = cls._finite_decimal(valuation.fund_value_cny, field="fund_value_cny")
+        persisted_cash = cls.quantize_money(cash)
+        persisted_non_cash = cls.quantize_money(equity + fund)
+        persisted_fund = cls.quantize_money(fund)
+        persisted_total = persisted_cash + persisted_non_cash
+        if cls.quantize_money(observed_total) != persisted_total:
+            raise ValueError(
+                "valuation decomposition mismatch: total_value_cny must equal "
+                "cash_value_cny + stock_value_cny + fund_value_cny"
+            )
+        cn = cls._finite_decimal(valuation.cn_asset_value, field="cn_asset_value")
+        us = cls._finite_decimal(valuation.us_asset_value, field="us_asset_value")
+        hk = cls._finite_decimal(valuation.hk_asset_value, field="hk_asset_value")
+        stock_weight = (
+            persisted_non_cash / persisted_total
+            if persisted_total > 0
+            else Decimal("0")
+        )
+        cash_weight = (
+            persisted_cash / persisted_total
+            if persisted_total > 0
+            else Decimal("0")
+        )
+        return NavValuationProjection(
+            cash_value=persisted_cash,
+            non_cash_value=persisted_non_cash,
+            fund_value=persisted_fund,
+            total_value=persisted_total,
+            cn_exposure_value=cls.quantize_money(cn),
+            us_exposure_value=cls.quantize_money(us),
+            hk_exposure_value=cls.quantize_money(hk),
+            stock_weight=cls.quantize_weight(stock_weight),
+            cash_weight=cls.quantize_weight(cash_weight),
+        )
+
+    @classmethod
+    def build_cash_flow_basis(
+        cls,
+        *,
+        nav_date: date,
+        last_nav: Optional[NAVHistory],
+        daily_cash_flow: Any,
+        gap_cash_flow: Any,
+        cash_flow_dataset: Any = None,
+    ) -> dict[str, Any]:
+        """Describe the daily column and gap calculation from one dataset."""
+
+        previous_date = getattr(last_nav, "date", None)
+        if isinstance(previous_date, datetime):
+            previous_date = previous_date.date()
+        dataset_details = (
+            cash_flow_dataset.details()
+            if cash_flow_dataset is not None and callable(getattr(cash_flow_dataset, "details", None))
+            else {}
+        )
+        return {
+            "version": cls.CASH_FLOW_BASIS_VERSION,
+            "cash_flow_column_semantics": "daily",
+            "daily_cash_flow": float(cls.quantize_money(daily_cash_flow)),
+            "gap_cash_flow": float(cls.quantize_money(gap_cash_flow)),
+            "previous_nav_date": previous_date.isoformat() if previous_date else None,
+            "gap_window": {
+                "start": previous_date.isoformat() if previous_date else nav_date.isoformat(),
+                "end": nav_date.isoformat(),
+                "start_inclusive": previous_date is None,
+                "end_inclusive": True,
+            },
+            "dataset_contract_version": dataset_details.get("contract_version"),
+            "dataset_financial_fingerprint": dataset_details.get("financial_fingerprint"),
+            "dataset_full_fingerprint": dataset_details.get("full_fingerprint"),
+        }
 
     @classmethod
     def calc_period_return(cls, current_value: float, base_value: Optional[float]) -> float:
@@ -105,12 +277,30 @@ class NavCalculator:
         cf_for_shares = gap_cash_flow if gap_cash_flow is not None else daily_cash_flow
         cf_for_shares_dec = cls.to_decimal(cf_for_shares)
         total_value_dec = cls.to_decimal(total_value)
-        last_nav_nav_dec = cls.to_decimal(last_nav.nav) if (last_nav and last_nav.nav is not None) else None
-        last_nav_shares_dec = cls.to_decimal(last_nav.shares) if (last_nav and last_nav.shares is not None) else None
+        last_nav_nav_dec = None
+        last_nav_shares_dec = None
+        if last_nav is not None:
+            if last_nav.nav is None or last_nav.shares is None:
+                raise ValueError(
+                    "historical_evidence_required: previous NAV requires nav and shares"
+                )
+            last_nav_nav_dec = cls._finite_decimal(
+                last_nav.nav,
+                field="previous_nav.nav",
+            )
+            last_nav_shares_dec = cls._finite_decimal(
+                last_nav.shares,
+                field="previous_nav.shares",
+            )
+            if last_nav_nav_dec <= 0 or last_nav_shares_dec < 0:
+                raise ValueError(
+                    "historical_evidence_required: previous NAV requires "
+                    "nav > 0 and shares >= 0"
+                )
 
-        if last_nav and last_nav_nav_dec is not None and last_nav_nav_dec > 0:
+        if last_nav is not None:
             shares_change_dec = cf_for_shares_dec / last_nav_nav_dec
-            shares_dec = (last_nav_shares_dec or Decimal("0")) + shares_change_dec
+            shares_dec = last_nav_shares_dec + shares_change_dec
         else:
             shares_change_dec = cf_for_shares_dec
             shares_dec = total_value_dec
@@ -222,7 +412,7 @@ class NavCalculator:
         return cls.quantize_nav(a) == cls.quantize_nav(b)
 
     @classmethod
-    def validate_nav_record(
+    def assert_nav_invariants(
         cls,
         *,
         nav_record: NAVHistory,
@@ -237,33 +427,244 @@ class NavCalculator:
         gap_cash_flow: Optional[float] = None,
         initial_value: Optional[float] = None,
         cumulative_cash_flow: float = 0.0,
+        cash_flow_dataset: Any = None,
+        require_finality: Optional[bool] = None,
     ) -> None:
-        errors = []
+        """Assert the final persisted/runtime NAV contract after all mapping."""
+
+        errors: list[str] = []
+        details = nav_record.details if isinstance(nav_record.details, dict) else {}
+        is_closed = str(details.get("status") or "").upper() == "CLOSED"
+
+        def require_reference_value(
+            reference: Any,
+            field: str,
+            label: str,
+            *,
+            positive: bool = False,
+            nonnegative: bool = False,
+        ) -> None:
+            if reference is None:
+                return
+            value = getattr(reference, field, None)
+            if value is None:
+                errors.append(f"{label}.{field} 缺失")
+                return
+            try:
+                parsed = cls._finite_decimal(value, field=f"{label}.{field}")
+            except ValueError:
+                errors.append(f"{label}.{field} 必须是有限数")
+                return
+            if positive and parsed <= 0:
+                errors.append(f"{label}.{field} 必须 > 0")
+            if nonnegative and parsed < 0:
+                errors.append(f"{label}.{field} 必须 >= 0")
+
+        if not is_closed:
+            require_reference_value(last_nav, "total_value", "last_nav")
+            require_reference_value(last_nav, "nav", "last_nav", positive=True)
+            require_reference_value(
+                last_nav,
+                "shares",
+                "last_nav",
+                nonnegative=True,
+            )
+            require_reference_value(
+                prev_month_end_nav,
+                "total_value",
+                "prev_month_end_nav",
+            )
+            require_reference_value(
+                prev_year_end_nav,
+                "total_value",
+                "prev_year_end_nav",
+            )
+            require_reference_value(
+                mtd_return_base_nav,
+                "nav",
+                "mtd_return_base_nav",
+                positive=True,
+            )
+            require_reference_value(
+                ytd_return_base_nav,
+                "nav",
+                "ytd_return_base_nav",
+                positive=True,
+            )
+
+        finite_fields = (
+            "total_value", "cash_value", "stock_value", "fund_value",
+            "cn_stock_value", "us_stock_value", "hk_stock_value",
+            "stock_weight", "cash_weight", "shares", "nav", "cash_flow",
+            "share_change", "pnl", "mtd_nav_change", "ytd_nav_change",
+            "mtd_pnl", "ytd_pnl",
+        )
+        for field in finite_fields:
+            value = getattr(nav_record, field, None)
+            if value is None:
+                continue
+            try:
+                if not cls.to_decimal(value).is_finite():
+                    errors.append(f"{field} 必须是有限数")
+            except Exception:
+                errors.append(f"{field} 必须是有限数")
 
         if nav_record.cash_value is None or nav_record.stock_value is None:
             errors.append("cash_value/stock_value 缺失（必填）")
         else:
             expected_total = float(cls.quantize_money(cls.to_decimal(nav_record.stock_value) + cls.to_decimal(nav_record.cash_value)))
-            if not cls.approx_equal(nav_record.total_value, expected_total, tolerance=0.06):
+            if not cls.money_equal(nav_record.total_value, expected_total):
                 errors.append(f"total_value 不等于 stock_value + cash_value: {nav_record.total_value} != {expected_total}")
 
-        if nav_record.total_value and nav_record.total_value > 0 and nav_record.stock_weight is not None and nav_record.cash_weight is not None:
-            weights_sum = nav_record.stock_weight + nav_record.cash_weight
-            if not cls.approx_equal(weights_sum, 1.0, tolerance=1e-4):
-                errors.append(f"stock_weight + cash_weight 不接近 1: {weights_sum}")
+        if (
+            nav_record.fund_value is not None
+            and nav_record.stock_value is not None
+            and nav_record.fund_value >= 0
+            and nav_record.stock_value >= 0
+            and cls.quantize_money(nav_record.fund_value) > cls.quantize_money(nav_record.stock_value)
+        ):
+            errors.append(
+                "fund_value 必须是已持久化 stock_value（非现金）的子集"
+            )
 
-        if nav_record.shares and nav_record.shares > 0 and nav_record.nav is not None:
+        if nav_record.total_value is not None and nav_record.total_value > 0:
+            if nav_record.stock_weight is None or nav_record.cash_weight is None:
+                errors.append("stock_weight/cash_weight 缺失（必填）")
+            elif nav_record.stock_value is not None and nav_record.cash_value is not None:
+                expected_stock_weight = float(
+                    cls.quantize_weight(
+                        cls.to_decimal(nav_record.stock_value)
+                        / cls.to_decimal(nav_record.total_value)
+                    )
+                )
+                expected_cash_weight = float(
+                    cls.quantize_weight(
+                        cls.to_decimal(nav_record.cash_value)
+                        / cls.to_decimal(nav_record.total_value)
+                    )
+                )
+                if not cls.approx_equal(nav_record.stock_weight, expected_stock_weight, tolerance=1e-6):
+                    errors.append(
+                        f"stock_weight 不一致: {nav_record.stock_weight} != {expected_stock_weight}"
+                    )
+                if not cls.approx_equal(nav_record.cash_weight, expected_cash_weight, tolerance=1e-6):
+                    errors.append(
+                        f"cash_weight 不一致: {nav_record.cash_weight} != {expected_cash_weight}"
+                    )
+                weights_sum = nav_record.stock_weight + nav_record.cash_weight
+                if not cls.approx_equal(weights_sum, 1.0, tolerance=1e-4):
+                    errors.append(f"stock_weight + cash_weight 不接近 1: {weights_sum}")
+
+        if is_closed:
+            if not cls.money_equal(nav_record.shares, 0.0):
+                errors.append("CLOSED NAV shares 必须为 0")
+            if not cls.nav_equal(nav_record.nav, 1.0):
+                errors.append("CLOSED NAV nav 必须为 1")
+            if not cls.money_equal(nav_record.share_change, 0.0):
+                errors.append("CLOSED NAV share_change 必须为 0")
+        elif nav_record.shares and nav_record.shares > 0 and nav_record.nav is not None:
             expected_nav = float(cls.quantize_nav(cls.to_decimal(nav_record.total_value) / cls.to_decimal(nav_record.shares)))
             if not cls.approx_equal(nav_record.nav, expected_nav, tolerance=1e-6):
                 errors.append(f"nav 不等于 total_value / shares: {nav_record.nav} != {expected_nav}")
+        else:
+            errors.append("非 CLOSED NAV 要求 shares > 0 且 nav 存在")
 
         effective_cash_flow = gap_cash_flow if gap_cash_flow is not None else daily_cash_flow
-        if last_nav and last_nav.shares is not None and (effective_cash_flow == 0 or cls.approx_equal(effective_cash_flow, 0.0, tolerance=0.01)):
-            expected_shares = float(cls.quantize_money(last_nav.shares))
-            if not cls.approx_equal(nav_record.shares, expected_shares, tolerance=0.01):
-                errors.append(f"无资金流时 shares 不应变化: {nav_record.shares} != {expected_shares}")
-            if not cls.money_equal(nav_record.share_change, 0.0):
-                errors.append(f"无资金流时 share_change 不应变化: {nav_record.share_change}")
+        if not cls.money_equal(nav_record.cash_flow, daily_cash_flow):
+            errors.append(
+                f"cash_flow 列必须是当日资金流: {nav_record.cash_flow} != {daily_cash_flow}"
+            )
+        if not is_closed:
+            if (
+                last_nav is not None
+                and last_nav.nav is not None
+                and last_nav.nav > 0
+                and last_nav.shares is not None
+            ):
+                expected_share_change = float(
+                    cls.quantize_money(
+                        cls.to_decimal(effective_cash_flow) / cls.to_decimal(last_nav.nav)
+                    )
+                )
+                expected_shares = float(
+                    cls.quantize_money(
+                        cls.to_decimal(last_nav.shares or 0)
+                        + cls.to_decimal(effective_cash_flow) / cls.to_decimal(last_nav.nav)
+                    )
+                )
+                if not cls.money_equal(nav_record.share_change, expected_share_change):
+                    errors.append(
+                        f"share_change 与 gap cash flow 不一致: "
+                        f"{nav_record.share_change} != {expected_share_change}"
+                    )
+                if not cls.money_equal(nav_record.shares, expected_shares):
+                    errors.append(
+                        f"shares 与上期份额及 gap cash flow 不一致: "
+                        f"{nav_record.shares} != {expected_shares}"
+                    )
+            elif last_nav is None:
+                if not cls.money_equal(nav_record.share_change, effective_cash_flow):
+                    errors.append("首条 NAV share_change 应等于 gap cash flow")
+                if not cls.money_equal(nav_record.shares, nav_record.total_value):
+                    errors.append("首条 NAV shares 应等于 total_value")
+
+        expected_pnl = None
+        if (
+            not is_closed
+            and last_nav is not None
+            and getattr(last_nav, "date", None) is not None
+            and (nav_record.date - last_nav.date).days == 1
+        ):
+            expected_pnl = float(
+                cls.quantize_money(
+                    cls.to_decimal(nav_record.total_value)
+                    - cls.to_decimal(last_nav.total_value)
+                    - cls.to_decimal(effective_cash_flow)
+                )
+            )
+        strict_final_record = bool(require_finality) or details.get("finality") is not None
+        if (
+            nav_record.pnl is not None or strict_final_record
+        ) and not cls.money_equal(nav_record.pnl, expected_pnl):
+            errors.append(f"pnl 不一致: {nav_record.pnl} != {expected_pnl}")
+
+        basis = details.get("cash_flow_basis")
+        if isinstance(basis, Mapping):
+            expected_previous_date = getattr(last_nav, "date", None)
+            if isinstance(expected_previous_date, datetime):
+                expected_previous_date = expected_previous_date.date()
+            expected_previous_text = (
+                expected_previous_date.isoformat() if expected_previous_date else None
+            )
+            if basis.get("version") != cls.CASH_FLOW_BASIS_VERSION:
+                errors.append("details.cash_flow_basis.version 不一致")
+            if basis.get("cash_flow_column_semantics") != "daily":
+                errors.append("details.cash_flow_basis 未声明 cash_flow=daily")
+            if not cls.money_equal(basis.get("daily_cash_flow"), daily_cash_flow):
+                errors.append("details.cash_flow_basis.daily_cash_flow 不一致")
+            if not cls.money_equal(basis.get("gap_cash_flow"), effective_cash_flow):
+                errors.append("details.cash_flow_basis.gap_cash_flow 不一致")
+            if basis.get("previous_nav_date") != expected_previous_text:
+                errors.append("details.cash_flow_basis.previous_nav_date 不一致")
+            gap_window = basis.get("gap_window") or {}
+            expected_start = expected_previous_text or nav_record.date.isoformat()
+            if (
+                gap_window.get("start") != expected_start
+                or gap_window.get("end") != nav_record.date.isoformat()
+                or gap_window.get("start_inclusive") is not (expected_previous_date is None)
+                or gap_window.get("end_inclusive") is not True
+            ):
+                errors.append("details.cash_flow_basis.gap_window 不一致")
+            if cash_flow_dataset is not None:
+                dataset_details = cash_flow_dataset.details()
+                if basis.get("dataset_contract_version") != dataset_details.get("contract_version"):
+                    errors.append("details.cash_flow_basis dataset contract_version 不一致")
+                if basis.get("dataset_financial_fingerprint") != dataset_details.get("financial_fingerprint"):
+                    errors.append("details.cash_flow_basis dataset fingerprint 不一致")
+                if basis.get("dataset_full_fingerprint") != dataset_details.get("full_fingerprint"):
+                    errors.append("details.cash_flow_basis dataset full_fingerprint 不一致")
+        elif require_finality or cash_flow_dataset is not None:
+            errors.append("details.cash_flow_basis 缺失")
 
         month_base_nav = mtd_return_base_nav if mtd_return_base_nav is not None else prev_month_end_nav
         year_base_nav = ytd_return_base_nav if ytd_return_base_nav is not None else prev_year_end_nav
@@ -300,8 +701,33 @@ class NavCalculator:
             if stored_cum_pnl is not None and not cls.money_equal(stored_cum_pnl, expected_cum_pnl):
                 errors.append(f"details.cumulative_appreciation 不一致: {stored_cum_pnl} != {expected_cum_pnl}")
 
+        finality = details.get("finality")
+        should_require_finality = (
+            bool(require_finality)
+            if require_finality is not None
+            else finality is not None
+        )
+        if should_require_finality:
+            reason = finality_validation_reason(
+                finality,
+                target_date=nav_record.date,
+            )
+            if reason == "writer_status_mismatch":
+                errors.append("details.finality writer/status 不一致")
+            elif reason is not None:
+                errors.append(f"details.finality 无效: {reason}")
+            else:
+                if is_closed and finality.get("status") != "closed":
+                    errors.append("CLOSED NAV finality.status 必须为 closed")
+
         if errors:
             raise ValueError("NAV 记录自校验失败: " + " | ".join(errors))
+
+    @classmethod
+    def validate_nav_record(cls, **kwargs: Any) -> None:
+        """Compatibility alias for the canonical final invariant assertion."""
+
+        cls.assert_nav_invariants(**kwargs)
 
     @classmethod
     def build_nav_record(

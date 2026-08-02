@@ -1,13 +1,17 @@
 from datetime import date
+from decimal import Decimal
 
 import pytest
 
 from src import config
+from src.app.cash_flow_summary_service import CashFlowSummaryService
 from src.app.cash_flow_effect_receipt_service import CashFlowEffectReceiptService
 from src.app.cash_flow_effect_service import CashFlowEffectService
 from src.app.cash_flow_effect_store import CashFlowEffectStore
 from src.app.futu_balance_sync_service import FutuBalanceSnapshot
-from src.models import AssetClass, AssetType, CashFlow, Holding
+from src.domain.cash_flow_contracts import CompletedCashFlowFacts
+from src.domain.holding_mutations import HoldingTarget
+from src.models import AssetClass, AssetType, Holding
 
 
 class FakeStorage:
@@ -45,9 +49,25 @@ class FakeStorage:
         return self.holdings.get((asset_id, account, broker))
 
     def replace_holding(self, holding):
-        replacement = Holding(**holding.model_dump())
-        key = (replacement.asset_id, replacement.account, replacement.broker)
-        current = self.holdings.get(key)
+        if isinstance(holding, HoldingTarget):
+            key = (
+                holding.identity.asset_id,
+                holding.identity.account,
+                holding.identity.broker,
+            )
+            current = self.holdings.get(key)
+            replacement = holding.to_holding(
+                record_id=(
+                    current.record_id
+                    if current is not None
+                    else f"created_{len(self.holdings)}"
+                ),
+                created_at=current.created_at if current is not None else None,
+            )
+        else:
+            replacement = Holding(**holding.model_dump())
+            key = (replacement.asset_id, replacement.account, replacement.broker)
+            current = self.holdings.get(key)
         replacement.record_id = current.record_id if current else f"created_{len(self.holdings)}"
         self.holdings[key] = replacement
         self.replacements.append(replacement)
@@ -73,7 +93,12 @@ class FailOnceStorage(FakeStorage):
         self.failed_once = False
 
     def replace_holding(self, holding):
-        if holding.account == self.fail_account and not self.failed_once:
+        account = (
+            holding.identity.account
+            if isinstance(holding, HoldingTarget)
+            else holding.account
+        )
+        if account == self.fail_account and not self.failed_once:
             self.failed_once = True
             raise RuntimeError("simulated target write failure")
         return super().replace_holding(holding)
@@ -122,17 +147,41 @@ def _flow(
     record_id="cf_1",
     account="lx",
 ):
-    return CashFlow(
-        record_id=record_id,
+    rate = Decimal("1") if currency == "CNY" else Decimal("7.2")
+    return CompletedCashFlowFacts.build(
         flow_date=date(2026, 7, 26),
         account=account,
         broker=broker,
         amount=amount,
         currency=currency,
-        cny_amount=amount if currency == "CNY" else None,
-        exchange_rate=1 if currency == "CNY" else None,
-        flow_type="DEPOSIT" if amount > 0 else "WITHDRAW",
-    )
+        cny_amount=Decimal(str(amount)) * rate,
+        exchange_rate=rate,
+        source="test",
+        record_id=record_id,
+    ).to_cash_flow()
+
+
+def _refresh_flow_contract(flow):
+    rate = Decimal(str(flow.exchange_rate or 1))
+    refreshed = CompletedCashFlowFacts.build(
+        flow_date=flow.flow_date,
+        account=flow.account,
+        broker=flow.broker,
+        amount=flow.amount,
+        currency=flow.currency,
+        cny_amount=Decimal(str(flow.amount)) * rate,
+        exchange_rate=rate,
+        source=flow.source or "test",
+        remark=flow.remark,
+        record_id=flow.record_id or "",
+        updated_at=flow.updated_at,
+    ).to_cash_flow()
+    flow.cny_amount = refreshed.cny_amount
+    flow.exchange_rate = refreshed.exchange_rate
+    flow.flow_type = refreshed.flow_type
+    flow.dedup_key = refreshed.dedup_key
+    flow.source = refreshed.source
+    return flow
 
 
 def _service(tmp_path, monkeypatch, storage, *, futu_provider=None):
@@ -157,6 +206,47 @@ def _service(tmp_path, monkeypatch, storage, *, futu_provider=None):
             if futu_provider is not None
             else None
         ),
+    )
+
+
+def test_official_dataset_effect_gate_reuses_rows_without_cash_flow_reread(
+    tmp_path,
+    monkeypatch,
+):
+    class TrackingStorage(FakeStorage):
+        def __init__(self):
+            super().__init__(flows=[], holdings=[])
+            self.raw_reads = 0
+            self.model_reads = 0
+
+        def get_raw_cash_flows(self, *, account=None):
+            assert account == "lx"
+            self.raw_reads += 1
+            return []
+
+        def get_cash_flows(self, account=None):
+            self.model_reads += 1
+            raise AssertionError("official effect gate must reuse the run dataset")
+
+    storage = TrackingStorage()
+    effect_service = _service(tmp_path, monkeypatch, storage)
+
+    dataset = CashFlowSummaryService(storage=storage).build_dataset(
+        account="lx",
+        nav_date=date(2026, 7, 26),
+        run_id="run-effect-dataset",
+        start_year=2026,
+        cash_flow_effect_service=effect_service,
+    )
+
+    assert dataset.complete is True
+    assert storage.raw_reads == 1
+    assert storage.model_reads == 0
+    assert dataset.effect_store_revision.startswith("cfs_")
+    assert dataset.effect_gate["effect_store_revision"] == dataset.effect_store_revision
+    assert (
+        dataset.effect_gate["cash_flow_financial_fingerprint"]
+        == dataset.financial_fingerprint
     )
 
 
@@ -255,6 +345,74 @@ def test_holding_change_after_preview_invalidates_confirmation(tmp_path, monkeyp
 
     assert storage.replacements == []
     assert service.store.get_effect(effect["effect_id"])["state"] == "stale"
+
+
+def test_holding_change_after_hash_recheck_fails_before_applying(
+    tmp_path,
+    monkeypatch,
+):
+    storage = FakeStorage(flows=[_flow()], holdings=[_cash()])
+    service = _service(tmp_path, monkeypatch, storage)
+    service.initialize_fingerprints()
+    effect = next(
+        item for item in service.review(account="lx")["effects"]
+        if item["effect_kind"] == "cash_flow"
+    )
+    preview = service.preview(effect["effect_id"])
+    original_build_preview = service._build_preview
+
+    def build_then_change(*args, **kwargs):
+        recomputed = original_build_preview(*args, **kwargs)
+        storage.holdings[("CNY-CASH", "lx", "某券商")].quantity = 120
+        return recomputed
+
+    monkeypatch.setattr(service, "_build_preview", build_then_change)
+
+    with pytest.raises(ValueError, match="changed after preview hash validation"):
+        service.confirm(
+            effect["effect_id"],
+            preview_hash=preview["preview_hash"],
+            confirm=True,
+        )
+
+    assert storage.replacements == []
+    assert service.store.get_effect(effect["effect_id"])["state"] == "previewed"
+
+
+def test_unowned_manual_metadata_change_is_preserved_during_confirmation(
+    tmp_path,
+    monkeypatch,
+):
+    cash = _cash()
+    cash.tag = ["old"]
+    storage = FakeStorage(flows=[_flow()], holdings=[cash])
+    service = _service(tmp_path, monkeypatch, storage)
+    service.initialize_fingerprints()
+    effect = next(
+        item for item in service.review(account="lx")["effects"]
+        if item["effect_kind"] == "cash_flow"
+    )
+    preview = service.preview(effect["effect_id"])
+    original_build_preview = service._build_preview
+
+    def build_then_change_metadata(*args, **kwargs):
+        recomputed = original_build_preview(*args, **kwargs)
+        storage.holdings[("CNY-CASH", "lx", "某券商")].tag = ["manual-new"]
+        return recomputed
+
+    monkeypatch.setattr(service, "_build_preview", build_then_change_metadata)
+
+    result = service.confirm(
+        effect["effect_id"],
+        preview_hash=preview["preview_hash"],
+        confirm=True,
+    )
+
+    holding = storage.holdings[("CNY-CASH", "lx", "某券商")]
+    assert result["success"] is True
+    assert holding.quantity == 120
+    assert holding.tag == ["manual-new"]
+    assert len(storage.replacements) == 1
 
 
 def test_futu_uses_exact_currency_field_allows_negative_and_warns_on_variance(
@@ -363,6 +521,7 @@ def test_account_change_previews_and_confirms_old_and_new_cash_targets(
     )
 
     flow.account = "sy"
+    _refresh_flow_contract(flow)
     correction = next(
         item for item in service.review(account="lx")["effects"]
         if item["effect_kind"] == "cash_flow"
@@ -418,6 +577,7 @@ def test_amount_correction_applies_only_delta_and_deletion_reverses_it(
         confirm=True,
     )
     flow.amount = 30
+    _refresh_flow_contract(flow)
     correction = next(
         item for item in service.review(account="lx")["effects"]
         if item["effect_kind"] == "cash_flow"
@@ -508,7 +668,7 @@ def test_cash_flow_effect_receipt_defaults_to_conversation_role(monkeypatch):
     assert requested == list(values)
 
 
-def test_remark_only_change_is_audited_by_scan_without_new_effect_version(
+def test_remark_only_change_creates_a_visible_source_version(
     tmp_path,
     monkeypatch,
 ):
@@ -524,8 +684,37 @@ def test_remark_only_change_is_audited_by_scan_without_new_effect_version(
     second_effect = service.store.get_latest_for_record("cf_1")
 
     assert second_scan["source_digest"] != first_scan["source_digest"]
-    assert second_effect["effect_id"] == first_effect["effect_id"]
-    assert second_effect["version"] == first_effect["version"]
+    assert second_effect["effect_id"] != first_effect["effect_id"]
+    assert second_effect["version"] == first_effect["version"] + 1
+    assert second_effect["source"]["remark"] == "补充银行流水号"
+
+
+def test_source_and_observed_dedup_changes_are_visible_to_effect_scan(
+    tmp_path,
+    monkeypatch,
+):
+    flow = _flow()
+    storage = FakeStorage(flows=[flow], holdings=[_cash()])
+    service = _service(tmp_path, monkeypatch, storage)
+    service.initialize_fingerprints()
+    service.scan()
+    first_effect = service.store.get_latest_for_record("cf_1")
+
+    flow.source = "bank-import"
+    service.scan()
+    source_changed = service.store.get_latest_for_record("cf_1")
+
+    assert source_changed["version"] == first_effect["version"] + 1
+    assert source_changed["source"]["source"] == "bank-import"
+
+    flow.dedup_key = "observed-tampered-key"
+    service.scan()
+    dedup_changed = service.store.get_latest_for_record("cf_1")
+
+    assert dedup_changed["version"] == source_changed["version"] + 1
+    assert dedup_changed["state"] == "blocked"
+    assert dedup_changed["source"]["dedup_key"] == "observed-tampered-key"
+    assert "DEDUP_KEY_MISMATCH" in dedup_changed["last_error"]
 
 
 def test_partial_multi_target_write_requires_confirmed_compensation_retry(
@@ -555,6 +744,7 @@ def test_partial_multi_target_write_requires_confirmed_compensation_retry(
     )
 
     flow.account = "sy"
+    _refresh_flow_contract(flow)
     correction = next(
         effect for effect in service.review()["effects"]
         if effect["effect_kind"] == "cash_flow"
@@ -605,6 +795,7 @@ def test_source_change_waits_for_compensation_then_requires_new_confirmation(
     )
 
     flow.account = "sy"
+    _refresh_flow_contract(flow)
     correction = next(
         effect for effect in service.review()["effects"]
         if effect["effect_kind"] == "cash_flow"
@@ -618,7 +809,7 @@ def test_source_change_waits_for_compensation_then_requires_new_confirmation(
     assert failed["status"] == "compensation_pending"
 
     flow.amount = 30
-    flow.cny_amount = 30
+    _refresh_flow_contract(flow)
     scan = service.scan()
     still_current = service.store.get_latest_for_record("cf_1")
 

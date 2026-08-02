@@ -8,6 +8,7 @@ import hashlib
 import json
 from typing import Any, Dict, Optional
 
+from src.domain.cash_flow_contracts import CASH_FLOW_MANUAL_REQUIRED_FIELDS
 from src.process_lock import cash_flow_record_lock_key, process_lock
 
 from .cash_flow_event_service import ACTIONABLE_CASH_FLOW_ACTIONS
@@ -19,7 +20,6 @@ from .operation_state_store import OperationStateStore
 
 
 CASH_FLOW_ATTENTION_RECEIPT_TYPE = "cash_flow_reconcile_attention_required"
-_MANUAL_INPUT_FIELDS = ("flow_date", "account", "broker", "amount", "currency")
 _FX_ATTENTION_MESSAGES = {
     "fx_confirmation_missing": "foreign cash-flow FX confirmation is missing",
     "fx_confirmation_stale": "foreign cash-flow FX confirmation is stale",
@@ -56,7 +56,7 @@ def normalized_manual_inputs(row: Dict[str, Any]) -> Dict[str, Any]:
     source = dict(row.get("fields") or row)
     return {
         field: _normalize_value(source.get(field))
-        for field in _MANUAL_INPUT_FIELDS
+        for field in CASH_FLOW_MANUAL_REQUIRED_FIELDS
     }
 
 

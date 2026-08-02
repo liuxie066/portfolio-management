@@ -6,18 +6,23 @@
 """
 import json
 import re
-from dataclasses import asdict, is_dataclass
 from datetime import date, datetime, timezone, timedelta
 from decimal import Decimal, ROUND_HALF_UP
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Mapping
 
 from .models import (
-    Holding, Transaction, CashFlow, NAVHistory, PriceCache,
+    Holding, CashFlow, NAVHistory, PriceCache,
     AssetType, TransactionType, AssetClass, Industry,
-    make_tx_dedup_key, make_cf_dedup_key, make_request_id, DATETIME_FORMAT
+    make_cf_dedup_key, DATETIME_FORMAT
 )
 from .snapshot_models import HoldingSnapshot
 from .feishu_client import FeishuClient
+from .feishu.contracts import (
+    FieldEncoding,
+    field_names_by_encoding,
+    get_table_contract,
+)
+from .feishu.errors import FeishuRecordNotFoundError
 from .local_cache import (
     LocalPriceCache,
     LocalHoldingsIndexCache,
@@ -30,6 +35,22 @@ from .feishu._cash_flow_mixin import CashFlowMixin
 from .feishu._holdings_mixin import HoldingsMixin
 from .feishu._snapshots_mixin import SnapshotsMixin
 from .feishu._nav_mixin import NavMixin
+
+
+_LOCAL_PRICE_CACHE_NUMBER_FIELDS = frozenset({
+    'price', 'cny_price', 'change', 'change_pct', 'exchange_rate',
+})
+
+
+def _wire_fields_by_encoding(table: str, encoding: FieldEncoding) -> frozenset[str]:
+    """Resolve remote wire types from the registry; price_cache is local-only."""
+    if table == 'price_cache':
+        return (
+            _LOCAL_PRICE_CACHE_NUMBER_FIELDS
+            if encoding is FieldEncoding.NUMBER
+            else frozenset()
+        )
+    return field_names_by_encoding(table, encoding)
 
 
 class _MemoryHoldingsIndexCache:
@@ -141,10 +162,8 @@ class FeishuStorage(
         self._holdings_index_loaded_all: bool = False
         self._holdings_index_loaded_accounts: set[str] = set()
 
-        # 防重缓存：本地 Set 预检，避免重复 API 查询
-        # key: request_id/dedup_key -> value: record_id (或 True 表示已存在)
-        self._request_id_cache: Dict[str, str] = {}  # transactions 表
-        self._dedup_key_cache: Dict[str, str] = {}   # transactions 和 cash_flow 表
+        # cash_flow 内容指纹缓存；transactions 是只读归档，不持有写幂等缓存。
+        self._dedup_key_cache: Dict[str, str] = {}
 
         # 本地文件价格缓存（替代飞书多维表）
         self._local_price_cache = local_price_cache or LocalPriceCache()
@@ -240,64 +259,8 @@ class FeishuStorage(
         """
         result = {}
 
-        # 定义各表的数字字段类型映射
-        # True = 数字类型, False = 文本类型
-        table_number_fields = {
-            'holdings': {
-                'quantity': True,
-                'avg_cost': True,
-            },
-            'transactions': {
-                # NOTE: Feishu transactions table stores numeric fields as Number.
-                'quantity': True,
-                'price': True,
-                'amount': True,
-                'fee': True,
-                # 'tax' 字段飞书表中可能不存在，作为可选字段处理
-            },
-            'cash_flow': {
-                # NOTE: Feishu cash_flow table stores numeric fields as Number.
-                'amount': True,
-                'cny_amount': True,
-                'exchange_rate': True,
-            },
-            'holdings_snapshot': {
-                'quantity': True,
-                'avg_cost': True,
-                'price': True,
-                'cny_price': True,
-                'market_value_cny': True,
-            },
-            'nav_history': {
-                'total_value': True,
-                'cash_value': True,
-                'stock_value': True,
-                'fund_value': True,
-                'cn_stock_value': True,
-                'us_stock_value': True,
-                'hk_stock_value': True,
-                'stock_weight': True,
-                'cash_weight': True,
-                'shares': True,
-                'nav': True,
-                'cash_flow': True,
-                'share_change': True,
-                'mtd_nav_change': True,
-                'ytd_nav_change': True,
-                'pnl': True,
-                'mtd_pnl': True,
-                'ytd_pnl': True,
-            },
-            'price_cache': {
-                'price': True,
-                'cny_price': True,
-                'change': True,
-                'change_pct': True,
-                'exchange_rate': True,
-            }
-        }
-
-        num_fields_config = table_number_fields.get(table, {})
+        number_fields = _wire_fields_by_encoding(table, FieldEncoding.NUMBER)
+        json_text_fields = _wire_fields_by_encoding(table, FieldEncoding.JSON_TEXT)
 
         for key, value in data.items():
             if value is None:
@@ -321,17 +284,11 @@ class FeishuStorage(
             elif isinstance(value, (AssetType, TransactionType, AssetClass, Industry)):
                 result[key] = value.value
             # JSON 字段
-            elif key in ['tag', 'details'] and isinstance(value, (list, dict)):
+            elif key in json_text_fields and isinstance(value, (list, dict)):
                 result[key] = json.dumps(value, ensure_ascii=False)
             # 数字字段类型处理
-            elif key in num_fields_config:
-                normalized_value = self._normalize_numeric_field(table, key, value)
-                if num_fields_config[key]:
-                    # 数字类型：直接传数字
-                    result[key] = normalized_value
-                else:
-                    # 文本类型：转换为字符串
-                    result[key] = str(normalized_value)
+            elif key in number_fields:
+                result[key] = self._normalize_numeric_field(table, key, value)
             # 其他直接传
             else:
                 result[key] = value
@@ -341,6 +298,8 @@ class FeishuStorage(
     def _from_feishu_fields(self, fields: Dict, table: str) -> Dict[str, Any]:
         """将飞书字段格式转换为 Python 字典"""
         result = {}
+        number_fields = _wire_fields_by_encoding(table, FieldEncoding.NUMBER)
+        json_text_fields = _wire_fields_by_encoding(table, FieldEncoding.JSON_TEXT)
 
         for key, value in fields.items():
             if value is None:
@@ -356,81 +315,23 @@ class FeishuStorage(
                 result[key] = asset_id_str
                 continue
 
-            # 根据表名和字段名做类型转换
-            if table == 'holdings':
-                if key == 'quantity' and value is not None and value != '':
-                    result[key] = self._parse_float(value)
-                elif key == 'avg_cost' and value is not None and value != '':
-                    parsed = self._parse_float(value)
-                    result[key] = self._normalize_numeric_field(table, key, parsed) if parsed is not None else None
-                elif key == 'tag' and value:
-                    try:
-                        result[key] = json.loads(value) if isinstance(value, str) else value
-                    except (json.JSONDecodeError, TypeError, ValueError):
-                        result[key] = []
-                else:
-                    result[key] = value
+            if key in number_fields and value != '':
+                parsed = self._parse_float(value)
+                result[key] = (
+                    self._normalize_numeric_field(table, key, parsed)
+                    if parsed is not None
+                    else None
+                )
+                continue
 
-            elif table == 'transactions':
-                if key in ['quantity', 'price', 'amount', 'fee', 'tax'] and value is not None and value != '':
-                    parsed = self._parse_float(value)
-                    result[key] = self._normalize_numeric_field(table, key, parsed) if parsed is not None else None
-                elif key == 'tx_date' and value:
-                    result[key] = value  # 保持字符串，模型会解析
-                else:
-                    result[key] = value
+            if key in json_text_fields and value:
+                try:
+                    result[key] = json.loads(value) if isinstance(value, str) else value
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    result[key] = [] if table == 'holdings' and key == 'tag' else None
+                continue
 
-            elif table == 'cash_flow':
-                if key in ['amount', 'cny_amount', 'exchange_rate'] and value is not None and value != '':
-                    parsed = self._parse_float(value)
-                    result[key] = self._normalize_numeric_field(table, key, parsed) if parsed is not None else None
-                elif key == 'flow_date' and value:
-                    result[key] = value
-                else:
-                    result[key] = value
-
-            elif table == 'nav_history':
-                # nav_history numeric fields: do NOT manufacture zeros.
-                # total_value is required; breakdown fields may be missing in legacy history.
-                nav_must_fields = {'total_value'}
-                nav_breakdown_fields = {
-                    'cash_value', 'stock_value', 'fund_value',
-                    'cn_stock_value', 'us_stock_value', 'hk_stock_value'
-                }
-                nav_optional_numeric_fields = {
-                    'stock_weight', 'cash_weight', 'shares', 'nav',
-                    'cash_flow', 'share_change',
-                    'mtd_nav_change', 'ytd_nav_change',
-                    'pnl', 'mtd_pnl', 'ytd_pnl'
-                }
-
-                if key in nav_must_fields:
-                    parsed = self._parse_float(value)
-                    result[key] = self._normalize_numeric_field(table, key, parsed) if parsed is not None else None
-                elif key in nav_breakdown_fields:
-                    parsed = self._parse_float(value)
-                    result[key] = self._normalize_numeric_field(table, key, parsed) if parsed is not None else None
-                elif key in nav_optional_numeric_fields:
-                    # 关键可选数值字段严禁把空值偷偷补成 0.0；None 和 0 语义不同
-                    parsed = self._parse_float(value)
-                    result[key] = self._normalize_numeric_field(table, key, parsed) if parsed is not None else None
-                elif key == 'details' and value:
-                    try:
-                        result[key] = json.loads(value) if isinstance(value, str) else value
-                    except (json.JSONDecodeError, TypeError, ValueError):
-                        result[key] = None
-                else:
-                    result[key] = value
-
-            elif table == 'price_cache':
-                if key in ['price', 'cny_price', 'change', 'change_pct', 'exchange_rate'] and value is not None and value != '':
-                    parsed = self._parse_float(value)
-                    result[key] = self._normalize_numeric_field(table, key, parsed) if parsed is not None else None
-                else:
-                    result[key] = value
-
-            else:
-                result[key] = value
+            result[key] = value
 
         return result
 
@@ -507,33 +408,176 @@ class FeishuStorage(
                 record = strict(table_name, record_id)
                 if isinstance(record, dict):
                     return record
-            except Exception:
+            except FeishuRecordNotFoundError:
                 return None
         return None
 
 
     # ========== compensation_tasks ==========
 
-    def add_compensation_task(self, task) -> Any:
-        """persist compensation task (optional table).
+    def mirror_compensation_task(
+        self,
+        task: Mapping[str, Any],
+        *,
+        mirror_record_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Project one authoritative local task into the optional mirror."""
 
-        If Feishu table is not configured, CompensationService
-        falls back to local JSONL queue.
-        """
-        if is_dataclass(task):
-            fields = asdict(task)
-        elif hasattr(task, "model_dump"):
-            fields = task.model_dump(mode="json")
-        else:
-            fields = dict(task)
+        if not isinstance(task, Mapping):
+            raise TypeError("compensation mirror task must be an object")
+        task_id = str(task.get("task_id") or "").strip()
+        if not task_id:
+            raise ValueError("compensation mirror requires task_id")
 
-        payload = dict(fields)
-        if isinstance(payload.get("payload"), (dict, list)):
-            payload["payload"] = json.dumps(payload["payload"], ensure_ascii=False, sort_keys=True)
-        result = self.client.create_record("compensation_tasks", payload)
-        record_id = result.get("record_id")
-        if isinstance(task, dict):
-            task["record_id"] = record_id
-        else:
-            setattr(task, "record_id", record_id)
-        return task
+        try:
+            self.client._get_table_config("compensation_tasks")
+        except ValueError as exc:
+            return {
+                "status": "skipped_unconfigured",
+                "task_id": task_id,
+                "error": str(exc),
+            }
+
+        contract = get_table_contract("compensation_tasks")
+        canonical = {
+            field.name: task.get(field.name)
+            for field in contract.fields
+            if field.name in task
+        }
+        requested_record_id = str(mirror_record_id or "").strip() or None
+        if requested_record_id is not None:
+            try:
+                return self._update_compensation_mirror(
+                    requested_record_id,
+                    task_id,
+                    canonical,
+                )
+            except FeishuRecordNotFoundError:
+                pass
+
+        escaped_task_id = self._escape_filter_value(task_id)
+        records = self.client.list_records(
+            "compensation_tasks",
+            filter_str=f'CurrentValue.[task_id] = "{escaped_task_id}"',
+            field_names=["task_id"],
+        )
+        matched_record_ids: list[str] = []
+        for record in records:
+            record_id = str((record or {}).get("record_id") or "").strip()
+            fields = (record or {}).get("fields")
+            returned_task_id = (
+                str(fields.get("task_id") or "").strip()
+                if isinstance(fields, dict)
+                else ""
+            )
+            if not record_id or returned_task_id != task_id:
+                raise RuntimeError(
+                    "compensation mirror lookup returned an out-of-scope row: "
+                    f"requested={task_id}, returned={returned_task_id or '<missing>'}"
+                )
+            matched_record_ids.append(record_id)
+
+        if len(matched_record_ids) > 1:
+            return {
+                "status": "duplicate",
+                "task_id": task_id,
+                "matched_count": len(matched_record_ids),
+                "record_ids": matched_record_ids,
+                "error": "compensation mirror task_id is ambiguous",
+            }
+        if matched_record_ids:
+            return self._update_compensation_mirror(
+                matched_record_ids[0],
+                task_id,
+                canonical,
+            )
+
+        create_fields = self._compensation_mirror_fields(
+            canonical,
+            for_update=False,
+        )
+        result = self.client.create_record("compensation_tasks", create_fields)
+        record_id = self._validate_compensation_mirror_result(
+            result,
+            task_id=task_id,
+        )
+        return {
+            "status": "created",
+            "task_id": task_id,
+            "record_id": record_id,
+        }
+
+    def _update_compensation_mirror(
+        self,
+        record_id: str,
+        task_id: str,
+        canonical: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        update_fields = self._compensation_mirror_fields(
+            canonical,
+            for_update=True,
+        )
+        result = self.client.update_record(
+            "compensation_tasks",
+            record_id,
+            update_fields,
+        )
+        returned_record_id = self._validate_compensation_mirror_result(
+            result,
+            task_id=task_id,
+            expected_record_id=record_id,
+        )
+        return {
+            "status": "updated",
+            "task_id": task_id,
+            "record_id": returned_record_id,
+        }
+
+    def _compensation_mirror_fields(
+        self,
+        canonical: Mapping[str, Any],
+        *,
+        for_update: bool,
+    ) -> Dict[str, Any]:
+        contract = get_table_contract("compensation_tasks")
+        fields_by_name = contract.fields_by_name
+        normalized: Dict[str, Any] = {}
+        for name, value in canonical.items():
+            field = fields_by_name[name]
+            if value is None or (isinstance(value, str) and not value.strip()):
+                if for_update and field.clearable:
+                    normalized[name] = None
+                continue
+            normalized[name] = value
+        return self._to_feishu_fields(
+            normalized,
+            "compensation_tasks",
+            preserve_none=for_update,
+        )
+
+    @staticmethod
+    def _validate_compensation_mirror_result(
+        result: Any,
+        *,
+        task_id: str,
+        expected_record_id: Optional[str] = None,
+    ) -> str:
+        if not isinstance(result, dict):
+            raise RuntimeError("compensation mirror write returned an invalid response")
+        record_id = str(result.get("record_id") or "").strip()
+        if not record_id:
+            raise RuntimeError("compensation mirror write returned no record_id")
+        if expected_record_id is not None and record_id != expected_record_id:
+            raise RuntimeError(
+                "compensation mirror write changed record identity: "
+                f"expected={expected_record_id}, returned={record_id}"
+            )
+        fields = result.get("fields")
+        if isinstance(fields, dict) and "task_id" in fields:
+            returned_task_id = str(fields.get("task_id") or "").strip()
+            if returned_task_id != task_id:
+                raise RuntimeError(
+                    "compensation mirror write returned a different task_id: "
+                    f"expected={task_id}, returned={returned_task_id or '<missing>'}"
+                )
+        return record_id

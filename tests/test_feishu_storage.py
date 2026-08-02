@@ -1,12 +1,29 @@
 """测试飞书存储层"""
 import pytest
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from unittest.mock import Mock, patch, MagicMock
 import json
 
 from src.feishu_storage import FeishuStorage
+from src.feishu.errors import FeishuRecordNotFoundError, LegacyReadOnlyError
+from src.feishu.contracts import (
+    TABLE_CONTRACTS,
+    FieldEncoding,
+    compare_live_schema,
+)
+from src.domain.compensation_contracts import MIRROR_COMPENSATION_STATUS_VALUES
+from src.domain.cash_flow_contracts import (
+    CashFlowContractError,
+    CompletedCashFlowFacts,
+)
+from src.domain.holding_mutations import (
+    HoldingMutationConflictError,
+    HoldingMutationProofError,
+    HoldingTarget,
+)
 from src.models import (
-    Holding, Transaction, CashFlow, NAVHistory, PriceCache,
+    ArchivedTransaction, Holding, Transaction, CashFlow, NAVHistory, PriceCache,
     AssetType, TransactionType, AssetClass, Industry, make_cf_dedup_key
 )
 
@@ -15,6 +32,77 @@ def _assert_canonical_holding_date(value):
     assert isinstance(value, str)
     parsed = datetime.strptime(value, '%Y/%m/%d')
     assert parsed.strftime('%Y/%m/%d') == value
+
+
+def _completed_cash_flow(
+    *,
+    amount=100,
+    flow_date=date(2025, 3, 14),
+    account='测试账户',
+    broker='华泰',
+    currency='CNY',
+    exchange_rate=None,
+    source='test',
+    record_id='',
+):
+    rate = exchange_rate
+    if rate is None:
+        rate = 1 if currency == 'CNY' else 7.2
+    return CompletedCashFlowFacts.build(
+        flow_date=flow_date,
+        account=account,
+        broker=broker,
+        amount=amount,
+        currency=currency,
+        exchange_rate=rate,
+        cny_amount=float(amount) * float(rate),
+        source=source,
+        record_id=record_id,
+    )
+
+
+def _archived_transaction_fields(
+    *,
+    account='测试账户',
+    request_id='req-123',
+    dedup_key='dedup-123',
+    tx_date='2025-03-14',
+    tx_type='BUY',
+    asset_id='000001',
+    quantity=1000,
+    price=10.5,
+    currency='CNY',
+    **optional,
+):
+    return {
+        'request_id': request_id,
+        'dedup_key': dedup_key,
+        'tx_date': tx_date,
+        'tx_type': tx_type,
+        'asset_id': asset_id,
+        'account': account,
+        'quantity': quantity,
+        'price': price,
+        'currency': currency,
+        **optional,
+    }
+
+
+def _compensation_task_fields(**changes):
+    fields = {
+        "task_id": "repair-1",
+        "operation_type": "SELL_TARGETS_INCOMPLETE",
+        "account": "a",
+        "status": "PENDING",
+        "payload": {"targets": [{"type": "HOLDING_TARGET_SET"}]},
+        "error": "initial failure",
+        "related_record_id": "nav-1",
+        "retry_count": 0,
+        "created_at": "2026-08-02T09:00:00",
+        "updated_at": "2026-08-02T09:00:00",
+    }
+    fields.update(changes)
+    return fields
 
 
 class TestFeishuStorageInitialization:
@@ -177,7 +265,7 @@ class TestFeishuStorageFieldConversion:
 
         assert tx_fields['amount'] == 0.0
         assert tx_fields['fee'] == 0.0
-        assert tx_fields['tax'] == 0.0
+        assert tx_fields['tax'] == '0'
         assert cf_fields['amount'] == 0.0
         assert cf_fields['cny_amount'] == 0.0
         assert cf_fields['exchange_rate'] == 0.0
@@ -185,6 +273,30 @@ class TestFeishuStorageFieldConversion:
         assert price.change == 0.0
         assert price.change_pct == 0.0
         assert price.exchange_rate == 0.0
+
+    def test_registered_number_fields_share_registry_owned_read_conversion(self):
+        for table_name, contract in TABLE_CONTRACTS.items():
+            fields = {
+                field.name: '1.25'
+                for field in contract.fields
+                if field.encoding is FieldEncoding.NUMBER
+            }
+            if not fields:
+                continue
+            converted = self.storage._from_feishu_fields(fields, table_name)
+
+            assert converted
+            assert all(isinstance(value, float) for value in converted.values())
+
+    def test_registered_json_text_fields_share_registry_owned_conversion(self):
+        encoded = self.storage._to_feishu_fields(
+            {'payload': {'target': 1}},
+            'compensation_tasks',
+        )
+        decoded = self.storage._from_feishu_fields(encoded, 'compensation_tasks')
+
+        assert encoded['payload'] == '{"target": 1}'
+        assert decoded['payload'] == {'target': 1}
 
 
 class TestFeishuStorageEscapeFilter:
@@ -215,12 +327,210 @@ class TestFeishuStorageEscapeFilter:
         assert result == '123'
 
 
+class TestFeishuStorageCompensationMirror:
+    def setup_method(self):
+        self.client = Mock()
+        self.client._get_table_config.return_value = ("app", "table")
+        self.storage = FeishuStorage(client=self.client)
+
+    def test_unconfigured_optional_table_is_an_explicit_zero_request_skip(self):
+        self.client._get_table_config.side_effect = ValueError(
+            "未配置表 compensation_tasks"
+        )
+
+        result = self.storage.mirror_compensation_task(
+            _compensation_task_fields()
+        )
+
+        assert result["status"] == "skipped_unconfigured"
+        assert "未配置表" in result["error"]
+        self.client.list_records.assert_not_called()
+        self.client.create_record.assert_not_called()
+        self.client.update_record.assert_not_called()
+
+    def test_zero_fresh_matches_creates_registry_encoded_projection(self):
+        self.client.list_records.return_value = []
+
+        def create(_table, fields):
+            return {
+                "record_id": "mirror-1",
+                "fields": dict(fields),
+            }
+
+        self.client.create_record.side_effect = create
+
+        result = self.storage.mirror_compensation_task(
+            _compensation_task_fields(task_id='repair-"quoted"')
+        )
+
+        assert result == {
+            "status": "created",
+            "task_id": 'repair-"quoted"',
+            "record_id": "mirror-1",
+        }
+        _, list_kwargs = self.client.list_records.call_args
+        assert '\\"quoted\\"' in list_kwargs["filter_str"]
+        _, create_fields = self.client.create_record.call_args.args
+        assert create_fields["task_id"] == 'repair-"quoted"'
+        assert create_fields["status"] == "PENDING"
+        assert json.loads(create_fields["payload"])["targets"]
+        assert create_fields["retry_count"] == 0
+
+    def test_one_fresh_match_updates_and_resolved_clears_stale_error(self):
+        self.client.list_records.return_value = [{
+            "record_id": "mirror-1",
+            "fields": {"task_id": "repair-1"},
+        }]
+
+        def update(_table, record_id, fields):
+            return {"record_id": record_id, "fields": dict(fields)}
+
+        self.client.update_record.side_effect = update
+        task = _compensation_task_fields(
+            status="RESOLVED",
+            error="",
+            retry_count=2,
+            updated_at="2026-08-02T09:03:00",
+            resolved_at="2026-08-02T09:03:00",
+            resolution="targets_applied_and_read_back",
+        )
+
+        result = self.storage.mirror_compensation_task(task)
+
+        assert result["status"] == "updated"
+        assert result["record_id"] == "mirror-1"
+        _, record_id, update_fields = self.client.update_record.call_args.args
+        assert record_id == "mirror-1"
+        assert update_fields["status"] == "RESOLVED"
+        assert update_fields["retry_count"] == 2
+        assert update_fields["updated_at"] == "2026-08-02T09:03:00"
+        assert update_fields["resolved_at"] == "2026-08-02T09:03:00"
+        assert update_fields["resolution"] == "targets_applied_and_read_back"
+        assert update_fields["error"] is None
+        contract = TABLE_CONTRACTS["compensation_tasks"]
+        assert (
+            contract.fields_by_name["status"].select_options
+            == MIRROR_COMPENSATION_STATUS_VALUES
+        )
+        assert contract.fields_by_name["error"].clearable is True
+        assert contract.fields_by_name["error"].schema_required is True
+        assert "error" not in contract.write_contract("create").required_fields
+        self.client.create_record.assert_not_called()
+
+    def test_error_is_schema_required_even_though_create_row_may_omit_it(self):
+        contract = TABLE_CONTRACTS["compensation_tasks"]
+        live_without_error = [
+            {
+                "field_name": field.name,
+                "type": field.type_id,
+                "ui_type": field.ui_type,
+                "property": {
+                    "options": [
+                        {"name": option}
+                        for option in field.select_options
+                    ],
+                },
+            }
+            for field in contract.fields
+            if field.name != "error"
+        ]
+
+        result = compare_live_schema(contract, live_without_error)
+
+        assert result["ok"] is False
+        assert result["missing_required"] == ["error"]
+        assert result["missing_optional"] == []
+
+    def test_duplicate_fresh_task_ids_fail_mirror_without_mutation(self):
+        self.client.list_records.return_value = [
+            {"record_id": "mirror-1", "fields": {"task_id": "repair-1"}},
+            {"record_id": "mirror-2", "fields": {"task_id": "repair-1"}},
+        ]
+
+        result = self.storage.mirror_compensation_task(
+            _compensation_task_fields()
+        )
+
+        assert result["status"] == "duplicate"
+        assert result["matched_count"] == 2
+        assert result["record_ids"] == ["mirror-1", "mirror-2"]
+        self.client.create_record.assert_not_called()
+        self.client.update_record.assert_not_called()
+
+    def test_stale_local_record_id_recovers_through_fresh_lookup(self):
+        self.client.update_record.side_effect = [
+            FeishuRecordNotFoundError(code=1254043, message="missing"),
+            {
+                "record_id": "mirror-new",
+                "fields": {"task_id": "repair-1"},
+            },
+        ]
+        self.client.list_records.return_value = [{
+            "record_id": "mirror-new",
+            "fields": {"task_id": "repair-1"},
+        }]
+
+        result = self.storage.mirror_compensation_task(
+            _compensation_task_fields(status="RUNNING"),
+            mirror_record_id="mirror-stale",
+        )
+
+        assert result == {
+            "status": "updated",
+            "task_id": "repair-1",
+            "record_id": "mirror-new",
+        }
+        assert self.client.update_record.call_count == 2
+        self.client.list_records.assert_called_once()
+        self.client.create_record.assert_not_called()
+
+
 class TestFeishuStorageHoldingOperations:
     """测试飞书存储层持仓操作"""
 
     def setup_method(self):
         self.mock_client = Mock()
         self.storage = FeishuStorage(client=self.mock_client)
+
+    def _use_remote_records(self, records, *, create_record_id='new_rec_123'):
+        remote = [
+            {'record_id': row['record_id'], 'fields': dict(row.get('fields') or {})}
+            for row in records
+        ]
+
+        def list_records(_table_name, filter_str=None, **_kwargs):
+            account = None
+            if filter_str and 'CurrentValue.[account] = "' in filter_str:
+                account = filter_str.split('CurrentValue.[account] = "', 1)[1].split('"', 1)[0]
+            return [
+                {'record_id': row['record_id'], 'fields': dict(row['fields'])}
+                for row in remote
+                if account is None or row['fields'].get('account') == account
+            ]
+
+        def get_record_strict(_table_name, record_id):
+            row = next(item for item in remote if item['record_id'] == record_id)
+            return {'record_id': row['record_id'], 'fields': dict(row['fields'])}
+
+        def create_record(_table_name, fields):
+            remote.append({'record_id': create_record_id, 'fields': dict(fields)})
+            return {'record_id': create_record_id, 'fields': dict(fields)}
+
+        def update_record(_table_name, record_id, fields):
+            row = next(item for item in remote if item['record_id'] == record_id)
+            row['fields'].update(fields)
+            return {'record_id': record_id, 'fields': dict(row['fields'])}
+
+        def delete_record(_table_name, record_id):
+            remote[:] = [item for item in remote if item['record_id'] != record_id]
+            return True
+
+        self.mock_client.list_records.side_effect = list_records
+        self.mock_client.get_record_strict.side_effect = get_record_strict
+        self.mock_client.create_record.side_effect = create_record
+        self.mock_client.update_record.side_effect = update_record
+        self.mock_client.delete_record.side_effect = delete_record
+        return remote
 
     def test_get_holding_with_market(self):
         """测试获取指定市场的持仓"""
@@ -273,12 +583,12 @@ class TestFeishuStorageHoldingOperations:
             }
         ]
 
-        result = self.storage.get_holding('000001', '测试账户')
+        with pytest.raises(ValueError, match="requires broker"):
+            self.storage.get_holding('000001', '测试账户')
 
-        # 未指定 broker 时返回第一个完整业务主键。
-        assert result is not None
-        assert result.record_id == 'rec_1'
-        assert result.broker == "华泰"
+        self.mock_client.create_record.assert_not_called()
+        self.mock_client.update_record.assert_not_called()
+        self.mock_client.delete_record.assert_not_called()
 
     def test_get_holding_not_found(self):
         """测试持仓不存在"""
@@ -357,11 +667,7 @@ class TestFeishuStorageHoldingOperations:
 
     def test_upsert_holding_create(self):
         """测试创建新持仓"""
-        self.mock_client.list_records.return_value = []  # 不存在
-        self.mock_client.create_record.return_value = {
-            'record_id': 'new_rec_123',
-            'fields': {}
-        }
+        self._use_remote_records([])
 
         holding = Holding(
             asset_id='000001',
@@ -378,9 +684,36 @@ class TestFeishuStorageHoldingOperations:
         assert result.record_id == 'new_rec_123'
         self.mock_client.create_record.assert_called_once()
 
+    def test_upsert_holding_canonicalizes_identity_payload_result_and_cache(self):
+        self._use_remote_records([])
+
+        result = self.storage.upsert_holding(Holding(
+            asset_id=' AAPL ',
+            asset_name=' Apple ',
+            asset_type=AssetType.US_STOCK,
+            account=' lx ',
+            broker=' IBKR ',
+            quantity=1,
+            currency='usd',
+        ))
+
+        fields = self.mock_client.create_record.call_args.args[1]
+        assert fields['asset_id'] == 'AAPL'
+        assert fields['asset_name'] == 'Apple'
+        assert fields['account'] == 'lx'
+        assert fields['broker'] == 'IBKR'
+        assert fields['currency'] == 'USD'
+        assert result.asset_id == 'AAPL'
+        assert result.account == 'lx'
+        assert result.broker == 'IBKR'
+        assert result.currency == 'USD'
+        key = self.storage._get_holding_cache_key('AAPL', 'lx', 'IBKR')
+        assert set(self.storage._holding_fields_cache) == {key}
+        assert self.storage._holding_fields_cache[key]['currency'] == 'USD'
+
     def test_upsert_holding_update(self):
         """测试更新现有持仓"""
-        self.mock_client.list_records.return_value = [{
+        self._use_remote_records([{
             'record_id': 'existing_rec',
             'fields': {
                 'asset_id': '000001',
@@ -391,11 +724,7 @@ class TestFeishuStorageHoldingOperations:
                 'quantity': '500',
                 'currency': 'CNY'
             }
-        }]
-        self.mock_client.update_record.return_value = {
-            'record_id': 'existing_rec',
-            'fields': {}
-        }
+        }])
 
         holding = Holding(
             asset_id='000001',
@@ -415,18 +744,91 @@ class TestFeishuStorageHoldingOperations:
         assert update_fields['asset_name'] == '平安银行股份有限公司'
         _assert_canonical_holding_date(update_fields['updated_at'])
 
+    def test_replace_holding_rejects_stale_readback_and_invalidates_cache(self):
+        self._use_remote_records([{
+            'record_id': 'existing_rec',
+            'fields': {
+                'asset_id': 'AAPL',
+                'asset_name': 'Apple',
+                'asset_type': 'us_stock',
+                'account': 'lx',
+                'broker': 'IBKR',
+                'quantity': 1,
+                'currency': 'USD',
+            },
+        }])
+        self.mock_client.update_record.side_effect = lambda *_args, **_kwargs: {
+            'record_id': 'existing_rec'
+        }
+
+        with pytest.raises(HoldingMutationProofError, match='readback disagrees'):
+            self.storage.replace_holding(Holding(
+                asset_id='AAPL',
+                asset_name='Apple',
+                asset_type=AssetType.US_STOCK,
+                account='lx',
+                broker='IBKR',
+                quantity=2,
+                currency='USD',
+            ))
+
+        key = self.storage._get_holding_cache_key('AAPL', 'lx', 'IBKR')
+        assert key not in self.storage._holding_fields_cache
+
+    def test_replace_holding_preserves_explicit_clear_intent(self):
+        self._use_remote_records([{
+            'record_id': 'existing_rec',
+            'fields': {
+                'asset_id': 'AAPL',
+                'asset_name': 'Apple',
+                'asset_type': 'us_stock',
+                'account': 'lx',
+                'broker': 'IBKR',
+                'quantity': 1,
+                'avg_cost': 200,
+                'currency': 'USD',
+                'asset_class': '美国资产',
+                'industry': '科技',
+                'tag': json.dumps(['manual'], ensure_ascii=False),
+            },
+        }])
+
+        replaced = self.storage.replace_holding(Holding(
+            asset_id='AAPL',
+            asset_name='Apple',
+            asset_type=AssetType.US_STOCK,
+            account='lx',
+            broker='IBKR',
+            quantity=1,
+            avg_cost=None,
+            currency='USD',
+            asset_class=None,
+            industry=None,
+            tag=[],
+        ))
+
+        fields = self.mock_client.update_record.call_args.args[2]
+        assert fields['avg_cost'] is None
+        assert fields['asset_class'] is None
+        assert fields['industry'] is None
+        assert fields['tag'] == '[]'
+        assert replaced.avg_cost is None
+        assert replaced.asset_class is None
+        assert replaced.industry is None
+        assert replaced.tag == []
+
     def test_update_holding_quantity(self):
         """测试更新持仓数量"""
-        self.mock_client.list_records.return_value = [{
+        self._use_remote_records([{
             'record_id': 'rec_123',
             'fields': {
                 'asset_id': '000001', 'asset_name': '平安银行',
                 'asset_type': 'a_stock', 'account': '测试账户',
                 'broker': '手工', 'quantity': '1000', 'currency': 'CNY',
             }
-        }]
+        }])
 
-        self.storage.update_holding_quantity('000001', '测试账户', 500)
+        self.storage.update_holding_quantity('000001', '测试账户', 500, '手工')
 
         self.mock_client.update_record.assert_called_once()
         call_args = self.mock_client.update_record.call_args
@@ -435,69 +837,98 @@ class TestFeishuStorageHoldingOperations:
 
     def test_delete_holding_if_zero(self):
         """测试持仓为0时删除"""
-        self.mock_client.list_records.return_value = [{
+        self._use_remote_records([{
             'record_id': 'rec_123',
             'fields': {
                 'asset_id': '000001', 'asset_name': '平安银行',
                 'asset_type': 'a_stock', 'account': '测试账户',
                 'broker': '手工', 'quantity': '0', 'currency': 'CNY',
             }
-        }]
+        }])
 
-        self.storage.delete_holding_if_zero('000001', '测试账户')
+        self.storage.delete_holding_if_zero('000001', '测试账户', '手工')
 
         self.mock_client.delete_record.assert_called_once_with('holdings', 'rec_123')
 
     def test_delete_holding_if_not_zero(self):
         """测试持仓不为0时不删除"""
-        self.mock_client.list_records.return_value = [{
+        self._use_remote_records([{
             'record_id': 'rec_123',
             'fields': {
                 'asset_id': '000001', 'asset_name': '平安银行',
                 'asset_type': 'a_stock', 'account': '测试账户',
                 'broker': '手工', 'quantity': '100', 'currency': 'CNY',
             }
-        }]
+        }])
 
-        self.storage.delete_holding_if_zero('000001', '测试账户')
+        self.storage.delete_holding_if_zero('000001', '测试账户', '手工')
 
         self.mock_client.delete_record.assert_not_called()
 
     def test_delete_holding_if_tiny_residual(self):
         """测试极小残值持仓会被视为零并删除"""
-        self.mock_client.list_records.return_value = [{
+        self._use_remote_records([{
             'record_id': 'rec_123',
             'fields': {
                 'asset_id': '000001', 'asset_name': '平安银行',
                 'asset_type': 'a_stock', 'account': '测试账户',
                 'broker': '手工', 'quantity': '0.0000000001', 'currency': 'CNY',
             }
-        }]
+        }])
 
-        self.storage.delete_holding_if_zero('000001', '测试账户')
+        self.storage.delete_holding_if_zero('000001', '测试账户', '手工')
 
         self.mock_client.delete_record.assert_called_once_with('holdings', 'rec_123')
 
-    def test_delete_holding_failure_keeps_cached_record(self):
-        self.mock_client.list_records.return_value = [{
+    def test_target_bound_zero_delete_refuses_reused_business_key(self):
+        remote = self._use_remote_records([{
+            'record_id': 'rec_old',
+            'fields': {
+                'asset_id': '000001', 'asset_name': '平安银行',
+                'asset_type': 'a_stock', 'account': '测试账户',
+                'broker': '手工', 'quantity': '0', 'currency': 'CNY',
+            },
+        }])
+        base = self.storage.get_holding_fresh('000001', '测试账户', '手工')
+        target = HoldingTarget.from_holdings(
+            base=base,
+            target=base,
+            owned_fields={'quantity'},
+        )
+        remote[0]['record_id'] = 'rec_new'
+
+        with pytest.raises(HoldingMutationConflictError, match='record changed'):
+            self.storage.delete_holding_target_if_zero(target)
+
+        self.mock_client.delete_record.assert_not_called()
+
+    def test_delete_holding_failure_does_not_publish_unproved_cache(self):
+        self._use_remote_records([{
             'record_id': 'rec_123',
             'fields': {
                 'asset_id': '000001', 'asset_name': '平安银行',
                 'asset_type': 'a_stock', 'account': '测试账户',
                 'broker': '手工', 'quantity': '0', 'currency': 'CNY',
             }
-        }]
+        }])
         self.mock_client.delete_record.side_effect = RuntimeError('delete timeout')
 
         with pytest.raises(RuntimeError, match='delete timeout'):
-            self.storage.delete_holding_if_zero('000001', '测试账户')
+            self.storage.delete_holding_if_zero('000001', '测试账户', '手工')
 
         cache_key = self.storage._get_holding_cache_key('000001', '测试账户', '手工')
-        assert self.storage._holding_fields_cache[cache_key]['record_id'] == 'rec_123'
+        assert cache_key not in self.storage._holding_fields_cache
 
     def test_delete_holding_by_record_id(self):
         """测试通过记录ID删除持仓"""
-        self.mock_client.delete_record.return_value = True
+        self._use_remote_records([{
+            'record_id': 'rec_123',
+            'fields': {
+                'asset_id': '000001', 'asset_name': '平安银行',
+                'asset_type': 'a_stock', 'account': '测试账户',
+                'broker': '手工', 'quantity': '0', 'currency': 'CNY',
+            },
+        }])
 
         result = self.storage.delete_holding_by_record_id('rec_123')
 
@@ -512,46 +943,7 @@ class TestFeishuStorageTransactionOperations:
         self.mock_client = Mock()
         self.storage = FeishuStorage(client=self.mock_client)
 
-    def test_add_transaction(self):
-        """测试添加交易记录"""
-        self.mock_client.list_records.return_value = []
-        self.mock_client.create_record.return_value = {
-            'record_id': 'tx_rec_123',
-            'fields': {}
-        }
-
-        tx = Transaction(
-            tx_date=date(2025, 3, 14),
-            tx_type=TransactionType.BUY,
-            asset_id='000001',
-            asset_name='平安银行',
-            account='测试账户',
-            quantity=1000,
-            price=10.5,
-            currency='CNY'
-        )
-
-        result = self.storage.add_transaction(tx)
-
-        assert result.record_id == 'tx_rec_123'
-
-    def test_add_transaction_with_request_id(self):
-        """测试带request_id的交易（幂等性）"""
-        # 模拟已存在相同request_id的记录
-        self.mock_client.list_records.return_value = [{
-            'record_id': 'existing_tx',
-            'fields': {
-                'request_id': 'req_123',
-                'tx_date': '2025-03-14',
-                'tx_type': 'BUY',
-                'asset_id': '000001',
-                'account': '测试账户',
-                'quantity': 1000,
-                'price': 10.5,
-                'currency': 'CNY',
-            }
-        }]
-
+    def _candidate_transaction(self):
         tx = Transaction(
             tx_date=date(2025, 3, 14),
             tx_type=TransactionType.BUY,
@@ -562,141 +954,119 @@ class TestFeishuStorageTransactionOperations:
             currency='CNY',
             request_id='req_123'
         )
+        return tx
 
-        result = self.storage.add_transaction(tx)
+    @pytest.mark.parametrize('boundary', ['facade', 'repository'])
+    def test_add_transaction_is_a_read_only_tombstone_before_transport(self, boundary):
+        target = self.storage if boundary == 'facade' else self.storage.transactions
 
-        assert result.record_id == 'existing_tx'
-        self.mock_client.create_record.assert_not_called()
+        with pytest.raises(LegacyReadOnlyError, match='legacy read-only archive'):
+            target.add_transaction(self._candidate_transaction())
 
-    def test_add_transaction_fails_closed_when_request_id_lookup_errors(self):
-        tx = Transaction(
-            tx_date=date(2025, 3, 14),
-            tx_type=TransactionType.BUY,
-            asset_id='000001',
-            account='测试账户',
-            quantity=1000,
-            price=10.5,
-            currency='CNY',
-            request_id='req_123'
-        )
-        self.mock_client.list_records.side_effect = RuntimeError('temporary Feishu failure')
+        assert self.mock_client.mock_calls == []
 
-        with pytest.raises(RuntimeError, match='idempotency lookup failed'):
-            self.storage.add_transaction(tx)
+    @pytest.mark.parametrize('boundary', ['facade', 'repository'])
+    def test_delete_transaction_is_a_read_only_tombstone_before_transport(self, boundary):
+        target = self.storage if boundary == 'facade' else self.storage.transactions
 
-        self.mock_client.create_record.assert_not_called()
+        with pytest.raises(LegacyReadOnlyError, match='legacy read-only archive'):
+            target.delete_transaction_by_record_id('tx_rec')
 
-    def test_default_content_dedup_replays_but_distinct_request_ids_create_split_trades(self):
-        self.mock_client.list_records.return_value = []
-        self.mock_client.create_record.side_effect = [
-            {'record_id': 'tx-1', 'fields': {}},
-            {'record_id': 'tx-2', 'fields': {}},
-            {'record_id': 'tx-3', 'fields': {}},
-        ]
-        self.mock_client.get_record_strict.return_value = {
-            'record_id': 'tx-1',
-            'fields': {
-                'tx_date': '2025-03-14',
-                'tx_type': 'BUY',
-                'asset_id': '000001',
-                'account': '测试账户',
-                'quantity': 1000,
-                'price': 10.5,
-                'currency': 'CNY',
-            },
-        }
-
-        def transaction(request_id=None):
-            return Transaction(
-                tx_date=date(2025, 3, 14),
-                tx_type=TransactionType.BUY,
-                asset_id='000001',
-                account='测试账户',
-                quantity=1000,
-                price=10.5,
-                currency='CNY',
-                request_id=request_id,
-            )
-
-        first = self.storage.add_transaction(transaction())
-        replay = self.storage.add_transaction(transaction())
-        split_one = self.storage.add_transaction(transaction('split-1'))
-        split_two = self.storage.add_transaction(transaction('split-2'))
-
-        assert first.record_id == 'tx-1'
-        assert replay.record_id == 'tx-1'
-        assert replay.was_replayed is True
-        assert {split_one.record_id, split_two.record_id} == {'tx-2', 'tx-3'}
-        assert self.mock_client.create_record.call_count == 3
-
-    def test_add_transaction_raises_when_idempotency_fields_missing(self):
-        tx = Transaction(
-            tx_date=date(2025, 3, 14),
-            tx_type=TransactionType.BUY,
-            asset_id='000001',
-            account='测试账户',
-            quantity=1000,
-            price=10.5,
-            currency='CNY',
-            request_id='req_123'
-        )
-        self.mock_client.list_records.side_effect = Exception('FieldNameNotFound')
-
-        with pytest.raises(ValueError, match='缺少 request_id 字段'):
-            self.storage.add_transaction(tx)
+        assert self.mock_client.mock_calls == []
 
     def test_get_transaction(self):
         """测试获取单条交易记录"""
         self.mock_client.get_record_strict.return_value = {
             'record_id': 'tx_rec',
-            'fields': {
-                'asset_id': '000001',
-                'tx_date': '2025-03-14',
-                'tx_type': 'BUY',
-                'quantity': '1000',
-                'price': '10.5',
-                'currency': 'CNY'
-            }
+            'fields': _archived_transaction_fields(),
         }
 
         result = self.storage.get_transaction('tx_rec')
 
-        assert result is not None
+        assert isinstance(result, ArchivedTransaction)
         assert result.asset_id == '000001'
         assert result.tx_type == TransactionType.BUY
+        assert result.amount is None
+        assert result.fee is None
+        assert not hasattr(result, 'source')
+
+    @pytest.mark.parametrize(
+        ('field', 'bad_value'),
+        [
+            ('tx_type', None),
+            ('currency', None),
+            ('quantity', None),
+            ('price', float('nan')),
+            ('tx_date', 1741881600000),
+            ('source', 'manual'),
+        ],
+    )
+    def test_get_transaction_rejects_missing_or_invalid_archive_facts(
+        self,
+        field,
+        bad_value,
+    ):
+        fields = _archived_transaction_fields()
+        fields[field] = bad_value
+        self.mock_client.get_record_strict.return_value = {
+            'record_id': 'tx_bad',
+            'fields': fields,
+        }
+
+        with pytest.raises(ValueError):
+            self.storage.get_transaction('tx_bad')
 
     def test_get_transaction_not_found(self):
         """测试交易记录不存在"""
-        self.mock_client.get_record_strict.side_effect = Exception('not found')
+        self.mock_client.get_record_strict.side_effect = FeishuRecordNotFoundError(
+            code=1254043,
+            message='RecordIdNotFound',
+        )
 
         result = self.storage.get_transaction('non_existent')
 
         assert result is None
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            PermissionError('forbidden'),
+            TimeoutError('timeout'),
+            ValueError('malformed response'),
+        ],
+    )
+    def test_get_transaction_propagates_non_not_found_errors(self, error):
+        self.mock_client.get_record_strict.side_effect = error
+
+        with pytest.raises(type(error), match=str(error)):
+            self.storage.get_transaction('rec_forbidden')
 
     def test_get_transactions(self):
         """测试获取交易记录列表"""
         self.mock_client.list_records.return_value = [
             {
                 'record_id': 'tx_1',
-                'fields': {
-                    'tx_date': '2025-03-14',
-                    'asset_id': '000001',
-                    'tx_type': 'BUY',
-                    'quantity': '1000',
-                    'price': '10.5',
-                    'currency': 'CNY'
-                }
+                'fields': _archived_transaction_fields(
+                    request_id='req-1',
+                    dedup_key='dedup-1',
+                    tx_date='2025-03-14',
+                    asset_id='000001',
+                    tx_type='BUY',
+                    quantity=1000,
+                    price=10.5,
+                )
             },
             {
                 'record_id': 'tx_2',
-                'fields': {
-                    'tx_date': '2025-03-13',
-                    'asset_id': '000002',
-                    'tx_type': 'SELL',
-                    'quantity': '-500',
-                    'price': '11.0',
-                    'currency': 'CNY'
-                }
+                'fields': _archived_transaction_fields(
+                    request_id='req-2',
+                    dedup_key='dedup-2',
+                    tx_date='2025-03-13',
+                    asset_id='000002',
+                    tx_type='SELL',
+                    quantity=-500,
+                    price=11,
+                )
             }
         ]
 
@@ -724,14 +1094,79 @@ class TestFeishuStorageTransactionOperations:
         assert '测试账户' in filter_str
         assert 'BUY' in filter_str
 
-    def test_delete_transaction_by_record_id(self):
-        """测试通过记录ID删除交易"""
-        self.mock_client.delete_record.return_value = True
+    def test_archive_request_lookup_is_scoped_by_account_and_request_id(self):
+        rows = {
+            'account-a': {
+                'record_id': 'tx-a',
+                'fields': _archived_transaction_fields(
+                    account='account-a',
+                    request_id='shared',
+                    dedup_key='dedup-a',
+                ),
+            },
+            'account-b': {
+                'record_id': 'tx-b',
+                'fields': _archived_transaction_fields(
+                    account='account-b',
+                    request_id='shared',
+                    dedup_key='dedup-b',
+                ),
+            },
+        }
 
-        result = self.storage.delete_transaction_by_record_id('tx_rec')
+        def list_records(_table, *, filter_str):
+            account = 'account-a' if 'account-a' in filter_str else 'account-b'
+            return [rows[account]]
 
-        assert result == True
-        self.mock_client.delete_record.assert_called_once_with('transactions', 'tx_rec')
+        self.mock_client.list_records.side_effect = list_records
+
+        a = self.storage.find_archived_transaction_by_request_id(
+            account='account-a',
+            request_id='shared',
+        )
+        b = self.storage.find_archived_transaction_by_request_id(
+            account='account-b',
+            request_id='shared',
+        )
+
+        assert (a.record_id, a.account) == ('tx-a', 'account-a')
+        assert (b.record_id, b.account) == ('tx-b', 'account-b')
+        filters = [call.kwargs['filter_str'] for call in self.mock_client.list_records.call_args_list]
+        assert all('CurrentValue.[account]' in value for value in filters)
+        assert all('CurrentValue.[request_id]' in value for value in filters)
+
+    def test_archive_request_lookup_rejects_cross_account_response(self):
+        self.mock_client.list_records.return_value = [{
+            'record_id': 'tx-a',
+            'fields': _archived_transaction_fields(
+                account='account-a',
+                request_id='shared',
+                dedup_key='dedup-a',
+            ),
+        }]
+
+        with pytest.raises(ValueError, match='out-of-scope'):
+            self.storage.find_archived_transaction_by_request_id(
+                account='account-b',
+                request_id='shared',
+            )
+
+    def test_archive_request_lookup_rejects_duplicate_business_key(self):
+        fields = _archived_transaction_fields(
+            account='account-a',
+            request_id='shared',
+            dedup_key='dedup-a',
+        )
+        self.mock_client.list_records.return_value = [
+            {'record_id': 'tx-a-1', 'fields': fields},
+            {'record_id': 'tx-a-2', 'fields': fields},
+        ]
+
+        with pytest.raises(ValueError, match='business key is ambiguous'):
+            self.storage.find_archived_transaction_by_request_id(
+                account='account-a',
+                request_id='shared',
+            )
 
 
 class TestFeishuStorageCashFlowOperations:
@@ -748,34 +1183,171 @@ class TestFeishuStorageCashFlowOperations:
             'record_id': 'cf_rec_123',
             'fields': {}
         }
-
-        cf = CashFlow(
-            flow_date=date(2025, 3, 14),
-            account='测试账户',
-            amount=100000,
-            currency='CNY',
-            cny_amount=100000,
-            flow_type='DEPOSIT'
+        self.storage._cash_flow_agg_loaded_accounts.add('测试账户')
+        self.storage._local_cash_flow_agg_cache.set_account(
+            '测试账户',
+            {'cumulative': 0.0, 'flow_count': 0},
         )
+
+        cf = _completed_cash_flow(amount=100000)
 
         result = self.storage.add_cash_flow(cf)
 
         assert result.record_id == 'cf_rec_123'
+        assert self.storage.get_cash_flow_aggs('测试账户')['cumulative'] == 100000.0
 
     def test_add_cash_flow_raises_when_dedup_key_field_missing(self):
         self.mock_client.list_records.side_effect = Exception('FieldNameNotFound')
 
-        cf = CashFlow(
-            flow_date=date(2025, 3, 14),
-            account='测试账户',
-            amount=100000,
-            currency='CNY',
-            cny_amount=100000,
-            flow_type='DEPOSIT'
-        )
+        cf = _completed_cash_flow(amount=100000)
 
         with pytest.raises(ValueError, match='缺少 dedup_key 字段'):
             self.storage.add_cash_flow(cf)
+
+    def test_add_cash_flow_rejects_transport_model_before_any_write(self):
+        transport = CashFlow(
+            flow_date=date(2025, 3, 14),
+            account='测试账户',
+            broker='华泰',
+            amount=100,
+            currency='CNY',
+        )
+
+        with pytest.raises(TypeError, match='CompletedCashFlowFacts'):
+            self.storage.add_cash_flow(transport)
+
+        self.mock_client.list_records.assert_not_called()
+        self.mock_client.create_record.assert_not_called()
+
+    def test_add_incomplete_foreign_facts_does_not_write_or_update_cache(self):
+        complete = _completed_cash_flow(
+            amount=10,
+            currency='USD',
+            exchange_rate=7.2,
+        )
+        incomplete = replace(
+            complete,
+            cny_amount=None,
+            exchange_rate=None,
+        )
+        self.storage._cash_flow_agg_loaded_accounts.add('测试账户')
+        self.storage._cash_flow_agg_mem_cache['测试账户'] = {
+            'cumulative': 100.0,
+        }
+
+        with pytest.raises(CashFlowContractError):
+            self.storage.add_cash_flow(incomplete)
+
+        self.mock_client.list_records.assert_not_called()
+        self.mock_client.create_record.assert_not_called()
+        assert self.storage._cash_flow_agg_mem_cache['测试账户'] == {
+            'cumulative': 100.0,
+        }
+
+    def test_add_invalidates_unloaded_disk_aggregate_instead_of_partial_append(self):
+        self.mock_client.list_records.return_value = []
+        self.mock_client.create_record.return_value = {
+            'record_id': 'cf_rec_123',
+            'fields': {},
+        }
+        self.storage._local_cash_flow_agg_cache.set_account(
+            '测试账户',
+            {'cumulative': 100.0, 'flow_count': 1},
+        )
+
+        self.storage.add_cash_flow(_completed_cash_flow(amount=50))
+
+        assert '测试账户' not in self.storage._cash_flow_agg_loaded_accounts
+        assert self.storage._local_cash_flow_agg_cache.get_account('测试账户') == {}
+
+    def test_add_cash_flow_rechecks_stale_dedup_cache_before_replay(self):
+        requested = _completed_cash_flow(amount=100)
+        changed = _completed_cash_flow(amount=200, record_id='cf_changed')
+        matching = requested.with_record_id('cf_matching')
+        records = {
+            'cf_changed': {
+                'record_id': 'cf_changed',
+                'fields': changed.to_fields(),
+            },
+            'cf_matching': {
+                'record_id': 'cf_matching',
+                'fields': matching.to_fields(),
+            },
+        }
+        self.storage._dedup_key_cache[
+            f'cash_flow:{requested.dedup_key}'
+        ] = 'cf_changed'
+        self.mock_client.get_record_strict.side_effect = (
+            lambda _table, record_id: records[record_id]
+        )
+        self.mock_client.list_records.return_value = [records['cf_matching']]
+
+        result = self.storage.add_cash_flow(requested)
+
+        assert result.record_id == 'cf_matching'
+        assert result.dedup_key == requested.dedup_key
+        assert result.amount == 100.0
+        assert result.was_replayed is True
+        assert self.storage._dedup_key_cache[
+            f'cash_flow:{requested.dedup_key}'
+        ] == 'cf_matching'
+        self.mock_client.list_records.assert_called_once()
+        self.mock_client.create_record.assert_not_called()
+
+    def test_add_cash_flow_creates_after_stale_dedup_cache_has_no_fresh_match(self):
+        requested = _completed_cash_flow(amount=100)
+        changed = _completed_cash_flow(amount=200, record_id='cf_changed')
+        stale_record = {
+            'record_id': 'cf_changed',
+            'fields': changed.to_fields(),
+        }
+        self.storage._dedup_key_cache[
+            f'cash_flow:{requested.dedup_key}'
+        ] = 'cf_changed'
+        self.mock_client.get_record_strict.return_value = stale_record
+        self.mock_client.list_records.return_value = []
+        self.mock_client.create_record.return_value = {
+            'record_id': 'cf_created',
+            'fields': requested.to_fields(),
+        }
+
+        result = self.storage.add_cash_flow(requested)
+
+        assert result.record_id == 'cf_created'
+        assert result.dedup_key == requested.dedup_key
+        assert result.was_replayed is False
+        self.mock_client.list_records.assert_called_once()
+        self.mock_client.create_record.assert_called_once()
+
+    def test_add_cash_flow_hot_cache_uses_decimal_aggregate_semantics(self):
+        self.mock_client.list_records.return_value = []
+        self.mock_client.create_record.return_value = {
+            'record_id': 'cf_created',
+            'fields': {},
+        }
+        cache_payload = {
+            'account': '测试账户',
+            'daily': {'2025-03-14': 0.1},
+            'monthly': {'2025-03': 0.1},
+            'yearly': {'2025': 0.1},
+            'cumulative': 0.1,
+            'flow_count': 1,
+            'flows': [],
+        }
+        self.storage._cash_flow_agg_loaded_accounts.add('测试账户')
+        self.storage._cash_flow_agg_mem_cache['测试账户'] = cache_payload
+        self.storage._local_cash_flow_agg_cache.set_account(
+            '测试账户',
+            cache_payload,
+        )
+
+        self.storage.add_cash_flow(_completed_cash_flow(amount='0.20'))
+
+        aggregate = self.storage.get_cash_flow_aggs('测试账户')
+        assert aggregate['daily']['2025-03-14'] == 0.3
+        assert aggregate['monthly']['2025-03'] == 0.3
+        assert aggregate['yearly']['2025'] == 0.3
+        assert aggregate['cumulative'] == 0.3
 
     def test_get_cash_flow(self):
         """测试获取单条出入金记录"""
@@ -784,7 +1356,6 @@ class TestFeishuStorageCashFlowOperations:
             'fields': {
                 'flow_date': '2025-03-14',
                 'amount': '100000',
-                'currency': 'CNY'
             }
         }
 
@@ -792,6 +1363,31 @@ class TestFeishuStorageCashFlowOperations:
 
         assert result is not None
         assert result.amount == 100000.0
+        assert result.currency is None
+        assert result.flow_type is None
+        assert result.dedup_key is None
+        assert result.source is None
+
+    def test_get_cash_flow_preserves_observed_dedup_and_digest_fields(self):
+        facts = _completed_cash_flow(
+            amount=100,
+            source='bank-import',
+            record_id='cf_rec',
+        )
+        fields = facts.to_fields()
+        fields['remark'] = 'observed memo'
+        fields['updated_at'] = '2025-03-14 09:30:00'
+        self.mock_client.get_record_strict.return_value = {
+            'record_id': 'cf_rec',
+            'fields': fields,
+        }
+
+        result = self.storage.get_cash_flow('cf_rec')
+
+        assert result.dedup_key == facts.dedup_key
+        assert result.source == 'bank-import'
+        assert result.remark == 'observed memo'
+        assert result.updated_at == '2025-03-14 09:30:00'
 
     def test_get_cash_flows(self):
         """测试获取出入金记录列表"""
@@ -827,13 +1423,28 @@ class TestFeishuStorageCashFlowOperations:
         )
 
         assert len(flows) == 2
+        projection = self.mock_client.list_records.call_args.kwargs['field_names']
+        assert projection == self.storage.CASH_FLOW_PROJECTION_FIELDS
+        assert {'remark', 'source', 'dedup_key'} <= set(projection)
 
     def test_get_total_cash_flow_cny(self):
         """测试获取累计出入金总额"""
+        facts = [
+            _completed_cash_flow(amount=100000, record_id='cf_1'),
+            _completed_cash_flow(
+                amount=-30000,
+                flow_date=date(2025, 3, 13),
+                record_id='cf_2',
+            ),
+            _completed_cash_flow(
+                amount=50000,
+                flow_date=date(2025, 3, 12),
+                record_id='cf_3',
+            ),
+        ]
         self.mock_client.list_records.return_value = [
-            {'fields': {'amount': '100000', 'cny_amount': '100000'}},
-            {'fields': {'amount': '-30000', 'cny_amount': '-30000'}},
-            {'fields': {'amount': '50000', 'cny_amount': '50000'}}
+            {'record_id': item.record_id, 'fields': item.to_fields()}
+            for item in facts
         ]
 
         total = self.storage.get_total_cash_flow_cny('测试账户')
@@ -848,22 +1459,81 @@ class TestFeishuStorageCashFlowOperations:
                 'fields': {
                     'flow_date': '2025-03-14',
                     'account': '测试账户',
+                    'broker': '华泰',
                     'amount': '10',
                     'currency': 'USD',
+                    'flow_type': 'DEPOSIT',
+                    'dedup_key': _completed_cash_flow(
+                        amount=10,
+                        currency='USD',
+                    ).dedup_key,
+                    'source': 'test',
                 },
             }
         ]
 
-        with pytest.raises(ValueError, match='pm cash-flow reconcile'):
+        with pytest.raises(CashFlowContractError) as exc_info:
             self.storage.preload_cash_flow_aggs('测试账户', force_refresh=True)
+
+        assert {issue.reason_code for issue in exc_info.value.issues} >= {
+            'EXCHANGE_RATE_MISSING',
+            'CNY_AMOUNT_MISSING',
+        }
+
+    def test_preload_cash_flow_aggs_missing_date_blocks_and_keeps_old_cache(self):
+        self.storage._cash_flow_agg_mem_cache['测试账户'] = {
+            'cumulative': 42.0,
+        }
+        self.mock_client.list_records.return_value = [{
+            'record_id': 'cf_missing_date',
+            'fields': {
+                'account': '测试账户',
+                'broker': '华泰',
+                'amount': 100,
+                'currency': 'CNY',
+                'flow_type': 'DEPOSIT',
+                'cny_amount': 100,
+                'exchange_rate': 1,
+                'dedup_key': 'untrusted-without-date',
+                'source': 'test',
+            },
+        }]
+
+        with pytest.raises(CashFlowContractError) as exc_info:
+            self.storage.preload_cash_flow_aggs(
+                '测试账户',
+                force_refresh=True,
+            )
+
+        assert 'FLOW_DATE_MISSING' in {
+            issue.reason_code for issue in exc_info.value.issues
+        }
+        assert self.storage._cash_flow_agg_mem_cache['测试账户'] == {
+            'cumulative': 42.0,
+        }
 
     def test_delete_cash_flow_by_record_id(self):
         """测试通过记录ID删除出入金"""
+        self.mock_client.get_record_strict.return_value = {
+            'record_id': 'cf_rec',
+            'fields': {'account': '测试账户'},
+        }
         self.mock_client.delete_record.return_value = True
+        self.storage._cash_flow_agg_loaded_accounts.add('测试账户')
+        self.storage._cash_flow_agg_mem_cache['测试账户'] = {
+            'cumulative': 100.0,
+        }
+        self.storage._local_cash_flow_agg_cache.set_account(
+            '测试账户',
+            {'cumulative': 100.0},
+        )
 
         result = self.storage.delete_cash_flow_by_record_id('cf_rec')
 
         assert result == True
+        assert '测试账户' not in self.storage._cash_flow_agg_loaded_accounts
+        assert '测试账户' not in self.storage._cash_flow_agg_mem_cache
+        assert self.storage._local_cash_flow_agg_cache.get_account('测试账户') == {}
 
     def test_reconcile_cash_flows_dry_run_fills_manual_cny_row(self):
         """手工现金流只填人工字段时，reconcile dry-run 应补齐系统字段预览。"""
@@ -1096,7 +1766,11 @@ class TestFeishuStorageNAVOperations:
         """测试更新现有净值记录"""
         self.mock_client.list_records.return_value = [{
             'record_id': 'existing_nav',
-            'fields': {'date': '2025-03-14', 'nav': '0.95'}
+            'fields': {
+                'date': '2025-03-14',
+                'account': '测试账户',
+                'nav': '0.95',
+            }
         }]
         self.mock_client.update_record.return_value = {
             'record_id': 'existing_nav',
@@ -1128,6 +1802,7 @@ class TestFeishuStorageNAVOperations:
                 'record_id': 'nav_1',
                 'fields': {
                     'date': today.isoformat(),
+                    'account': '测试账户',
                     'total_value': '1000000',
                     'nav': '1.0'
                 }
@@ -1136,6 +1811,7 @@ class TestFeishuStorageNAVOperations:
                 'record_id': 'nav_2',
                 'fields': {
                     'date': yesterday.isoformat(),
+                    'account': '测试账户',
                     'total_value': '990000',
                     'nav': '0.99'
                 }
@@ -1154,15 +1830,27 @@ class TestFeishuStorageNAVOperations:
         self.mock_client.list_records.return_value = [
             {
                 'record_id': 'nav_1',
-                'fields': {'date': '2025-03-13', 'nav': '0.99'}
+                'fields': {
+                    'date': '2025-03-13',
+                    'account': '测试账户',
+                    'nav': '0.99',
+                }
             },
             {
                 'record_id': 'nav_2',
-                'fields': {'date': '2025-03-14', 'nav': '1.0'}
+                'fields': {
+                    'date': '2025-03-14',
+                    'account': '测试账户',
+                    'nav': '1.0',
+                }
             },
             {
                 'record_id': 'nav_3',
-                'fields': {'date': '2025-03-12', 'nav': '0.98'}
+                'fields': {
+                    'date': '2025-03-12',
+                    'account': '测试账户',
+                    'nav': '0.98',
+                }
             }
         ]
 
@@ -1176,7 +1864,11 @@ class TestFeishuStorageNAVOperations:
         """测试获取指定日期的净值"""
         self.mock_client.list_records.return_value = [{
             'record_id': 'nav_1',
-            'fields': {'date': '2025-03-14', 'nav': '1.0'}
+            'fields': {
+                'date': '2025-03-14',
+                'account': '测试账户',
+                'nav': '1.0',
+            }
         }]
 
         result = self.storage.get_nav_on_date('测试账户', date(2025, 3, 14))
@@ -1189,11 +1881,19 @@ class TestFeishuStorageNAVOperations:
         self.mock_client.list_records.return_value = [
             {
                 'record_id': 'nav_1',
-                'fields': {'date': '2025-03-12', 'nav': '0.98'}
+                'fields': {
+                    'date': '2025-03-12',
+                    'account': '测试账户',
+                    'nav': '0.98',
+                }
             },
             {
                 'record_id': 'nav_2',
-                'fields': {'date': '2025-03-13', 'nav': '0.99'}
+                'fields': {
+                    'date': '2025-03-13',
+                    'account': '测试账户',
+                    'nav': '0.99',
+                }
             }
         ]
 
@@ -1206,7 +1906,12 @@ class TestFeishuStorageNAVOperations:
         """测试获取总份额"""
         self.mock_client.list_records.return_value = [{
             'record_id': 'nav_1',
-            'fields': {'date': '2025-03-14', 'shares': '1000000', 'nav': '1.0'}
+            'fields': {
+                'date': '2025-03-14',
+                'account': '测试账户',
+                'shares': '1000000',
+                'nav': '1.0',
+            }
         }]
 
         shares = self.storage.get_total_shares('测试账户')
@@ -1317,65 +2022,26 @@ class TestFeishuStoragePriceOperations:
         assert prices[0].asset_id == '000001'
 
 
-def test_transaction_replay_marker_is_runtime_only():
-    client = Mock()
-    storage = FeishuStorage(client=client)
-    client.list_records.return_value = [{
-        "record_id": "tx-existing",
-        "fields": {
-            "request_id": "req-1",
-            "dedup_key": "dedup-1",
-            "tx_date": "2025-03-14",
-            "tx_type": "BUY",
-            "asset_id": "000001",
-            "account": "a",
-            "quantity": 1,
-            "price": 10,
-            "currency": "CNY",
-        },
-    }]
-    tx = Transaction(
-        tx_date=date(2025, 3, 14),
-        tx_type=TransactionType.BUY,
-        asset_id="000001",
-        account="a",
-        quantity=99,
-        price=10,
-        currency="CNY",
-        request_id="req-1",
-    )
-
-    result = storage.add_transaction(tx)
-
-    assert result.was_replayed is True
-    assert result.quantity == 1
-    assert "was_replayed" not in result.model_dump()
-    assert "_was_replayed" not in result.model_dump()
-    client.create_record.assert_not_called()
-
-
 def test_cash_flow_replay_marker_is_runtime_only():
     client = Mock()
     storage = FeishuStorage(client=client)
     client.list_records.return_value = [{"record_id": "cf-existing", "fields": {}}]
+    facts = _completed_cash_flow(
+        account="a",
+        broker="某券商",
+        amount=100,
+        source="test",
+        record_id="cf-existing",
+    )
     client.get_record_strict.return_value = {
         "record_id": "cf-existing",
-        "fields": {
-            "flow_date": "2025-03-14",
-            "account": "a",
-            "amount": 100,
-            "currency": "CNY",
-            "cny_amount": 100,
-            "flow_type": "DEPOSIT",
-        },
+        "fields": facts.to_fields(),
     }
-    cf = CashFlow(
-        flow_date=date(2025, 3, 14),
+    cf = _completed_cash_flow(
         account="a",
+        broker="某券商",
         amount=100,
-        currency="CNY",
-        cny_amount=100,
-        flow_type="DEPOSIT",
+        source="test",
     )
 
     result = storage.add_cash_flow(cf)
@@ -1384,50 +2050,3 @@ def test_cash_flow_replay_marker_is_runtime_only():
     assert "was_replayed" not in result.model_dump()
     assert "_was_replayed" not in result.model_dump()
     client.create_record.assert_not_called()
-
-
-def test_transaction_same_host_concurrent_check_create_is_serialized():
-    from concurrent.futures import ThreadPoolExecutor
-    import time
-
-    client = Mock()
-    storage = FeishuStorage(client=client)
-    client.list_records.return_value = []
-    client.get_record_strict.return_value = {
-        "record_id": "tx-created",
-        "fields": {
-            "request_id": "same-request",
-            "dedup_key": "same-dedup",
-            "tx_date": "2025-03-14",
-            "tx_type": "BUY",
-            "asset_id": "000001",
-            "account": "a",
-            "quantity": 1,
-            "price": 10,
-            "currency": "CNY",
-        },
-    }
-
-    def create(_table, _fields):
-        time.sleep(0.05)
-        return {"record_id": "tx-created", "fields": {}}
-
-    client.create_record.side_effect = create
-
-    def submit():
-        return storage.add_transaction(Transaction(
-            tx_date=date(2025, 3, 14),
-            tx_type=TransactionType.BUY,
-            asset_id="000001",
-            account="a",
-            quantity=1,
-            price=10,
-            currency="CNY",
-            request_id="same-request",
-        ))
-
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        results = list(executor.map(lambda _: submit(), range(2)))
-
-    assert client.create_record.call_count == 1
-    assert sorted(result.was_replayed for result in results) == [False, True]
