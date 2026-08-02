@@ -9,9 +9,15 @@ from src.app.snapshot_service import SnapshotService, snapshot_digest
 from src.domain.snapshot_contracts import (
     NormalizedValuationRow,
     NormalizedValuationSnapshot,
+    SnapshotExactSetPlan,
+    SnapshotSetConflictError,
+    SnapshotWriteAuthority,
     ValuationComponent,
 )
+from src.domain.nav_calculator import ClosedNavTarget
+from src.feishu.contracts import validate_write_fields
 from src.models import AssetClass, AssetType, Holding
+from src.feishu.repositories.snapshots_repository import SnapshotsRepository
 
 
 def _normalized_valuation():
@@ -40,79 +46,139 @@ def _normalized_valuation():
         warnings=[],
         excluded_zero_keys=(),
     )
-def test_snapshot_service_writes_when_preview_has_changes(tmp_path):
-    storage = Mock()
-    storage.batch_upsert_holding_snapshots.side_effect = [
-        {"to_create": [{"asset_id": "000001"}], "to_update": []},
-        {"created": 1, "updated": 0},
-    ]
+
+
+def _authority(normalized, *, overwrite=False, confirmed=True):
+    as_of = "2026-03-19"
+    return SnapshotWriteAuthority(
+        account="a",
+        as_of=as_of,
+        run_id="run-snapshot",
+        issuer="test",
+        overwrite_existing=overwrite,
+        confirmed=confirmed,
+        target_digest=normalized.target_digest(as_of=as_of),
+    )
+
+
+class _ExactStorage:
+    def __init__(self, rows=()):
+        self.rows = list(rows)
+        self.apply_calls = []
+        self.fail_readback = False
+
+    def list_holding_snapshots_fresh(self, *, account, as_of):
+        assert account == "a"
+        assert as_of == "2026-03-19"
+        if self.fail_readback and self.apply_calls:
+            return []
+        return list(self.rows)
+
+    def apply_holding_snapshot_actions(self, *, actions, current, dry_run=False):
+        self.apply_calls.append((actions, list(current), dry_run))
+        if dry_run:
+            return {"dry_run": True, **actions.summary()}
+        next_id = 1
+        by_id = {row.record_id: row for row in self.rows}
+        for row in actions.creates:
+            while f"snapshot-{next_id}" in by_id:
+                next_id += 1
+            created = row.model_copy(update={"record_id": f"snapshot-{next_id}"})
+            by_id[created.record_id] = created
+        for record_id, row in actions.updates:
+            by_id[record_id] = row.model_copy(update={"record_id": record_id})
+        for record_id in actions.deletes:
+            by_id.pop(record_id, None)
+        self.rows = list(by_id.values())
+        return {
+            "dry_run": False,
+            "created": len(actions.creates),
+            "updated": len(actions.updates),
+            "deleted": len(actions.deletes),
+        }
+
+
+def test_snapshot_service_exact_set_updates_clears_and_deletes(tmp_path):
+    normalized = _normalized_valuation()
+    desired = normalized.to_snapshot_rows(as_of="2026-03-19")[0]
+    current_a = desired.model_copy(
+        update={"record_id": "snapshot-a", "remark": "stale"}
+    )
+    current_b = desired.model_copy(update={
+        "record_id": "snapshot-b",
+        "asset_id": "obsolete",
+        "dedup_key": "a:2026-03-19:CN:obsolete",
+    })
+    storage = _ExactStorage((current_a, current_b))
     service = SnapshotService(storage=storage, data_dir=tmp_path)
 
     snapshots = service.persist_holdings_snapshot(
         account="a",
         today=date(2026, 3, 19),
-        normalized_valuation=_normalized_valuation(),
+        normalized_valuation=normalized,
+        write_authority=_authority(normalized, overwrite=True),
         dry_run=False,
     )
 
     assert len(snapshots) == 1
     assert snapshots[0].dedup_key == "a:2026-03-19:CN:000001"
-    assert snapshots[0].price == 10.123
-    assert snapshots[0].cny_price == 10.123
-    assert snapshots[0].market_value_cny == 124.97
-    assert storage.batch_upsert_holding_snapshots.call_count == 2
-    assert storage.batch_upsert_holding_snapshots.call_args_list[0].kwargs["dry_run"] is True
-    assert storage.batch_upsert_holding_snapshots.call_args_list[1].kwargs["dry_run"] is False
+    assert storage.rows[0].record_id == "snapshot-a"
+    assert storage.rows[0].remark is None
+    actions = storage.apply_calls[0][0]
+    assert actions.summary() == {
+        "create": 0,
+        "update": 1,
+        "delete": 1,
+        "unchanged": 0,
+    }
 
     out_file = tmp_path / "holdings_snapshot" / "a" / "2026-03-19.json"
     payload = json.loads(out_file.read_text(encoding="utf-8"))
     assert payload["count"] == 1
-    assert payload["digest"] == snapshot_digest(snapshots)
-    assert payload["snapshots"][0]["asset_id"] == "000001"
+    assert payload["digest"] == snapshot_digest(storage.rows)
 
 
 def test_generic_normalized_builder_is_not_official():
     assert _normalized_valuation().official_eligible is False
 
 
-def test_snapshot_service_skips_feishu_write_when_preview_has_no_changes(tmp_path):
-    storage = Mock()
-    storage.batch_upsert_holding_snapshots.return_value = {"to_create": [], "to_update": []}
+def test_snapshot_service_first_write_requires_confirmed_authority(tmp_path):
+    normalized = _normalized_valuation()
+    storage = _ExactStorage()
     service = SnapshotService(storage=storage, data_dir=tmp_path)
 
     service.persist_holdings_snapshot(
         account="a",
         today=date(2026, 3, 19),
-        normalized_valuation=_normalized_valuation(),
+        normalized_valuation=normalized,
+        write_authority=_authority(normalized),
         dry_run=False,
     )
 
-    storage.batch_upsert_holding_snapshots.assert_called_once()
+    assert len(storage.rows) == 1
     assert (tmp_path / "holdings_snapshot" / "a" / "2026-03-19.json").exists()
 
 
-def test_snapshot_service_passes_dry_run_to_actual_write(tmp_path):
-    storage = Mock()
-    storage.batch_upsert_holding_snapshots.side_effect = [
-        {"to_create": [], "to_update": [{"asset_id": "000001"}]},
-        {"created": 0, "updated": 0},
-    ]
+def test_snapshot_service_dry_run_plans_without_mutation(tmp_path):
+    normalized = _normalized_valuation()
+    storage = _ExactStorage()
     service = SnapshotService(storage=storage, data_dir=tmp_path)
 
     service.persist_holdings_snapshot(
         account="a",
         today=date(2026, 3, 19),
-        normalized_valuation=_normalized_valuation(),
+        normalized_valuation=normalized,
+        write_authority=_authority(normalized, confirmed=False),
         dry_run=True,
     )
 
-    assert storage.batch_upsert_holding_snapshots.call_count == 2
-    assert storage.batch_upsert_holding_snapshots.call_args_list[1].kwargs["dry_run"] is True
+    assert storage.rows == []
+    assert storage.apply_calls[0][2] is True
 
 
 def test_snapshot_service_dry_run_does_not_modify_existing_local_snapshot(tmp_path):
-    storage = Mock()
-    storage.batch_upsert_holding_snapshots.return_value = {"to_create": [], "to_update": []}
+    normalized = _normalized_valuation()
+    storage = _ExactStorage()
     service = SnapshotService(storage=storage, data_dir=tmp_path)
     out_file = tmp_path / "holdings_snapshot" / "a" / "2026-03-19.json"
     out_file.parent.mkdir(parents=True)
@@ -123,7 +189,8 @@ def test_snapshot_service_dry_run_does_not_modify_existing_local_snapshot(tmp_pa
     service.persist_holdings_snapshot(
         account="a",
         today=date(2026, 3, 19),
-        normalized_valuation=_normalized_valuation(),
+        normalized_valuation=normalized,
+        write_authority=_authority(normalized, confirmed=False),
         dry_run=True,
     )
 
@@ -131,23 +198,180 @@ def test_snapshot_service_dry_run_does_not_modify_existing_local_snapshot(tmp_pa
     assert out_file.stat().st_mtime_ns == old_mtime_ns
 
 
-def test_snapshot_service_raises_when_feishu_write_fails(tmp_path):
-    storage = Mock()
-    storage.batch_upsert_holding_snapshots.side_effect = RuntimeError("boom")
+def test_snapshot_service_requires_overwrite_for_existing_slice(tmp_path):
+    normalized = _normalized_valuation()
+    existing = normalized.to_snapshot_rows(as_of="2026-03-19")[0].model_copy(
+        update={"record_id": "snapshot-a"}
+    )
+    storage = _ExactStorage((existing,))
     service = SnapshotService(storage=storage, data_dir=tmp_path)
 
-    with pytest.raises(RuntimeError, match="boom"):
+    with pytest.raises(PermissionError, match="overwrite_existing"):
         service.persist_holdings_snapshot(
             account="a",
             today=date(2026, 3, 19),
-            normalized_valuation=_normalized_valuation(),
+            normalized_valuation=normalized,
+            write_authority=_authority(normalized, overwrite=False),
+            dry_run=False,
+        )
+    assert storage.apply_calls == []
+
+
+def test_snapshot_service_empty_target_requires_overwrite_for_existing_slice(tmp_path):
+    existing_normalized = _normalized_valuation()
+    existing = existing_normalized.to_snapshot_rows(
+        as_of="2026-03-19"
+    )[0].model_copy(update={"record_id": "snapshot-a"})
+    closed = NormalizedValuationSnapshot.from_closed_input(
+        ClosedNavTarget.build(
+            total_value=100,
+            cash_value=100,
+            non_cash_value=0,
+        ),
+        account="a",
+        source_provenance={"run_id": "run-snapshot"},
+    )
+    storage = _ExactStorage((existing,))
+    service = SnapshotService(storage=storage, data_dir=tmp_path)
+
+    with pytest.raises(PermissionError, match="overwrite_existing"):
+        service.persist_holdings_snapshot(
+            account="a",
+            today=date(2026, 3, 19),
+            normalized_valuation=closed,
+            write_authority=_authority(closed, overwrite=False),
+            dry_run=False,
+        )
+    assert storage.apply_calls == []
+
+
+def test_snapshot_service_unconfirmed_overwrite_performs_zero_mutation(tmp_path):
+    normalized = _normalized_valuation()
+    existing = normalized.to_snapshot_rows(as_of="2026-03-19")[0].model_copy(
+        update={"record_id": "snapshot-a"}
+    )
+    storage = _ExactStorage((existing,))
+    service = SnapshotService(storage=storage, data_dir=tmp_path)
+
+    with pytest.raises(PermissionError, match="confirmed"):
+        service.persist_holdings_snapshot(
+            account="a",
+            today=date(2026, 3, 19),
+            normalized_valuation=normalized,
+            write_authority=_authority(
+                normalized,
+                overwrite=True,
+                confirmed=False,
+            ),
+            dry_run=False,
+        )
+    assert storage.apply_calls == []
+
+
+def test_snapshot_plan_blocks_duplicate_remote_business_keys():
+    normalized = _normalized_valuation()
+    desired = normalized.to_snapshot_rows(as_of="2026-03-19")[0]
+    duplicate_a = desired.model_copy(update={"record_id": "snapshot-a"})
+    duplicate_b = desired.model_copy(update={"record_id": "snapshot-b"})
+
+    with pytest.raises(SnapshotSetConflictError, match="duplicate business keys"):
+        SnapshotExactSetPlan.build(
+            account="a",
+            as_of="2026-03-19",
+            target_digest=normalized.target_digest(as_of="2026-03-19"),
+            before=(duplicate_a, duplicate_b),
+            desired=(desired,),
+        )
+
+
+def test_snapshot_repository_sends_explicit_clear_then_deletes_obsolete():
+    normalized = _normalized_valuation()
+    desired = normalized.to_snapshot_rows(as_of="2026-03-19")[0]
+    current_a = desired.model_copy(
+        update={"record_id": "snapshot-a", "remark": "stale"}
+    )
+    current_b = desired.model_copy(update={
+        "record_id": "snapshot-b",
+        "asset_id": "obsolete",
+        "dedup_key": "a:2026-03-19:CN:obsolete",
+    })
+    plan = SnapshotExactSetPlan.build(
+        account="a",
+        as_of="2026-03-19",
+        target_digest=normalized.target_digest(as_of="2026-03-19"),
+        before=(current_a, current_b),
+        desired=(desired,),
+    )
+    actions = plan.residual_actions((current_a, current_b))
+    client = Mock()
+    client.batch_update_records.return_value = [{"record_id": "snapshot-a"}]
+    client.batch_delete_records.return_value = 1
+
+    class Storage:
+        @staticmethod
+        def _to_feishu_fields(data, _table, preserve_none=False):
+            return {
+                key: value
+                for key, value in data.items()
+                if preserve_none or value is not None
+            }
+
+    storage = Storage()
+    storage.client = client
+    repository = SnapshotsRepository(storage)
+
+    result = repository.apply_holding_snapshot_actions(
+        actions=actions,
+        current=(current_a, current_b),
+        dry_run=False,
+    )
+
+    update = client.batch_update_records.call_args.args[1][0]
+    assert update == {
+        "record_id": "snapshot-a",
+        "fields": {"remark": None},
+    }
+    client.batch_delete_records.assert_called_once_with(
+        "holdings_snapshot",
+        ["snapshot-b"],
+    )
+    assert result == {
+        "dry_run": False,
+        "created": 0,
+        "updated": 1,
+        "deleted": 1,
+        "unchanged": 0,
+    }
+
+
+@pytest.mark.parametrize("field", ["asset_name", "avg_cost", "source", "remark"])
+def test_snapshot_write_contract_allows_owned_optional_fields_to_clear(field):
+    validate_write_fields(
+        "holdings_snapshot",
+        "update",
+        {field: None},
+    )
+
+
+def test_snapshot_service_raises_when_fresh_readback_is_not_exact(tmp_path):
+    normalized = _normalized_valuation()
+    storage = _ExactStorage()
+    storage.fail_readback = True
+    service = SnapshotService(storage=storage, data_dir=tmp_path)
+
+    with pytest.raises(RuntimeError, match="fresh readback"):
+        service.persist_holdings_snapshot(
+            account="a",
+            today=date(2026, 3, 19),
+            normalized_valuation=normalized,
+            write_authority=_authority(normalized),
             dry_run=False,
         )
 
 
 def test_snapshot_service_ignores_local_snapshot_write_failure(tmp_path):
-    storage = Mock()
-    storage.batch_upsert_holding_snapshots.return_value = {"to_create": [], "to_update": []}
+    normalized = _normalized_valuation()
+    storage = _ExactStorage()
     data_dir = tmp_path / "not_a_directory"
     data_dir.write_text("block mkdir", encoding="utf-8")
     service = SnapshotService(storage=storage, data_dir=data_dir)
@@ -155,7 +379,8 @@ def test_snapshot_service_ignores_local_snapshot_write_failure(tmp_path):
     snapshots = service.persist_holdings_snapshot(
         account="a",
         today=date(2026, 3, 19),
-        normalized_valuation=_normalized_valuation(),
+        normalized_valuation=normalized,
+        write_authority=_authority(normalized),
         dry_run=False,
     )
 

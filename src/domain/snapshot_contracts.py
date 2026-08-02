@@ -7,6 +7,7 @@ holding rows and official NAV totals are projected from this object.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 import json
@@ -15,6 +16,8 @@ from typing import Any, Iterable, Mapping, Optional
 
 NORMALIZED_VALUATION_VERSION = "pm.normalized_valuation.v2"
 SNAPSHOT_DIGEST_VERSION = "pm.holdings_snapshot.v2"
+SNAPSHOT_EXACT_SET_VERSION = "pm.holdings_snapshot.exact_set.v1"
+SNAPSHOT_WRITE_AUTHORITY_VERSION = "pm.holdings_snapshot.write_authority.v1"
 QUANTITY_QUANT = Decimal("0.00000001")
 MONEY_QUANT = Decimal("0.01")
 NAV_QUANT = Decimal("0.000001")
@@ -122,6 +125,441 @@ def snapshot_digest(snapshots: Iterable[Any]) -> str:
         )
     )
     return digest_payload({"version": SNAPSHOT_DIGEST_VERSION, "rows": items})
+
+
+def snapshot_business_key(snapshot: Any) -> tuple[str, str, str, str]:
+    """Return the canonical account/date/broker/asset business key."""
+
+    return (
+        str(snapshot.account),
+        str(snapshot.as_of),
+        str(snapshot.broker),
+        str(snapshot.asset_id),
+    )
+
+
+def _assert_snapshot_scope(snapshot: Any, *, account: str, as_of: str) -> None:
+    if snapshot.account != account or snapshot.as_of != as_of:
+        raise ValueError(
+            "holdings snapshot row scope mismatch: "
+            f"expected={account}/{as_of} actual={snapshot.account}/{snapshot.as_of}"
+        )
+    expected_dedup_key = f"{account}:{as_of}:{snapshot.broker}:{snapshot.asset_id}"
+    if snapshot.dedup_key != expected_dedup_key:
+        raise ValueError(
+            "holdings snapshot dedup_key mismatch: "
+            f"expected={expected_dedup_key} actual={snapshot.dedup_key}"
+        )
+
+
+def _snapshot_with_record_payload(snapshot: Any) -> dict[str, Any]:
+    return {
+        "record_id": str(snapshot.record_id or "") or None,
+        **snapshot_row_payload(snapshot),
+    }
+
+
+def _snapshot_from_payload(payload: Mapping[str, Any]) -> Any:
+    from src.snapshot_models import HoldingSnapshot
+
+    return HoldingSnapshot(**dict(payload))
+
+
+class SnapshotSetConflictError(ValueError):
+    """The remote slice is neither the bound before set nor a safe partial target."""
+
+
+@dataclass(frozen=True)
+class SnapshotSetActions:
+    """Residual mutations required to reach one exact snapshot target set."""
+
+    creates: tuple[Any, ...]
+    updates: tuple[tuple[str, Any], ...]
+    deletes: tuple[str, ...]
+    unchanged: int = 0
+
+    @property
+    def mutation_count(self) -> int:
+        return len(self.creates) + len(self.updates) + len(self.deletes)
+
+    def summary(self) -> dict[str, int]:
+        return {
+            "create": len(self.creates),
+            "update": len(self.updates),
+            "delete": len(self.deletes),
+            "unchanged": self.unchanged,
+        }
+
+
+@dataclass(frozen=True)
+class SnapshotExactSetPlan:
+    """Immutable before/target snapshot set bound to one account and date."""
+
+    account: str
+    as_of: str
+    target_digest: str
+    before: tuple[Any, ...]
+    desired: tuple[Any, ...]
+    contract_version: str = SNAPSHOT_EXACT_SET_VERSION
+
+    def __post_init__(self) -> None:
+        _nonblank(self.account, field="snapshot_plan.account")
+        try:
+            date.fromisoformat(self.as_of)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("snapshot_plan.as_of must be YYYY-MM-DD") from exc
+        if self.contract_version != SNAPSHOT_EXACT_SET_VERSION:
+            raise ValueError("unsupported snapshot exact-set contract version")
+        if len(str(self.target_digest)) != 64:
+            raise ValueError("snapshot plan target_digest must be a sha256 digest")
+        if not isinstance(self.before, tuple) or not isinstance(self.desired, tuple):
+            raise TypeError("snapshot plan before/desired sets must be immutable tuples")
+        self._validate_rows(self.before, require_record_id=True, label="before")
+        self._validate_rows(self.desired, require_record_id=False, label="desired")
+
+    def _validate_rows(
+        self,
+        rows: tuple[Any, ...],
+        *,
+        require_record_id: bool,
+        label: str,
+    ) -> None:
+        keys: list[tuple[str, str, str, str]] = []
+        record_ids: list[str] = []
+        for row in rows:
+            _assert_snapshot_scope(row, account=self.account, as_of=self.as_of)
+            keys.append(snapshot_business_key(row))
+            record_id = str(getattr(row, "record_id", None) or "")
+            if require_record_id and not record_id:
+                raise ValueError(f"snapshot plan {label} row requires record_id")
+            if record_id:
+                record_ids.append(record_id)
+        if len(keys) != len(set(keys)):
+            raise SnapshotSetConflictError(
+                f"snapshot plan {label} set contains duplicate business keys"
+            )
+        if len(record_ids) != len(set(record_ids)):
+            raise SnapshotSetConflictError(
+                f"snapshot plan {label} set contains duplicate record_ids"
+            )
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        account: str,
+        as_of: str,
+        target_digest: str,
+        before: Iterable[Any],
+        desired: Iterable[Any],
+    ) -> "SnapshotExactSetPlan":
+        def sort_key(row: Any) -> tuple[str, str, str, str, str]:
+            return snapshot_business_key(row) + (str(row.record_id or ""),)
+
+        return cls(
+            account=str(account),
+            as_of=str(as_of),
+            target_digest=str(target_digest),
+            before=tuple(sorted(before, key=sort_key)),
+            desired=tuple(sorted(desired, key=sort_key)),
+        )
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> "SnapshotExactSetPlan":
+        if not isinstance(payload, Mapping):
+            raise TypeError("snapshot exact-set plan payload must be an object")
+        plan = cls.build(
+            account=str(payload.get("account") or ""),
+            as_of=str(payload.get("as_of") or ""),
+            target_digest=str(payload.get("target_digest") or ""),
+            before=(
+                _snapshot_from_payload(row)
+                for row in (payload.get("before") or [])
+            ),
+            desired=(
+                _snapshot_from_payload(row)
+                for row in (payload.get("desired") or [])
+            ),
+        )
+        if payload.get("contract_version") != plan.contract_version:
+            raise ValueError("snapshot exact-set plan contract_version mismatch")
+        if payload.get("plan_digest") != plan.plan_digest:
+            raise ValueError("snapshot exact-set plan digest mismatch")
+        return plan
+
+    @property
+    def row_digest(self) -> str:
+        return snapshot_digest(self.desired)
+
+    def canonical_payload(self) -> dict[str, Any]:
+        return {
+            "contract_version": self.contract_version,
+            "account": self.account,
+            "as_of": self.as_of,
+            "target_digest": self.target_digest,
+            "row_digest": self.row_digest,
+            "before": [_snapshot_with_record_payload(row) for row in self.before],
+            "desired": [snapshot_row_payload(row) for row in self.desired],
+        }
+
+    @property
+    def plan_digest(self) -> str:
+        return digest_payload(self.canonical_payload())
+
+    def to_payload(self) -> dict[str, Any]:
+        return {**self.canonical_payload(), "plan_digest": self.plan_digest}
+
+    @staticmethod
+    def _rows_by_key(rows: Iterable[Any]) -> dict[tuple[str, str, str, str], Any]:
+        result: dict[tuple[str, str, str, str], Any] = {}
+        for row in rows:
+            key = snapshot_business_key(row)
+            if key in result:
+                raise SnapshotSetConflictError(
+                    f"duplicate remote holdings_snapshot business key: {key}"
+                )
+            result[key] = row
+        return result
+
+    def residual_actions(self, current: Iterable[Any]) -> SnapshotSetActions:
+        """Validate a safe replay state and return the remaining deterministic actions."""
+
+        current_rows = tuple(current)
+        self._validate_rows(current_rows, require_record_id=True, label="current")
+        before_by_key = self._rows_by_key(self.before)
+        desired_by_key = self._rows_by_key(self.desired)
+        current_by_key = self._rows_by_key(current_rows)
+        allowed_keys = set(before_by_key) | set(desired_by_key)
+        unknown_keys = sorted(set(current_by_key) - allowed_keys)
+        if unknown_keys:
+            raise SnapshotSetConflictError(
+                f"snapshot remote set contains unbound keys: {unknown_keys}"
+            )
+
+        creates: list[Any] = []
+        updates: list[tuple[str, Any]] = []
+        deletes: list[str] = []
+        unchanged = 0
+        for key in sorted(desired_by_key):
+            desired = desired_by_key[key]
+            current_row = current_by_key.get(key)
+            before_row = before_by_key.get(key)
+            if current_row is None:
+                if before_row is not None:
+                    raise SnapshotSetConflictError(
+                        f"bound snapshot row disappeared before target completion: {key}"
+                    )
+                creates.append(desired)
+                continue
+            current_payload = snapshot_row_payload(current_row)
+            desired_payload = snapshot_row_payload(desired)
+            if before_row is not None:
+                if current_row.record_id != before_row.record_id:
+                    raise SnapshotSetConflictError(
+                        f"bound snapshot record_id changed: {key}"
+                    )
+                before_payload = snapshot_row_payload(before_row)
+                if current_payload not in (before_payload, desired_payload):
+                    raise SnapshotSetConflictError(
+                        f"bound snapshot row matches neither before nor target: {key}"
+                    )
+            elif current_payload != desired_payload:
+                raise SnapshotSetConflictError(
+                    f"new snapshot row does not match the bound target: {key}"
+                )
+            if current_payload == desired_payload:
+                unchanged += 1
+            else:
+                updates.append((str(current_row.record_id), desired))
+
+        for key in sorted(set(before_by_key) - set(desired_by_key)):
+            before_row = before_by_key[key]
+            current_row = current_by_key.get(key)
+            if current_row is None:
+                unchanged += 1
+                continue
+            if (
+                current_row.record_id != before_row.record_id
+                or snapshot_row_payload(current_row) != snapshot_row_payload(before_row)
+            ):
+                raise SnapshotSetConflictError(
+                    f"obsolete snapshot row changed before deletion: {key}"
+                )
+            deletes.append(str(current_row.record_id))
+
+        return SnapshotSetActions(
+            creates=tuple(creates),
+            updates=tuple(updates),
+            deletes=tuple(deletes),
+            unchanged=unchanged,
+        )
+
+
+@dataclass(frozen=True)
+class BoundSnapshotWriteAuthority:
+    """A confirmed write capability cryptographically bound to one exact-set plan."""
+
+    account: str
+    as_of: str
+    run_id: str
+    issuer: str
+    overwrite_existing: bool
+    confirmed: bool
+    target_digest: str
+    plan_digest: str
+    authority_digest: str
+    contract_version: str = SNAPSHOT_WRITE_AUTHORITY_VERSION
+
+    def __post_init__(self) -> None:
+        for name in ("account", "as_of", "run_id", "issuer"):
+            _nonblank(getattr(self, name), field=f"snapshot_authority.{name}")
+        if len(self.target_digest) != 64 or len(self.plan_digest) != 64:
+            raise ValueError("snapshot authority digests must be sha256 digests")
+        if self.contract_version != SNAPSHOT_WRITE_AUTHORITY_VERSION:
+            raise ValueError("unsupported snapshot write authority version")
+        expected_authority_digest = digest_payload({
+            "contract_version": self.contract_version,
+            "account": self.account,
+            "as_of": self.as_of,
+            "run_id": self.run_id,
+            "issuer": self.issuer,
+            "overwrite_existing": self.overwrite_existing,
+            "confirmed": self.confirmed,
+            "target_digest": self.target_digest,
+        })
+        if self.authority_digest != expected_authority_digest:
+            raise ValueError("snapshot authority digest mismatch")
+
+    def canonical_payload(self) -> dict[str, Any]:
+        return {
+            "contract_version": self.contract_version,
+            "account": self.account,
+            "as_of": self.as_of,
+            "run_id": self.run_id,
+            "issuer": self.issuer,
+            "overwrite_existing": self.overwrite_existing,
+            "confirmed": self.confirmed,
+            "target_digest": self.target_digest,
+            "plan_digest": self.plan_digest,
+            "authority_digest": self.authority_digest,
+        }
+
+    @property
+    def digest(self) -> str:
+        return digest_payload(self.canonical_payload())
+
+    def to_payload(self) -> dict[str, Any]:
+        return {**self.canonical_payload(), "bound_digest": self.digest}
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> "BoundSnapshotWriteAuthority":
+        if not isinstance(payload, Mapping):
+            raise TypeError("bound snapshot authority payload must be an object")
+        if not isinstance(payload.get("overwrite_existing"), bool):
+            raise ValueError("snapshot authority overwrite_existing must be boolean")
+        if not isinstance(payload.get("confirmed"), bool):
+            raise ValueError("snapshot authority confirmed must be boolean")
+        bound = cls(
+            account=str(payload.get("account") or ""),
+            as_of=str(payload.get("as_of") or ""),
+            run_id=str(payload.get("run_id") or ""),
+            issuer=str(payload.get("issuer") or ""),
+            overwrite_existing=payload["overwrite_existing"],
+            confirmed=payload["confirmed"],
+            target_digest=str(payload.get("target_digest") or ""),
+            plan_digest=str(payload.get("plan_digest") or ""),
+            authority_digest=str(payload.get("authority_digest") or ""),
+            contract_version=str(payload.get("contract_version") or ""),
+        )
+        if payload.get("bound_digest") != bound.digest:
+            raise ValueError("bound snapshot authority digest mismatch")
+        return bound
+
+    def assert_matches(self, plan: SnapshotExactSetPlan) -> None:
+        if (
+            self.account != plan.account
+            or self.as_of != plan.as_of
+            or self.target_digest != plan.target_digest
+            or self.plan_digest != plan.plan_digest
+        ):
+            raise SnapshotSetConflictError(
+                "snapshot authority scope/digest does not match the prepared plan"
+            )
+
+
+@dataclass(frozen=True)
+class SnapshotWriteAuthority:
+    """Top-level caller intent before it is bound to a fresh exact-set plan."""
+
+    account: str
+    as_of: str
+    run_id: str
+    issuer: str
+    overwrite_existing: bool
+    confirmed: bool
+    target_digest: str
+    contract_version: str = SNAPSHOT_WRITE_AUTHORITY_VERSION
+
+    def __post_init__(self) -> None:
+        for name in ("account", "as_of", "run_id", "issuer"):
+            _nonblank(getattr(self, name), field=f"snapshot_authority.{name}")
+        try:
+            date.fromisoformat(self.as_of)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("snapshot_authority.as_of must be YYYY-MM-DD") from exc
+        if not isinstance(self.overwrite_existing, bool) or not isinstance(
+            self.confirmed, bool
+        ):
+            raise TypeError("snapshot authority flags must be boolean")
+        if len(str(self.target_digest)) != 64:
+            raise ValueError("snapshot authority target_digest must be a sha256 digest")
+        if self.contract_version != SNAPSHOT_WRITE_AUTHORITY_VERSION:
+            raise ValueError("unsupported snapshot write authority version")
+
+    @property
+    def digest(self) -> str:
+        return digest_payload({
+            "contract_version": self.contract_version,
+            "account": self.account,
+            "as_of": self.as_of,
+            "run_id": self.run_id,
+            "issuer": self.issuer,
+            "overwrite_existing": self.overwrite_existing,
+            "confirmed": self.confirmed,
+            "target_digest": self.target_digest,
+        })
+
+    def bind(
+        self,
+        plan: SnapshotExactSetPlan,
+        *,
+        require_confirm: bool,
+    ) -> BoundSnapshotWriteAuthority:
+        if (
+            self.account != plan.account
+            or self.as_of != plan.as_of
+            or self.target_digest != plan.target_digest
+        ):
+            raise SnapshotSetConflictError(
+                "snapshot write authority scope/digest mismatch"
+            )
+        if require_confirm and not self.confirmed:
+            raise PermissionError("snapshot write requires confirmed authority")
+        if plan.before and not self.overwrite_existing:
+            raise PermissionError(
+                "holdings_snapshot slice already exists; overwrite_existing=True required"
+            )
+        return BoundSnapshotWriteAuthority(
+            account=self.account,
+            as_of=self.as_of,
+            run_id=self.run_id,
+            issuer=self.issuer,
+            overwrite_existing=self.overwrite_existing,
+            confirmed=self.confirmed,
+            target_digest=self.target_digest,
+            plan_digest=plan.plan_digest,
+            authority_digest=self.digest,
+        )
 
 
 def _enum_value(value: Any) -> Optional[str]:

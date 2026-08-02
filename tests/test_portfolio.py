@@ -414,6 +414,7 @@ class TestPortfolioManagerNAVRecord:
             '测试账户',
             valuation,
             nav_date=date(2025, 3, 14),
+            persist=False,
             run_id=run_id,
             cash_flow_dataset=_cash_flow_dataset(
                 self.mock_storage,
@@ -455,6 +456,7 @@ class TestPortfolioManagerNAVRecord:
             '测试账户',
             valuation,
             nav_date=date(2025, 3, 14),
+            persist=False,
             run_id=run_id,
             cash_flow_dataset=_cash_flow_dataset(
                 self.mock_storage,
@@ -494,6 +496,7 @@ class TestPortfolioManagerNAVRecord:
             '测试账户',
             valuation,
             nav_date=date(2025, 3, 14),
+            persist=False,
             run_id=run_id,
             cash_flow_dataset=_cash_flow_dataset(
                 self.mock_storage,

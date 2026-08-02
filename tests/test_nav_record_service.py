@@ -1,6 +1,9 @@
 from dataclasses import replace
+from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 import inspect
+import threading
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -22,6 +25,7 @@ from src.domain.cash_flow_contracts import (
 from src.domain.nav_calculator import ClosedNavTarget
 from src.domain.snapshot_contracts import (
     NormalizedValuationSnapshot,
+    SnapshotWriteAuthority,
     attached_normalized_valuation,
 )
 from src.models import AssetClass, AssetType, Holding, NAVHistory, PortfolioValuation
@@ -111,23 +115,93 @@ def _storage():
     storage = Mock()
     storage.get_nav_index.return_value = {"_nav_objects": []}
     storage.get_raw_cash_flows.return_value = []
+    nav_state = {}
+    snapshot_state = []
 
-    def write_nav(nav, **_kwargs):
+    def write_nav(nav, **kwargs):
+        if kwargs.get("dry_run"):
+            return nav
         nav.record_id = nav.record_id or "nav-1"
+        nav_state[(nav.account, nav.date)] = nav
         return nav
 
     storage.write_nav_record.side_effect = write_nav
     storage.write_nav_records.side_effect = lambda navs, **_kwargs: [write_nav(nav) for nav in navs]
+    storage.preload_nav_index.return_value = {}
+    storage.get_nav_on_date.side_effect = lambda account, nav_date: nav_state.get(
+        (account, nav_date)
+    )
+
+    def patch_nav_details(record_id, details, *, dry_run=False):
+        assert dry_run is False
+        for nav in nav_state.values():
+            if nav.record_id == record_id:
+                nav.details = dict(details)
+                return {"record_id": record_id}
+        raise ValueError(f"missing nav: {record_id}")
+
+    storage.nav_history.patch_nav_details.side_effect = patch_nav_details
+    storage.nav_history.preload_nav_index.return_value = {}
+    storage.list_holding_snapshots_fresh.side_effect = (
+        lambda **_kwargs: list(snapshot_state)
+    )
+
+    def apply_snapshot_actions(*, actions, current, dry_run=False):
+        if dry_run:
+            return {"dry_run": True, **actions.summary()}
+        by_id = {row.record_id: row for row in snapshot_state}
+        next_id = len(by_id) + 1
+        for row in actions.creates:
+            created = row.model_copy(update={"record_id": f"snapshot-{next_id}"})
+            next_id += 1
+            by_id[created.record_id] = created
+        for record_id, row in actions.updates:
+            by_id[record_id] = row.model_copy(update={"record_id": record_id})
+        for record_id in actions.deletes:
+            by_id.pop(record_id, None)
+        snapshot_state[:] = list(by_id.values())
+        return {
+            "created": len(actions.creates),
+            "updated": len(actions.updates),
+            "deleted": len(actions.deletes),
+        }
+
+    storage.apply_holding_snapshot_actions.side_effect = apply_snapshot_actions
+    storage._test_nav_state = nav_state
+    storage._test_snapshot_state = snapshot_state
     return storage
 
 
 def _manager(storage):
     manager = PortfolioManager(storage=storage, price_fetcher=Mock())
-    manager.snapshot_service = Mock()
-    manager.snapshot_service.build_holdings_snapshots.return_value = []
+    manager.snapshot_service._write_local_snapshot = Mock()
+    manager.compensation = Mock()
+    manager.compensation.new_task_id.return_value = "repair-snapshot"
     manager._record_compensation = Mock()
     manager._print_nav_summary = Mock()
     return manager
+
+
+def _snapshot_authority(
+    valuation,
+    *,
+    nav_date=date(2026, 3, 19),
+    run_id="run-nav-test",
+    overwrite=False,
+    confirmed=True,
+    issuer="nav-record",
+):
+    normalized = attached_normalized_valuation(valuation)
+    assert normalized is not None
+    return SnapshotWriteAuthority(
+        account="a",
+        as_of=nav_date.isoformat(),
+        run_id=run_id,
+        issuer=issuer,
+        overwrite_existing=overwrite,
+        confirmed=confirmed,
+        target_digest=normalized.target_digest(as_of=nav_date.isoformat()),
+    )
 
 
 def _dataset(storage, nav_date, run_id="run-nav-test", account="a"):
@@ -219,7 +293,7 @@ def test_nav_record_service_records_nav_through_manager_helpers():
     assert result.account == "a"
     assert result.total_value == 1200.0
     manager._find_latest_nav_before.assert_called_once()
-    manager.snapshot_service.persist_holdings_snapshot.assert_called_once()
+    storage.apply_holding_snapshot_actions.assert_called_once()
     storage.write_nav_record.assert_called_once_with(result, overwrite_existing=False, dry_run=True)
     storage.write_nav_records.assert_not_called()
     manager._print_nav_summary.assert_not_called()
@@ -552,9 +626,10 @@ def test_nav_record_service_uses_bulk_persist_when_requested():
     manager = _manager(storage)
     service = NavRecordService(manager=manager, storage=storage)
 
+    valuation = _valuation()
     result = service.record_nav(
         account="a",
-        valuation=_valuation(),
+        valuation=valuation,
         nav_date=date(2026, 3, 19),
         persist=True,
         dry_run=False,
@@ -562,10 +637,16 @@ def test_nav_record_service_uses_bulk_persist_when_requested():
         use_bulk_persist=True,
         run_id="run-bulk",
         cash_flow_dataset=_dataset(storage, date(2026, 3, 19), "run-bulk"),
+        snapshot_write_authority=_snapshot_authority(
+            valuation,
+            run_id="run-bulk",
+            overwrite=True,
+        ),
     )
 
     storage.write_nav_records.assert_called_once_with([result], mode="replace", allow_partial=False, dry_run=False)
-    storage.write_nav_record.assert_not_called()
+    assert storage.write_nav_record.call_count == 1
+    assert storage.write_nav_record.call_args.kwargs["dry_run"] is True
     manager._print_nav_summary.assert_called_once()
 
 
@@ -590,7 +671,7 @@ def test_nav_record_service_rejects_real_write_on_unreliable_valuation():
 
     storage.write_nav_record.assert_not_called()
     storage.write_nav_records.assert_not_called()
-    manager.snapshot_service.persist_holdings_snapshot.assert_not_called()
+    storage.apply_holding_snapshot_actions.assert_not_called()
 
 
 def test_nav_record_service_rejects_mutated_compatibility_projection():
@@ -619,7 +700,7 @@ def test_nav_record_service_rejects_mutated_compatibility_projection():
         )
 
     storage.write_nav_record.assert_not_called()
-    manager.snapshot_service.persist_holdings_snapshot.assert_not_called()
+    storage.apply_holding_snapshot_actions.assert_not_called()
 
 
 def test_nav_record_service_rejects_unattached_aggregate_projection():
@@ -651,7 +732,7 @@ def test_nav_record_service_rejects_unattached_aggregate_projection():
 
     storage.write_nav_record.assert_not_called()
     storage.write_nav_records.assert_not_called()
-    manager.snapshot_service.persist_holdings_snapshot.assert_not_called()
+    storage.apply_holding_snapshot_actions.assert_not_called()
 
 
 def test_normal_nav_entrypoint_rejects_closed_input_authority():
@@ -684,7 +765,7 @@ def test_normal_nav_entrypoint_rejects_closed_input_authority():
         )
 
     storage.write_nav_record.assert_not_called()
-    manager.snapshot_service.persist_holdings_snapshot.assert_not_called()
+    storage.apply_holding_snapshot_actions.assert_not_called()
 
 
 def test_nav_record_service_rejects_substituted_normalized_digest():
@@ -716,49 +797,292 @@ def test_nav_record_service_rejects_substituted_normalized_digest():
 
     storage.write_nav_record.assert_not_called()
     storage.write_nav_records.assert_not_called()
-    manager.snapshot_service.persist_holdings_snapshot.assert_not_called()
+    storage.apply_holding_snapshot_actions.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("nav_overwrite", "authority_overwrite"),
+    [(True, False), (False, True)],
+)
+def test_nav_write_rejects_overwrite_authority_mismatch_before_remote_reads(
+    nav_overwrite,
+    authority_overwrite,
+):
+    storage = _storage()
+    manager = _manager(storage)
+    service = NavRecordService(manager=manager, storage=storage)
+    valuation = _valuation()
+
+    with pytest.raises(PermissionError, match="overwrite_existing"):
+        service.record_nav(
+            account="a",
+            valuation=valuation,
+            nav_date=date(2026, 3, 19),
+            persist=True,
+            dry_run=False,
+            overwrite_existing=nav_overwrite,
+            run_id="run-authority-overwrite",
+            cash_flow_dataset=_dataset(
+                storage,
+                date(2026, 3, 19),
+                "run-authority-overwrite",
+            ),
+            snapshot_write_authority=_snapshot_authority(
+                valuation,
+                run_id="run-authority-overwrite",
+                overwrite=authority_overwrite,
+            ),
+        )
+
+    storage.list_holding_snapshots_fresh.assert_not_called()
+    storage.write_nav_record.assert_not_called()
+    storage.write_nav_records.assert_not_called()
+    storage.apply_holding_snapshot_actions.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("authority_run_id", "authority_issuer", "mismatch"),
+    [
+        ("run-other", "nav-record", "run_id"),
+        ("run-authority-context", "other-writer", "issuer"),
+    ],
+)
+def test_nav_write_rejects_authority_context_mismatch_before_remote_reads(
+    authority_run_id,
+    authority_issuer,
+    mismatch,
+):
+    storage = _storage()
+    manager = _manager(storage)
+    service = NavRecordService(manager=manager, storage=storage)
+    valuation = _valuation()
+
+    with pytest.raises(PermissionError, match=mismatch):
+        service.record_nav(
+            account="a",
+            valuation=valuation,
+            nav_date=date(2026, 3, 19),
+            persist=True,
+            dry_run=False,
+            run_id="run-authority-context",
+            cash_flow_dataset=_dataset(
+                storage,
+                date(2026, 3, 19),
+                "run-authority-context",
+            ),
+            snapshot_write_authority=_snapshot_authority(
+                valuation,
+                run_id=authority_run_id,
+                issuer=authority_issuer,
+            ),
+        )
+
+    storage.list_holding_snapshots_fresh.assert_not_called()
+    storage.write_nav_record.assert_not_called()
+    storage.apply_holding_snapshot_actions.assert_not_called()
 
 
 def test_nav_record_service_logs_snapshot_failure_after_nav_write(caplog):
     storage = _storage()
     manager = _manager(storage)
-    manager.snapshot_service.persist_holdings_snapshot.side_effect = RuntimeError("snapshot boom")
+    storage.apply_holding_snapshot_actions.side_effect = RuntimeError("snapshot boom")
     service = NavRecordService(manager=manager, storage=storage)
+    valuation = _valuation()
 
     result = service.record_nav(
         account="a",
-        valuation=_valuation(),
+        valuation=valuation,
         nav_date=date(2026, 3, 19),
         persist=True,
         run_id="run-snapshot-fail",
         cash_flow_dataset=_dataset(storage, date(2026, 3, 19), "run-snapshot-fail"),
+        snapshot_write_authority=_snapshot_authority(
+            valuation,
+            run_id="run-snapshot-fail",
+        ),
     )
 
     assert result.date == date(2026, 3, 19)
-    storage.write_nav_record.assert_called_once()
+    assert storage.write_nav_record.call_count == 2
     assert result.details["snapshot_persisted"] is False
     assert result.details["snapshot_status"] == "failed"
     assert result.details["snapshot_error"] == "snapshot boom"
-    manager._record_compensation.assert_called_once()
-    call = manager._record_compensation.call_args.kwargs
-    assert call["operation_type"] == "NAV_HOLDINGS_SNAPSHOT_FAILED"
+    manager.compensation.prepare.assert_called_once()
+    call = manager.compensation.prepare.call_args.kwargs
+    assert call["operation_type"] == "NAV_HOLDINGS_SNAPSHOT_TARGET_SET"
     assert call["task_id"] == result.details["snapshot_task_id"]
     assert call["payload"]["targets"][0]["type"] == "HOLDINGS_SNAPSHOT_TARGET_SET"
+    assert any(
+        item.args[1] == "FAILED"
+        for item in manager.compensation.update_status.call_args_list
+    )
     storage.nav_history.patch_nav_details.assert_called_once_with("nav-1", result.details, dry_run=False)
-    assert "holdings_snapshot write failed for 2026-03-19 (a): snapshot boom" in caplog.text
+    assert "holdings_snapshot exact-set incomplete" in caplog.text
 
 
-def test_nav_record_service_raises_partial_when_recovery_evidence_cannot_persist():
+def test_nav_snapshot_exact_set_holds_account_lock_through_remote_actions(
+    monkeypatch,
+):
     storage = _storage()
     manager = _manager(storage)
-    manager.snapshot_service.persist_holdings_snapshot.side_effect = RuntimeError("snapshot boom")
-    manager._record_compensation.side_effect = OSError("disk full")
     service = NavRecordService(manager=manager, storage=storage)
+    valuation = _valuation()
+    lock_state = {"key": None}
 
-    with pytest.raises(PartialWriteError) as captured:
+    @contextmanager
+    def fake_process_lock(key):
+        assert lock_state["key"] is None
+        lock_state["key"] = key
+        try:
+            yield
+        finally:
+            lock_state["key"] = None
+
+    original_apply = storage.apply_holding_snapshot_actions.side_effect
+
+    def apply_under_lock(**kwargs):
+        assert lock_state["key"] == "account-write:a"
+        return original_apply(**kwargs)
+
+    monkeypatch.setattr(
+        "src.app.nav_record_service.process_lock",
+        fake_process_lock,
+    )
+    storage.apply_holding_snapshot_actions.side_effect = apply_under_lock
+
+    def history_under_lock(account):
+        assert account == "a"
+        assert lock_state["key"] == "account-write:a"
+        return {"_nav_objects": []}
+
+    storage.get_nav_index.side_effect = history_under_lock
+
+    result = service.record_nav(
+        account="a",
+        valuation=valuation,
+        nav_date=date(2026, 3, 19),
+        persist=True,
+        run_id="run-account-lock",
+        cash_flow_dataset=_dataset(
+            storage,
+            date(2026, 3, 19),
+            "run-account-lock",
+        ),
+        snapshot_write_authority=_snapshot_authority(
+            valuation,
+            run_id="run-account-lock",
+        ),
+    )
+
+    assert result.details["snapshot_status"] == "complete"
+    assert lock_state["key"] is None
+
+
+def test_same_account_writers_calculate_from_history_inside_one_lock(monkeypatch):
+    storage = _storage()
+
+    def write_nav_with_unique_id(nav, **kwargs):
+        if kwargs.get("dry_run"):
+            return nav
+        nav.record_id = nav.record_id or f"nav-{nav.date.isoformat()}"
+        storage._test_nav_state[(nav.account, nav.date)] = nav
+        return nav
+
+    storage.write_nav_record.side_effect = write_nav_with_unique_id
+    storage.list_holding_snapshots_fresh.side_effect = lambda **kwargs: [
+        row
+        for row in storage._test_snapshot_state
+        if row.account == kwargs["account"] and row.as_of == kwargs["as_of"]
+    ]
+    storage.get_nav_index.side_effect = lambda account: {
+        "_nav_objects": [
+            row.model_copy(deep=True)
+            for (row_account, _nav_date), row in storage._test_nav_state.items()
+            if row_account == account
+        ]
+    }
+    manager = _manager(storage)
+    service = NavRecordService(manager=manager, storage=storage)
+    valuation = _valuation()
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    serial = threading.Lock()
+    entry_count = 0
+    entry_count_lock = threading.Lock()
+
+    @contextmanager
+    def fake_process_lock(key):
+        nonlocal entry_count
+        assert key == "account-write:a"
+        with entry_count_lock:
+            entry_count += 1
+            current_entry = entry_count
+        with serial:
+            if current_entry == 1:
+                first_entered.set()
+                assert release_first.wait(timeout=2)
+            yield
+
+    monkeypatch.setattr(
+        "src.app.nav_record_service.process_lock",
+        fake_process_lock,
+    )
+    first_date = date(2026, 3, 19)
+    second_date = date(2026, 3, 20)
+    first_dataset = _dataset(storage, first_date, "run-serial-1")
+    second_dataset = _dataset(storage, second_date, "run-serial-2")
+
+    def write_on(nav_date, run_id, dataset):
+        return service.record_nav(
+            account="a",
+            valuation=valuation,
+            nav_date=nav_date,
+            persist=True,
+            run_id=run_id,
+            cash_flow_dataset=dataset,
+            snapshot_write_authority=_snapshot_authority(
+                valuation,
+                nav_date=nav_date,
+                run_id=run_id,
+            ),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(
+            write_on,
+            first_date,
+            "run-serial-1",
+            first_dataset,
+        )
+        assert first_entered.wait(timeout=2)
+        second = pool.submit(
+            write_on,
+            second_date,
+            "run-serial-2",
+            second_dataset,
+        )
+        release_first.set()
+        first_result = first.result(timeout=3)
+        second_result = second.result(timeout=3)
+
+    assert first_result.details["snapshot_status"] == "complete"
+    assert second_result.details["snapshot_status"] == "complete"
+    assert second_result.details["cash_flow_basis"]["previous_nav_date"] == (
+        first_date.isoformat()
+    )
+
+
+def test_nav_record_service_blocks_nav_when_prepare_fsync_fails():
+    storage = _storage()
+    manager = _manager(storage)
+    manager.compensation.prepare.side_effect = OSError("disk full")
+    service = NavRecordService(manager=manager, storage=storage)
+    valuation = _valuation()
+
+    with pytest.raises(OSError, match="disk full"):
         service.record_nav(
             account="a",
-            valuation=_valuation(),
+            valuation=valuation,
             nav_date=date(2026, 3, 19),
             persist=True,
             run_id="run-compensation-fail",
@@ -767,11 +1091,281 @@ def test_nav_record_service_raises_partial_when_recovery_evidence_cannot_persist
                 date(2026, 3, 19),
                 "run-compensation-fail",
             ),
+            snapshot_write_authority=_snapshot_authority(
+                valuation,
+                run_id="run-compensation-fail",
+            ),
         )
 
-    assert captured.value.operation == "NAV_RECORD"
-    assert captured.value.compensation_persisted is False
-    assert storage.write_nav_record.called
+    assert storage.write_nav_record.call_count == 1
+    assert storage.write_nav_record.call_args.kwargs["dry_run"] is True
+    assert storage._test_nav_state == {}
+
+
+def test_nav_timeout_with_matching_remote_success_continues_exact_set():
+    storage = _storage()
+    manager = _manager(storage)
+    service = NavRecordService(manager=manager, storage=storage)
+    valuation = _valuation()
+    normal_write = storage.write_nav_record.side_effect
+
+    def write_then_timeout(nav, **kwargs):
+        result = normal_write(nav, **kwargs)
+        if not kwargs.get("dry_run"):
+            raise TimeoutError("transport timed out after commit")
+        return result
+
+    storage.write_nav_record.side_effect = write_then_timeout
+
+    result = service.record_nav(
+        account="a",
+        valuation=valuation,
+        nav_date=date(2026, 3, 19),
+        persist=True,
+        dry_run=False,
+        run_id="run-timeout-success",
+        cash_flow_dataset=_dataset(
+            storage,
+            date(2026, 3, 19),
+            "run-timeout-success",
+        ),
+        snapshot_write_authority=_snapshot_authority(
+            valuation,
+            run_id="run-timeout-success",
+        ),
+    )
+
+    assert result.details["snapshot_status"] == "complete"
+    assert result.details["snapshot_persisted"] is True
+    assert len(storage._test_snapshot_state) == 3
+    statuses = [call.args[1] for call in manager.compensation.update_status.call_args_list]
+    assert statuses == ["PENDING", "RESOLVED"]
+
+
+def test_final_nav_readback_transient_absence_recovers_completed_state():
+    storage = _storage()
+    manager = _manager(storage)
+    service = NavRecordService(manager=manager, storage=storage)
+    valuation = _valuation()
+    normal_get = storage.get_nav_on_date.side_effect
+    read_count = 0
+
+    def intermittent_readback(account, nav_date):
+        nonlocal read_count
+        read_count += 1
+        if read_count == 3:
+            return None
+        return normal_get(account, nav_date)
+
+    storage.get_nav_on_date.side_effect = intermittent_readback
+
+    result = service.record_nav(
+        account="a",
+        valuation=valuation,
+        nav_date=date(2026, 3, 19),
+        persist=True,
+        dry_run=False,
+        run_id="run-readback-recovered",
+        cash_flow_dataset=_dataset(
+            storage,
+            date(2026, 3, 19),
+            "run-readback-recovered",
+        ),
+        snapshot_write_authority=_snapshot_authority(
+            valuation,
+            run_id="run-readback-recovered",
+        ),
+    )
+
+    assert result.details["snapshot_status"] == "complete"
+    status_call = manager.compensation.update_status.call_args
+    assert status_call.args[1] == "RESOLVED"
+    assert status_call.kwargs["resolution"] == (
+        "completion_recovered_by_fresh_nav_readback"
+    )
+
+
+def test_nav_exception_with_absent_remote_resolves_no_replay():
+    storage = _storage()
+    manager = _manager(storage)
+    service = NavRecordService(manager=manager, storage=storage)
+    valuation = _valuation()
+
+    def fail_before_commit(nav, **kwargs):
+        if kwargs.get("dry_run"):
+            return nav
+        raise TimeoutError("transport failed before commit")
+
+    storage.write_nav_record.side_effect = fail_before_commit
+
+    with pytest.raises(TimeoutError, match="before commit"):
+        service.record_nav(
+            account="a",
+            valuation=valuation,
+            nav_date=date(2026, 3, 19),
+            persist=True,
+            dry_run=False,
+            run_id="run-timeout-absent",
+            cash_flow_dataset=_dataset(
+                storage,
+                date(2026, 3, 19),
+                "run-timeout-absent",
+            ),
+            snapshot_write_authority=_snapshot_authority(
+                valuation,
+                run_id="run-timeout-absent",
+            ),
+        )
+
+    assert storage._test_snapshot_state == []
+    status_call = manager.compensation.update_status.call_args
+    assert status_call.args[1] == "RESOLVED"
+    assert status_call.kwargs["resolution"] == "nav_absent_no_replay"
+
+
+def test_nav_exception_with_unknown_remote_state_stays_pending():
+    storage = _storage()
+    manager = _manager(storage)
+    service = NavRecordService(manager=manager, storage=storage)
+    valuation = _valuation()
+
+    def write_unknown(nav, **kwargs):
+        if kwargs.get("dry_run"):
+            return nav
+        unknown = nav.model_copy(deep=True)
+        unknown.record_id = "nav-unknown"
+        unknown.details = {"run_id": "someone-else"}
+        storage._test_nav_state[(nav.account, nav.date)] = unknown
+        raise TimeoutError("unknown transport outcome")
+
+    storage.write_nav_record.side_effect = write_unknown
+
+    with pytest.raises(PartialWriteError) as captured:
+        service.record_nav(
+            account="a",
+            valuation=valuation,
+            nav_date=date(2026, 3, 19),
+            persist=True,
+            dry_run=False,
+            run_id="run-timeout-unknown",
+            cash_flow_dataset=_dataset(
+                storage,
+                date(2026, 3, 19),
+                "run-timeout-unknown",
+            ),
+            snapshot_write_authority=_snapshot_authority(
+                valuation,
+                run_id="run-timeout-unknown",
+            ),
+        )
+
+    assert captured.value.failed_step == "nav_write_outcome_unknown"
+    assert storage._test_snapshot_state == []
+    status_call = manager.compensation.update_status.call_args
+    assert status_call.args[1] == "PENDING"
+    assert status_call.kwargs["error_type"] == "nav_write_outcome_unknown"
+
+
+def test_original_snapshot_path_refuses_nav_base_drift_before_snapshot_mutation():
+    storage = _storage()
+    manager = _manager(storage)
+    service = NavRecordService(manager=manager, storage=storage)
+    valuation = _valuation()
+    normal_write = storage.write_nav_record.side_effect
+
+    def write_then_drift(nav, **kwargs):
+        result = normal_write(nav, **kwargs)
+        if not kwargs.get("dry_run"):
+            drifted = nav.model_copy(deep=True)
+            drifted.details = {
+                **dict(nav.details or {}),
+                "cash_flow_basis": {"financial_fingerprint": "external-v2"},
+            }
+            storage._test_nav_state[(nav.account, nav.date)] = drifted
+        return result
+
+    storage.write_nav_record.side_effect = write_then_drift
+
+    result = service.record_nav(
+        account="a",
+        valuation=valuation,
+        nav_date=date(2026, 3, 19),
+        persist=True,
+        dry_run=False,
+        run_id="run-base-drift",
+        cash_flow_dataset=_dataset(
+            storage,
+            date(2026, 3, 19),
+            "run-base-drift",
+        ),
+        snapshot_write_authority=_snapshot_authority(
+            valuation,
+            run_id="run-base-drift",
+        ),
+    )
+
+    assert result.details["snapshot_status"] == "failed"
+    assert "base details drifted" in result.details["snapshot_details_patch_error"]
+    assert storage._test_nav_state[("a", date(2026, 3, 19))].details[
+        "cash_flow_basis"
+    ] == {"financial_fingerprint": "external-v2"}
+    storage.apply_holding_snapshot_actions.assert_not_called()
+    storage.nav_history.patch_nav_details.assert_not_called()
+
+
+def test_snapshot_delete_stale_readback_remains_recoverable_partial():
+    storage = _storage()
+    manager = _manager(storage)
+    service = NavRecordService(manager=manager, storage=storage)
+    valuation = _valuation()
+    normalized = attached_normalized_valuation(valuation)
+    assert normalized is not None
+    obsolete = normalized.to_snapshot_rows(as_of="2026-03-19")[0].model_copy(
+        update={
+            "record_id": "snapshot-obsolete",
+            "asset_id": "OBSOLETE",
+            "dedup_key": "a:2026-03-19:TEST:OBSOLETE",
+        }
+    )
+    storage._test_snapshot_state.append(obsolete)
+    stale_readback = [obsolete]
+    read_count = 0
+
+    def stale_after_apply(**_kwargs):
+        nonlocal read_count
+        read_count += 1
+        if read_count >= 3:
+            return list(stale_readback)
+        return list(storage._test_snapshot_state)
+
+    storage.list_holding_snapshots_fresh.side_effect = stale_after_apply
+
+    result = service.record_nav(
+        account="a",
+        valuation=valuation,
+        nav_date=date(2026, 3, 19),
+        persist=True,
+        dry_run=False,
+        overwrite_existing=True,
+        run_id="run-delete-readback",
+        cash_flow_dataset=_dataset(
+            storage,
+            date(2026, 3, 19),
+            "run-delete-readback",
+        ),
+        snapshot_write_authority=_snapshot_authority(
+            valuation,
+            run_id="run-delete-readback",
+            overwrite=True,
+        ),
+    )
+
+    assert result.details["snapshot_status"] == "failed"
+    assert "fresh readback" in result.details["snapshot_error"]
+    assert manager.compensation.update_status.call_args_list[-1].args[1] == "FAILED"
+    assert manager.compensation.update_status.call_args_list[-1].kwargs[
+        "error_type"
+    ] == "snapshot_target_incomplete"
 
 
 def test_portfolio_skill_record_nav_surfaces_snapshot_partial_failure():
@@ -792,9 +1386,14 @@ def test_portfolio_skill_record_nav_surfaces_snapshot_partial_failure():
     skill.portfolio = Mock()
     skill.portfolio.record_nav.return_value = nav_record
     skill.portfolio.build_cash_flow_dataset.return_value = _DatasetStub()
+    valuation = _valuation()
 
     result = skill.record_nav(
-        snapshot={"valuation": _valuation(), "snapshot_time": "2026-03-19T12:00:00"},
+        snapshot={
+            "valuation": valuation,
+            "normalized_valuation": attached_normalized_valuation(valuation),
+            "snapshot_time": "2026-03-19T12:00:00",
+        },
         dry_run=False,
         confirm=True,
     )
@@ -809,6 +1408,43 @@ def test_portfolio_skill_record_nav_surfaces_snapshot_partial_failure():
         skill.portfolio.record_nav.call_args.kwargs["cash_flow_dataset"]
         is skill.portfolio.build_cash_flow_dataset.return_value
     )
+
+
+def test_portfolio_skill_record_nav_treats_snapshot_preview_as_dry_run_success():
+    nav_record = NAVHistory(
+        date=date(2026, 3, 19),
+        account="a",
+        total_value=1200.0,
+        nav=1.2,
+        shares=1000.0,
+        details={
+            "snapshot_persisted": False,
+            "snapshot_status": "planned",
+            "snapshot_preview": {"created": 3, "updated": 0, "deleted": 0},
+        },
+    )
+    skill = PortfolioSkill.__new__(PortfolioSkill)
+    skill.account = "a"
+    skill.portfolio = Mock()
+    skill.portfolio.record_nav.return_value = nav_record
+    skill.portfolio.build_cash_flow_dataset.return_value = _DatasetStub()
+    valuation = _valuation()
+
+    result = skill.record_nav(
+        snapshot={
+            "valuation": valuation,
+            "normalized_valuation": attached_normalized_valuation(valuation),
+            "snapshot_time": "2026-03-19T12:00:00",
+        },
+        dry_run=True,
+        confirm=False,
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "dry_run"
+    assert result["snapshot_status"] == "planned"
+    assert result["snapshot_persisted"] is False
+    assert "snapshot_error" not in result
 
 
 def test_portfolio_skill_record_nav_passes_price_timeout_to_snapshot_builder():
@@ -826,9 +1462,14 @@ def test_portfolio_skill_record_nav_passes_price_timeout_to_snapshot_builder():
     skill.portfolio = Mock()
     skill.portfolio.record_nav.return_value = nav_record
     skill.portfolio.build_cash_flow_dataset.return_value = _DatasetStub()
+    valuation = _valuation()
     skill.build_snapshot = Mock(
         side_effect=lambda price_timeout_seconds=None: calls.append(price_timeout_seconds)
-        or {"valuation": _valuation(), "snapshot_time": "2026-03-19T12:00:00"}
+        or {
+            "valuation": valuation,
+            "normalized_valuation": attached_normalized_valuation(valuation),
+            "snapshot_time": "2026-03-19T12:00:00",
+        }
     )
 
     result = skill.record_nav(price_timeout=17)
@@ -880,17 +1521,198 @@ def test_portfolio_skill_close_nav_persists_closed_finality():
     assert written.details["finality"]["writer"] == "close-nav"
     evidence = written.details["snapshot_evidence"]
     assert evidence["version"] == "v2"
-    assert evidence["status"] == "planned"
+    assert evidence["status"] == "complete"
     assert evidence["row_count"] == 0
     assert [item["name"] for item in evidence["components"]] == [
         "manual_cash_value",
         "manual_non_cash_value",
     ]
     assert evidence["target_digest"]
+    assert evidence["plan_digest"]
+    assert skill.storage._test_snapshot_state == []
     assert written.details["cash_flow_dataset"]["financial_fingerprint"]
     assert skill.storage.get_raw_cash_flows.call_count == 1
     skill.storage.reconcile_cash_flows.assert_not_called()
     assert "write_nav_record" not in inspect.getsource(PortfolioSkill.close_nav)
+
+
+def test_portfolio_skill_close_nav_surfaces_snapshot_partial_failure():
+    nav_record = NAVHistory(
+        date=date(2026, 3, 19),
+        account="a",
+        total_value=100.0,
+        nav=1.0,
+        shares=0.0,
+        details={
+            "snapshot_persisted": False,
+            "snapshot_status": "failed",
+            "snapshot_error": "delete readback stale",
+            "snapshot_task_id": "repair-closed",
+            "snapshot_retry_command": (
+                "pm compensation retry --task-id repair-closed --confirm"
+            ),
+        },
+    )
+    skill = PortfolioSkill.__new__(PortfolioSkill)
+    skill.account = "a"
+    skill.storage = Mock()
+    skill.portfolio = Mock()
+    skill.portfolio.record_closed_nav.return_value = nav_record
+    skill.portfolio.build_cash_flow_dataset.return_value = _DatasetStub()
+
+    result = skill.close_nav(
+        date_str="2026-03-19",
+        total_value=100.0,
+        cash_value=100.0,
+        stock_value=0.0,
+        dry_run=False,
+        confirm=True,
+    )
+
+    assert result["success"] is False
+    assert result["status"] == "partial"
+    assert result["snapshot_error"] == "delete readback stale"
+    assert result["task_id"] == "repair-closed"
+    assert "repair-closed" in result["retry_command"]
+
+
+def test_closed_nav_history_read_and_calculation_are_under_account_lock(
+    monkeypatch,
+):
+    storage = _storage()
+    manager = _manager(storage)
+    service = NavRecordService(manager=manager, storage=storage)
+    lock_state = {"key": None}
+
+    @contextmanager
+    def fake_process_lock(key):
+        assert lock_state["key"] is None
+        lock_state["key"] = key
+        try:
+            yield
+        finally:
+            lock_state["key"] = None
+
+    def history_under_lock(account):
+        assert account == "a"
+        assert lock_state["key"] == "account-write:a"
+        return {"_nav_objects": []}
+
+    monkeypatch.setattr(
+        "src.app.nav_record_service.process_lock",
+        fake_process_lock,
+    )
+    storage.get_nav_index.side_effect = history_under_lock
+    nav_date = date(2026, 3, 19)
+    run_id = "run-closed-lock"
+    closed_target = ClosedNavTarget.build(
+        total_value=100,
+        cash_value=100,
+        non_cash_value=0,
+    )
+    normalized = NormalizedValuationSnapshot.from_closed_input(
+        closed_target,
+        account="a",
+        source_provenance={"run_id": run_id},
+    )
+
+    result = service.record_closed_nav(
+        account="a",
+        nav_date=nav_date,
+        total_value=100,
+        cash_value=100,
+        stock_value=0,
+        cash_flow_dataset=_dataset(storage, nav_date, run_id),
+        run_id=run_id,
+        dry_run=True,
+        normalized_valuation=normalized,
+        snapshot_write_authority=SnapshotWriteAuthority(
+            account="a",
+            as_of=nav_date.isoformat(),
+            run_id=run_id,
+            issuer="close-nav",
+            overwrite_existing=False,
+            confirmed=False,
+            target_digest=normalized.target_digest(as_of=nav_date.isoformat()),
+        ),
+    )
+
+    assert result.details["snapshot_status"] == "planned"
+    assert lock_state["key"] is None
+
+
+def test_closed_nav_uses_exact_empty_snapshot_set_and_overwrite_authority():
+    skill = PortfolioSkill.__new__(PortfolioSkill)
+    skill.account = "a"
+    skill.storage = _storage()
+    skill.portfolio = _manager(skill.storage)
+    skill.portfolio.nav_record_service.cash_flow_dataset_dependencies = lambda: {
+        "cash_flow_effect_service": None,
+        "operation_state_store": None,
+    }
+    open_valuation = _valuation()
+    existing = attached_normalized_valuation(open_valuation).to_snapshot_rows(
+        as_of="2026-03-19"
+    )[0].model_copy(update={"record_id": "snapshot-open"})
+    skill.storage._test_snapshot_state.append(existing)
+
+    blocked = skill.close_nav(
+        date_str="2026-03-19",
+        total_value=100.0,
+        cash_value=100.0,
+        stock_value=0.0,
+        dry_run=False,
+        confirm=True,
+        overwrite_existing=False,
+    )
+
+    assert blocked["success"] is False
+    assert "overwrite_existing" in blocked["error"]
+    assert skill.storage._test_snapshot_state == [existing]
+    skill.storage.write_nav_record.assert_not_called()
+
+    completed = skill.close_nav(
+        date_str="2026-03-19",
+        total_value=100.0,
+        cash_value=100.0,
+        stock_value=0.0,
+        dry_run=False,
+        confirm=True,
+        overwrite_existing=True,
+    )
+
+    assert completed["success"] is True
+    assert skill.storage._test_snapshot_state == []
+    assert skill.storage.apply_holding_snapshot_actions.call_args.kwargs[
+        "actions"
+    ].deletes == ("snapshot-open",)
+    skill.storage.batch_upsert_holding_snapshots.assert_not_called()
+
+
+def test_closed_nav_unconfirmed_overwrite_performs_zero_mutation():
+    skill = PortfolioSkill.__new__(PortfolioSkill)
+    skill.account = "a"
+    skill.storage = _storage()
+    skill.portfolio = _manager(skill.storage)
+    existing = attached_normalized_valuation(_valuation()).to_snapshot_rows(
+        as_of="2026-03-19"
+    )[0].model_copy(update={"record_id": "snapshot-open"})
+    skill.storage._test_snapshot_state.append(existing)
+
+    result = skill.close_nav(
+        date_str="2026-03-19",
+        total_value=100.0,
+        cash_value=100.0,
+        stock_value=0.0,
+        dry_run=False,
+        confirm=False,
+        overwrite_existing=True,
+    )
+
+    assert result["success"] is False
+    assert skill.storage._test_snapshot_state == [existing]
+    skill.storage.write_nav_record.assert_not_called()
+    skill.storage.apply_holding_snapshot_actions.assert_not_called()
 
 
 def test_nav_record_persists_daily_column_and_weekend_gap_basis():

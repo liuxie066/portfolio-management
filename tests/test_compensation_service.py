@@ -5,12 +5,18 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock
 
 from src.app.compensation_service import CompensationService
+from src.app.snapshot_service import SnapshotService
 from src.domain.holding_mutations import (
     HoldingMutationConflictError,
     HoldingTarget,
 )
 from src.feishu.repositories.nav_history_repository import NavHistoryRepository
 from src.models import AssetType, Holding, NAVHistory
+from src.snapshot_models import HoldingSnapshot
+from src.domain.snapshot_contracts import (
+    SnapshotExactSetPlan,
+    SnapshotWriteAuthority,
+)
 
 
 def _record_worker(queue_file, operation):
@@ -69,6 +75,56 @@ def _storage(current):
     return storage, state
 
 
+def _snapshot_recovery_details(plan, authority, *, task_id="repair-snapshot"):
+    binding = {
+        "target_digest": plan.target_digest,
+        "plan_digest": plan.plan_digest,
+        "row_digest": plan.row_digest,
+        "authority_digest": authority.authority_digest,
+        "bound_authority_digest": authority.digest,
+        "run_id": authority.run_id,
+        "issuer": authority.issuer,
+        "overwrite_existing": authority.overwrite_existing,
+        "task_id": task_id,
+    }
+    base = {
+        "source": "daily-job",
+        "run_id": authority.run_id,
+        "finality": {
+            "run_id": authority.run_id,
+            "writer": authority.issuer,
+        },
+        "cash_flow_basis": {"financial_fingerprint": "cash-flow-v1"},
+    }
+    prepared = {
+        **base,
+        "snapshot_persisted": False,
+        "snapshot_status": "prepared",
+        "snapshot_plan_digest": plan.plan_digest,
+        "snapshot_task_id": task_id,
+        "snapshot_retry_command": (
+            f"pm compensation retry --task-id {task_id} --confirm"
+        ),
+        "snapshot_evidence": {**binding, "status": "prepared"},
+    }
+    failed = {
+        **prepared,
+        "snapshot_status": "failed",
+        "snapshot_error": "snapshot boom",
+        "snapshot_evidence": {**binding, "status": "failed"},
+    }
+    complete = {
+        **base,
+        "snapshot_persisted": True,
+        "snapshot_status": "complete",
+        "snapshot_digest": plan.row_digest,
+        "snapshot_plan_digest": plan.plan_digest,
+        "snapshot_task_id": task_id,
+        "snapshot_evidence": {**binding, "status": "complete"},
+    }
+    return prepared, failed, complete
+
+
 def test_nav_recovery_reads_details_from_the_nav_index():
     assert "details" in NavHistoryRepository.NAV_INDEX_PROJECTION_FIELDS
 
@@ -91,6 +147,27 @@ def test_compensation_service_persists_local_before_best_effort_mirror(tmp_path)
     assert rows[0]["task_id"] == task.task_id
     assert rows[0]["status"] == "PENDING"
     storage.add_compensation_task.assert_called_once()
+
+
+def test_prepared_snapshot_target_is_fsynced_locally_without_mirror(tmp_path):
+    queue_file = tmp_path / "compensation.jsonl"
+    storage = Mock()
+    service = CompensationService(storage=storage, queue_file=queue_file)
+    before = _holding(10)
+    desired = _holding(5)
+
+    task = service.prepare(
+        operation_type="NAV_HOLDINGS_SNAPSHOT_TARGET_SET",
+        account="a",
+        payload={"targets": [_target(service, before, desired)]},
+        task_id="repair-prepared",
+    )
+
+    assert task.status == "PREPARED"
+    event = json.loads(queue_file.read_text(encoding="utf-8").splitlines()[0])
+    assert event["status"] == "PREPARED"
+    assert event["task_id"] == "repair-prepared"
+    storage.add_compensation_task.assert_not_called()
 
 
 def test_concurrent_recorders_retain_both_task_ids(tmp_path):
@@ -243,20 +320,37 @@ def test_retry_classifies_repository_cas_failure_as_state_conflict(tmp_path):
 
 
 def test_snapshot_retry_accepts_failed_details_and_is_idempotent_when_complete(tmp_path):
-    original_details = {"source": "daily-job"}
-    failed_details = {
-        **original_details,
-        "snapshot_persisted": False,
-        "snapshot_status": "failed",
-        "snapshot_error": "snapshot boom",
-        "snapshot_task_id": "repair-snapshot",
-    }
-    complete_details = {
-        **original_details,
-        "snapshot_persisted": True,
-        "snapshot_status": "complete",
-        "snapshot_digest": "digest-1",
-    }
+    desired = HoldingSnapshot(
+        as_of="2026-03-19",
+        account="a",
+        asset_id="000001",
+        broker="futu",
+        quantity=10,
+        currency="CNY",
+        price=2,
+        cny_price=2,
+        market_value_cny=20,
+        dedup_key="a:2026-03-19:futu:000001",
+    )
+    plan = SnapshotExactSetPlan.build(
+        account="a",
+        as_of="2026-03-19",
+        target_digest="1" * 64,
+        before=(),
+        desired=(desired,),
+    )
+    authority = SnapshotWriteAuthority(
+        account="a",
+        as_of="2026-03-19",
+        run_id="run-snapshot-retry",
+        issuer="daily-job",
+        overwrite_existing=False,
+        confirmed=True,
+        target_digest=plan.target_digest,
+    ).bind(plan, require_confirm=True)
+    prepared_details, failed_details, complete_details = (
+        _snapshot_recovery_details(plan, authority)
+    )
     nav = NAVHistory(
         record_id="nav-1",
         date=date(2026, 3, 19),
@@ -267,6 +361,29 @@ def test_snapshot_retry_accepts_failed_details_and_is_idempotent_when_complete(t
     storage = Mock()
     storage.get_nav_on_date.return_value = nav
     storage.nav_history = Mock()
+    snapshot_state = []
+    storage.list_holding_snapshots_fresh.side_effect = (
+        lambda **_kwargs: list(snapshot_state)
+    )
+
+    def apply_actions(*, actions, current, dry_run=False):
+        assert dry_run is False
+        by_id = {row.record_id: row for row in snapshot_state}
+        for index, row in enumerate(actions.creates, start=1):
+            created = row.model_copy(update={"record_id": f"snapshot-{index}"})
+            by_id[created.record_id] = created
+        for record_id, row in actions.updates:
+            by_id[record_id] = row.model_copy(update={"record_id": record_id})
+        for record_id in actions.deletes:
+            by_id.pop(record_id, None)
+        snapshot_state[:] = list(by_id.values())
+        return {
+            "created": len(actions.creates),
+            "updated": len(actions.updates),
+            "deleted": len(actions.deletes),
+        }
+
+    storage.apply_holding_snapshot_actions.side_effect = apply_actions
 
     def patch_details(record_id, details, *, dry_run=False):
         assert record_id == "nav-1"
@@ -275,27 +392,12 @@ def test_snapshot_retry_accepts_failed_details_and_is_idempotent_when_complete(t
 
     storage.nav_history.patch_nav_details.side_effect = patch_details
     service = CompensationService(storage=storage, queue_file=tmp_path / "compensation.jsonl")
-    target = {
-        "type": "HOLDINGS_SNAPSHOT_TARGET_SET",
-        "account": "a",
-        "as_of": "2026-03-19",
-        "nav_record_id": "nav-1",
-        "before": {"one_of": [original_details, failed_details]},
-        "target": {"details": complete_details},
-        "snapshots": [{
-            "as_of": "2026-03-19",
-            "account": "a",
-            "asset_id": "000001",
-            "broker": "futu",
-            "quantity": 10,
-            "currency": "CNY",
-            "price": 2,
-            "cny_price": 2,
-            "market_value_cny": 20,
-            "dedup_key": "2026-03-19:a:000001:futu",
-        }],
-        "digest": "digest-1",
-    }
+    target = SnapshotService.recovery_target(
+        plan=plan,
+        authority=authority,
+        planned_nav_details=prepared_details,
+        complete_nav_details=complete_details,
+    )
     task = service.record(
         operation_type="NAV_HOLDINGS_SNAPSHOT_FAILED",
         account="a",
@@ -308,7 +410,7 @@ def test_snapshot_retry_accepts_failed_details_and_is_idempotent_when_complete(t
 
     assert resolved["success"] is True
     assert nav.details == complete_details
-    storage.batch_upsert_holding_snapshots.assert_called_once()
+    assert len(snapshot_state) == 1
     storage.nav_history.patch_nav_details.assert_called_once()
 
     duplicate = service.record(
@@ -321,13 +423,194 @@ def test_snapshot_retry_accepts_failed_details_and_is_idempotent_when_complete(t
     already_complete = service.retry(duplicate.task_id, confirm=True)
 
     assert already_complete["success"] is True
-    assert already_complete["target_outcomes"] == [{
-        "index": 0,
-        "type": "HOLDINGS_SNAPSHOT_TARGET_SET",
-        "status": "already_applied",
-    }]
-    storage.batch_upsert_holding_snapshots.assert_called_once()
+    assert already_complete["target_outcomes"][0]["status"] == "already_applied"
+    assert already_complete["target_outcomes"][0]["snapshot_readback_verified"] is True
+    assert storage.apply_holding_snapshot_actions.call_count == 2
     storage.nav_history.patch_nav_details.assert_called_once()
+
+    tampered_target = json.loads(json.dumps(target))
+    tampered_target["plan_digest"] = "0" * 64
+    tampered = service.record(
+        operation_type="NAV_HOLDINGS_SNAPSHOT_FAILED",
+        account="a",
+        payload={"targets": [tampered_target]},
+        error="tampered payload",
+    )
+    apply_count = storage.apply_holding_snapshot_actions.call_count
+    patch_count = storage.nav_history.patch_nav_details.call_count
+
+    conflict = service.retry(tampered.task_id, confirm=True)
+
+    assert conflict["success"] is False
+    assert conflict["error_type"] == "state_conflict"
+    assert storage.apply_holding_snapshot_actions.call_count == apply_count
+    assert storage.nav_history.patch_nav_details.call_count == patch_count
+
+    details_tamper = json.loads(json.dumps(target))
+    details_tamper["complete_nav_details"]["cash_flow_basis"] = {
+        "financial_fingerprint": "tampered"
+    }
+    tampered_details_task = service.record(
+        operation_type="NAV_HOLDINGS_SNAPSHOT_FAILED",
+        account="a",
+        payload={"targets": [details_tamper]},
+        error="tampered details payload",
+    )
+
+    details_conflict = service.retry(
+        tampered_details_task.task_id,
+        confirm=True,
+    )
+
+    assert details_conflict["success"] is False
+    assert details_conflict["error_type"] == "state_conflict"
+    assert storage.apply_holding_snapshot_actions.call_count == apply_count
+    assert storage.nav_history.patch_nav_details.call_count == patch_count
+
+
+def test_snapshot_retry_refuses_non_snapshot_nav_base_drift_before_mutation(
+    tmp_path,
+):
+    desired = HoldingSnapshot(
+        as_of="2026-03-19",
+        account="a",
+        asset_id="000001",
+        broker="futu",
+        quantity=10,
+        currency="CNY",
+        price=2,
+        cny_price=2,
+        market_value_cny=20,
+        dedup_key="a:2026-03-19:futu:000001",
+    )
+    plan = SnapshotExactSetPlan.build(
+        account="a",
+        as_of="2026-03-19",
+        target_digest="3" * 64,
+        before=(),
+        desired=(desired,),
+    )
+    authority = SnapshotWriteAuthority(
+        account="a",
+        as_of="2026-03-19",
+        run_id="run-drift",
+        issuer="daily-job",
+        overwrite_existing=False,
+        confirmed=True,
+        target_digest=plan.target_digest,
+    ).bind(plan, require_confirm=True)
+    prepared, failed, complete = _snapshot_recovery_details(plan, authority)
+    drifted = {
+        **failed,
+        "cash_flow_basis": {"financial_fingerprint": "cash-flow-v2"},
+    }
+    nav = NAVHistory(
+        record_id="nav-1",
+        date=date(2026, 3, 19),
+        account="a",
+        total_value=1000,
+        details=drifted,
+    )
+    storage = Mock()
+    storage.nav_history = Mock()
+    storage.get_nav_on_date.return_value = nav
+    target = SnapshotService.recovery_target(
+        plan=plan,
+        authority=authority,
+        planned_nav_details=prepared,
+        complete_nav_details=complete,
+    )
+    service = CompensationService(
+        storage=storage,
+        queue_file=tmp_path / "compensation.jsonl",
+    )
+    task = service.record(
+        operation_type="NAV_HOLDINGS_SNAPSHOT_FAILED",
+        account="a",
+        payload={"targets": [target]},
+        error="snapshot boom",
+    )
+
+    result = service.retry(task.task_id, confirm=True)
+
+    assert result["success"] is False
+    assert result["error_type"] == "state_conflict"
+    assert "base details drifted" in result["error"]
+    storage.apply_holding_snapshot_actions.assert_not_called()
+    storage.nav_history.patch_nav_details.assert_not_called()
+
+
+def test_snapshot_compensation_requires_exact_readback_before_resolved(tmp_path):
+    desired = HoldingSnapshot(
+        as_of="2026-03-19",
+        account="a",
+        asset_id="000001",
+        broker="futu",
+        quantity=10,
+        currency="CNY",
+        price=2,
+        cny_price=2,
+        market_value_cny=20,
+        dedup_key="a:2026-03-19:futu:000001",
+    )
+    plan = SnapshotExactSetPlan.build(
+        account="a",
+        as_of="2026-03-19",
+        target_digest="2" * 64,
+        before=(),
+        desired=(desired,),
+    )
+    authority = SnapshotWriteAuthority(
+        account="a",
+        as_of="2026-03-19",
+        run_id="run-readback",
+        issuer="daily-job",
+        overwrite_existing=False,
+        confirmed=True,
+        target_digest=plan.target_digest,
+    ).bind(plan, require_confirm=True)
+    prepared_details, failed_details, complete_details = (
+        _snapshot_recovery_details(plan, authority)
+    )
+    nav = NAVHistory(
+        record_id="nav-1",
+        date=date(2026, 3, 19),
+        account="a",
+        total_value=1000,
+        details=failed_details,
+    )
+    storage = Mock()
+    storage.get_nav_on_date.return_value = nav
+    storage.list_holding_snapshots_fresh.return_value = []
+    storage.apply_holding_snapshot_actions.return_value = {
+        "created": 1,
+        "updated": 0,
+        "deleted": 0,
+    }
+    target = SnapshotService.recovery_target(
+        plan=plan,
+        authority=authority,
+        planned_nav_details=prepared_details,
+        complete_nav_details=complete_details,
+    )
+    service = CompensationService(
+        storage=storage,
+        queue_file=tmp_path / "compensation.jsonl",
+    )
+    task = service.record(
+        operation_type="NAV_HOLDINGS_SNAPSHOT_FAILED",
+        account="a",
+        payload={"targets": [target]},
+        error="readback missing",
+    )
+
+    result = service.retry(task.task_id, confirm=True)
+
+    assert result["success"] is False
+    assert result["status"] == "FAILED"
+    assert "fresh readback" in result["error"]
+    storage.nav_history.patch_nav_details.assert_not_called()
+    assert service.get_task(task.task_id)["status"] == "FAILED"
 
 
 def test_retry_refuses_state_conflict_without_overwrite(tmp_path):

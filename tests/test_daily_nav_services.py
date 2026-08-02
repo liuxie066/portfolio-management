@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date
 from types import SimpleNamespace
 
+import pytest
+
 from src.app.account_nav_recorder_service import AccountNavRecorderService
 from src.app.business_calendar_service import BusinessCalendarService
 from src.app.daily_account_nav_service import DailyAccountNavService
@@ -10,6 +12,7 @@ from src.app.daily_nav_job_service import DailyNavJobService
 from src.app.daily_report_payload_service import DailyReportPayloadService
 from src.app.nav_initialization_service import NavInitializationService
 from src.domain.holdings import RawHoldingRecord
+from src.domain.snapshot_contracts import NormalizedValuationSnapshot
 from src.models import AssetType
 
 
@@ -64,6 +67,16 @@ class _PassingGlobalHoldingsPreflight:
         return {"success": True, "status": "valid", "scope": "global"}
 
 
+def _normalized(account: str) -> NormalizedValuationSnapshot:
+    return NormalizedValuationSnapshot.build(
+        account=account,
+        rows=(),
+        shares=100,
+        excluded_zero_keys=(),
+        source="test_fixture",
+    )
+
+
 def test_business_calendar_skips_weekend_and_configured_holiday():
     calendar = BusinessCalendarService(holidays=["2026-05-22"])
 
@@ -95,7 +108,11 @@ def test_daily_account_nav_service_reuses_one_snapshot_and_respects_nav_date():
     calls = []
     run_pool = object()
     valuation = SimpleNamespace(warnings=[])
-    snapshot = {"valuation": valuation, "snapshot_time": "2026-05-22T18:00:00"}
+    snapshot = {
+        "valuation": valuation,
+        "normalized_valuation": _normalized("alice"),
+        "snapshot_time": "2026-05-22T18:00:00",
+    }
     nav_record = _nav_record()
     dataset = _CashFlowDatasetStub("daily-dataset")
 
@@ -162,6 +179,10 @@ def test_daily_account_nav_service_reuses_one_snapshot_and_respects_nav_date():
     assert record_call[2]["dry_run"] is False
     assert record_call[2]["overwrite_existing"] is False
     assert record_call[2]["cash_flow_dataset"] is dataset
+    authority = record_call[2]["snapshot_write_authority"]
+    assert authority.account == "alice"
+    assert authority.run_id == "run-daily-1"
+    assert authority.confirmed is True
     context = record_call[2]["nav_write_context"]
     assert context.status == "manual"
     assert context.writer == "daily-report"
@@ -175,7 +196,11 @@ def test_daily_account_nav_service_reuses_one_snapshot_and_respects_nav_date():
 def test_account_nav_recorder_records_nav_without_report_reads():
     calls = []
     valuation = SimpleNamespace(warnings=["price warning"])
-    snapshot = {"valuation": valuation, "snapshot_time": "2026-05-22T18:00:00"}
+    snapshot = {
+        "valuation": valuation,
+        "normalized_valuation": _normalized("alice"),
+        "snapshot_time": "2026-05-22T18:00:00",
+    }
     nav_record = _nav_record()
     dataset = _CashFlowDatasetStub("recorder-dataset")
 
@@ -241,7 +266,11 @@ def test_account_nav_recorder_records_nav_without_report_reads():
 def test_account_nav_recorder_syncs_futu_before_snapshot_and_passes_run_pool(monkeypatch):
     calls = []
     run_pool = object()
-    snapshot = {"valuation": SimpleNamespace(warnings=[]), "snapshot_time": "2026-05-22T18:00:00"}
+    snapshot = {
+        "valuation": SimpleNamespace(warnings=[]),
+        "normalized_valuation": _normalized("lx"),
+        "snapshot_time": "2026-05-22T18:00:00",
+    }
     dataset = _CashFlowDatasetStub("futu-dataset")
 
     class FakeSyncService:
@@ -299,7 +328,11 @@ def test_nav_initialization_service_initializes_empty_account():
         total_value_cny=1000.0,
         warnings=[],
     )
-    snapshot = {"valuation": valuation, "snapshot_time": "2026-05-22T18:00:00"}
+    snapshot = {
+        "valuation": valuation,
+        "normalized_valuation": _normalized("alice"),
+        "snapshot_time": "2026-05-22T18:00:00",
+    }
     nav_record = SimpleNamespace(
         nav=1.0,
         shares=1000.0,
@@ -368,6 +401,97 @@ def test_nav_initialization_service_initializes_empty_account():
     assert context.writer == "init-nav"
     assert context.nav_date == date(2026, 5, 22)
     assert context.valuation_as_of == "2026-05-22T18:00:00"
+
+
+@pytest.mark.parametrize(
+    ("dry_run", "details", "expected_success", "expected_status"),
+    [
+        (
+            True,
+            {
+                "snapshot_persisted": False,
+                "snapshot_status": "planned",
+                "snapshot_preview": {"to_create": 1},
+            },
+            True,
+            None,
+        ),
+        (
+            False,
+            {
+                "snapshot_persisted": False,
+                "snapshot_status": "failed",
+                "snapshot_error": "snapshot readback stale",
+                "snapshot_task_id": "repair-init",
+                "snapshot_retry_command": (
+                    "pm compensation retry --task-id repair-init --confirm"
+                ),
+            },
+            False,
+            "partial",
+        ),
+    ],
+)
+def test_nav_initialization_classifies_snapshot_preview_and_partial(
+    dry_run,
+    details,
+    expected_success,
+    expected_status,
+):
+    valuation = SimpleNamespace(total_value_cny=1000.0, warnings=[])
+    nav_record = SimpleNamespace(
+        nav=1.0,
+        shares=1000.0,
+        total_value=1000.0,
+        cash_value=100.0,
+        stock_value=900.0,
+        fund_value=0.0,
+        details=details,
+    )
+
+    class FakeStorage:
+        @staticmethod
+        def get_nav_history(_account, days):
+            assert days == 9999
+            return []
+
+    class FakeReadService:
+        @staticmethod
+        def build_snapshot(**_kwargs):
+            return {
+                "valuation": valuation,
+                "normalized_valuation": _normalized("alice"),
+                "snapshot_time": "2026-05-22T18:00:00",
+            }
+
+    class FakePortfolio:
+        @staticmethod
+        def build_cash_flow_dataset(**_kwargs):
+            return _CashFlowDatasetStub("init-dataset")
+
+        @staticmethod
+        def record_nav(*_args, **_kwargs):
+            return nav_record
+
+    result = NavInitializationService(
+        account="alice",
+        storage=FakeStorage(),
+        portfolio=FakePortfolio(),
+        read_service=FakeReadService(),
+    ).init_nav_history(
+        date_str="2026-05-22",
+        dry_run=dry_run,
+        confirm=not dry_run,
+    )
+
+    assert result["success"] is expected_success
+    if expected_status is None:
+        assert "status" not in result
+        assert "snapshot_error" not in result
+    else:
+        assert result["status"] == expected_status
+        assert result["task_id"] == "repair-init"
+        assert "repair-init" in result["retry_command"]
 
 
 def test_daily_report_payload_service_uses_existing_snapshot_and_nav_record():
@@ -445,7 +569,11 @@ def test_daily_report_payload_service_uses_dry_run_nav_record_for_recent_snapsho
 
 def test_daily_account_nav_service_returns_failure_when_payload_stage_raises():
     valuation = SimpleNamespace(warnings=[])
-    snapshot = {"valuation": valuation, "snapshot_time": "2026-05-22T18:00:00"}
+    snapshot = {
+        "valuation": valuation,
+        "normalized_valuation": _normalized("alice"),
+        "snapshot_time": "2026-05-22T18:00:00",
+    }
 
     class FakeReadService:
         def build_snapshot(self, **_kwargs):

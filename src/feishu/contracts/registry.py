@@ -156,9 +156,18 @@ _SNAPSHOT_FIELDS = (
     _field("cny_price", 2, "Number", FieldEncoding.NUMBER, FieldOwnership.SYSTEM),
     _field("market_value_cny", 2, "Number", FieldEncoding.NUMBER, FieldOwnership.SYSTEM),
     _field("dedup_key", 1, "Text", FieldEncoding.TEXT, FieldOwnership.SYSTEM),
-    _field("asset_name", 1, "Text", FieldEncoding.TEXT, FieldOwnership.SYSTEM, required=False),
-    _field("avg_cost", 2, "Number", FieldEncoding.NUMBER, FieldOwnership.SYSTEM, required=False),
-    _field("source", 1, "Text", FieldEncoding.TEXT, FieldOwnership.SYSTEM, required=False),
+    _field(
+        "asset_name", 1, "Text", FieldEncoding.TEXT, FieldOwnership.SYSTEM,
+        required=False, clearable=True,
+    ),
+    _field(
+        "avg_cost", 2, "Number", FieldEncoding.NUMBER, FieldOwnership.SYSTEM,
+        required=False, clearable=True,
+    ),
+    _field(
+        "source", 1, "Text", FieldEncoding.TEXT, FieldOwnership.SYSTEM,
+        required=False, clearable=True,
+    ),
     _field("remark", 1, "Text", FieldEncoding.TEXT, FieldOwnership.SYSTEM, required=False, clearable=True),
 )
 

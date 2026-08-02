@@ -247,7 +247,8 @@ class PortfolioManager:
                    nav_write_context: Optional[NavWriteContext] = None,
                    cash_flow_dataset: Any = None,
                    nav_history_snapshot: Optional[tuple[NAVHistory, ...]] = None,
-                   normalized_valuation: Any = None) -> NAVHistory:
+                   normalized_valuation: Any = None,
+                   snapshot_write_authority: Any = None) -> NAVHistory:
         """
         记录每日净值（按Excel账户净值sheet逻辑）
         计算字段：股票市值、现金结余、账户净值、占比、份额变动、涨幅、资产升值
@@ -269,6 +270,7 @@ class PortfolioManager:
             cash_flow_dataset=cash_flow_dataset,
             nav_history_snapshot=nav_history_snapshot,
             normalized_valuation=normalized_valuation,
+            snapshot_write_authority=snapshot_write_authority,
         )
 
     def build_cash_flow_dataset(
@@ -301,6 +303,8 @@ class PortfolioManager:
         overwrite_existing: bool = False,
         dry_run: bool = True,
         nav_write_context: Optional[NavWriteContext] = None,
+        normalized_valuation: Any = None,
+        snapshot_write_authority: Any = None,
     ) -> NAVHistory:
         return self.nav_record_service.record_closed_nav(
             account=account,
@@ -313,6 +317,8 @@ class PortfolioManager:
             overwrite_existing=overwrite_existing,
             dry_run=dry_run,
             nav_write_context=nav_write_context,
+            normalized_valuation=normalized_valuation,
+            snapshot_write_authority=snapshot_write_authority,
         )
 
     @classmethod

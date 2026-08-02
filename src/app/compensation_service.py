@@ -19,9 +19,9 @@ from src.domain.holding_mutations import (
     holding_owned_fields_match,
     holding_state_digest,
 )
+from src.domain.snapshot_contracts import SnapshotSetConflictError
 from src.models import Holding
 from src.process_lock import account_lock_key, process_lock
-from src.snapshot_models import HoldingSnapshot
 from src.time_utils import bj_now_naive
 
 
@@ -155,6 +155,43 @@ class CompensationService:
                 pass
         return task
 
+    def prepare(
+        self,
+        *,
+        operation_type: str,
+        account: str,
+        payload: Dict[str, Any],
+        task_id: Optional[str] = None,
+    ) -> CompensationTask:
+        """Fsync one recovery target before its first remote mutation.
+
+        Prepared targets intentionally remain local.  The optional Feishu table
+        is a task-status mirror, not authority for a transient write intent.
+        """
+
+        task = CompensationTask(
+            task_id=task_id or self.new_task_id(),
+            operation_type=operation_type,
+            account=account,
+            status="PREPARED",
+            payload=payload,
+            error="",
+        )
+        targets = payload.get("targets") if isinstance(payload, dict) else None
+        if not isinstance(targets, list) or not targets:
+            raise ValueError("prepared compensation payload requires targets")
+        if not all(self._target_is_supported(target) for target in targets):
+            raise ValueError("prepared compensation payload contains unsupported target")
+        self._append_event({"event": "CREATED", **asdict(task)})
+        return task
+
+    def update_status(self, task_id: str, status: str, **metadata: Any) -> None:
+        """Append a durable lifecycle event for an existing prepared task."""
+
+        if self.get_task(task_id) is None:
+            raise ValueError(f"compensation task not found: {task_id}")
+        self._append_status(task_id, status, **metadata)
+
     def list_tasks(self, *, include_resolved: bool = False) -> list[Dict[str, Any]]:
         tasks = list(self._fold_events().values())
         if not include_resolved:
@@ -235,6 +272,7 @@ class CompensationService:
                         (
                             CompensationStateConflict,
                             HoldingMutationConflictError,
+                            SnapshotSetConflictError,
                         ),
                     )
                     else "target_apply_failed"
@@ -445,39 +483,99 @@ class CompensationService:
         return {"status": "applied"}
 
     def _apply_snapshot_target(self, target: Dict[str, Any]) -> Dict[str, Any]:
-        account = str(target.get("account") or "")
-        as_of = str(target.get("as_of") or "")
-        nav_record_id = target.get("nav_record_id")
-        current_nav = self.storage.get_nav_on_date(account, date.fromisoformat(as_of))
-        if current_nav is None or (nav_record_id and current_nav.record_id != nav_record_id):
+        from src.app.snapshot_service import SnapshotService
+
+        try:
+            plan, authority = SnapshotService.parse_recovery_target(target)
+        except (TypeError, ValueError, PermissionError) as exc:
             raise CompensationStateConflict(
-                {"account": account, "as_of": as_of, "record_id": nav_record_id},
-                None if current_nav is None else {"record_id": current_nav.record_id},
-                target.get("before"),
-                target.get("target"),
-            )
+                {
+                    "account": target.get("account"),
+                    "as_of": target.get("as_of"),
+                },
+                "invalid_prepared_target",
+                "bound_scope_and_digests",
+                str(exc),
+            ) from exc
+        account = plan.account
+        as_of = plan.as_of
+        snapshot_service = SnapshotService(storage=self.storage)
+        current_nav = self._get_nav_fresh(account=account, as_of=as_of)
+        if current_nav is None:
+            return {"status": "nav_absent_no_replay"}
 
         current_details = dict(current_nav.details or {})
-        desired_details = dict((target.get("target") or {}).get("details") or {})
-        if current_details == desired_details:
-            return {"status": "already_applied"}
-        if not self._state_matches(current_details, target.get("before")):
-            raise CompensationStateConflict(
-                {"account": account, "as_of": as_of, "record_id": nav_record_id},
-                current_details,
-                target.get("before"),
-                desired_details,
-            )
+        desired_details = dict(target.get("complete_nav_details") or {})
+        initial_nav_state = snapshot_service.classify_recovery_nav_state(
+            target=target,
+            details=current_details,
+            plan=plan,
+            authority=authority,
+        )
 
-        snapshots = [HoldingSnapshot(**row) for row in target.get("snapshots") or []]
-        self.storage.batch_upsert_holding_snapshots(snapshots, dry_run=False)
+        snapshot_result = snapshot_service.apply_exact_set(
+            plan=plan,
+            authority=authority,
+            dry_run=False,
+        )
+        prepatch_nav = self._get_nav_fresh(account=account, as_of=as_of)
+        if (
+            prepatch_nav is None
+            or prepatch_nav.record_id != current_nav.record_id
+        ):
+            raise SnapshotSetConflictError(
+                "fresh NAV identity changed before compensation completion patch"
+            )
+        prepatch_state = snapshot_service.classify_recovery_nav_state(
+            target=target,
+            details=dict(prepatch_nav.details or {}),
+            plan=plan,
+            authority=authority,
+        )
         patch = getattr(getattr(self.storage, "nav_history", None), "patch_nav_details", None)
         if not callable(patch):
             patch = getattr(self.storage, "patch_nav_details", None)
         if not callable(patch):
             raise AttributeError("storage does not support patch_nav_details")
-        patch(nav_record_id, desired_details, dry_run=False)
-        return {"status": "applied"}
+        if prepatch_state == "incomplete":
+            patch(prepatch_nav.record_id, desired_details, dry_run=False)
+        readback_nav = self._get_nav_fresh(account=account, as_of=as_of)
+        if (
+            readback_nav is None
+            or readback_nav.record_id != current_nav.record_id
+            or snapshot_service.classify_recovery_nav_state(
+                target=target,
+                details=dict(readback_nav.details or {}),
+                plan=plan,
+                authority=authority,
+            )
+            != "complete"
+        ):
+            raise RuntimeError(
+                "NAV fresh readback does not confirm snapshot completion details"
+            )
+        mutations = sum(
+            int(snapshot_result.get(name) or 0)
+            for name in ("created", "updated", "deleted")
+        )
+        return {
+            "status": (
+                "already_applied"
+                if mutations == 0 and initial_nav_state == "complete"
+                else "applied"
+            ),
+            "snapshot_readback_verified": True,
+            "nav_readback_verified": True,
+        }
+
+    def _get_nav_fresh(self, *, account: str, as_of: str) -> Any:
+        nav_repo = getattr(self.storage, "nav_history", None)
+        preload = getattr(nav_repo, "preload_nav_index", None)
+        if not callable(preload):
+            preload = getattr(self.storage, "preload_nav_index", None)
+        if callable(preload):
+            preload(account, force_refresh=True)
+        return self.storage.get_nav_on_date(account, date.fromisoformat(as_of))
 
     @staticmethod
     def _state_matches(current: Any, expected: Any) -> bool:

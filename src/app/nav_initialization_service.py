@@ -10,13 +10,22 @@ from src.time_utils import bj_today
 
 def _snapshot_failure(nav_record: Any) -> Optional[Dict[str, Any]]:
     details = getattr(nav_record, "details", None) or {}
-    snapshot_error = details.get("snapshot_error")
-    if not snapshot_error:
+    failed = (
+        details.get("snapshot_persisted") is False
+        or details.get("snapshot_status") == "failed"
+    )
+    if not failed:
         return None
+    snapshot_error = (
+        details.get("snapshot_error")
+        or "holdings_snapshot recovery required"
+    )
     return {
         "snapshot_status": details.get("snapshot_status") or "failed",
-        "snapshot_persisted": bool(details.get("snapshot_persisted")),
+        "snapshot_persisted": False,
         "snapshot_error": snapshot_error,
+        "task_id": details.get("snapshot_task_id"),
+        "retry_command": details.get("snapshot_retry_command"),
     }
 
 
@@ -78,6 +87,30 @@ class NavInitializationService:
 
             snapshot = self.read_service.build_snapshot(price_timeout_seconds=price_timeout)
             valuation = snapshot["valuation"]
+            from src.domain.snapshot_contracts import (
+                NormalizedValuationSnapshot,
+                SnapshotWriteAuthority,
+            )
+
+            normalized_valuation = snapshot.get("normalized_valuation")
+            if not isinstance(
+                normalized_valuation,
+                NormalizedValuationSnapshot,
+            ):
+                raise ValueError(
+                    "NAV initialization requires normalized_valuation"
+                )
+            snapshot_write_authority = SnapshotWriteAuthority(
+                account=self.account,
+                as_of=nav_date.isoformat(),
+                run_id=run_id,
+                issuer="init-nav",
+                overwrite_existing=False,
+                confirmed=confirm,
+                target_digest=normalized_valuation.target_digest(
+                    as_of=nav_date.isoformat()
+                ),
+            )
             if valuation.total_value_cny <= 0:
                 return {
                     "success": False,
@@ -99,7 +132,8 @@ class NavInitializationService:
                 use_bulk_persist=use_bulk_persist,
                 run_id=run_id,
                 cash_flow_dataset=cash_flow_dataset,
-                normalized_valuation=snapshot.get("normalized_valuation"),
+                normalized_valuation=normalized_valuation,
+                snapshot_write_authority=snapshot_write_authority,
                 nav_write_context=NavWriteContext(
                     status="initial",
                     writer="init-nav",
@@ -132,7 +166,7 @@ class NavInitializationService:
             }
             if valuation.warnings:
                 result["warnings"] = valuation.warnings
-            failure = _snapshot_failure(nav_record)
+            failure = None if dry_run else _snapshot_failure(nav_record)
             if failure:
                 result.update(failure)
                 result["success"] = False
