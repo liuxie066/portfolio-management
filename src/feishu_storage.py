@@ -6,10 +6,9 @@
 """
 import json
 import re
-from dataclasses import asdict, is_dataclass
 from datetime import date, datetime, timezone, timedelta
 from decimal import Decimal, ROUND_HALF_UP
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Mapping
 
 from .models import (
     Holding, CashFlow, NAVHistory, PriceCache,
@@ -18,7 +17,11 @@ from .models import (
 )
 from .snapshot_models import HoldingSnapshot
 from .feishu_client import FeishuClient
-from .feishu.contracts import FieldEncoding, field_names_by_encoding
+from .feishu.contracts import (
+    FieldEncoding,
+    field_names_by_encoding,
+    get_table_contract,
+)
 from .feishu.errors import FeishuRecordNotFoundError
 from .local_cache import (
     LocalPriceCache,
@@ -412,27 +415,169 @@ class FeishuStorage(
 
     # ========== compensation_tasks ==========
 
-    def add_compensation_task(self, task) -> Any:
-        """persist compensation task (optional table).
+    def mirror_compensation_task(
+        self,
+        task: Mapping[str, Any],
+        *,
+        mirror_record_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Project one authoritative local task into the optional mirror."""
 
-        If Feishu table is not configured, CompensationService
-        falls back to local JSONL queue.
-        """
-        if is_dataclass(task):
-            fields = asdict(task)
-        elif hasattr(task, "model_dump"):
-            fields = task.model_dump(mode="json")
-        else:
-            fields = dict(task)
+        if not isinstance(task, Mapping):
+            raise TypeError("compensation mirror task must be an object")
+        task_id = str(task.get("task_id") or "").strip()
+        if not task_id:
+            raise ValueError("compensation mirror requires task_id")
 
-        payload = dict(fields)
-        if isinstance(payload.get("payload"), (dict, list)):
-            payload["payload"] = json.dumps(payload["payload"], ensure_ascii=False, sort_keys=True)
-        payload = {key: value for key, value in payload.items() if value is not None}
-        result = self.client.create_record("compensation_tasks", payload)
-        record_id = result.get("record_id")
-        if isinstance(task, dict):
-            task["record_id"] = record_id
-        else:
-            setattr(task, "record_id", record_id)
-        return task
+        try:
+            self.client._get_table_config("compensation_tasks")
+        except ValueError as exc:
+            return {
+                "status": "skipped_unconfigured",
+                "task_id": task_id,
+                "error": str(exc),
+            }
+
+        contract = get_table_contract("compensation_tasks")
+        canonical = {
+            field.name: task.get(field.name)
+            for field in contract.fields
+            if field.name in task
+        }
+        requested_record_id = str(mirror_record_id or "").strip() or None
+        if requested_record_id is not None:
+            try:
+                return self._update_compensation_mirror(
+                    requested_record_id,
+                    task_id,
+                    canonical,
+                )
+            except FeishuRecordNotFoundError:
+                pass
+
+        escaped_task_id = self._escape_filter_value(task_id)
+        records = self.client.list_records(
+            "compensation_tasks",
+            filter_str=f'CurrentValue.[task_id] = "{escaped_task_id}"',
+            field_names=["task_id"],
+        )
+        matched_record_ids: list[str] = []
+        for record in records:
+            record_id = str((record or {}).get("record_id") or "").strip()
+            fields = (record or {}).get("fields")
+            returned_task_id = (
+                str(fields.get("task_id") or "").strip()
+                if isinstance(fields, dict)
+                else ""
+            )
+            if not record_id or returned_task_id != task_id:
+                raise RuntimeError(
+                    "compensation mirror lookup returned an out-of-scope row: "
+                    f"requested={task_id}, returned={returned_task_id or '<missing>'}"
+                )
+            matched_record_ids.append(record_id)
+
+        if len(matched_record_ids) > 1:
+            return {
+                "status": "duplicate",
+                "task_id": task_id,
+                "matched_count": len(matched_record_ids),
+                "record_ids": matched_record_ids,
+                "error": "compensation mirror task_id is ambiguous",
+            }
+        if matched_record_ids:
+            return self._update_compensation_mirror(
+                matched_record_ids[0],
+                task_id,
+                canonical,
+            )
+
+        create_fields = self._compensation_mirror_fields(
+            canonical,
+            for_update=False,
+        )
+        result = self.client.create_record("compensation_tasks", create_fields)
+        record_id = self._validate_compensation_mirror_result(
+            result,
+            task_id=task_id,
+        )
+        return {
+            "status": "created",
+            "task_id": task_id,
+            "record_id": record_id,
+        }
+
+    def _update_compensation_mirror(
+        self,
+        record_id: str,
+        task_id: str,
+        canonical: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        update_fields = self._compensation_mirror_fields(
+            canonical,
+            for_update=True,
+        )
+        result = self.client.update_record(
+            "compensation_tasks",
+            record_id,
+            update_fields,
+        )
+        returned_record_id = self._validate_compensation_mirror_result(
+            result,
+            task_id=task_id,
+            expected_record_id=record_id,
+        )
+        return {
+            "status": "updated",
+            "task_id": task_id,
+            "record_id": returned_record_id,
+        }
+
+    def _compensation_mirror_fields(
+        self,
+        canonical: Mapping[str, Any],
+        *,
+        for_update: bool,
+    ) -> Dict[str, Any]:
+        contract = get_table_contract("compensation_tasks")
+        fields_by_name = contract.fields_by_name
+        normalized: Dict[str, Any] = {}
+        for name, value in canonical.items():
+            field = fields_by_name[name]
+            if value is None or (isinstance(value, str) and not value.strip()):
+                if for_update and field.clearable:
+                    normalized[name] = None
+                continue
+            normalized[name] = value
+        return self._to_feishu_fields(
+            normalized,
+            "compensation_tasks",
+            preserve_none=for_update,
+        )
+
+    @staticmethod
+    def _validate_compensation_mirror_result(
+        result: Any,
+        *,
+        task_id: str,
+        expected_record_id: Optional[str] = None,
+    ) -> str:
+        if not isinstance(result, dict):
+            raise RuntimeError("compensation mirror write returned an invalid response")
+        record_id = str(result.get("record_id") or "").strip()
+        if not record_id:
+            raise RuntimeError("compensation mirror write returned no record_id")
+        if expected_record_id is not None and record_id != expected_record_id:
+            raise RuntimeError(
+                "compensation mirror write changed record identity: "
+                f"expected={expected_record_id}, returned={record_id}"
+            )
+        fields = result.get("fields")
+        if isinstance(fields, dict) and "task_id" in fields:
+            returned_task_id = str(fields.get("task_id") or "").strip()
+            if returned_task_id != task_id:
+                raise RuntimeError(
+                    "compensation mirror write returned a different task_id: "
+                    f"expected={task_id}, returned={returned_task_id or '<missing>'}"
+                )
+        return record_id

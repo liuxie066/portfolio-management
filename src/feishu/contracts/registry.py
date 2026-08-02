@@ -4,6 +4,8 @@ from __future__ import annotations
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping, Optional
 
+from src.domain.compensation_contracts import MIRROR_COMPENSATION_STATUS_VALUES
+
 from .models import (
     FieldContract,
     FieldEncoding,
@@ -195,10 +197,13 @@ _COMPENSATION_FIELDS = (
     _field("account", 1, "Text", FieldEncoding.TEXT, FieldOwnership.SYSTEM),
     _field(
         "status", 3, "SingleSelect", FieldEncoding.SINGLE_SELECT,
-        FieldOwnership.SYSTEM, options=("PENDING", "RUNNING", "FAILED", "RESOLVED"),
+        FieldOwnership.SYSTEM, options=MIRROR_COMPENSATION_STATUS_VALUES,
     ),
     _field("payload", 1, "Text", FieldEncoding.JSON_TEXT, FieldOwnership.SYSTEM),
-    _field("error", 1, "Text", FieldEncoding.TEXT, FieldOwnership.SYSTEM),
+    _field(
+        "error", 1, "Text", FieldEncoding.TEXT, FieldOwnership.SYSTEM,
+        clearable=True,
+    ),
     _field("related_record_id", 1, "Text", FieldEncoding.TEXT, FieldOwnership.SYSTEM),
     _field("retry_count", 2, "Number", FieldEncoding.NUMBER, FieldOwnership.SYSTEM),
     _field("created_at", 1, "Text", FieldEncoding.TEXT, FieldOwnership.SYSTEM),
@@ -278,7 +283,7 @@ _TABLES = (
         write_contracts=_writes(
             _COMPENSATION_FIELDS,
             (
-                "task_id", "operation_type", "account", "status", "payload", "error",
+                "task_id", "operation_type", "account", "status", "payload",
                 "retry_count", "created_at", "updated_at",
             ),
         ),

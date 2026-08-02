@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import uuid
 from contextlib import ExitStack
@@ -11,6 +12,11 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
 from src import config
+from src.domain.compensation_contracts import (
+    CompensationStatus,
+    MIRROR_ACTIVATING_STATUS_VALUES,
+    validate_compensation_transition,
+)
 from src.domain.holding_mutations import (
     HoldingIdentity,
     HoldingMutationConflictError,
@@ -31,6 +37,8 @@ SUPPORTED_TARGET_TYPES = {
     "CASH_TARGET_SET",
     "HOLDINGS_SNAPSHOT_TARGET_SET",
 }
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -140,19 +148,20 @@ class CompensationService:
             task_id=task_id or self.new_task_id(),
             operation_type=operation_type,
             account=account,
-            status="PENDING",
+            status=CompensationStatus.PENDING.value,
             payload=payload,
             error=str(error),
             related_record_id=related_record_id,
         )
-        self._append_event({"event": "CREATED", **asdict(task)})
-
-        if self.storage is not None and hasattr(self.storage, "add_compensation_task"):
-            try:
-                self.storage.add_compensation_task(task)
-            except Exception:
-                # The fsync'd local event log is authoritative; Feishu is a mirror.
-                pass
+        mirror_eligible = self._payload_is_supported(payload)
+        with process_lock(f"compensation:{task.task_id}"):
+            self._append_event({
+                "event": "CREATED",
+                **asdict(task),
+                "mirror_eligible": mirror_eligible,
+            })
+            if mirror_eligible:
+                self._mirror_current_state(task.task_id)
         return task
 
     def prepare(
@@ -173,7 +182,7 @@ class CompensationService:
             task_id=task_id or self.new_task_id(),
             operation_type=operation_type,
             account=account,
-            status="PREPARED",
+            status=CompensationStatus.PREPARED.value,
             payload=payload,
             error="",
         )
@@ -182,20 +191,30 @@ class CompensationService:
             raise ValueError("prepared compensation payload requires targets")
         if not all(self._target_is_supported(target) for target in targets):
             raise ValueError("prepared compensation payload contains unsupported target")
-        self._append_event({"event": "CREATED", **asdict(task)})
+        with process_lock(f"compensation:{task.task_id}"):
+            self._append_event({
+                "event": "CREATED",
+                **asdict(task),
+                "mirror_eligible": False,
+            })
         return task
 
     def update_status(self, task_id: str, status: str, **metadata: Any) -> None:
         """Append a durable lifecycle event for an existing prepared task."""
 
-        if self.get_task(task_id) is None:
-            raise ValueError(f"compensation task not found: {task_id}")
-        self._append_status(task_id, status, **metadata)
+        with process_lock(f"compensation:{task_id}"):
+            if self.get_task(task_id) is None:
+                raise ValueError(f"compensation task not found: {task_id}")
+            self._append_status(task_id, status, **metadata)
 
     def list_tasks(self, *, include_resolved: bool = False) -> list[Dict[str, Any]]:
         tasks = list(self._fold_events().values())
         if not include_resolved:
-            tasks = [task for task in tasks if task.get("status") != "RESOLVED"]
+            tasks = [
+                task
+                for task in tasks
+                if task.get("status") != CompensationStatus.RESOLVED.value
+            ]
         tasks.sort(key=lambda task: (task.get("created_at") or "", task.get("task_id") or ""))
         return tasks
 
@@ -239,13 +258,13 @@ class CompensationService:
             task = self.get_task(task_id)
             if task is None:
                 raise ValueError(f"compensation task not found: {task_id}")
-            if task.get("status") == "RESOLVED":
+            if task.get("status") == CompensationStatus.RESOLVED.value:
                 return {"success": True, **task, "already_resolved": True}
 
             retry_count = int(task.get("retry_count") or 0) + 1
             self._append_status(
                 task_id,
-                "RUNNING",
+                CompensationStatus.RUNNING.value,
                 retry_count=retry_count,
                 target_outcomes=[],
             )
@@ -260,7 +279,7 @@ class CompensationService:
                     })
                     self._append_status(
                         task_id,
-                        "RUNNING",
+                        CompensationStatus.RUNNING.value,
                         retry_count=retry_count,
                         target_outcomes=list(outcomes),
                     )
@@ -279,27 +298,21 @@ class CompensationService:
                 )
                 self._append_status(
                     task_id,
-                    "FAILED",
+                    CompensationStatus.FAILED.value,
                     retry_count=retry_count,
                     error=str(exc),
                     error_type=error_type,
                     target_outcomes=outcomes,
                 )
-                return {
-                    "success": False,
-                    "status": "FAILED",
-                    "task_id": task_id,
-                    "supported": True,
-                    "error_type": error_type,
-                    "error": str(exc),
-                    "target_outcomes": outcomes,
-                }
+                failed = self.get_task(task_id) or {}
+                return {"success": False, **failed}
 
             self._append_status(
                 task_id,
-                "RESOLVED",
+                CompensationStatus.RESOLVED.value,
                 retry_count=retry_count,
                 error="",
+                resolution="targets_applied_and_read_back",
                 target_outcomes=outcomes,
                 resolved_at=bj_now_naive().isoformat(),
             )
@@ -311,13 +324,89 @@ class CompensationService:
         return self._apply_target(target)
 
     def _append_status(self, task_id: str, status: str, **metadata: Any) -> None:
+        current = self.get_task(task_id)
+        if current is None:
+            raise ValueError(f"compensation task not found: {task_id}")
+        status = validate_compensation_transition(current.get("status"), status)
+        mirror_eligible = bool(current.get("mirror_eligible"))
+        if (
+            not mirror_eligible
+            and current.get("supported")
+            and status in MIRROR_ACTIVATING_STATUS_VALUES
+        ):
+            mirror_eligible = True
         self._append_event({
             "event": "STATUS",
+            **metadata,
             "task_id": task_id,
             "status": status,
             "updated_at": bj_now_naive().isoformat(),
-            **metadata,
+            "mirror_eligible": mirror_eligible,
         })
+        if mirror_eligible:
+            self._mirror_current_state(task_id)
+
+    def _mirror_current_state(self, task_id: str) -> None:
+        """Best-effort projection after the authoritative local append."""
+
+        task = self.get_task(task_id)
+        if task is None or not task.get("mirror_eligible"):
+            return
+        mirror = getattr(self.storage, "mirror_compensation_task", None)
+        if not callable(mirror):
+            return
+
+        attempted_at = bj_now_naive().isoformat()
+        try:
+            outcome = mirror(
+                task,
+                mirror_record_id=task.get("mirror_record_id"),
+            )
+            if not isinstance(outcome, dict) or not outcome.get("status"):
+                raise RuntimeError("compensation mirror returned an invalid outcome")
+            receipt = {
+                "status": str(outcome["status"]),
+                "task_id": task_id,
+                "attempted_at": attempted_at,
+                **{
+                    key: value
+                    for key, value in outcome.items()
+                    if key not in {"status", "task_id"}
+                },
+            }
+        except Exception as exc:
+            receipt = {
+                "status": "failed",
+                "task_id": task_id,
+                "attempted_at": attempted_at,
+                "error": str(exc),
+            }
+
+        event = {
+            "event": "MIRROR",
+            "task_id": task_id,
+            "mirror_receipt": receipt,
+        }
+        record_id = str(receipt.get("record_id") or "").strip()
+        if record_id:
+            event["mirror_record_id"] = record_id
+        try:
+            self._append_event(event)
+        except Exception:
+            logger.exception(
+                "compensation mirror receipt append failed: task_id=%s status=%s",
+                task_id,
+                receipt.get("status"),
+            )
+            return
+
+        if receipt.get("status") in {"failed", "duplicate"}:
+            logger.warning(
+                "compensation mirror did not converge: task_id=%s status=%s error=%s",
+                task_id,
+                receipt.get("status"),
+                receipt.get("error") or "",
+            )
 
     def _append_event(self, event: Dict[str, Any]) -> None:
         self.queue_file.parent.mkdir(parents=True, exist_ok=True)
@@ -362,14 +451,14 @@ class CompensationService:
             if current is None:
                 current = dict(event)
                 current.pop("event", None)
-                current.setdefault("status", "PENDING")
+                current.setdefault("status", CompensationStatus.PENDING.value)
                 current.setdefault("retry_count", 0)
                 current.setdefault("payload", {})
                 current.setdefault("target_outcomes", [])
                 folded[task_id] = current
             else:
                 for key, value in event.items():
-                    if key not in {"event", "operation_type", "account", "payload", "related_record_id", "created_at"}:
+                    if key not in {"event", "operation_type", "account", "payload", "created_at"}:
                         current[key] = value
             targets = (current.get("payload") or {}).get("targets")
             current["supported"] = bool(
@@ -378,7 +467,22 @@ class CompensationService:
                 and all(self._target_is_supported(target) for target in targets)
             )
             current["target_count"] = len(targets) if isinstance(targets, list) else 0
+            current.setdefault(
+                "mirror_eligible",
+                bool(
+                    current["supported"]
+                    and current.get("status") != CompensationStatus.PREPARED.value
+                ),
+            )
         return folded
+
+    def _payload_is_supported(self, payload: Any) -> bool:
+        targets = payload.get("targets") if isinstance(payload, dict) else None
+        return bool(
+            isinstance(targets, list)
+            and targets
+            and all(self._target_is_supported(target) for target in targets)
+        )
 
     @staticmethod
     def _target_is_supported(target: Any) -> bool:

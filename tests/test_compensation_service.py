@@ -4,6 +4,8 @@ from datetime import date
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock
 
+import pytest
+
 from src.app.compensation_service import CompensationService
 from src.app.snapshot_service import SnapshotService
 from src.domain.holding_mutations import (
@@ -58,6 +60,9 @@ def _target(service, before, target):
 
 def _storage(current):
     storage = Mock()
+    storage.mirror_compensation_task.return_value = {
+        "status": "skipped_unconfigured",
+    }
     state = {"holding": current}
     storage.get_holding_fresh.side_effect = lambda *_args: state["holding"]
 
@@ -132,13 +137,21 @@ def test_nav_recovery_reads_details_from_the_nav_index():
 def test_compensation_service_persists_local_before_best_effort_mirror(tmp_path):
     queue_file = tmp_path / "compensation.jsonl"
     storage = Mock()
-    storage.add_compensation_task.side_effect = RuntimeError("mirror unavailable")
     service = CompensationService(storage=storage, queue_file=queue_file)
+    before = _holding(10)
+    desired = _holding(5)
+
+    def fail_after_local_append(task, *, mirror_record_id=None):
+        assert mirror_record_id is None
+        assert service.get_task(task["task_id"])["status"] == "PENDING"
+        raise RuntimeError("mirror unavailable")
+
+    storage.mirror_compensation_task.side_effect = fail_after_local_append
 
     task = service.record(
         operation_type="BUY_TARGETS_INCOMPLETE",
         account="test",
-        payload={"targets": []},
+        payload={"targets": [_target(service, before, desired)]},
         error="failed",
         related_record_id="rec1",
     )
@@ -146,7 +159,10 @@ def test_compensation_service_persists_local_before_best_effort_mirror(tmp_path)
     rows = [json.loads(line) for line in queue_file.read_text(encoding="utf-8").splitlines()]
     assert rows[0]["task_id"] == task.task_id
     assert rows[0]["status"] == "PENDING"
-    storage.add_compensation_task.assert_called_once()
+    assert rows[1]["event"] == "MIRROR"
+    assert rows[1]["mirror_receipt"]["status"] == "failed"
+    assert service.get_task(task.task_id)["status"] == "PENDING"
+    storage.mirror_compensation_task.assert_called_once()
 
 
 def test_prepared_snapshot_target_is_fsynced_locally_without_mirror(tmp_path):
@@ -167,7 +183,147 @@ def test_prepared_snapshot_target_is_fsynced_locally_without_mirror(tmp_path):
     event = json.loads(queue_file.read_text(encoding="utf-8").splitlines()[0])
     assert event["status"] == "PREPARED"
     assert event["task_id"] == "repair-prepared"
-    storage.add_compensation_task.assert_not_called()
+    service.update_status(
+        task.task_id,
+        "RESOLVED",
+        resolution="original_write_completed",
+    )
+    assert service.get_task(task.task_id)["status"] == "RESOLVED"
+    storage.mirror_compensation_task.assert_not_called()
+
+
+def test_mirror_tracks_actionable_lifecycle_with_one_remote_identity(tmp_path):
+    before = _holding(10)
+    desired = _holding(5)
+    storage, state = _storage(before)
+    working_replace = storage.replace_holding.side_effect
+    storage.replace_holding.side_effect = RuntimeError("holding unavailable")
+    mirrored_statuses = []
+    service = CompensationService(
+        storage=storage,
+        queue_file=tmp_path / "compensation.jsonl",
+    )
+
+    def mirror_current(task, *, mirror_record_id=None):
+        local = service.get_task(task["task_id"])
+        assert local["status"] == task["status"]
+        mirrored_statuses.append(task["status"])
+        if mirror_record_id is None:
+            return {"status": "created", "record_id": "mirror-1"}
+        assert mirror_record_id == "mirror-1"
+        return {"status": "updated", "record_id": mirror_record_id}
+
+    storage.mirror_compensation_task.side_effect = mirror_current
+    task = service.record(
+        operation_type="SELL_TARGETS_INCOMPLETE",
+        account="a",
+        payload={"targets": [_target(service, before, desired)]},
+        error="initial failure",
+    )
+
+    failed = service.retry(task.task_id, confirm=True)
+
+    assert failed["success"] is False
+    assert failed["status"] == "FAILED"
+    assert failed["mirror_record_id"] == "mirror-1"
+    assert failed["mirror_receipt"]["status"] == "updated"
+    assert state["holding"].quantity == 10
+
+    storage.replace_holding.side_effect = working_replace
+    resolved = service.retry(task.task_id, confirm=True)
+
+    assert resolved["success"] is True
+    assert resolved["status"] == "RESOLVED"
+    assert resolved["mirror_record_id"] == "mirror-1"
+    assert resolved["mirror_receipt"]["status"] == "updated"
+    assert mirrored_statuses == [
+        "PENDING",
+        "RUNNING",
+        "FAILED",
+        "RUNNING",
+        "RUNNING",
+        "RESOLVED",
+    ]
+
+
+def test_mirror_skip_duplicate_and_error_are_receipts_not_task_authority(tmp_path):
+    before = _holding(10)
+    desired = _holding(5)
+    storage, _state = _storage(before)
+    service = CompensationService(
+        storage=storage,
+        queue_file=tmp_path / "compensation.jsonl",
+    )
+    outcomes = [
+        {"status": "skipped_unconfigured", "error": "table not configured"},
+        {
+            "status": "duplicate",
+            "matched_count": 2,
+            "error": "task_id is ambiguous",
+        },
+        RuntimeError("mirror transport failed"),
+    ]
+
+    def mirror_outcome(*_args, **_kwargs):
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    storage.mirror_compensation_task.side_effect = mirror_outcome
+    task = service.record(
+        operation_type="SELL_TARGETS_INCOMPLETE",
+        account="a",
+        payload={"targets": [_target(service, before, desired)]},
+        error="initial failure",
+    )
+    pending = service.get_task(task.task_id)
+    assert pending["status"] == "PENDING"
+    assert pending["mirror_receipt"]["status"] == "skipped_unconfigured"
+
+    service.update_status(task.task_id, "RUNNING")
+    running = service.get_task(task.task_id)
+    assert running["status"] == "RUNNING"
+    assert running["mirror_receipt"]["status"] == "duplicate"
+
+    service.update_status(task.task_id, "FAILED", error="target failed")
+    failed = service.get_task(task.task_id)
+    assert failed["status"] == "FAILED"
+    assert failed["error"] == "target failed"
+    assert failed["mirror_receipt"]["status"] == "failed"
+    assert "transport failed" in failed["mirror_receipt"]["error"]
+
+
+def test_actionable_task_cannot_regress_to_prepared_before_local_append(tmp_path):
+    before = _holding(10)
+    desired = _holding(5)
+    storage, _state = _storage(before)
+    storage.mirror_compensation_task.return_value = {
+        "status": "created",
+        "record_id": "mirror-1",
+    }
+    service = CompensationService(
+        storage=storage,
+        queue_file=tmp_path / "compensation.jsonl",
+    )
+    task = service.record(
+        operation_type="SELL_TARGETS_INCOMPLETE",
+        account="a",
+        payload={"targets": [_target(service, before, desired)]},
+        error="initial failure",
+    )
+    before_events = service._read_events()
+    before_calls = storage.mirror_compensation_task.call_count
+
+    with pytest.raises(
+        ValueError,
+        match="invalid compensation transition: PENDING -> PREPARED",
+    ):
+        service.update_status(task.task_id, "PREPARED")
+
+    assert service._read_events() == before_events
+    assert service.get_task(task.task_id)["status"] == "PENDING"
+    assert storage.mirror_compensation_task.call_count == before_calls
 
 
 def test_concurrent_recorders_retain_both_task_ids(tmp_path):

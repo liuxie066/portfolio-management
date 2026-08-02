@@ -176,7 +176,7 @@ Write contracts:
 | `account` | 1 | `Text` | `text` | `required` | `system` | `no` |  |
 | `status` | 3 | `SingleSelect` | `single_select` | `required` | `system` | `no` | `PENDING`, `RUNNING`, `FAILED`, `RESOLVED` |
 | `payload` | 1 | `Text` | `json_text` | `required` | `system` | `no` |  |
-| `error` | 1 | `Text` | `text` | `required` | `system` | `no` |  |
+| `error` | 1 | `Text` | `text` | `required` | `system` | `yes` |  |
 | `related_record_id` | 1 | `Text` | `text` | `required` | `system` | `no` |  |
 | `retry_count` | 2 | `Number` | `number` | `required` | `system` | `no` |  |
 | `created_at` | 1 | `Text` | `text` | `required` | `system` | `no` |  |
@@ -186,7 +186,7 @@ Write contracts:
 
 Write contracts:
 
-- `create` row-required fields: `account`, `created_at`, `error`, `operation_type`, `payload`, `retry_count`, `status`, `task_id`, `updated_at`
+- `create` row-required fields: `account`, `created_at`, `operation_type`, `payload`, `retry_count`, `status`, `task_id`, `updated_at`
 - `update` row-required fields: none
 - `delete` row-required fields: none
 

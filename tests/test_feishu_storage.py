@@ -7,7 +7,12 @@ import json
 
 from src.feishu_storage import FeishuStorage
 from src.feishu.errors import FeishuRecordNotFoundError, LegacyReadOnlyError
-from src.feishu.contracts import TABLE_CONTRACTS, FieldEncoding
+from src.feishu.contracts import (
+    TABLE_CONTRACTS,
+    FieldEncoding,
+    compare_live_schema,
+)
+from src.domain.compensation_contracts import MIRROR_COMPENSATION_STATUS_VALUES
 from src.domain.cash_flow_contracts import (
     CashFlowContractError,
     CompletedCashFlowFacts,
@@ -81,6 +86,23 @@ def _archived_transaction_fields(
         'currency': currency,
         **optional,
     }
+
+
+def _compensation_task_fields(**changes):
+    fields = {
+        "task_id": "repair-1",
+        "operation_type": "SELL_TARGETS_INCOMPLETE",
+        "account": "a",
+        "status": "PENDING",
+        "payload": {"targets": [{"type": "HOLDING_TARGET_SET"}]},
+        "error": "initial failure",
+        "related_record_id": "nav-1",
+        "retry_count": 0,
+        "created_at": "2026-08-02T09:00:00",
+        "updated_at": "2026-08-02T09:00:00",
+    }
+    fields.update(changes)
+    return fields
 
 
 class TestFeishuStorageInitialization:
@@ -303,6 +325,164 @@ class TestFeishuStorageEscapeFilter:
         """测试非字符串转义"""
         result = self.storage._escape_filter_value(123)
         assert result == '123'
+
+
+class TestFeishuStorageCompensationMirror:
+    def setup_method(self):
+        self.client = Mock()
+        self.client._get_table_config.return_value = ("app", "table")
+        self.storage = FeishuStorage(client=self.client)
+
+    def test_unconfigured_optional_table_is_an_explicit_zero_request_skip(self):
+        self.client._get_table_config.side_effect = ValueError(
+            "未配置表 compensation_tasks"
+        )
+
+        result = self.storage.mirror_compensation_task(
+            _compensation_task_fields()
+        )
+
+        assert result["status"] == "skipped_unconfigured"
+        assert "未配置表" in result["error"]
+        self.client.list_records.assert_not_called()
+        self.client.create_record.assert_not_called()
+        self.client.update_record.assert_not_called()
+
+    def test_zero_fresh_matches_creates_registry_encoded_projection(self):
+        self.client.list_records.return_value = []
+
+        def create(_table, fields):
+            return {
+                "record_id": "mirror-1",
+                "fields": dict(fields),
+            }
+
+        self.client.create_record.side_effect = create
+
+        result = self.storage.mirror_compensation_task(
+            _compensation_task_fields(task_id='repair-"quoted"')
+        )
+
+        assert result == {
+            "status": "created",
+            "task_id": 'repair-"quoted"',
+            "record_id": "mirror-1",
+        }
+        _, list_kwargs = self.client.list_records.call_args
+        assert '\\"quoted\\"' in list_kwargs["filter_str"]
+        _, create_fields = self.client.create_record.call_args.args
+        assert create_fields["task_id"] == 'repair-"quoted"'
+        assert create_fields["status"] == "PENDING"
+        assert json.loads(create_fields["payload"])["targets"]
+        assert create_fields["retry_count"] == 0
+
+    def test_one_fresh_match_updates_and_resolved_clears_stale_error(self):
+        self.client.list_records.return_value = [{
+            "record_id": "mirror-1",
+            "fields": {"task_id": "repair-1"},
+        }]
+
+        def update(_table, record_id, fields):
+            return {"record_id": record_id, "fields": dict(fields)}
+
+        self.client.update_record.side_effect = update
+        task = _compensation_task_fields(
+            status="RESOLVED",
+            error="",
+            retry_count=2,
+            updated_at="2026-08-02T09:03:00",
+            resolved_at="2026-08-02T09:03:00",
+            resolution="targets_applied_and_read_back",
+        )
+
+        result = self.storage.mirror_compensation_task(task)
+
+        assert result["status"] == "updated"
+        assert result["record_id"] == "mirror-1"
+        _, record_id, update_fields = self.client.update_record.call_args.args
+        assert record_id == "mirror-1"
+        assert update_fields["status"] == "RESOLVED"
+        assert update_fields["retry_count"] == 2
+        assert update_fields["updated_at"] == "2026-08-02T09:03:00"
+        assert update_fields["resolved_at"] == "2026-08-02T09:03:00"
+        assert update_fields["resolution"] == "targets_applied_and_read_back"
+        assert update_fields["error"] is None
+        contract = TABLE_CONTRACTS["compensation_tasks"]
+        assert (
+            contract.fields_by_name["status"].select_options
+            == MIRROR_COMPENSATION_STATUS_VALUES
+        )
+        assert contract.fields_by_name["error"].clearable is True
+        assert contract.fields_by_name["error"].schema_required is True
+        assert "error" not in contract.write_contract("create").required_fields
+        self.client.create_record.assert_not_called()
+
+    def test_error_is_schema_required_even_though_create_row_may_omit_it(self):
+        contract = TABLE_CONTRACTS["compensation_tasks"]
+        live_without_error = [
+            {
+                "field_name": field.name,
+                "type": field.type_id,
+                "ui_type": field.ui_type,
+                "property": {
+                    "options": [
+                        {"name": option}
+                        for option in field.select_options
+                    ],
+                },
+            }
+            for field in contract.fields
+            if field.name != "error"
+        ]
+
+        result = compare_live_schema(contract, live_without_error)
+
+        assert result["ok"] is False
+        assert result["missing_required"] == ["error"]
+        assert result["missing_optional"] == []
+
+    def test_duplicate_fresh_task_ids_fail_mirror_without_mutation(self):
+        self.client.list_records.return_value = [
+            {"record_id": "mirror-1", "fields": {"task_id": "repair-1"}},
+            {"record_id": "mirror-2", "fields": {"task_id": "repair-1"}},
+        ]
+
+        result = self.storage.mirror_compensation_task(
+            _compensation_task_fields()
+        )
+
+        assert result["status"] == "duplicate"
+        assert result["matched_count"] == 2
+        assert result["record_ids"] == ["mirror-1", "mirror-2"]
+        self.client.create_record.assert_not_called()
+        self.client.update_record.assert_not_called()
+
+    def test_stale_local_record_id_recovers_through_fresh_lookup(self):
+        self.client.update_record.side_effect = [
+            FeishuRecordNotFoundError(code=1254043, message="missing"),
+            {
+                "record_id": "mirror-new",
+                "fields": {"task_id": "repair-1"},
+            },
+        ]
+        self.client.list_records.return_value = [{
+            "record_id": "mirror-new",
+            "fields": {"task_id": "repair-1"},
+        }]
+
+        result = self.storage.mirror_compensation_task(
+            _compensation_task_fields(status="RUNNING"),
+            mirror_record_id="mirror-stale",
+        )
+
+        assert result == {
+            "status": "updated",
+            "task_id": "repair-1",
+            "record_id": "mirror-new",
+        }
+        assert self.client.update_record.call_count == 2
+        self.client.list_records.assert_called_once()
+        self.client.create_record.assert_not_called()
 
 
 class TestFeishuStorageHoldingOperations:
