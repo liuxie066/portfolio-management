@@ -8,7 +8,9 @@
   `59625b0d6c666da338c0a520e85a221932846949`
 - Current Draft PR base:
   `main@cf47cd92848036c30e7212c1925ec53a4c882a6d`
-- Accepted reviewed source/documentation head:
+- Accepted reviewed implementation head:
+  `09cd07b72c9d5ae6a07d9f77dc2761c91c977584`
+- Accepted PR-review evidence commit:
   `e5269a3796ad1197c5ddca2a3693932b87e08094`
 - Draft PR: `https://github.com/liuxie066/portfolio-management/pull/45`
 - Recorded at: `2026-08-02T10:23:33+08:00`
@@ -153,13 +155,16 @@ material findings.
 | Generated schema | `python3.12 scripts/generate_feishu_schema_docs.py --check` passed |
 | Migration contract | `python3.12 scripts/migrate_schema.py expectations` passed |
 | Diff/merge hygiene | exact-remote `git diff --check`, merge-marker, and unmerged-entry checks passed |
-| Actual PR inventory | GitHub API 205 files; exact remote-ref diff 205 files |
+| Reviewed implementation inventory at `09cd07b` | GitHub API 205 files; exact remote-ref diff 205 files |
+| Evidence-inclusive Draft PR inventory | 207 files after adding the PR review and closeout artifacts; implementation scope unchanged |
 | Actual PR review | no material findings; `docs/reviews/pr-45-review-20260802-101856.md` |
 | GitHub CI on accepted PR-review head | `quality-contract` passed in 23 seconds, run `30728698665` |
 
-GitHub's aggregate PR diff endpoint returns HTTP 406 because the diff exceeds
-20,000 lines. The review used all three paginated PR-file API pages and the
-exact remote refs; the API display limit is not an unreviewed scope gap.
+GitHub's aggregate PR diff endpoint returns HTTP 406 because the reviewed
+implementation diff exceeds 20,000 lines. The implementation review used all
+three paginated PR-file API pages and the exact remote refs; the API display
+limit is not an unreviewed scope gap. The two later files are review/closeout
+evidence, not unreviewed implementation changes.
 
 ## Generated Documentation Decision
 
