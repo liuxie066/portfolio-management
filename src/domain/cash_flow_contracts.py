@@ -17,7 +17,17 @@ CASH_FLOW_CONTRACT_VERSION = "pm.cash_flow.row.v1"
 CASH_FLOW_GENERATED_FINGERPRINT_VERSION = "pm.cash_flow.generated.v1"
 CASH_FLOW_DATASET_CONTRACT_VERSION = "pm.cash_flow.dataset.v1"
 CASH_FLOW_MONEY_QUANT = Decimal("0.01")
-CASH_FLOW_TYPES = frozenset({"DEPOSIT", "WITHDRAW"})
+
+
+class CashFlowType(str, Enum):
+    """Domain-owned values derived from the sign of a cash-flow amount."""
+
+    DEPOSIT = "DEPOSIT"
+    WITHDRAW = "WITHDRAW"
+
+
+CASH_FLOW_TYPE_VALUES = tuple(item.value for item in CashFlowType)
+CASH_FLOW_TYPES = frozenset(CASH_FLOW_TYPE_VALUES)
 CASH_FLOW_AMBIGUOUS_RATE_SOURCES = frozenset({
     "-",
     "manual",
@@ -31,12 +41,15 @@ CASH_FLOW_AMBIGUOUS_RATE_SOURCES = frozenset({
     "unknown",
 })
 BEIJING_TZ = timezone(timedelta(hours=8))
-CASH_FLOW_FINANCIAL_FIELDS = (
+CASH_FLOW_MANUAL_REQUIRED_FIELDS = (
     "flow_date",
     "account",
     "broker",
     "amount",
     "currency",
+)
+CASH_FLOW_FINANCIAL_FIELDS = (
+    *CASH_FLOW_MANUAL_REQUIRED_FIELDS,
     "flow_type",
     "cny_amount",
     "dedup_key",
@@ -1116,7 +1129,11 @@ def expected_cash_flow_type(manual: ManualCashFlowFacts) -> str:
 
     if not isinstance(manual, ManualCashFlowFacts):
         raise TypeError("expected_cash_flow_type requires ManualCashFlowFacts")
-    return "DEPOSIT" if manual.amount > 0 else "WITHDRAW"
+    return (
+        CashFlowType.DEPOSIT.value
+        if manual.amount > 0
+        else CashFlowType.WITHDRAW.value
+    )
 
 
 def cash_flow_generated_fingerprint(facts: CompletedCashFlowFacts) -> str:
@@ -1436,8 +1453,12 @@ __all__ = [
     "CASH_FLOW_CONTRACT_VERSION",
     "CASH_FLOW_AMBIGUOUS_RATE_SOURCES",
     "CASH_FLOW_GENERATED_FINGERPRINT_VERSION",
+    "CASH_FLOW_FINANCIAL_FIELDS",
+    "CASH_FLOW_MANUAL_REQUIRED_FIELDS",
     "CASH_FLOW_MONEY_QUANT",
+    "CASH_FLOW_TYPE_VALUES",
     "CASH_FLOW_TYPES",
+    "CashFlowType",
     "CashFlowDuplicateGroup",
     "CashFlowManualDatasetAudit",
     "CashFlowContractError",

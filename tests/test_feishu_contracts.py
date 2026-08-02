@@ -2,6 +2,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
+from src.domain.cash_flow_contracts import CASH_FLOW_TYPE_VALUES
 from src.models import ArchivedTransaction
 
 from src.feishu.contracts import (
@@ -165,6 +166,47 @@ def test_holdings_write_contract_is_the_identity_and_clearability_source():
                 "broker": "IBKR",
                 "quantity": 1,
                 "currency": "USD",
+            },
+        )
+
+
+def test_every_writable_table_requires_its_business_key_on_create():
+    for table in TABLE_CONTRACTS.values():
+        create = table.write_contract("create")
+        if create is not None:
+            assert set(table.business_key).issubset(create.required_fields)
+
+
+def test_cash_flow_create_contract_requires_complete_persisted_facts():
+    table = get_table_contract("cash_flow")
+    create = table.write_contract("create")
+
+    assert create is not None
+    assert create.required_fields == {
+        "flow_date",
+        "account",
+        "broker",
+        "amount",
+        "currency",
+        "flow_type",
+        "cny_amount",
+        "dedup_key",
+        "exchange_rate",
+        "source",
+    }
+    assert (
+        table.fields_by_name["flow_type"].select_options
+        == CASH_FLOW_TYPE_VALUES
+    )
+    with pytest.raises(ValueError, match="缺少必填字段: broker"):
+        validate_write_fields(
+            "cash_flow",
+            "create",
+            {
+                "flow_date": 1785513600000,
+                "account": "lx",
+                "amount": 1,
+                "currency": "CNY",
             },
         )
 

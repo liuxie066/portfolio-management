@@ -107,6 +107,17 @@ class TableContract:
                 raise ValueError(
                     f"table {self.name} {contract.operation.value} allows unknown fields: {unknown}"
                 )
+            if (
+                contract.operation is WriteOperation.CREATE
+                and not set(self.business_key).issubset(contract.required_fields)
+            ):
+                missing_key_fields = sorted(
+                    set(self.business_key) - contract.required_fields
+                )
+                raise ValueError(
+                    f"table {self.name} create contract must require business key fields: "
+                    f"{missing_key_fields}"
+                )
         if self.forbidden_fields & known:
             overlap = sorted(self.forbidden_fields & known)
             raise ValueError(f"table {self.name} fields are also forbidden: {overlap}")

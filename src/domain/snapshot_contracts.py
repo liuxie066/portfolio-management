@@ -13,11 +13,14 @@ import hashlib
 import json
 from typing import Any, Iterable, Mapping, Optional
 
+from src.snapshot_models import HoldingSnapshot
+
 
 NORMALIZED_VALUATION_VERSION = "pm.normalized_valuation.v2"
 SNAPSHOT_DIGEST_VERSION = "pm.holdings_snapshot.v2"
 SNAPSHOT_EXACT_SET_VERSION = "pm.holdings_snapshot.exact_set.v1"
 SNAPSHOT_WRITE_AUTHORITY_VERSION = "pm.holdings_snapshot.write_authority.v1"
+SNAPSHOT_BUSINESS_KEY_FIELDS = ("as_of", "account", "asset_id", "broker")
 QUANTITY_QUANT = Decimal("0.00000001")
 MONEY_QUANT = Decimal("0.01")
 NAV_QUANT = Decimal("0.000001")
@@ -85,31 +88,24 @@ def _optional_snapshot_number(value: Any, *, field: str) -> Optional[str]:
     return canonical_decimal(finite_decimal(value, field=field))
 
 
-def snapshot_row_payload(snapshot: Any) -> dict[str, Any]:
+def snapshot_row_payload(snapshot: HoldingSnapshot) -> dict[str, Any]:
     """Canonical full persisted row used by all v2 snapshot digests."""
 
-    return {
-        "as_of": snapshot.as_of,
-        "account": snapshot.account,
-        "asset_id": snapshot.asset_id,
-        "broker": snapshot.broker,
-        "quantity": _optional_snapshot_number(snapshot.quantity, field="quantity"),
-        "currency": snapshot.currency,
-        "price": _optional_snapshot_number(snapshot.price, field="price"),
-        "cny_price": _optional_snapshot_number(
-            snapshot.cny_price,
-            field="cny_price",
-        ),
-        "market_value_cny": _optional_snapshot_number(
-            snapshot.market_value_cny,
-            field="market_value_cny",
-        ),
-        "dedup_key": snapshot.dedup_key,
-        "asset_name": snapshot.asset_name,
-        "avg_cost": _optional_snapshot_number(snapshot.avg_cost, field="avg_cost"),
-        "source": snapshot.source,
-        "remark": snapshot.remark,
-    }
+    if not isinstance(snapshot, HoldingSnapshot):
+        raise TypeError("snapshot_row_payload requires HoldingSnapshot")
+    payload = snapshot.model_dump(mode="python", exclude={"record_id"})
+    for field_name in (
+        "quantity",
+        "price",
+        "cny_price",
+        "market_value_cny",
+        "avg_cost",
+    ):
+        payload[field_name] = _optional_snapshot_number(
+            payload[field_name],
+            field=field_name,
+        )
+    return payload
 
 
 def snapshot_digest(snapshots: Iterable[Any]) -> str:
@@ -117,24 +113,45 @@ def snapshot_digest(snapshots: Iterable[Any]) -> str:
 
     items = [snapshot_row_payload(snapshot) for snapshot in snapshots]
     items.sort(
-        key=lambda item: (
-            item["account"],
-            item["as_of"],
-            item["broker"],
-            item["asset_id"],
+        key=lambda item: tuple(
+            str(item[field_name]) for field_name in SNAPSHOT_BUSINESS_KEY_FIELDS
         )
     )
     return digest_payload({"version": SNAPSHOT_DIGEST_VERSION, "rows": items})
 
 
 def snapshot_business_key(snapshot: Any) -> tuple[str, str, str, str]:
-    """Return the canonical account/date/broker/asset business key."""
+    """Return the canonical persisted snapshot business key."""
 
-    return (
-        str(snapshot.account),
-        str(snapshot.as_of),
-        str(snapshot.broker),
-        str(snapshot.asset_id),
+    return tuple(
+        str(getattr(snapshot, field_name))
+        for field_name in SNAPSHOT_BUSINESS_KEY_FIELDS
+    )
+
+
+def snapshot_dedup_key(
+    *,
+    account: Any,
+    as_of: Any,
+    broker: Any,
+    asset_id: Any,
+) -> str:
+    """Return the stable persisted dedup token for one snapshot business key."""
+
+    values = {
+        "account": str(account or "").strip(),
+        "as_of": str(as_of or "").strip(),
+        "broker": str(broker or "").strip(),
+        "asset_id": str(asset_id or "").strip(),
+    }
+    missing = sorted(name for name, value in values.items() if not value)
+    if missing:
+        raise ValueError(
+            "snapshot dedup key requires nonblank fields: " + ", ".join(missing)
+        )
+    # Preserve the deployed opaque token format while owning the formula once.
+    return ":".join(
+        (values["account"], values["as_of"], values["broker"], values["asset_id"])
     )
 
 
@@ -144,7 +161,12 @@ def _assert_snapshot_scope(snapshot: Any, *, account: str, as_of: str) -> None:
             "holdings snapshot row scope mismatch: "
             f"expected={account}/{as_of} actual={snapshot.account}/{snapshot.as_of}"
         )
-    expected_dedup_key = f"{account}:{as_of}:{snapshot.broker}:{snapshot.asset_id}"
+    expected_dedup_key = snapshot_dedup_key(
+        account=account,
+        as_of=as_of,
+        broker=snapshot.broker,
+        asset_id=snapshot.asset_id,
+    )
     if snapshot.dedup_key != expected_dedup_key:
         raise ValueError(
             "holdings snapshot dedup_key mismatch: "
@@ -160,8 +182,6 @@ def _snapshot_with_record_payload(snapshot: Any) -> dict[str, Any]:
 
 
 def _snapshot_from_payload(payload: Mapping[str, Any]) -> Any:
-    from src.snapshot_models import HoldingSnapshot
-
     return HoldingSnapshot(**dict(payload))
 
 
@@ -773,8 +793,6 @@ class NormalizedValuationRow:
         )
 
     def to_snapshot_row(self, *, as_of: str) -> Any:
-        from src.snapshot_models import HoldingSnapshot
-
         if not self.broker:
             raise ValueError(
                 f"holding snapshot broker must be nonblank: {self.asset_id}"
@@ -783,7 +801,12 @@ class NormalizedValuationRow:
             raise ValueError(
                 f"holding snapshot price fields are required: {self.asset_id}"
             )
-        dedup_key = f"{self.account}:{as_of}:{self.broker}:{self.asset_id}"
+        dedup_key = snapshot_dedup_key(
+            account=self.account,
+            as_of=as_of,
+            broker=self.broker,
+            asset_id=self.asset_id,
+        )
         return HoldingSnapshot(
             as_of=as_of,
             account=self.account,

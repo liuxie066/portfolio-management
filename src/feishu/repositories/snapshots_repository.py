@@ -6,18 +6,32 @@ from typing import Any, Dict, Iterable, List
 from ...domain.snapshot_contracts import (
     SnapshotExactSetPlan,
     SnapshotSetActions,
+    snapshot_business_key,
     snapshot_row_payload,
 )
 from ...snapshot_models import HoldingSnapshot
 from ..contracts import get_table_contract
 
 
+_SNAPSHOT_REGISTRY_FIELDS = tuple(
+    get_table_contract("holdings_snapshot").fields_by_name
+)
+_SNAPSHOT_MODEL_FIELDS = tuple(
+    field_name
+    for field_name in HoldingSnapshot.model_fields
+    if field_name != "record_id"
+)
+if _SNAPSHOT_MODEL_FIELDS != _SNAPSHOT_REGISTRY_FIELDS:
+    raise RuntimeError(
+        "HoldingSnapshot model disagrees with holdings_snapshot registry; "
+        f"model={_SNAPSHOT_MODEL_FIELDS}, registry={_SNAPSHOT_REGISTRY_FIELDS}"
+    )
+
+
 class SnapshotsRepository:
     """Fresh reads and deterministic exact-set writes for holdings snapshots."""
 
-    PROJECTION_FIELDS = list(
-        get_table_contract("holdings_snapshot").fields_by_name
-    )
+    PROJECTION_FIELDS = list(_SNAPSHOT_REGISTRY_FIELDS)
 
     def __init__(self, storage):
         self.storage = storage
@@ -71,13 +85,7 @@ class SnapshotsRepository:
                 "invalid holdings_snapshot records: " + " | ".join(errors)
             )
         rows.sort(
-            key=lambda row: (
-                row.account,
-                row.as_of,
-                row.broker,
-                row.asset_id,
-                row.record_id or "",
-            )
+            key=lambda row: snapshot_business_key(row) + (row.record_id or "",)
         )
         return rows
 

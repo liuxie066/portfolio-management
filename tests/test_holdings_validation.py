@@ -344,6 +344,65 @@ def test_valid_raw_record_builds_typed_holding_without_defaults():
     assert holding.broker == "IBKR"
 
 
+def test_missing_registry_required_asset_name_blocks_typed_holding():
+    report = HoldingsValidator().validate([_record(asset_name="   ")])
+    record = report.records[0]
+    outcome = _outcome(report, "asset_name")
+
+    assert outcome.status == "missing_manual"
+    assert outcome.reason_code == "ASSET_NAME_MISSING"
+    assert outcome.blocks_official_nav is True
+    assert report.blocking_count == 1
+    assert record.valid_for_typed_holding is False
+    with pytest.raises(ValueError, match="not fully valid"):
+        record.to_holding()
+
+
+def test_provider_can_propose_missing_asset_name_but_cannot_supply_raw_fact():
+    position = FutuPositionEvidence(
+        asset_id="AAPL",
+        raw_code="US.AAPL",
+        asset_name="Apple Inc.",
+        security_type="STOCK",
+        market="US",
+        currency="USD",
+        currency_explicit=True,
+    )
+    report = HoldingsValidator().validate(
+        [_record(asset_name="", broker="富途")],
+        evidence=_futu_bundle(position),
+    )
+
+    outcome = _outcome(report, "asset_name")
+    assert outcome.status == "missing_completable"
+    assert outcome.proposed == "Apple Inc."
+    assert outcome.blocks_official_nav is True
+    assert report.records[0].valid_for_typed_holding is False
+
+
+def test_manual_asset_name_remains_usable_during_nonblocking_provider_conflict():
+    position = FutuPositionEvidence(
+        asset_id="AAPL",
+        raw_code="US.AAPL",
+        asset_name="Apple Inc.",
+        security_type="STOCK",
+        market="US",
+        currency="USD",
+        currency_explicit=True,
+    )
+    report = HoldingsValidator().validate(
+        [_record(asset_name="Manual Apple", broker="富途")],
+        evidence=_futu_bundle(position),
+    )
+    record = report.records[0]
+
+    outcome = _outcome(report, "asset_name")
+    assert outcome.status == "conflict"
+    assert outcome.blocks_official_nav is False
+    assert record.valid_for_typed_holding is True
+    assert record.to_holding().asset_name == "Manual Apple"
+
+
 def test_typed_holding_uses_the_same_normalized_asset_type_as_validation():
     record = HoldingsValidator().validate([_record(asset_type="US_STOCK")]).records[0]
 

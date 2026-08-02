@@ -15,40 +15,24 @@ from src.domain.holdings import (
     asset_class_for_economic_exposure,
 )
 from src.domain.holding_dates import parse_holding_date
+from src.feishu.contracts import get_table_contract
 
 
 VALIDATION_POLICY_VERSION = "holdings-validation.v1"
 CURRENCY_POLICY_VERSION = "holdings-currency.v1"
 ASSET_CLASS_POLICY_VERSION = "holdings-asset-class.v2"
 
-REQUIRED_FIELDS = {
-    "asset_id",
-    "asset_type",
-    "account",
-    "broker",
-    "quantity",
-    "currency",
-}
+_HOLDINGS_TABLE_CONTRACT = get_table_contract("holdings")
+_HOLDINGS_CREATE_CONTRACT = _HOLDINGS_TABLE_CONTRACT.write_contract("create")
+if _HOLDINGS_CREATE_CONTRACT is None:
+    raise RuntimeError("holdings create contract is required for validation")
+REQUIRED_FIELDS = _HOLDINGS_CREATE_CONTRACT.required_fields
 
 _CURRENCY_RE = re.compile(r"^[A-Z]{3,5}$")
 _CASH_ASSET_ID_RE = re.compile(r"^([A-Z]{3,5})-(CASH|MMF)$")
 _MARKET_SUFFIX_RE = re.compile(r"\.([A-Z]{2})$")
 _FUTU_MARKETS = {"US", "HK", "SH", "SZ", "CN"}
-VALIDATION_RELEVANT_FIELDS = (
-    "asset_id",
-    "asset_name",
-    "asset_type",
-    "account",
-    "broker",
-    "quantity",
-    "avg_cost",
-    "currency",
-    "asset_class",
-    "industry",
-    "tag",
-    "created_at",
-    "updated_at",
-)
+VALIDATION_RELEVANT_FIELDS = tuple(_HOLDINGS_TABLE_CONTRACT.fields_by_name)
 
 
 def _canonical_json(value: Any) -> str:
@@ -292,7 +276,17 @@ class RecordValidation:
         if self.issues:
             return False
         by_field = {item.field: item for item in self.outcomes}
-        return all(by_field.get(name) is not None and by_field[name].status == "valid" for name in REQUIRED_FIELDS)
+        return all(
+            by_field.get(name) is not None
+            and (
+                by_field[name].status == "valid"
+                or (
+                    by_field[name].status == "conflict"
+                    and not by_field[name].blocks_official_nav
+                )
+            )
+            for name in REQUIRED_FIELDS
+        )
 
     def to_holding(
         self,
@@ -307,7 +301,10 @@ class RecordValidation:
                 by_field[name].status == "valid"
                 or (
                     by_field[name].status == "conflict"
-                    and name in confirmed
+                    and (
+                        not by_field[name].blocks_official_nav
+                        or name in confirmed
+                    )
                 )
             )
             for name in REQUIRED_FIELDS
@@ -710,16 +707,16 @@ class HoldingsValidator:
                 authority="futu_explicit",
                 authority_id=authority_id,
                 reason_code="ASSET_NAME_COMPLETION_AVAILABLE",
-                blocks_official_nav=False,
+                blocks_official_nav=True,
                 evidence=evidence_payload,
             )
         if current is None:
             return FieldOutcome(
                 field="asset_name",
-                status="optional_missing",
+                status="missing_manual",
                 current=raw_value,
-                reason_code="ASSET_NAME_OPTIONAL_MISSING",
-                blocks_official_nav=False,
+                reason_code="ASSET_NAME_MISSING",
+                blocks_official_nav=True,
             )
         if proposed and current != proposed:
             return FieldOutcome(

@@ -4,7 +4,12 @@ from __future__ import annotations
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping, Optional
 
+from src.domain.cash_flow_contracts import (
+    CASH_FLOW_FINANCIAL_FIELDS,
+    CASH_FLOW_TYPE_VALUES,
+)
 from src.domain.compensation_contracts import MIRROR_COMPENSATION_STATUS_VALUES
+from src.domain.snapshot_contracts import SNAPSHOT_BUSINESS_KEY_FIELDS
 
 from .models import (
     FieldContract,
@@ -112,7 +117,7 @@ _CASH_FLOW_FIELDS = (
     _field("currency", 1, "Text", FieldEncoding.TEXT, FieldOwnership.MANUAL),
     _field(
         "flow_type", 3, "SingleSelect", FieldEncoding.SINGLE_SELECT,
-        FieldOwnership.SYSTEM, options=("DEPOSIT", "WITHDRAW"),
+        FieldOwnership.SYSTEM, options=CASH_FLOW_TYPE_VALUES,
     ),
     _field("cny_amount", 2, "Number", FieldEncoding.NUMBER, FieldOwnership.SYSTEM),
     _field("dedup_key", 1, "Text", FieldEncoding.TEXT, FieldOwnership.SYSTEM),
@@ -243,7 +248,10 @@ _TABLES = (
         role=TableRole.CORE,
         fields=_CASH_FLOW_FIELDS,
         business_key=("dedup_key",),
-        write_contracts=_writes(_CASH_FLOW_FIELDS, ("flow_date", "account", "amount", "currency")),
+        write_contracts=_writes(
+            _CASH_FLOW_FIELDS,
+            CASH_FLOW_FINANCIAL_FIELDS,
+        ),
         forbidden_fields=frozenset({
             "exchange_rate_date", "exchange_rate_source", "exchange_rate_evidence_type",
         }),
@@ -259,7 +267,7 @@ _TABLES = (
         name="holdings_snapshot",
         role=TableRole.CORE,
         fields=_SNAPSHOT_FIELDS,
-        business_key=("as_of", "account", "asset_id", "broker"),
+        business_key=SNAPSHOT_BUSINESS_KEY_FIELDS,
         write_contracts=_writes(
             _SNAPSHOT_FIELDS,
             (

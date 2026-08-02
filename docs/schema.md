@@ -67,7 +67,7 @@ Write contracts:
 
 Write contracts:
 
-- `create` row-required fields: `account`, `amount`, `currency`, `flow_date`
+- `create` row-required fields: `account`, `amount`, `broker`, `cny_amount`, `currency`, `dedup_key`, `exchange_rate`, `flow_date`, `flow_type`, `source`
 - `update` row-required fields: none
 - `delete` row-required fields: none
 

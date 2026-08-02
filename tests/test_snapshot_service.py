@@ -7,15 +7,19 @@ import pytest
 
 from src.app.snapshot_service import SnapshotService, snapshot_digest
 from src.domain.snapshot_contracts import (
+    SNAPSHOT_BUSINESS_KEY_FIELDS,
     NormalizedValuationRow,
     NormalizedValuationSnapshot,
     SnapshotExactSetPlan,
     SnapshotSetConflictError,
     SnapshotWriteAuthority,
     ValuationComponent,
+    snapshot_business_key,
+    snapshot_dedup_key,
+    snapshot_row_payload,
 )
 from src.domain.nav_calculator import ClosedNavTarget
-from src.feishu.contracts import validate_write_fields
+from src.feishu.contracts import get_table_contract, validate_write_fields
 from src.models import AssetClass, AssetType, Holding
 from src.feishu.repositories.snapshots_repository import SnapshotsRepository
 
@@ -508,6 +512,32 @@ def test_snapshot_digest_v2_covers_native_unit_price():
 
     assert first.price == 1.234567
     assert snapshot_digest([first]) != snapshot_digest([second])
+
+
+def test_snapshot_identity_and_full_row_projection_have_one_contract():
+    row = _normalized_valuation().to_snapshot_rows(as_of="2026-03-19")[0]
+    table = get_table_contract("holdings_snapshot")
+
+    assert table.business_key == SNAPSHOT_BUSINESS_KEY_FIELDS
+    assert snapshot_business_key(row) == tuple(
+        str(getattr(row, field_name))
+        for field_name in SNAPSHOT_BUSINESS_KEY_FIELDS
+    )
+    assert tuple(snapshot_row_payload(row)) == tuple(table.fields_by_name)
+    assert tuple(SnapshotsRepository.PROJECTION_FIELDS) == tuple(
+        table.fields_by_name
+    )
+    assert row.dedup_key == snapshot_dedup_key(
+        account=row.account,
+        as_of=row.as_of,
+        broker=row.broker,
+        asset_id=row.asset_id,
+    )
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        type(row)(
+            **row.model_dump(),
+            future_unregistered_field="ignored",
+        )
 
 
 def test_normalized_total_is_rows_plus_declared_components():

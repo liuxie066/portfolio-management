@@ -44,7 +44,7 @@ class HoldingSnapshot(BaseModel):
     source: Optional[str] = None
     remark: Optional[str] = None
 
-    model_config = ConfigDict(frozen=True, allow_inf_nan=False)
+    model_config = ConfigDict(frozen=True, allow_inf_nan=False, extra='forbid')
 
     @field_validator(
         'as_of', 'account', 'asset_id', 'broker', 'currency', 'dedup_key',

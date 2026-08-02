@@ -135,6 +135,7 @@ def test_reconcile_never_reports_success_when_futu_evidence_fetch_failed():
                 "rec_us",
                 {
                     "asset_id": "AAPL",
+                    "asset_name": "Apple Inc.",
                     "asset_type": "us_stock",
                     "account": "lx",
                     "broker": "富途",
