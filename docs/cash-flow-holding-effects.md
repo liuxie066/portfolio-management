@@ -821,7 +821,11 @@ Cash Flow 回执复用当前 NAV/Futu 回执配置：
 
 非 Futu 必须明确显示
 `target_source=estimated_current_plus_event`。`compensation_pending` 必须显示
-“可能部分写入”和 compensation task ID，不能使用成功标题。
+“可能部分写入”、原始错误、已确认/未确认 target 范围、compensation task ID
+和精确的 `effects retry --effect-id ... --confirm` 恢复命令，不能使用成功标题。
+`stale` 必须区分 preview hash 失效与后续 correction effect，并给出对应
+effect 的精确 `effects preview --effect-id ... --json` 命令。未知
+`receipt_type` 必须拒绝发送，不能落入通用处理回执。
 
 ### 16.5 发送失败语义
 
@@ -829,6 +833,9 @@ Cash Flow 回执复用当前 NAV/Futu 回执配置：
 - 回执失败不得把已 `applied` 或 `record_only` 的 effect 回退。
 - 发送结果作为 effect audit event 保存：`sent + message_id` 或
   `failed + error`。
+- 未知 `receipt_type` 属于不可重试的回执契约错误：outbox 将其标记为
+  `invalid` 并保留错误证据，不得反复占用待发送队列；传输或配置失败仍保留
+  `failed` 状态供后续重试。
 - 发现回执失败时，后续 scanner 可以重试未成功的 digest；成功后停止。
 - 飞书请求出现 outcome unknown 时允许出现重复消息，因此消息必须带
   effect ID 或 scan digest 供人工识别。

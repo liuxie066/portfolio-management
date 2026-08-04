@@ -757,6 +757,19 @@ def test_partial_multi_target_write_requires_confirmed_compensation_retry(
     )
 
     assert result["status"] == "compensation_pending"
+    compensation_receipt = next(
+        row
+        for row in service.store.list_pending_receipts()
+        if row["receipt_type"] == "compensation_pending"
+    )
+    assert compensation_receipt["payload"]["target_count"] == 2
+    assert compensation_receipt["payload"]["confirmed_target_count"] == 1
+    assert compensation_receipt["payload"]["unconfirmed_targets"] == [{
+        "account": "sy",
+        "asset_id": "CNY-CASH",
+        "broker": "某券商",
+        "quantity": 70.0,
+    }]
     assert storage.holdings[("CNY-CASH", "lx", "某券商")].quantity == 100.0
     assert storage.holdings[("CNY-CASH", "sy", "某券商")].quantity == 50
     with pytest.raises(ValueError, match="requires confirm"):

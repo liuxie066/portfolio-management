@@ -1716,6 +1716,7 @@ class CashFlowEffectService:
         )
         already_applied = True
         readbacks: list[Optional[Holding]] = []
+        confirmed_target_count = 0
         try:
             for target, mutation_target, before in zip(
                 targets,
@@ -1744,6 +1745,7 @@ class CashFlowEffectService:
                         "holding fresh readback does not match confirmed target: "
                         f"{self._identity(target.asset_id, target.account, target.broker)}"
                     )
+                confirmed_target_count += 1
         except Exception as exc:
             task = self.compensation.record(
                 operation_type="CASH_FLOW_EFFECT_TARGETS_INCOMPLETE",
@@ -1767,6 +1769,13 @@ class CashFlowEffectService:
                 },
                 expected_states={"applying"},
             )
+            receipt_targets = [
+                {
+                    **dict(item["identity"]),
+                    "quantity": item["target"].get("quantity"),
+                }
+                for item in compensation_targets
+            ]
             self.store.enqueue_receipt(
                 receipt_key=f"effect:{effect_id}:compensation:{task.task_id}",
                 receipt_type="compensation_pending",
@@ -1777,6 +1786,11 @@ class CashFlowEffectService:
                     "state": "compensation_pending",
                     "task_id": task.task_id,
                     "error": str(exc),
+                    "target_count": len(receipt_targets),
+                    "confirmed_target_count": confirmed_target_count,
+                    "unconfirmed_targets": receipt_targets[
+                        confirmed_target_count:
+                    ],
                 },
             )
             return {

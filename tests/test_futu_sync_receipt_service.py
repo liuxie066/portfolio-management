@@ -19,7 +19,7 @@ def _write_result():
         "success": True,
         "account": "sy",
         "dry_run": False,
-        "cash_mmf": {"created": 0, "updated": 1},
+        "cash_mmf": {"success": True, "created": 0, "updated": 1},
         "cash_effects": {
             "created": 1,
             "resolved": 0,
@@ -130,3 +130,78 @@ def test_futu_sync_receipt_failure_does_not_claim_delivery():
     assert result["success"] is False
     assert result["status"] == "failed"
     assert result["error"] == "send failed"
+
+
+def test_futu_sync_failure_receipt_uses_nested_error_and_exact_failed_stage():
+    message = FutuSyncReceiptService.build_message({
+        "success": False,
+        "account": "lx",
+        "dry_run": False,
+        "sync_run_id": "sync_123",
+        "write_stage": "cash_mmf",
+        "partial_write_possible": True,
+        "stages": {
+            "positions": {
+                "status": "succeeded",
+                "partial_write_possible": False,
+            },
+            "securities_cash": {
+                "status": "succeeded",
+                "partial_write_possible": False,
+            },
+            "fund_mmf": {
+                "status": "failed",
+                "partial_write_possible": True,
+            },
+        },
+        "cash_mmf": {
+            "success": False,
+            "partial_write_possible": True,
+            "error": "飞书 API 错误: TextFieldConvFail (code=1254060)",
+        },
+    })
+
+    assert message == (
+        "# PM · 回执 · lx\n"
+        "\n"
+        "类型｜持仓同步\n"
+        "状态｜❌ 失败\n"
+        "失败阶段｜fund_mmf\n"
+        "错误｜飞书 API 错误: TextFieldConvFail (code=1254060)\n"
+        "Run｜sync_123\n"
+        "CASH / MMF｜富途原币余额仅观测；PM 使用 CNY-CASH 人民币汇总，"
+        "不做金额对账；MMF 结果未确认\n"
+        "警告｜fund_mmf 阶段可能已部分写入，请先 dry-run 复核\n"
+        "下一步｜pm futu sync --account lx --dry-run --json\n"
+        "\n"
+        "## 执行阶段\n"
+        "positions · 成功\n"
+        "securities_cash · 成功\n"
+        "fund_mmf · 失败 · 可能部分写入"
+    )
+
+    assert "unknown error" not in message
+    assert "MMF 新增 0，更新 0" not in message
+
+
+def test_futu_sync_success_receipt_keeps_confirmed_zero_mmf_counts():
+    result = _write_result()
+    result["cash_mmf"] = {
+        "success": True,
+        "created": 0,
+        "updated": 0,
+    }
+
+    message = FutuSyncReceiptService.build_message(result)
+
+    assert "MMF 新增 0，更新 0" in message
+
+
+def test_futu_sync_receipt_does_not_infer_counts_from_success_alone():
+    result = _write_result()
+    result["cash_mmf"] = {"success": True}
+
+    message = FutuSyncReceiptService.build_message(result)
+
+    assert "MMF 结果未确认" in message
+    assert "MMF 新增 0，更新 0" not in message

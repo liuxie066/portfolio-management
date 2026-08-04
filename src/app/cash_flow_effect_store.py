@@ -941,14 +941,34 @@ class CashFlowEffectStore:
             result.append(item)
         return result
 
+    def list_invalid_receipts(self, *, limit: int = 100) -> list[Dict[str, Any]]:
+        """Return terminal render-contract failures for operator audit."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM cash_flow_effect_receipts
+                WHERE status = 'invalid'
+                ORDER BY updated_at DESC LIMIT ?
+                """,
+                (int(limit),),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["payload"] = json.loads(item.pop("payload_json"))
+            result.append(item)
+        return result
+
     def mark_receipt(
         self,
         receipt_key: str,
         *,
         success: bool,
+        retryable: bool = True,
         message_id: Optional[str] = None,
         error: Optional[str] = None,
     ) -> None:
+        status = "sent" if success else "failed" if retryable else "invalid"
         with self._connect() as conn:
             cursor = conn.execute(
                 """
@@ -958,7 +978,7 @@ class CashFlowEffectStore:
                 WHERE receipt_key = ?
                 """,
                 (
-                    "sent" if success else "failed",
+                    status,
                     message_id,
                     error,
                     bj_now_naive().isoformat(),
