@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.1.35 - 2026-08-05
+
+- Separated Feishu Bitable and Conversation application roles across Base API,
+  event-listener, and receipt paths, with fail-closed named systemd encrypted
+  credentials, least-privilege unit grants, and redacted configuration checks.
+- Established canonical Feishu Bitable contracts for holdings, cash flow, NAV,
+  snapshots, transactions, and compensation data, preserving raw field state
+  through strict validation, serialization, fresh readback, and cache updates.
+- Hardened holdings mutation identity, cash-flow completion and FX authority,
+  complete NAV reads/finality, replayable valuation snapshots, exact-set
+  snapshot recovery, and local-authoritative compensation lifecycle handling.
+- Hardened cash-flow and Futu receipt action contracts so only executable,
+  validated operator actions are rendered as actions while informational
+  guidance remains non-executable.
+- Deployment requires provisioning both named encrypted Feishu credentials,
+  publishing the Bitable app permissions/event configuration, subscribing the
+  intended Base, and passing the secure local preflight before explicitly
+  enabling the Holdings event listener.
+
 ## 0.1.34 - 2026-08-01
 
 - Corrected combined and holdings-compatible Feishu Bitable subscription
