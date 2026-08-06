@@ -13,8 +13,8 @@ CREDENTIALS_DIRECTORY_ENV = "CREDENTIALS_DIRECTORY"
 SECURE_FEISHU_CREDENTIALS_ENV = "PM_REQUIRE_SECURE_FEISHU_CREDENTIALS"
 MAX_FEISHU_APP_SECRET_BYTES = 4096
 
-BITABLE_APP_SECRET_CREDENTIAL = "pm-feishu-bitable-app-secret"
-CONVERSATION_APP_SECRET_CREDENTIAL = "pm-feishu-conversation-app-secret"
+AGENT_APP_SECRET_CREDENTIAL = "pm-feishu-agent-app-secret"
+LISTENER_APP_SECRET_CREDENTIAL = "pm-feishu-listener-app-secret"
 
 _TRUE_VALUES = {"1", "true", "yes", "y", "on"}
 _FALSE_VALUES = {"0", "false", "no", "n", "off"}

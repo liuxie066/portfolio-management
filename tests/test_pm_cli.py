@@ -237,10 +237,13 @@ def test_pm_holdings_event_status_is_local_only_and_does_not_claim_remote_health
     assert result["read_only"] is True
     assert result["remote_subscription_verified"] is False
     assert result["listener_connection_verified"] is False
-    assert result["credentials"]["role"] == "bitable"
+    assert result["credentials"]["listener_ingress"]["ready"] is True
+    assert result["credentials"]["agent_worker"]["ready"] is True
     assert config_keys == [
-        "feishu.bitable.app_id",
-        "feishu.bitable.app_secret",
+        "feishu.listener.app_id",
+        "feishu.listener.app_secret",
+        "feishu.agent.app_id",
+        "feishu.agent.app_secret",
     ]
     assert "no Feishu request" in result["note"]
 
@@ -283,12 +286,21 @@ def test_pm_holdings_event_status_separates_identity_from_target_failure():
         "valid": False,
         "error": "missing holdings table reference",
     }
-    assert result["credentials"] == {
-        "role": "bitable",
+    assert result["credentials"]["listener_ingress"] == {
+        "role": "listener",
+        "ready": True,
         "app_id_configured": True,
         "app_secret_configured": True,
         "issues": [],
     }
+    assert result["credentials"]["agent_worker"] == {
+        "role": "agent",
+        "ready": True,
+        "app_id_configured": True,
+        "app_secret_configured": True,
+        "issues": [],
+    }
+    assert result["credentials"]["issues"] == []
 
 
 def test_pm_combined_event_status_is_local_only_and_reports_both_inboxes():
@@ -371,15 +383,14 @@ def test_pm_combined_event_status_is_local_only_and_reports_both_inboxes():
     assert result["local_inboxes"]["cash_flow"]["counts"] == {"pending": 1}
     assert result["remote_subscription_verified"] is False
     assert result["listener_connection_verified"] is False
-    assert result["credentials"] == {
-        "role": "bitable",
-        "app_id_configured": True,
-        "app_secret_configured": True,
-        "issues": [],
-    }
+    assert result["credentials"]["listener_ingress"]["ready"] is True
+    assert result["credentials"]["agent_worker"]["ready"] is True
+    assert result["credentials"]["issues"] == []
     assert config_keys == [
-        "feishu.bitable.app_id",
-        "feishu.bitable.app_secret",
+        "feishu.listener.app_id",
+        "feishu.listener.app_secret",
+        "feishu.agent.app_id",
+        "feishu.agent.app_secret",
     ]
 
 
@@ -416,8 +427,12 @@ def test_pm_combined_event_status_reports_redacted_bitable_credential_issue():
         inspect_cash_flow_event_status = classmethod(lambda cls: {"initialized": False})
 
     def configured(key, default=None):
-        if key == "feishu.bitable.app_id":
-            return "cli_data"
+        if key in {
+            "feishu.listener.app_id",
+            "feishu.agent.app_id",
+            "feishu.agent.app_secret",
+        }:
+            return "configured"
         raise FeishuCredentialConfigError("missing_secure_credential", key)
 
     patch = MonkeyPatch()
@@ -433,17 +448,25 @@ def test_pm_combined_event_status_reports_redacted_bitable_credential_issue():
         patch.undo()
 
     result = json.loads(stdout.getvalue())
-    assert result["credentials"] == {
-        "role": "bitable",
+    assert result["credentials"]["listener_ingress"] == {
+        "role": "listener",
+        "ready": False,
         "app_id_configured": True,
         "app_secret_configured": False,
         "issues": [
             {
-                "key": "feishu.bitable.app_secret",
+                "key": "feishu.listener.app_secret",
                 "error": "missing_secure_credential",
             }
         ],
     }
+    assert result["credentials"]["agent_worker"]["ready"] is True
+    assert result["credentials"]["issues"] == [
+        {
+            "key": "feishu.listener.app_secret",
+            "error": "missing_secure_credential",
+        }
+    ]
 
 
 def test_pm_combined_event_target_collision_is_reported_and_refuses_mutations():
@@ -1428,13 +1451,13 @@ def test_pm_config_inspect_never_discloses_feishu_secret_with_show_secrets():
         config_file = Path(tmp) / "config.yaml"
         config_file.write_text("{}\n", encoding="utf-8")
         secret = "never-return-this-feishu-secret"
-        (credential_dir / config.BITABLE_APP_SECRET_CREDENTIAL).write_text(
+        (credential_dir / config.AGENT_APP_SECRET_CREDENTIAL).write_text(
             secret,
             encoding="utf-8",
         )
-        conversation_secret = "never-return-conversation-secret"
-        (credential_dir / config.CONVERSATION_APP_SECRET_CREDENTIAL).write_text(
-            conversation_secret,
+        listener_secret = "never-return-listener-secret"
+        (credential_dir / config.LISTENER_APP_SECRET_CREDENTIAL).write_text(
+            listener_secret,
             encoding="utf-8",
         )
         patch = MonkeyPatch()
@@ -1442,9 +1465,9 @@ def test_pm_config_inspect_never_discloses_feishu_secret_with_show_secrets():
         try:
             patch.setenv(config.CONFIG_FILE_ENV, str(config_file))
             patch.setenv("CREDENTIALS_DIRECTORY", str(credential_dir))
-            patch.setenv("FEISHU_BITABLE_APP_ID", "cli_bitable_private")
-            patch.setenv("FEISHU_CONVERSATION_APP_ID", "cli_conversation_private")
-            patch.setenv("FEISHU_CONVERSATION_OPEN_ID", "ou_private_user")
+            patch.setenv("FEISHU_AGENT_APP_ID", "cli_agent_private")
+            patch.setenv("FEISHU_AGENT_OPEN_ID", "ou_private_user")
+            patch.setenv("FEISHU_LISTENER_APP_ID", "cli_listener_private")
             config.reload_config()
             with redirect_stdout(stdout):
                 assert pm.main(
@@ -1452,10 +1475,10 @@ def test_pm_config_inspect_never_discloses_feishu_secret_with_show_secrets():
                         "config",
                         "inspect",
                         "--keys",
-                        "feishu.bitable.app_id,feishu.bitable.app_secret,"
-                        "feishu.conversation.app_id,"
-                        "feishu.conversation.app_secret,"
-                        "feishu.conversation.open_id",
+                        "feishu.agent.app_id,feishu.agent.app_secret,"
+                        "feishu.agent.open_id,"
+                        "feishu.listener.app_id,"
+                        "feishu.listener.app_secret",
                         "--show-secrets",
                         "--json",
                     ]
@@ -1467,15 +1490,15 @@ def test_pm_config_inspect_never_discloses_feishu_secret_with_show_secrets():
         encoded = stdout.getvalue()
         out = json.loads(encoded)
         assert secret not in encoded
-        assert conversation_secret not in encoded
-        assert "cli_bitable_private" not in encoded
-        assert "cli_conversation_private" not in encoded
+        assert listener_secret not in encoded
+        assert "cli_agent_private" not in encoded
+        assert "cli_listener_private" not in encoded
         assert "ou_private_user" not in encoded
-        assert out["values"]["feishu.bitable.app_id"]["value"] == "cli...ate"
-        assert out["values"]["feishu.bitable.app_secret"]["value"] == "nev...ret"
-        assert out["values"]["feishu.conversation.app_id"]["value"] == "cli...ate"
-        assert out["values"]["feishu.conversation.app_secret"]["value"] == "nev...ret"
-        assert out["values"]["feishu.conversation.open_id"]["value"] == "ou_...ser"
+        assert out["values"]["feishu.agent.app_id"]["value"] == "cli...ate"
+        assert out["values"]["feishu.agent.app_secret"]["value"] == "nev...ret"
+        assert out["values"]["feishu.agent.open_id"]["value"] == "ou_...ser"
+        assert out["values"]["feishu.listener.app_id"]["value"] == "cli...ate"
+        assert out["values"]["feishu.listener.app_secret"]["value"] == "nev...ret"
 
 
 def test_pm_config_doctor_rejects_invalid_secure_mode_without_secret_leak():
@@ -1511,11 +1534,11 @@ def test_pm_config_doctor_can_require_both_secure_feishu_roles():
             """
 feishu:
   app_token: appToken
-  bitable:
-    app_id: cli_bitable
-  conversation:
-    app_id: cli_conversation
+  agent:
+    app_id: cli_agent
     open_id: ou_user
+  listener:
+    app_id: cli_listener
   tables:
     holdings: appToken/tbl_holdings
     nav_history: appToken/tbl_nav
@@ -1526,12 +1549,12 @@ feishu:
         )
         credential_dir = root / "credentials"
         credential_dir.mkdir()
-        (credential_dir / config.BITABLE_APP_SECRET_CREDENTIAL).write_text(
-            "bitable-secret",
+        (credential_dir / config.AGENT_APP_SECRET_CREDENTIAL).write_text(
+            "agent-secret",
             encoding="utf-8",
         )
-        (credential_dir / config.CONVERSATION_APP_SECRET_CREDENTIAL).write_text(
-            "conversation-secret",
+        (credential_dir / config.LISTENER_APP_SECRET_CREDENTIAL).write_text(
+            "listener-secret",
             encoding="utf-8",
         )
         patch = MonkeyPatch()
@@ -1552,8 +1575,8 @@ feishu:
     encoded = json.dumps(out, ensure_ascii=False)
     assert out["success"] is True
     assert out["secure_feishu_required"] is True
-    assert "bitable-secret" not in encoded
-    assert "conversation-secret" not in encoded
+    assert "agent-secret" not in encoded
+    assert "listener-secret" not in encoded
 
 
 def test_pm_config_doctor_returns_nonzero_for_missing_deploy_config():

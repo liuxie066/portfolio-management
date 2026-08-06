@@ -454,24 +454,42 @@ def cmd_holdings_events_status(args):
     sdk_available = FeishuHoldingsEventAdapter.sdk_available()
     credential_issues = []
 
-    def role_value_configured(key):
+    def role_value_configured(key, role_issues):
         try:
             return bool(str(config.get(key) or "").strip())
         except FeishuCredentialConfigError as exc:
             if exc.as_issue() not in credential_issues:
                 credential_issues.append(exc.as_issue())
+            if exc.as_issue() not in role_issues:
+                role_issues.append(exc.as_issue())
             return False
 
-    app_id_configured = role_value_configured("feishu.bitable.app_id")
-    app_secret_configured = role_value_configured("feishu.bitable.app_secret")
+    listener_issues = []
+    listener_app_id_configured = role_value_configured(
+        "feishu.listener.app_id", listener_issues
+    )
+    listener_app_secret_configured = role_value_configured(
+        "feishu.listener.app_secret", listener_issues
+    )
+    agent_issues = []
+    agent_app_id_configured = role_value_configured(
+        "feishu.agent.app_id", agent_issues
+    )
+    agent_app_secret_configured = role_value_configured(
+        "feishu.agent.app_secret", agent_issues
+    )
+    listener_ready = bool(
+        listener_app_id_configured and listener_app_secret_configured
+    )
+    agent_ready = bool(agent_app_id_configured and agent_app_secret_configured)
     result = {
         "success": bool(
             target_error is None
             and target
             and not credential_issues
             and sdk_available
-            and app_id_configured
-            and app_secret_configured
+            and listener_ready
+            and agent_ready
         ),
         "read_only": True,
         "target": target.as_dict() if target else None,
@@ -480,9 +498,20 @@ def cmd_holdings_events_status(args):
             "error": target_error,
         },
         "credentials": {
-            "role": "bitable",
-            "app_id_configured": app_id_configured,
-            "app_secret_configured": app_secret_configured,
+            "listener_ingress": {
+                "role": "listener",
+                "ready": listener_ready,
+                "app_id_configured": listener_app_id_configured,
+                "app_secret_configured": listener_app_secret_configured,
+                "issues": listener_issues,
+            },
+            "agent_worker": {
+                "role": "agent",
+                "ready": agent_ready,
+                "app_id_configured": agent_app_id_configured,
+                "app_secret_configured": agent_app_secret_configured,
+                "issues": agent_issues,
+            },
             "issues": credential_issues,
         },
         "sdk_available": sdk_available,
@@ -568,24 +597,42 @@ def cmd_events_status(args):
     sdk_available = FeishuBitableEventAdapter.sdk_available()
     credential_issues = []
 
-    def role_value_configured(key):
+    def role_value_configured(key, role_issues):
         try:
             return bool(str(config.get(key) or "").strip())
         except FeishuCredentialConfigError as exc:
             if exc.as_issue() not in credential_issues:
                 credential_issues.append(exc.as_issue())
+            if exc.as_issue() not in role_issues:
+                role_issues.append(exc.as_issue())
             return False
 
-    app_id_configured = role_value_configured("feishu.bitable.app_id")
-    app_secret_configured = role_value_configured("feishu.bitable.app_secret")
+    listener_issues = []
+    listener_app_id_configured = role_value_configured(
+        "feishu.listener.app_id", listener_issues
+    )
+    listener_app_secret_configured = role_value_configured(
+        "feishu.listener.app_secret", listener_issues
+    )
+    agent_issues = []
+    agent_app_id_configured = role_value_configured(
+        "feishu.agent.app_id", agent_issues
+    )
+    agent_app_secret_configured = role_value_configured(
+        "feishu.agent.app_secret", agent_issues
+    )
+    listener_ready = bool(
+        listener_app_id_configured and listener_app_secret_configured
+    )
+    agent_ready = bool(agent_app_id_configured and agent_app_secret_configured)
     registry_valid = registry_error is None
     result = {
         "success": bool(
             registry_valid
             and not credential_issues
             and sdk_available
-            and app_id_configured
-            and app_secret_configured
+            and listener_ready
+            and agent_ready
         ),
         "read_only": True,
         "target_registry": {
@@ -594,9 +641,20 @@ def cmd_events_status(args):
             "targets": [target.as_dict() for target in targets],
         },
         "credentials": {
-            "role": "bitable",
-            "app_id_configured": app_id_configured,
-            "app_secret_configured": app_secret_configured,
+            "listener_ingress": {
+                "role": "listener",
+                "ready": listener_ready,
+                "app_id_configured": listener_app_id_configured,
+                "app_secret_configured": listener_app_secret_configured,
+                "issues": listener_issues,
+            },
+            "agent_worker": {
+                "role": "agent",
+                "ready": agent_ready,
+                "app_id_configured": agent_app_id_configured,
+                "app_secret_configured": agent_app_secret_configured,
+                "issues": agent_issues,
+            },
             "issues": credential_issues,
         },
         "sdk_available": sdk_available,

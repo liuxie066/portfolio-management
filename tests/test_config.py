@@ -101,37 +101,48 @@ def test_receipt_config_falls_back_to_options_monitor_bot_env():
         patch.undo()
 
 
-def test_canonical_feishu_roles_resolve_legacy_inputs_without_cross_role_fallback():
+def test_agent_accepts_direct_writer_legacy_input_without_cross_role_fallback(
+    tmp_path,
+):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("{}\n", encoding="utf-8")
     patch = MonkeyPatch()
     try:
-        patch.delenv("FEISHU_BITABLE_APP_ID", raising=False)
-        patch.delenv("FEISHU_CONVERSATION_APP_ID", raising=False)
+        patch.setenv(config.CONFIG_FILE_ENV, str(config_file))
+        patch.delenv("FEISHU_AGENT_APP_ID", raising=False)
         patch.setenv("FEISHU_APP_ID", "cli_bitable")
         patch.setenv("FEISHU_RECEIPT_APP_ID", "cli_conversation")
+        patch.setenv("FEISHU_BITABLE_APP_ID", "cli_listener_legacy")
+        config.reload_config()
 
-        assert config.get_with_source("feishu.bitable.app_id") == (
+        assert config.get_with_source("feishu.agent.app_id") == (
             "cli_bitable",
             "legacy-env:FEISHU_APP_ID",
         )
-        assert config.get_with_source("feishu.conversation.app_id") == (
-            "cli_conversation",
-            "legacy-env:FEISHU_RECEIPT_APP_ID",
-        )
+        with pytest.raises(
+            config.FeishuCredentialConfigError,
+            match=(
+                r"^ambiguous_legacy_role_configuration: "
+                r"feishu\.listener\.app_id$"
+            ),
+        ):
+            config.get("feishu.listener.app_id")
     finally:
         patch.undo()
+        config.reload_config()
 
 
 def test_canonical_and_legacy_non_secret_identity_conflict_fails_redacted():
     patch = MonkeyPatch()
     try:
-        patch.setenv("FEISHU_BITABLE_APP_ID", "cli_new")
+        patch.setenv("FEISHU_AGENT_APP_ID", "cli_new")
         patch.setenv("FEISHU_APP_ID", "cli_old")
 
         with pytest.raises(
             config.FeishuCredentialConfigError,
-            match=r"^conflicting_role_configuration: feishu\.bitable\.app_id$",
+            match=r"^conflicting_role_configuration: feishu\.agent\.app_id$",
         ):
-            config.get("feishu.bitable.app_id")
+            config.get("feishu.agent.app_id")
     finally:
         patch.undo()
 
@@ -139,13 +150,13 @@ def test_canonical_and_legacy_non_secret_identity_conflict_fails_redacted():
 def test_credential_config_error_allows_standard_traceback_assignment():
     error = config.FeishuCredentialConfigError(
         "conflicting_role_configuration",
-        "feishu.bitable.app_id",
+        "feishu.agent.app_id",
     )
 
     error.__traceback__ = None
 
     assert str(error) == (
-        "conflicting_role_configuration: feishu.bitable.app_id"
+        "conflicting_role_configuration: feishu.agent.app_id"
     )
 
 
@@ -156,16 +167,16 @@ def test_equal_canonical_and_legacy_identity_is_reported_as_redundant():
         patch = MonkeyPatch()
         try:
             patch.setenv(config.CONFIG_FILE_ENV, str(config_file))
-            patch.setenv("FEISHU_BITABLE_APP_ID", "cli_same")
+            patch.setenv("FEISHU_AGENT_APP_ID", "cli_same")
             patch.setenv("FEISHU_APP_ID", "cli_same")
             config.reload_config()
 
-            inspected = config.inspect_config(keys=["feishu.bitable.app_id"])
+            inspected = config.inspect_config(keys=["feishu.agent.app_id"])
 
             assert inspected["success"] is True
             assert inspected["warnings"] == [
                 {
-                    "key": "feishu.bitable.app_id",
+                    "key": "feishu.agent.app_id",
                     "warning": "redundant_legacy_configuration",
                     "sources": ["legacy-env:FEISHU_APP_ID"],
                 }
@@ -175,12 +186,129 @@ def test_equal_canonical_and_legacy_identity_is_reported_as_redundant():
             config.reload_config()
 
 
+def test_canonical_role_identity_conflicting_env_and_file_values_fail_closed(
+    tmp_path,
+):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        "feishu:\n  agent:\n    app_id: cli_file\n",
+        encoding="utf-8",
+    )
+    patch = MonkeyPatch()
+    try:
+        patch.setenv(config.CONFIG_FILE_ENV, str(config_file))
+        patch.setenv("FEISHU_AGENT_APP_ID", "cli_env")
+        config.reload_config()
+
+        with pytest.raises(
+            config.FeishuCredentialConfigError,
+            match=r"^conflicting_role_configuration: feishu\.agent\.app_id$",
+        ):
+            config.get("feishu.agent.app_id")
+    finally:
+        patch.undo()
+        config.reload_config()
+
+
+@pytest.mark.parametrize(
+    ("environment", "canonical_key"),
+    [
+        ("FEISHU_CONVERSATION_APP_ID", "feishu.agent.app_id"),
+        ("FEISHU_RECEIPT_OPEN_ID", "feishu.agent.open_id"),
+        ("OM_FEISHU_BOT_APP_ID", "feishu.agent.app_id"),
+        ("FEISHU_BITABLE_APP_ID", "feishu.agent.app_id"),
+        ("FEISHU_BITABLE_APP_ID", "feishu.listener.app_id"),
+        ("FEISHU_CONVERSATION_APP_ID", "feishu.listener.app_id"),
+        ("FEISHU_RECEIPT_APP_ID", "feishu.listener.app_id"),
+        ("OM_FEISHU_BOT_APP_ID", "feishu.listener.app_id"),
+    ],
+)
+def test_ambiguous_old_role_identity_is_never_promoted(
+    tmp_path,
+    environment,
+    canonical_key,
+):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("{}\n", encoding="utf-8")
+    patch = MonkeyPatch()
+    try:
+        patch.setenv(config.CONFIG_FILE_ENV, str(config_file))
+        patch.setenv(environment, "legacy-private-value")
+        config.reload_config()
+
+        with pytest.raises(
+            config.FeishuCredentialConfigError,
+            match=(
+                "^ambiguous_legacy_role_configuration: "
+                + canonical_key.replace(".", r"\.")
+                + "$"
+            ),
+        ):
+            config.get(canonical_key)
+    finally:
+        patch.undo()
+        config.reload_config()
+
+
+def test_explicit_canonical_identity_reports_ambiguous_old_role_as_shadow(
+    tmp_path,
+):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("{}\n", encoding="utf-8")
+    patch = MonkeyPatch()
+    try:
+        patch.setenv(config.CONFIG_FILE_ENV, str(config_file))
+        patch.setenv("FEISHU_AGENT_APP_ID", "cli_agent")
+        patch.setenv("FEISHU_CONVERSATION_APP_ID", "cli_old_role")
+        config.reload_config()
+
+        inspected = config.inspect_config(keys=["feishu.agent.app_id"])
+
+        assert inspected["success"] is True
+        assert inspected["warnings"] == [
+            {
+                "key": "feishu.agent.app_id",
+                "warning": "legacy_role_shadow_detected",
+                "sources": ["legacy-env:FEISHU_CONVERSATION_APP_ID"],
+            }
+        ]
+        assert "cli_old_role" not in json.dumps(inspected)
+    finally:
+        patch.undo()
+        config.reload_config()
+
+
+def test_multiple_plaintext_agent_secret_sources_fail_closed(tmp_path):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("{}\n", encoding="utf-8")
+    patch = MonkeyPatch()
+    try:
+        patch.setenv(config.CONFIG_FILE_ENV, str(config_file))
+        patch.delenv("PM_REQUIRE_SECURE_FEISHU_CREDENTIALS", raising=False)
+        patch.delenv("CREDENTIALS_DIRECTORY", raising=False)
+        patch.setenv("FEISHU_AGENT_APP_SECRET", "canonical-private")
+        patch.setenv("FEISHU_APP_SECRET", "safe-legacy-private")
+        config.reload_config()
+
+        with pytest.raises(
+            config.FeishuCredentialConfigError,
+            match=(
+                r"^ambiguous_plaintext_secret_sources: "
+                r"feishu\.agent\.app_secret$"
+            ),
+        ):
+            config.get("feishu.agent.app_secret")
+    finally:
+        patch.undo()
+        config.reload_config()
+
+
 def test_secure_credential_wins_without_reading_or_comparing_legacy_secret():
     with TemporaryDirectory() as tmp:
         root = Path(tmp)
         credential_dir = root / "credentials"
         credential_dir.mkdir()
-        credential_path = credential_dir / config.BITABLE_APP_SECRET_CREDENTIAL
+        credential_path = credential_dir / config.AGENT_APP_SECRET_CREDENTIAL
         credential_path.write_text("secure-do-not-leak\n", encoding="utf-8")
         config_file = root / "config.yaml"
         config_file.write_text(
@@ -193,26 +321,26 @@ def test_secure_credential_wins_without_reading_or_comparing_legacy_secret():
             patch.setenv(config.CONFIG_FILE_ENV, str(config_file))
             patch.setenv("CREDENTIALS_DIRECTORY", str(credential_dir))
             patch.setenv("PM_REQUIRE_SECURE_FEISHU_CREDENTIALS", "1")
-            patch.delenv("FEISHU_BITABLE_APP_SECRET", raising=False)
+            patch.delenv("FEISHU_AGENT_APP_SECRET", raising=False)
             patch.delenv("FEISHU_APP_SECRET", raising=False)
             config.reload_config()
 
-            assert config.get_with_source("feishu.bitable.app_secret") == (
+            assert config.get_with_source("feishu.agent.app_secret") == (
                 "secure-do-not-leak",
-                f"credential:{config.BITABLE_APP_SECRET_CREDENTIAL}",
+                f"credential:{config.AGENT_APP_SECRET_CREDENTIAL}",
             )
             inspected = config.inspect_config(
-                keys=["feishu.bitable.app_secret"],
+                keys=["feishu.agent.app_secret"],
                 redact=False,
             )
             encoded = json.dumps(inspected, ensure_ascii=False)
             assert inspected["success"] is True
-            assert inspected["values"]["feishu.bitable.app_secret"]["value"] == (
+            assert inspected["values"]["feishu.agent.app_secret"]["value"] == (
                 "sec...eak"
             )
             assert inspected["warnings"] == [
                 {
-                    "key": "feishu.bitable.app_secret",
+                    "key": "feishu.agent.app_secret",
                     "warning": "plaintext_shadow_detected",
                     "sources": ["config:feishu.app_secret"],
                 }
@@ -240,23 +368,23 @@ def test_secure_mode_rejects_plaintext_fallback_and_reports_missing_credential()
             patch.setenv(config.CONFIG_FILE_ENV, str(config_file))
             patch.setenv("CREDENTIALS_DIRECTORY", str(credential_dir))
             patch.setenv("PM_REQUIRE_SECURE_FEISHU_CREDENTIALS", "1")
-            patch.delenv("FEISHU_BITABLE_APP_SECRET", raising=False)
+            patch.delenv("FEISHU_AGENT_APP_SECRET", raising=False)
             patch.delenv("FEISHU_APP_SECRET", raising=False)
             config.reload_config()
 
             with pytest.raises(
                 config.FeishuCredentialConfigError,
-                match=r"^insecure_secret_source: feishu\.bitable\.app_secret$",
+                match=r"^insecure_secret_source: feishu\.agent\.app_secret$",
             ):
-                config.get("feishu.bitable.app_secret")
+                config.get("feishu.agent.app_secret")
             inspected = config.inspect_config(
-                keys=["feishu.bitable.app_secret"],
+                keys=["feishu.agent.app_secret"],
                 redact=False,
             )
             assert inspected["success"] is False
             assert inspected["issues"] == [
                 {
-                    "key": "feishu.bitable.app_secret",
+                    "key": "feishu.agent.app_secret",
                     "error": "insecure_secret_source",
                 }
             ]
@@ -266,12 +394,63 @@ def test_secure_mode_rejects_plaintext_fallback_and_reports_missing_credential()
             config.reload_config()
             with pytest.raises(
                 config.FeishuCredentialConfigError,
-                match=r"^missing_secure_credential: feishu\.bitable\.app_secret$",
+                match=r"^missing_secure_credential: feishu\.agent\.app_secret$",
             ):
-                config.get("feishu.bitable.app_secret")
+                config.get("feishu.agent.app_secret")
         finally:
             patch.undo()
             config.reload_config()
+
+
+def test_secure_validation_rejects_configured_user_token_without_disclosure(
+    tmp_path,
+):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+feishu:
+  agent:
+    app_id: cli_agent
+    open_id: ou_user
+  listener:
+    app_id: cli_listener
+  app_token: appToken
+  tables:
+    holdings: appToken/tbl_holdings
+    nav_history: appToken/tbl_nav
+    cash_flow: appToken/tbl_cash
+    holdings_snapshot: appToken/tbl_snapshot
+""",
+        encoding="utf-8",
+    )
+    credential_dir = tmp_path / "credentials"
+    credential_dir.mkdir()
+    (credential_dir / config.AGENT_APP_SECRET_CREDENTIAL).write_text(
+        "agent-private",
+        encoding="utf-8",
+    )
+    (credential_dir / config.LISTENER_APP_SECRET_CREDENTIAL).write_text(
+        "listener-private",
+        encoding="utf-8",
+    )
+    patch = MonkeyPatch()
+    try:
+        patch.setenv(config.CONFIG_FILE_ENV, str(config_file))
+        patch.setenv("CREDENTIALS_DIRECTORY", str(credential_dir))
+        patch.setenv("FEISHU_USER_TOKEN", "user-token-private")
+        config.reload_config()
+
+        validated = config.validate_deploy_config(require_secure_feishu=True)
+
+        assert validated["success"] is False
+        assert {
+            (issue["key"], issue["error"])
+            for issue in validated["issues"]
+        } == {("feishu.user_token", "insecure_identity_override")}
+        assert "user-token-private" not in json.dumps(validated)
+    finally:
+        patch.undo()
+        config.reload_config()
 
 
 def test_invalid_secure_mode_value_fails_closed_without_plaintext_fallback():
@@ -285,8 +464,8 @@ def test_invalid_secure_mode_value_fails_closed_without_plaintext_fallback():
             config.FeishuCredentialConfigError,
             match=r"^invalid_secure_mode: feishu\.credentials\.secure_mode$",
         ):
-            config.get("feishu.bitable.app_secret")
-        inspected = config.inspect_config(keys=["feishu.bitable.app_secret"])
+            config.get("feishu.agent.app_secret")
+        inspected = config.inspect_config(keys=["feishu.agent.app_secret"])
         encoded = json.dumps(inspected, ensure_ascii=False)
         assert inspected["success"] is False
         assert inspected["issues"] == [
@@ -307,15 +486,15 @@ def test_invalid_secure_mode_value_fails_closed_without_plaintext_fallback():
 def test_systemd_feishu_credential_rejects_invalid_payloads(payload):
     with TemporaryDirectory() as tmp:
         credential_dir = Path(tmp)
-        (credential_dir / config.BITABLE_APP_SECRET_CREDENTIAL).write_bytes(payload)
+        (credential_dir / config.AGENT_APP_SECRET_CREDENTIAL).write_bytes(payload)
         patch = MonkeyPatch()
         try:
             patch.setenv("CREDENTIALS_DIRECTORY", str(credential_dir))
             with pytest.raises(
                 config.FeishuCredentialConfigError,
-                match=r"^invalid_credential_file: feishu\.bitable\.app_secret$",
+                match=r"^invalid_credential_file: feishu\.agent\.app_secret$",
             ):
-                config.get("feishu.bitable.app_secret")
+                config.get("feishu.agent.app_secret")
         finally:
             patch.undo()
 
@@ -324,14 +503,14 @@ def test_systemd_feishu_credential_accepts_exact_4096_byte_boundary():
     with TemporaryDirectory() as tmp:
         credential_dir = Path(tmp)
         value = "x" * 4096
-        (credential_dir / config.BITABLE_APP_SECRET_CREDENTIAL).write_text(
+        (credential_dir / config.AGENT_APP_SECRET_CREDENTIAL).write_text(
             value,
             encoding="utf-8",
         )
         patch = MonkeyPatch()
         try:
             patch.setenv("CREDENTIALS_DIRECTORY", str(credential_dir))
-            assert config.get("feishu.bitable.app_secret") == value
+            assert config.get("feishu.agent.app_secret") == value
         finally:
             patch.undo()
 
@@ -342,15 +521,15 @@ def test_systemd_feishu_credential_rejects_symlink():
         credential_dir.mkdir()
         source = Path(tmp) / "source"
         source.write_text("do-not-read", encoding="utf-8")
-        (credential_dir / config.BITABLE_APP_SECRET_CREDENTIAL).symlink_to(source)
+        (credential_dir / config.AGENT_APP_SECRET_CREDENTIAL).symlink_to(source)
         patch = MonkeyPatch()
         try:
             patch.setenv("CREDENTIALS_DIRECTORY", str(credential_dir))
             with pytest.raises(
                 config.FeishuCredentialConfigError,
-                match=r"^invalid_credential_file: feishu\.bitable\.app_secret$",
+                match=r"^invalid_credential_file: feishu\.agent\.app_secret$",
             ):
-                config.get("feishu.bitable.app_secret")
+                config.get("feishu.agent.app_secret")
         finally:
             patch.undo()
 
@@ -360,13 +539,13 @@ def test_invalid_credential_traceback_suppresses_path_and_raw_bytes():
 
     with TemporaryDirectory() as tmp:
         credential_dir = Path(tmp)
-        credential_path = credential_dir / config.BITABLE_APP_SECRET_CREDENTIAL
+        credential_path = credential_dir / config.AGENT_APP_SECRET_CREDENTIAL
         credential_path.write_bytes(b"private-prefix-\xff-private-suffix")
         patch = MonkeyPatch()
         try:
             patch.setenv("CREDENTIALS_DIRECTORY", str(credential_dir))
             try:
-                config.get("feishu.bitable.app_secret")
+                config.get("feishu.agent.app_secret")
             except config.FeishuCredentialConfigError:
                 rendered = traceback.format_exc()
             else:
@@ -383,7 +562,7 @@ def test_credential_open_error_traceback_suppresses_path(monkeypatch, tmp_path):
     import traceback
     from src.configuration import feishu_credentials
 
-    credential_path = tmp_path / config.BITABLE_APP_SECRET_CREDENTIAL
+    credential_path = tmp_path / config.AGENT_APP_SECRET_CREDENTIAL
     credential_path.write_text("fixture-secret", encoding="utf-8")
 
     def fail_open(path, _flags):
@@ -392,7 +571,7 @@ def test_credential_open_error_traceback_suppresses_path(monkeypatch, tmp_path):
     monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
     monkeypatch.setattr(feishu_credentials.os, "open", fail_open)
     try:
-        config.get("feishu.bitable.app_secret")
+        config.get("feishu.agent.app_secret")
     except config.FeishuCredentialConfigError:
         rendered = traceback.format_exc()
     else:
@@ -625,9 +804,7 @@ futu:
 
             assert payload["success"] is False
             assert {issue["key"] for issue in payload["issues"]} >= {
-                "feishu.conversation.app_id",
-                "feishu.conversation.app_secret",
-                "feishu.conversation.open_id",
+                "feishu.agent.open_id",
             }
         finally:
             patch.undo()
