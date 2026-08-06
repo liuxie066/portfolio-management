@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.36 - 2026-08-06
+
+- Corrected the Feishu two-application authority model so the Agent identity
+  owns conversations, receipts, and every Base read/write/synchronization path,
+  while the Listener identity is confined to Holdings and Cash Flow event
+  subscription and long-connection ingress.
+- Added canonical `feishu.agent` and `feishu.listener` configuration with
+  fail-closed legacy-role detection, no cross-role fallback, redacted plaintext
+  shadow diagnostics, and isolated explicit user-token behavior.
+- Added role-named systemd encrypted credentials, least-privilege unit grants,
+  canonical mapping and credential capability gates, and an activation preflight
+  that blocks service enablement when either role is not ready.
+
 ## 0.1.35 - 2026-08-05
 
 - Separated Feishu Bitable and Conversation application roles across Base API,
