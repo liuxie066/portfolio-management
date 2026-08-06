@@ -79,9 +79,9 @@ def test_futu_sync_receipt_sends_write_summary_from_liukanshan():
 def test_futu_sync_receipt_defaults_to_conversation_role(monkeypatch):
     requested = []
     values = {
-        "feishu.conversation.app_id": "cli_conversation",
-        "feishu.conversation.app_secret": "conversation_secret",
-        "feishu.conversation.open_id": "ou_user",
+        "feishu.agent.app_id": "cli_agent",
+        "feishu.agent.app_secret": "agent_secret",
+        "feishu.agent.open_id": "ou_user",
     }
 
     def fake_get(key, default=None):
@@ -93,8 +93,8 @@ def test_futu_sync_receipt_defaults_to_conversation_role(monkeypatch):
     service = FutuSyncReceiptService()
 
     assert (service.app_id, service.app_secret, service.open_id) == (
-        "cli_conversation",
-        "conversation_secret",
+        "cli_agent",
+        "agent_secret",
         "ou_user",
     )
     assert requested == list(values)

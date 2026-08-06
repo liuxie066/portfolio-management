@@ -116,27 +116,27 @@ def _adapter(sdk, targets):
     )
 
 
-def test_adapter_default_secret_uses_only_bitable_role(monkeypatch):
+def test_adapter_default_secret_uses_only_listener_role(monkeypatch):
     requested = []
 
     def fake_get(key, default=None):
         requested.append(key)
-        return "data_secret" if key == "feishu.bitable.app_secret" else default
+        return "data_secret" if key == "feishu.listener.app_secret" else default
 
     monkeypatch.setattr("src.feishu.bitable_event_adapter.config.get", fake_get)
 
     adapter = FeishuBitableEventAdapter(targets=_targets())
 
     assert adapter.app_secret == "data_secret"
-    assert requested == ["feishu.bitable.app_secret"]
+    assert requested == ["feishu.listener.app_secret"]
 
 
-def test_event_targets_use_same_bitable_app_identity(monkeypatch):
+def test_event_targets_use_same_listener_app_identity(monkeypatch):
     requested = []
 
     def fake_get(key, default=None):
         requested.append(key)
-        return "cli_data" if key == "feishu.bitable.app_id" else default
+        return "cli_data" if key == "feishu.listener.app_id" else default
 
     monkeypatch.setattr("src.config.get", fake_get)
     monkeypatch.setattr(
@@ -150,7 +150,7 @@ def test_event_targets_use_same_bitable_app_identity(monkeypatch):
     )
 
     assert {target.app_id for target in targets} == {"cli_data"}
-    assert requested == ["feishu.bitable.app_id", "feishu.bitable.app_id"]
+    assert requested == ["feishu.listener.app_id", "feishu.listener.app_id"]
 
 
 def test_shared_adapter_registers_one_event_callback():

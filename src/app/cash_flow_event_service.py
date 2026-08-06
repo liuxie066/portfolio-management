@@ -49,9 +49,9 @@ class CashFlowEventTarget:
 
     @classmethod
     def from_config(cls) -> "CashFlowEventTarget":
-        app_id = str(config.get("feishu.bitable.app_id") or "").strip()
+        app_id = str(config.get("feishu.listener.app_id") or "").strip()
         if not app_id:
-            raise ValueError("missing feishu.bitable.app_id for cash flow event listener")
+            raise ValueError("missing feishu.listener.app_id for cash flow event listener")
         file_token, table_id = config.get_feishu_table_ref("cash_flow")
         return cls(app_id=app_id, file_token=file_token, table_id=table_id)
 

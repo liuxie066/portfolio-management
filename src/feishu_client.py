@@ -54,11 +54,17 @@ class FeishuClient:
         Args:
             app_id: 飞书自建应用 App ID
             app_secret: 飞书自建应用 App Secret
-            user_token: 个人访问令牌（与 app_id/app_secret 二选一）
+            user_token: 显式个人访问令牌（仅供隔离调用方/测试注入，不读取配置）
         """
-        self.app_id = app_id or config.get("feishu.bitable.app_id")
-        self.app_secret = app_secret or config.get("feishu.bitable.app_secret")
-        self.user_token = user_token or config.get("feishu.user_token")
+        self.user_token = (
+            str(user_token).strip() if user_token is not None else None
+        )
+        if self.user_token:
+            self.app_id = app_id
+            self.app_secret = app_secret
+        else:
+            self.app_id = app_id or config.get("feishu.agent.app_id")
+            self.app_secret = app_secret or config.get("feishu.agent.app_secret")
         self.timeout = (
             config.get_float("feishu.connect_timeout", 5.0) or 5.0,
             config.get_float("feishu.read_timeout", 30.0) or 30.0,

@@ -13,6 +13,8 @@ from src import config
 from src.app import FutuBalanceSnapshot, FutuBalanceSyncService
 from src.app.futu_balance_sync_service import FutuOpenApiBalanceProvider
 from src.domain.holding_mutations import HoldingTarget
+from src.feishu_client import FeishuClient
+from src.feishu_storage import FeishuStorage
 from src.models import AssetType, Holding
 from skill_api import PortfolioSkill
 
@@ -133,6 +135,107 @@ def test_sync_cash_and_mmf_observes_cash_and_updates_only_mmf():
     ]
     assert storage.holdings[("CNY-CASH", "lx", "富途")].quantity == 20
     assert storage.holdings[("CNY-MMF", "lx", "富途")].quantity == 200.33
+
+
+def test_mmf_sync_composition_updates_through_agent_owned_feishu_client(
+    monkeypatch,
+):
+    """Prove the scheduled MMF write path never resolves Listener identity."""
+
+    requested_config_keys = []
+    values = {
+        "feishu.agent.app_id": "cli_agent",
+        "feishu.agent.app_secret": "agent_secret",
+        "feishu.tables.holdings": "base_agent/tbl_holdings",
+        "feishu.app_token": "base_agent",
+    }
+
+    def configured(key, default=None):
+        requested_config_keys.append(key)
+        return values.get(key, default)
+
+    monkeypatch.setattr(config, "get", configured)
+    client = FeishuClient()
+    remote_record = {
+        "record_id": "rec_mmf",
+        "fields": {
+            "asset_id": "CNY-MMF",
+            "asset_name": "货币基金",
+            "asset_type": "mmf",
+            "account": "lx",
+            "broker": "富途",
+            "quantity": 50.0,
+            "currency": "CNY",
+            "asset_class": "现金",
+            "industry": "现金",
+        },
+    }
+    protocol_calls = []
+
+    def no_network_request(method, endpoint, **kwargs):
+        protocol_calls.append((method, endpoint))
+        if method == "GET":
+            return {
+                "items": [
+                    {
+                        "record_id": remote_record["record_id"],
+                        "fields": dict(remote_record["fields"]),
+                    }
+                ],
+                "has_more": False,
+            }
+        if method == "PUT":
+            remote_record["fields"].update(kwargs["json"]["fields"])
+            return {
+                "record": {
+                    "record_id": remote_record["record_id"],
+                    "fields": dict(remote_record["fields"]),
+                }
+            }
+        raise AssertionError(f"unexpected protocol method: {method}")
+
+    monkeypatch.setattr(client, "_request", no_network_request)
+
+    class MemoryIndex:
+        def __init__(self):
+            self.rows = {}
+
+        def load_all(self):
+            return {key: dict(value) for key, value in self.rows.items()}
+
+        def upsert(self, key, value, *, _flush=False):
+            self.rows[key] = dict(value)
+
+        def delete(self, key, *, _flush=False):
+            self.rows.pop(key, None)
+
+        def flush(self):
+            return None
+
+    storage = FeishuStorage(
+        client=client,
+        local_holdings_index_cache=MemoryIndex(),
+    )
+
+    result = FutuBalanceSyncService(
+        storage,
+        FakeProvider(cash=100.0, mmf=200.33),
+    ).sync_cash_and_mmf(account="lx")
+
+    assert result["success"] is True
+    assert result["updated"] == 1
+    assert remote_record["fields"]["quantity"] == 200.33
+    assert client.app_id == "cli_agent"
+    assert client.app_secret == "agent_secret"
+    assert "feishu.agent.app_id" in requested_config_keys
+    assert "feishu.agent.app_secret" in requested_config_keys
+    assert not any("listener" in key for key in requested_config_keys)
+    assert [method for method, _endpoint in protocol_calls] == [
+        "GET",
+        "GET",
+        "PUT",
+        "GET",
+    ]
 
 
 def test_sync_cash_and_mmf_never_replaces_existing_cash_fields():

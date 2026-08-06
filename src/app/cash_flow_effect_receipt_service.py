@@ -41,17 +41,17 @@ class CashFlowEffectReceiptService:
         self.app_id = (
             app_id
             if app_id is not None
-            else config.get("feishu.conversation.app_id")
+            else config.get("feishu.agent.app_id")
         )
         self.app_secret = (
             app_secret
             if app_secret is not None
-            else config.get("feishu.conversation.app_secret")
+            else config.get("feishu.agent.app_secret")
         )
         self.open_id = (
             open_id
             if open_id is not None
-            else config.get("feishu.conversation.open_id")
+            else config.get("feishu.agent.open_id")
         )
         self.client_factory = client_factory
 
@@ -116,9 +116,9 @@ class CashFlowEffectReceiptService:
         missing = [
             key
             for key, value in (
-                ("feishu.conversation.app_id", self.app_id),
-                ("feishu.conversation.app_secret", self.app_secret),
-                ("feishu.conversation.open_id", self.open_id),
+                ("feishu.agent.app_id", self.app_id),
+                ("feishu.agent.app_secret", self.app_secret),
+                ("feishu.agent.open_id", self.open_id),
             )
             if not str(value or "").strip()
         ]

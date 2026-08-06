@@ -489,7 +489,7 @@ def test_nav_receipt_missing_config_and_send_failure_are_reported():
     )
     assert missing["success"] is False
     assert missing["status"] == "failed"
-    assert "feishu.conversation.app_id" in missing["error"]
+    assert "feishu.agent.app_id" in missing["error"]
 
     class FailedClient:
         def __init__(self, **_kwargs):
@@ -517,9 +517,9 @@ def test_nav_receipt_missing_config_and_send_failure_are_reported():
 def test_nav_receipt_defaults_to_conversation_role(monkeypatch):
     requested = []
     values = {
-        "feishu.conversation.app_id": "cli_conversation",
-        "feishu.conversation.app_secret": "conversation_secret",
-        "feishu.conversation.open_id": "ou_user",
+        "feishu.agent.app_id": "cli_agent",
+        "feishu.agent.app_secret": "agent_secret",
+        "feishu.agent.open_id": "ou_user",
     }
 
     def fake_get(key, default=None):
@@ -531,8 +531,8 @@ def test_nav_receipt_defaults_to_conversation_role(monkeypatch):
     service = NavHistoryReceiptService()
 
     assert (service.app_id, service.app_secret, service.open_id) == (
-        "cli_conversation",
-        "conversation_secret",
+        "cli_agent",
+        "agent_secret",
         "ou_user",
     )
     assert requested == list(values)

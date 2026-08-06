@@ -25,9 +25,9 @@ def _enqueue(store, key, receipt_type="holding_case_discovered"):
 def test_operation_receipt_senders_default_to_conversation_role(monkeypatch):
     requested = []
     values = {
-        "feishu.conversation.app_id": "cli_conversation",
-        "feishu.conversation.app_secret": "conversation_secret",
-        "feishu.conversation.open_id": "ou_user",
+        "feishu.agent.app_id": "cli_agent",
+        "feishu.agent.app_secret": "agent_secret",
+        "feishu.agent.open_id": "ou_user",
     }
 
     def fake_get(key, default=None):
@@ -41,13 +41,13 @@ def test_operation_receipt_senders_default_to_conversation_role(monkeypatch):
     cash_flow = CashFlowReceiptService()
 
     assert (holdings.app_id, holdings.app_secret, holdings.open_id) == (
-        "cli_conversation",
-        "conversation_secret",
+        "cli_agent",
+        "agent_secret",
         "ou_user",
     )
     assert (cash_flow.app_id, cash_flow.app_secret, cash_flow.open_id) == (
-        "cli_conversation",
-        "conversation_secret",
+        "cli_agent",
+        "agent_secret",
         "ou_user",
     )
     assert requested == [*values, *values]

@@ -50,8 +50,8 @@ class TestFeishuClientInitialization:
         try:
             with patch.dict(os.environ, {
                 'PORTFOLIO_CONFIG_FILE': str(config_file),
-                'FEISHU_BITABLE_APP_ID': 'test_app_id',
-                'FEISHU_BITABLE_APP_SECRET': 'test_secret',
+                'FEISHU_AGENT_APP_ID': 'test_app_id',
+                'FEISHU_AGENT_APP_SECRET': 'test_secret',
                 'FEISHU_APP_TOKEN': 'test_token'
             }, clear=True):
                 config.reload_config()
@@ -62,11 +62,11 @@ class TestFeishuClientInitialization:
         finally:
             config.reload_config()
 
-    def test_default_identity_uses_only_bitable_role(self):
+    def test_default_identity_uses_only_agent_role(self):
         with patch("src.feishu_client.config.get") as config_get:
             values = {
-                "feishu.bitable.app_id": "cli_data",
-                "feishu.bitable.app_secret": "data_secret",
+                "feishu.agent.app_id": "cli_data",
+                "feishu.agent.app_secret": "data_secret",
                 "feishu.user_token": None,
             }
             config_get.side_effect = lambda key, default=None: values.get(key, default)
@@ -76,10 +76,10 @@ class TestFeishuClientInitialization:
         assert client.app_id == "cli_data"
         assert client.app_secret == "data_secret"
         requested = {call.args[0] for call in config_get.call_args_list}
-        assert "feishu.bitable.app_id" in requested
-        assert "feishu.bitable.app_secret" in requested
-        assert "feishu.conversation.app_id" not in requested
-        assert "feishu.conversation.app_secret" not in requested
+        assert "feishu.agent.app_id" in requested
+        assert "feishu.agent.app_secret" in requested
+        assert "feishu.listener.app_id" not in requested
+        assert "feishu.listener.app_secret" not in requested
 
     def test_init_with_params(self):
         """测试使用参数初始化"""
@@ -92,13 +92,40 @@ class TestFeishuClientInitialization:
         assert client.app_secret == 'param_secret'
         assert client.user_token == 'user_token_123'
 
-    def test_init_with_user_token(self):
-        """测试使用个人访问令牌初始化"""
-        with patch.dict(os.environ, {
-            'FEISHU_USER_TOKEN': 'user_token_env'
-        }):
+    def test_explicit_user_token_does_not_resolve_agent_config(self):
+        with patch("src.feishu_client.config.get") as config_get:
+            def isolated_config(key, default=None):
+                if key.startswith("feishu.agent."):
+                    raise AssertionError("explicit token must not resolve Agent config")
+                return default
+
+            config_get.side_effect = isolated_config
+
+            client = FeishuClient(user_token=" isolated-token ")
+
+        assert client.user_token == "isolated-token"
+        assert client.app_id is None
+        assert client.app_secret is None
+        assert client._get_headers()["Authorization"] == "Bearer isolated-token"
+        assert not any(
+            call.args[0].startswith("feishu.agent.")
+            for call in config_get.call_args_list
+        )
+
+    def test_default_client_ignores_configured_user_token(self):
+        """默认客户端不得让配置中的个人令牌旁路 Agent 身份。"""
+        with patch("src.feishu_client.config.get") as config_get:
+            config_get.side_effect = lambda key, default=None: {
+                "feishu.agent.app_id": "cli_agent",
+                "feishu.agent.app_secret": "agent_secret",
+                "feishu.user_token": "must-not-be-read",
+            }.get(key, default)
+
             client = FeishuClient()
-            assert client.user_token == 'user_token_env'
+
+        assert client.user_token is None
+        requested = {call.args[0] for call in config_get.call_args_list}
+        assert "feishu.user_token" not in requested
 
     def test_table_configs_unified_base(self):
         """测试统一base配置方式"""
