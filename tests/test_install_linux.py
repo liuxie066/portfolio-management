@@ -35,7 +35,7 @@ def _args(tmp_path: Path, *extra: str):
     for name in install_linux.FEISHU_CREDENTIAL_NAMES:
         (credential_store / name).write_bytes(b"encrypted-fixture")
     install_linux.ENCRYPTED_CREDENTIAL_STORE_DIR = credential_store
-    return install_linux.build_parser().parse_args([
+    args = install_linux.build_parser().parse_args([
         "--app-dir", str(tmp_path / "app"),
         "--config-dir", str(tmp_path / "etc"),
         "--data-dir", str(tmp_path / "state"),
@@ -46,6 +46,19 @@ def _args(tmp_path: Path, *extra: str):
         "--options-monitor-env-file", str(tmp_path / "options-monitor.env"),
         *extra,
     ])
+    if "--apply" in extra:
+        paths = install_linux.build_paths(args)
+        paths.config_file.parent.mkdir(parents=True, exist_ok=True)
+        paths.config_file.write_text(
+            "feishu:\n"
+            "  agent:\n"
+            "    app_id: cli_agent\n"
+            "    open_id: ou_operator\n"
+            "  listener:\n"
+            "    app_id: cli_listener\n",
+            encoding="utf-8",
+        )
+    return args
 
 
 def test_install_linux_plan_uses_yaml_config_and_durable_receipt_timer(tmp_path):
@@ -109,8 +122,19 @@ def test_install_linux_plan_uses_yaml_config_and_durable_receipt_timer(tmp_path)
         },
         "preflight_service": install_linux.FEISHU_PREFLIGHT_SERVICE_NAME,
         "preflight_enabled": False,
+        "preflight_required_before_activation": True,
     }
-    assert payload["feishu_receipt_env"]["secret_imported"] is False
+    assert payload["systemd"]["feishu_role_mapping"] == {
+        "required_before_apply": True,
+        "verified": False,
+        "required_keys": [
+            "feishu.agent.app_id",
+            "feishu.agent.open_id",
+            "feishu.listener.app_id",
+        ],
+    }
+    assert payload["legacy_feishu_role_sources"]["copied"] is False
+    assert payload["legacy_feishu_role_sources"]["values_read"] is False
     assert "daily_job_args" not in payload
 
 
@@ -122,11 +146,11 @@ def test_install_linux_rendered_config_points_runtime_dirs(tmp_path):
 
     assert payload["data"]["dir"] == str(tmp_path / "state")
     assert payload["report"]["reports_dir"] == str(tmp_path / "reports")
-    assert payload["feishu"]["bitable"] == {"app_id": ""}
-    assert payload["feishu"]["conversation"] == {
+    assert payload["feishu"]["agent"] == {
         "app_id": "",
         "open_id": "",
     }
+    assert payload["feishu"]["listener"] == {"app_id": ""}
     assert "app_secret" not in rendered
     assert payload["quality"] == {
         "read_token": "",
@@ -139,8 +163,16 @@ def test_install_linux_rendered_config_points_runtime_dirs(tmp_path):
 def test_install_linux_apply_writes_files_without_overwriting_existing_config(tmp_path, monkeypatch):
     args = _args(tmp_path, "--apply")
     paths = install_linux.build_paths(args)
-    paths.config_file.parent.mkdir(parents=True)
-    paths.config_file.write_text("account: existing\n", encoding="utf-8")
+    existing = (
+        "account: existing\n"
+        "feishu:\n"
+        "  agent:\n"
+        "    app_id: cli_agent\n"
+        "    open_id: ou_operator\n"
+        "  listener:\n"
+        "    app_id: cli_listener\n"
+    )
+    paths.config_file.write_text(existing, encoding="utf-8")
 
     commands = []
     monkeypatch.setattr(install_linux.subprocess, "run", lambda command, check: commands.append(command))
@@ -148,8 +180,8 @@ def test_install_linux_apply_writes_files_without_overwriting_existing_config(tm
     payload = install_linux.apply_install(args)
 
     assert payload["dry_run"] is False
-    assert payload["writes"][str(paths.config_file)] == "skipped_exists"
-    assert paths.config_file.read_text(encoding="utf-8") == "account: existing\n"
+    assert payload["writes"][str(paths.config_file)] == "verified_existing"
+    assert paths.config_file.read_text(encoding="utf-8") == existing
     assert paths.env_file.exists()
     assert (tmp_path / "bin" / "pm").exists()
     assert "PORTFOLIO_CONFIG_FILE" in (tmp_path / "bin" / "pm").read_text(encoding="utf-8")
@@ -182,6 +214,11 @@ def test_install_linux_enable_starts_all_timers(tmp_path, monkeypatch):
         ["systemctl", "daemon-reload"],
         [
             "systemctl",
+            "start",
+            install_linux.FEISHU_PREFLIGHT_SERVICE_NAME,
+        ],
+        [
+            "systemctl",
             "enable",
             "--now",
             install_linux.TIMER_NAME,
@@ -200,6 +237,11 @@ def test_install_linux_enable_api_service_is_independent_from_timers(tmp_path, m
 
     assert commands == [
         ["systemctl", "daemon-reload"],
+        [
+            "systemctl",
+            "start",
+            install_linux.FEISHU_PREFLIGHT_SERVICE_NAME,
+        ],
         ["systemctl", "enable", "--now", install_linux.API_SERVICE_NAME],
     ]
 
@@ -212,7 +254,51 @@ def test_install_linux_enable_quality_timer_is_independent(tmp_path, monkeypatch
 
     assert commands == [
         ["systemctl", "daemon-reload"],
+        [
+            "systemctl",
+            "start",
+            install_linux.FEISHU_PREFLIGHT_SERVICE_NAME,
+        ],
         ["systemctl", "enable", "--now", install_linux.QUALITY_TIMER_NAME],
+    ]
+
+
+def test_install_linux_failed_preflight_blocks_every_activation(
+    tmp_path,
+    monkeypatch,
+):
+    commands = []
+
+    def run(command, check):
+        commands.append(command)
+        if command == [
+            "systemctl",
+            "start",
+            install_linux.FEISHU_PREFLIGHT_SERVICE_NAME,
+        ]:
+            raise subprocess.CalledProcessError(1, command)
+
+    monkeypatch.setattr(install_linux.subprocess, "run", run)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        install_linux.apply_install(
+            _args(
+                tmp_path,
+                "--apply",
+                "--enable-timer",
+                "--enable-api-service",
+                "--enable-quality-timer",
+                "--enable-holdings-event-listener",
+            )
+        )
+
+    assert commands == [
+        ["systemctl", "daemon-reload"],
+        [
+            "systemctl",
+            "start",
+            install_linux.FEISHU_PREFLIGHT_SERVICE_NAME,
+        ],
     ]
 
 
@@ -239,6 +325,11 @@ def test_install_linux_holdings_event_listener_is_generated_disabled_and_explici
     assert payload["systemd"]["holdings_events"]["enabled"] is True
     assert commands == [
         ["systemctl", "daemon-reload"],
+        [
+            "systemctl",
+            "start",
+            install_linux.FEISHU_PREFLIGHT_SERVICE_NAME,
+        ],
         [
             "systemctl",
             "enable",
@@ -274,14 +365,15 @@ def test_dual_feishu_app_docs_preserve_secret_and_authorization_boundaries():
         root / "docs" / "holdings-event-listener-runbook.md"
     ).read_text(encoding="utf-8")
 
-    assert "feishu.bitable.app_id" in deploy
-    assert "feishu.conversation.app_id" in deploy
-    assert "pm-feishu-bitable-app-secret" in readme
-    assert "pm-feishu-conversation-app-secret" in readme
+    assert "feishu.agent.app_id" in deploy
+    assert "feishu.agent.open_id" in deploy
+    assert "feishu.listener.app_id" in deploy
+    assert "pm-feishu-agent-app-secret" in readme
+    assert "pm-feishu-listener-app-secret" in readme
     assert "app_secret:" not in example
     assert "App Secret 都不写入 YAML" in readme
     assert "不配置第三个 event-only 应用" in deploy
-    assert "绝不会导入\n`OM_FEISHU_BOT_APP_SECRET`" in deploy
+    assert "不读取、推断、复制或提升" in deploy
     assert "portfolio-feishu-preflight.service" in deploy
     assert "不请求飞书、不订阅、不连接 listener、不发送消息" in deploy
     assert "互相独立的授权边界" in deploy
@@ -290,18 +382,20 @@ def test_dual_feishu_app_docs_preserve_secret_and_authorization_boundaries():
     assert "等价消息发送权限" not in deploy
 
     prepare_marker = "仅准备 credential-capable checkout/venv"
-    provision_marker = "轮换并配置两份 encrypted credentials"
-    apply_marker = "apply credential-capable config/env/units"
+    mapping_marker = "人工核对并写入 canonical Agent/Listener 非秘密映射"
+    provision_marker = "轮换已暴露的 Agent Secret"
+    apply_marker = "apply credential-capable env/units"
     preflight_marker = "secure preflight 通过"
-    assert deploy.index(prepare_marker) < deploy.index(provision_marker)
+    assert deploy.index(prepare_marker) < deploy.index(mapping_marker)
+    assert deploy.index(mapping_marker) < deploy.index(provision_marker)
     assert deploy.index(provision_marker) < deploy.index(apply_marker)
     assert deploy.index(apply_marker) < deploy.index(preflight_marker)
 
     subscription = listener.split("## Separately confirmed subscription", 1)[1]
     subscription = subscription.split("## Separately confirmed service activation", 1)[0]
     assert "systemd-run --wait --pipe --collect" in subscription
-    assert "LoadCredentialEncrypted=pm-feishu-bitable-app-secret" in subscription
-    assert "pm-feishu-conversation-app-secret" not in subscription
+    assert "LoadCredentialEncrypted=pm-feishu-listener-app-secret" in subscription
+    assert "pm-feishu-agent-app-secret" not in subscription
     assert (
         "CREDENTIALS_DIRECTORY=/run/credentials/"
         "portfolio-feishu-subscribe-once.service"
@@ -410,13 +504,13 @@ def test_install_linux_service_units_have_exact_feishu_credential_grants(tmp_pat
         ),
     }
     expected = {
-        "morning": set(install_linux.FEISHU_CREDENTIAL_NAMES),
-        "evening": set(install_linux.FEISHU_CREDENTIAL_NAMES),
-        "cash_flow": set(install_linux.FEISHU_CREDENTIAL_NAMES),
-        "api": set(install_linux.FEISHU_CREDENTIAL_NAMES),
-        "quality": {install_linux.BITABLE_APP_SECRET_CREDENTIAL},
-        "receipts": {install_linux.CONVERSATION_APP_SECRET_CREDENTIAL},
-        "events": {install_linux.BITABLE_APP_SECRET_CREDENTIAL},
+        "morning": {install_linux.AGENT_APP_SECRET_CREDENTIAL},
+        "evening": {install_linux.AGENT_APP_SECRET_CREDENTIAL},
+        "cash_flow": {install_linux.AGENT_APP_SECRET_CREDENTIAL},
+        "api": {install_linux.AGENT_APP_SECRET_CREDENTIAL},
+        "quality": {install_linux.AGENT_APP_SECRET_CREDENTIAL},
+        "receipts": {install_linux.AGENT_APP_SECRET_CREDENTIAL},
+        "events": set(install_linux.FEISHU_CREDENTIAL_NAMES),
     }
     expected_units = {
         "morning": install_linux.SERVICE_NAME,
@@ -544,8 +638,8 @@ def test_systemd_credential_capability_probe_uses_exact_unit_syntax(tmp_path):
         unit_path = Path(command[-1])
         unit = unit_path.read_text(encoding="utf-8")
         assert unit.count("LoadCredentialEncrypted=") == 2
-        assert install_linux.BITABLE_APP_SECRET_CREDENTIAL in unit
-        assert install_linux.CONVERSATION_APP_SECRET_CREDENTIAL in unit
+        assert install_linux.AGENT_APP_SECRET_CREDENTIAL in unit
+        assert install_linux.LISTENER_APP_SECRET_CREDENTIAL in unit
         assert "ExecStart=/bin/true" in unit
         return subprocess.CompletedProcess(command, 0, "", "")
 
@@ -574,7 +668,7 @@ def test_install_linux_missing_encrypted_credential_blocks_before_target_writes(
     paths = install_linux.build_paths(args)
     (
         install_linux.ENCRYPTED_CREDENTIAL_STORE_DIR
-        / install_linux.CONVERSATION_APP_SECRET_CREDENTIAL
+        / install_linux.LISTENER_APP_SECRET_CREDENTIAL
     ).unlink()
     monkeypatch.setattr(
         install_linux,
@@ -587,8 +681,147 @@ def test_install_linux_missing_encrypted_credential_blocks_before_target_writes(
     with pytest.raises(RuntimeError, match="missing or invalid encrypted") as exc:
         install_linux.apply_install(args)
 
-    assert install_linux.CONVERSATION_APP_SECRET_CREDENTIAL in str(exc.value)
+    assert install_linux.LISTENER_APP_SECRET_CREDENTIAL in str(exc.value)
+    assert paths.config_file.exists()
+
+
+def test_install_linux_requires_explicit_role_mapping_before_target_writes(
+    tmp_path,
+    monkeypatch,
+):
+    args = _args(tmp_path, "--apply")
+    paths = install_linux.build_paths(args)
+    paths.config_file.unlink()
+    sequence = []
+    monkeypatch.setattr(
+        install_linux,
+        "verify_encrypted_credential_presence",
+        lambda: sequence.append("credential-check"),
+    )
+    monkeypatch.setattr(
+        install_linux,
+        "_mkdirs",
+        lambda paths: sequence.append("target-write"),
+    )
+
+    with pytest.raises(RuntimeError, match="role mapping not verified"):
+        install_linux.apply_install(args)
+
+    assert sequence == []
     assert not paths.config_file.exists()
+
+
+def test_install_linux_does_not_promote_ambiguous_legacy_role_mapping(
+    tmp_path,
+):
+    args = _args(tmp_path, "--apply")
+    paths = install_linux.build_paths(args)
+    paths.config_file.write_text(
+        "feishu:\n"
+        "  bitable:\n"
+        "    app_id: cli_old_listener\n"
+        "  conversation:\n"
+        "    app_id: cli_old_agent\n"
+        "    open_id: ou_operator\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="missing canonical key") as exc:
+        install_linux.apply_install(args)
+
+    assert "feishu.agent.app_id" in str(exc.value)
+    assert "feishu.listener.app_id" in str(exc.value)
+
+
+def test_install_linux_accepts_canonical_nonsecret_env_without_rewriting_it(
+    tmp_path,
+    monkeypatch,
+):
+    args = _args(tmp_path, "--apply")
+    paths = install_linux.build_paths(args)
+    paths.config_file.write_text(
+        "feishu:\n"
+        "  agent:\n"
+        "    app_id: ''\n"
+        "    open_id: ''\n"
+        "  listener:\n"
+        "    app_id: ''\n",
+        encoding="utf-8",
+    )
+    original = (
+        "FEISHU_AGENT_APP_ID=cli_agent_env\n"
+        "FEISHU_AGENT_OPEN_ID=ou_operator_env\n"
+        "FEISHU_LISTENER_APP_ID=cli_listener_env\n"
+    )
+    paths.env_file.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(install_linux.subprocess, "run", lambda command, check: None)
+
+    payload = install_linux.apply_install(args)
+
+    assert payload["writes"][str(paths.env_file)] == "skipped_exists"
+    assert paths.env_file.read_text(encoding="utf-8") == original
+    assert payload["systemd"]["feishu_role_mapping"]["sources"] == {
+        "feishu.agent.app_id": "target_env",
+        "feishu.agent.open_id": "target_env",
+        "feishu.listener.app_id": "target_env",
+    }
+
+
+def test_install_linux_rejects_conflicting_canonical_nonsecret_env(
+    tmp_path,
+):
+    args = _args(tmp_path, "--apply")
+    paths = install_linux.build_paths(args)
+    paths.env_file.write_text(
+        "FEISHU_AGENT_APP_ID=cli_different_agent\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="conflicting canonical key") as exc:
+        install_linux.apply_install(args)
+
+    assert "feishu.agent.app_id" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "config_content",
+    [
+        (
+            "feishu:\n"
+            "  agent:\n"
+            "    app_id: cli_agent\n"
+            "    app_secret: must-never-appear\n"
+            "    open_id: ou_operator\n"
+            "  listener:\n"
+            "    app_id: cli_listener\n"
+        ),
+        (
+            "feishu: {agent: {app_id: cli_agent, "
+            "app_secret: must-never-appear, open_id: ou_operator}, "
+            "listener: {app_id: cli_listener}}\n"
+        ),
+    ],
+)
+def test_install_linux_role_mapping_rejects_plaintext_secret_without_echo(
+    tmp_path,
+    config_content,
+):
+    args = _args(tmp_path, "--apply")
+    paths = install_linux.build_paths(args)
+    paths.config_file.write_text(config_content, encoding="utf-8")
+
+    with pytest.raises(RuntimeError) as exc:
+        install_linux.apply_install(args)
+
+    assert "plaintext app_secret" in str(exc.value)
+    assert "must-never-appear" not in str(exc.value)
+
+
+def test_install_linux_never_overwrites_prepared_config(tmp_path):
+    args = _args(tmp_path, "--apply", "--overwrite-config")
+
+    with pytest.raises(RuntimeError, match="--overwrite-config is disabled"):
+        install_linux.apply_install(args)
 
 
 def test_install_linux_unsupported_systemd_blocks_before_target_writes(
@@ -618,7 +851,7 @@ def test_install_linux_unsupported_systemd_blocks_before_target_writes(
         install_linux.apply_install(args)
 
     assert sequence == ["capability"]
-    assert not paths.config_file.exists()
+    assert paths.config_file.exists()
 
 
 def test_install_linux_supported_probe_precedes_every_target_write(
@@ -663,7 +896,7 @@ def test_install_linux_rejects_symlinked_encrypted_credential(tmp_path):
     store = install_linux.ENCRYPTED_CREDENTIAL_STORE_DIR
     target = store / "opaque-target"
     target.write_bytes(b"encrypted-fixture")
-    credential = store / install_linux.BITABLE_APP_SECRET_CREDENTIAL
+    credential = store / install_linux.AGENT_APP_SECRET_CREDENTIAL
     credential.unlink()
     credential.symlink_to(target)
 
@@ -693,7 +926,7 @@ def test_install_linux_clean_apply_is_idempotent(tmp_path, monkeypatch):
         for path in tracked_paths
     }
 
-    assert second["writes"][str(paths.config_file)] == "skipped_exists"
+    assert second["writes"][str(paths.config_file)] == "verified_existing"
     assert second_digests == first_digests
 
 
@@ -713,6 +946,60 @@ def test_install_linux_human_plan_reports_shadow_key_without_value(
     output = capsys.readouterr().out
     assert "options_monitor_env:OM_FEISHU_BOT_APP_SECRET" in output
     assert "do-not-render-this-value" not in output
+
+
+def test_install_linux_detects_canonical_and_legacy_plaintext_secret_keys_only(
+    tmp_path,
+):
+    source = tmp_path / "options-monitor.env"
+    source.write_text(
+        "FEISHU_AGENT_APP_SECRET=source-agent-value\n"
+        "FEISHU_BITABLE_APP_SECRET=source-legacy-value\n",
+        encoding="utf-8",
+    )
+    args = _args(tmp_path)
+    paths = install_linux.build_paths(args)
+    paths.env_file.parent.mkdir(parents=True, exist_ok=True)
+    paths.env_file.write_text(
+        "FEISHU_LISTENER_APP_SECRET=target-listener-value\n"
+        "FEISHU_CONVERSATION_APP_SECRET=target-legacy-value\n",
+        encoding="utf-8",
+    )
+    paths.config_file.write_text(
+        "feishu:\n  agent:\n    app_secret: yaml-secret-value\n",
+        encoding="utf-8",
+    )
+
+    payload = install_linux.build_plan(args)
+
+    assert payload["plaintext_feishu_shadows"]["detected"] == [
+        {"location": "config_file", "key": "app_secret"},
+        {
+            "location": "options_monitor_env",
+            "key": "FEISHU_AGENT_APP_SECRET",
+        },
+        {
+            "location": "options_monitor_env",
+            "key": "FEISHU_BITABLE_APP_SECRET",
+        },
+        {
+            "location": "target_env",
+            "key": "FEISHU_CONVERSATION_APP_SECRET",
+        },
+        {
+            "location": "target_env",
+            "key": "FEISHU_LISTENER_APP_SECRET",
+        },
+    ]
+    rendered = str(payload)
+    for secret in (
+        "source-agent-value",
+        "source-legacy-value",
+        "target-listener-value",
+        "target-legacy-value",
+        "yaml-secret-value",
+    ):
+        assert secret not in rendered
 
 
 def test_install_linux_root_apply_assigns_runtime_dirs_to_service_user(
@@ -745,7 +1032,7 @@ def test_install_linux_root_apply_assigns_runtime_dirs_to_service_user(
     assert rendered == [" ".join(command) for command in commands]
 
 
-def test_install_linux_apply_imports_only_nonsecret_options_monitor_feishu_values(
+def test_install_linux_apply_reports_but_never_imports_legacy_feishu_values(
     tmp_path,
     monkeypatch,
 ):
@@ -768,15 +1055,18 @@ def test_install_linux_apply_imports_only_nonsecret_options_monitor_feishu_value
     payload = install_linux.apply_install(args)
     rendered = paths.env_file.read_text(encoding="utf-8")
 
-    assert payload["feishu_receipt_env"] == {
+    assert payload["legacy_feishu_role_sources"] == {
         "source": str(source),
         "target": str(paths.env_file),
-        "keys": list(install_linux.OPTIONS_MONITOR_FEISHU_KEYS),
-        "secret_imported": False,
-        "status": "imported_nonsecret_values",
+        "detected": [
+            {"location": "options_monitor_env", "key": key}
+            for key in sorted(install_linux.OPTIONS_MONITOR_FEISHU_KEYS)
+        ],
+        "copied": False,
+        "values_read": False,
     }
-    assert "OM_FEISHU_BOT_APP_ID=cli_liukanshan" in rendered
-    assert "OM_FEISHU_BOT_USER_OPEN_ID=ou_user" in rendered
+    assert "OM_FEISHU_BOT_APP_ID" not in rendered
+    assert "OM_FEISHU_BOT_USER_OPEN_ID" not in rendered
     assert "OM_FEISHU_BOT_APP_SECRET" not in rendered
     assert "receipt_secret" not in rendered
     assert "OPENAI_API_KEY" not in rendered
@@ -793,7 +1083,10 @@ def test_install_linux_apply_imports_only_nonsecret_options_monitor_feishu_value
     }
 
 
-def test_install_linux_partial_source_updates_only_explicit_receipt_values(tmp_path, monkeypatch):
+def test_install_linux_legacy_source_never_changes_existing_target_env(
+    tmp_path,
+    monkeypatch,
+):
     source = tmp_path / "options-monitor.env"
     source.write_text(
         "OM_FEISHU_BOT_APP_ID=cli_new\n"
@@ -802,7 +1095,7 @@ def test_install_linux_partial_source_updates_only_explicit_receipt_values(tmp_p
     )
     args = _args(tmp_path, "--apply")
     paths = install_linux.build_paths(args)
-    paths.env_file.parent.mkdir(parents=True)
+    paths.env_file.parent.mkdir(parents=True, exist_ok=True)
     paths.env_file.write_text(
         "# keep this comment\n"
         "KEEP_EXISTING=1\n"
@@ -816,12 +1109,34 @@ def test_install_linux_partial_source_updates_only_explicit_receipt_values(tmp_p
     payload = install_linux.apply_install(args)
     rendered = paths.env_file.read_text(encoding="utf-8")
 
-    assert payload["feishu_receipt_env"]["status"] == "imported_nonsecret_values"
     assert "# keep this comment\nKEEP_EXISTING=1\n" in rendered
-    assert "OM_FEISHU_BOT_APP_ID=cli_new" in rendered
+    assert "OM_FEISHU_BOT_APP_ID=cli_old" in rendered
     assert "OM_FEISHU_BOT_APP_SECRET=secret_old" in rendered
     assert "secret_new" not in rendered
     assert "OM_FEISHU_BOT_USER_OPEN_ID=ou_keep" in rendered
+    assert payload["legacy_feishu_role_sources"] == {
+        "source": str(source),
+        "target": str(paths.env_file),
+        "detected": [
+            {
+                "location": "options_monitor_env",
+                "key": "OM_FEISHU_BOT_APP_ID",
+            },
+            {
+                "location": "options_monitor_env",
+                "key": "OM_FEISHU_BOT_APP_SECRET",
+            },
+            {"location": "target_env", "key": "OM_FEISHU_BOT_APP_ID"},
+            {"location": "target_env", "key": "OM_FEISHU_BOT_APP_SECRET"},
+            {
+                "location": "target_env",
+                "key": "OM_FEISHU_BOT_USER_OPEN_ID",
+            },
+        ],
+        "copied": False,
+        "values_read": False,
+    }
+    assert "secret_old" not in str(payload)
     assert payload["plaintext_feishu_shadows"]["detected"] == [
         {
             "location": "options_monitor_env",
@@ -834,7 +1149,7 @@ def test_install_linux_partial_source_updates_only_explicit_receipt_values(tmp_p
 def test_install_linux_missing_source_preserves_target_env_byte_for_byte(tmp_path, monkeypatch):
     args = _args(tmp_path, "--apply")
     paths = install_linux.build_paths(args)
-    paths.env_file.parent.mkdir(parents=True)
+    paths.env_file.parent.mkdir(parents=True, exist_ok=True)
     original = (
         "# production-only values\n"
         "KEEP_EXISTING=1\n"
@@ -849,7 +1164,11 @@ def test_install_linux_missing_source_preserves_target_env_byte_for_byte(tmp_pat
     payload = install_linux.apply_install(args)
     rendered = paths.env_file.read_text(encoding="utf-8")
 
-    assert payload["feishu_receipt_env"]["status"] == "source_missing"
+    assert payload["legacy_feishu_role_sources"]["detected"] == [
+        {"location": "target_env", "key": "OM_FEISHU_BOT_APP_ID"},
+        {"location": "target_env", "key": "OM_FEISHU_BOT_APP_SECRET"},
+        {"location": "target_env", "key": "OM_FEISHU_BOT_USER_OPEN_ID"},
+    ]
     assert hashlib.sha256(rendered.encode()).hexdigest() == before_digest
     assert rendered == original
 
@@ -857,7 +1176,7 @@ def test_install_linux_missing_source_preserves_target_env_byte_for_byte(tmp_pat
 def test_install_linux_rejects_duplicate_target_env_before_other_writes(tmp_path, monkeypatch):
     args = _args(tmp_path, "--apply")
     paths = install_linux.build_paths(args)
-    paths.env_file.parent.mkdir(parents=True)
+    paths.env_file.parent.mkdir(parents=True, exist_ok=True)
     paths.env_file.write_text("DUP=1\nDUP=2\n", encoding="utf-8")
     monkeypatch.setattr(install_linux.subprocess, "run", lambda command, check: None)
 
@@ -868,7 +1187,7 @@ def test_install_linux_rejects_duplicate_target_env_before_other_writes(tmp_path
     else:
         raise AssertionError("expected duplicate target env to fail")
 
-    assert not paths.config_file.exists()
+    assert paths.config_file.exists()
     assert paths.env_file.read_text(encoding="utf-8") == "DUP=1\nDUP=2\n"
 
 
@@ -890,7 +1209,7 @@ def test_install_linux_rejects_duplicate_source_env_before_other_writes(tmp_path
     else:
         raise AssertionError("expected duplicate source env to fail")
 
-    assert not paths.config_file.exists()
+    assert paths.config_file.exists()
     assert not paths.env_file.exists()
 
 
@@ -943,11 +1262,11 @@ def test_install_shell_help_is_available():
     assert "--enable-holdings-event-listener" in result.stdout
     assert "receipt timers" in result.stdout
     assert "--sync-futu-cash-mmf" not in result.stdout
-    assert "OM_FEISHU_BOT_APP_ID" in result.stdout
-    assert "OM_FEISHU_BOT_USER_OPEN_ID" in result.stdout
-    assert "OM_FEISHU_BOT_APP_SECRET" not in result.stdout
+    assert "feishu.agent/feishu.listener" in result.stdout
+    assert "pm-feishu-agent-app-secret" in result.stdout
+    assert "pm-feishu-listener-app-secret" in result.stdout
     assert "installer never imports, copies from the source" in result.stdout
-    assert "creates, or prints secret values" in result.stdout
+    assert "creates,\ndecrypts, or prints secret values" in result.stdout
 
 
 def test_install_linux_direct_entrypoint_imports_runtime_contract_outside_repo_cwd(
@@ -966,9 +1285,9 @@ def test_install_linux_direct_entrypoint_imports_runtime_contract_outside_repo_c
     )
 
     assert "Install portfolio-management Linux systemd assets" in result.stdout
-    assert install_linux.BITABLE_APP_SECRET_CREDENTIAL == (
-        "pm-feishu-bitable-app-secret"
+    assert install_linux.AGENT_APP_SECRET_CREDENTIAL == (
+        "pm-feishu-agent-app-secret"
     )
-    assert install_linux.CONVERSATION_APP_SECRET_CREDENTIAL == (
-        "pm-feishu-conversation-app-secret"
+    assert install_linux.LISTENER_APP_SECRET_CREDENTIAL == (
+        "pm-feishu-listener-app-secret"
     )

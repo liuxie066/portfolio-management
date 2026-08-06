@@ -64,11 +64,13 @@ from skill_api import (
 ./pm daily-job --account lx --write --confirm --json
 ```
 
-Futu 真实写入后会由配置的飞书“刘看山”Conversation 应用发送回执；多账户
+Futu 真实写入后会由配置的飞书“刘看山”Agent 应用发送回执；多账户
 `daily-job` 真实执行后也会发送一条汇总 NAV 回执。dry-run 不发送。非秘密配置键为
-`feishu.conversation.app_id` 和 `feishu.conversation.open_id`；Linux 生产环境只从
-systemd encrypted credential `pm-feishu-conversation-app-secret` 读取 App Secret。
-旧 `feishu.receipt.*` / `OM_FEISHU_BOT_*` 仅用于迁移识别，不是生产稳态配置。
+`feishu.agent.app_id` 和 `feishu.agent.open_id`；Linux 生产环境只从
+systemd encrypted credential `pm-feishu-agent-app-secret` 读取 App Secret。Agent
+同时拥有全部 Base 读写；Listener 只监听 holdings/cash-flow 变更。旧
+`feishu.bitable.*` / `feishu.conversation.*` / `feishu.receipt.*` /
+`OM_FEISHU_BOT_*` 仅用于迁移识别，不是生产稳态配置。
 通知失败只反映在返回值 `receipt` 中，不改变同步或 NAV 写入本身的 `success`。
 完整 Futu 同步由外层调度脚本调用，不放进 `daily-job`。
 

@@ -31,7 +31,7 @@ sudo scripts/install.sh
 - 安装或更新代码目录。
 - 创建 `.venv` 并安装 `requirements.txt`。
 - 生成稳定启动命令 `/usr/local/bin/pm`。
-- 调用 `scripts/install_linux.py` 写入 config/env/systemd 文件。
+- 调用 `scripts/install_linux.py` 验证已准备的 config，再写入 env/systemd 文件。
 - 将 runtime data/reports 目录交给 `--run-user`，确保该用户可创建和恢复
   `pm_operation_state.sqlite3`；数据库文件自身保持 `0600`。
 
@@ -58,13 +58,13 @@ python3 -m venv .venv
 # 先审计计划，不写系统文件
 python3 scripts/install_linux.py --json
 
-# 仅在下文两份 encrypted credentials 已配置后执行；不会覆盖已有 config.yaml
+# 仅在下文 canonical 角色映射和两份 encrypted credentials 都已验证后执行
 sudo python3 scripts/install_linux.py --apply
 ```
 
-安装脚本会生成：
+安装脚本会验证但不生成、不覆盖
+`/etc/portfolio-management/config.yaml`。验证通过后生成：
 
-- `/etc/portfolio-management/config.yaml`
 - `/etc/portfolio-management/portfolio-management.env`
 - `/usr/local/bin/pm`
 - `/etc/systemd/system/portfolio-nav-daily.service`
@@ -79,7 +79,9 @@ sudo python3 scripts/install_linux.py --apply
 - `/etc/systemd/system/portfolio-holdings-event-listener.service`
 - `/etc/systemd/system/portfolio-feishu-preflight.service`（默认禁用）
 
-如果已有 `config.yaml`，默认保留不覆盖；确需重建模板时显式加 `--overwrite-config`。
+`--overwrite-config` 是禁用的安全参数；安装器不拥有生产业务配置的
+覆盖权。首次安装先手工复制 `config.example.yaml` 到目标路径，填写并
+审核非秘密字段，再运行 `--apply`。
 
 ## 配置
 
@@ -92,7 +94,9 @@ sudo chmod 600 /etc/portfolio-management/config.yaml
 
 定时日净值任务至少需要：
 
-- `feishu.bitable.app_id`
+- `feishu.agent.app_id`
+- `feishu.agent.open_id`
+- `feishu.listener.app_id`
 - `feishu.tables.holdings`
 - `feishu.tables.nav_history`
 - `feishu.tables.cash_flow`
@@ -106,28 +110,41 @@ sudo chmod 600 /etc/portfolio-management/config.yaml
 
 | 角色 | 非秘密配置 | systemd credential | 需要的能力 |
 |---|---|---|---|
-| Bitable | `feishu.bitable.app_id` | `pm-feishu-bitable-app-secret` | 目标 Base 的记录读取/写入；云文档事件订阅；`drive.file.bitable_record_changed_v1` 长连接；目标 Base 管理/访问权限 |
-| Conversation | `feishu.conversation.app_id`、`feishu.conversation.open_id` | `pm-feishu-conversation-app-secret` | 开启机器人能力；精确授予以应用身份发送消息 `im:message:send_as_bot`；目标用户在机器人可用范围内 |
+| Agent（原 Agent 机器人） | `feishu.agent.app_id`、`feishu.agent.open_id` | `pm-feishu-agent-app-secret` | 所有 Base 记录读取/写入；开启机器人能力；精确授予以应用身份发送消息 `im:message:send_as_bot`；目标 Base 访问权限 |
+| Listener | `feishu.listener.app_id` | `pm-feishu-listener-app-secret` | 仅云文档事件订阅与 `drive.file.bitable_record_changed_v1` 长连接入口；不承担 Base 业务读写或消息发送 |
 
-Bitable 应用同时负责 Base API 与表格变更事件。Conversation 应用只发对话/回执，
-不需要 Base 权限。飞书官方接口权限依据见
+Agent 是业务权限主体；Listener 只是事件入口。Listener 进程收到事件后，
+后续 fresh read、校验、计算和 Base 写入仍使用 Agent 身份。飞书官方接口权限依据见
 [多维表格 API 概述](https://open.feishu.cn/document/server-docs/docs/bitable-v1/bitable-overview?lang=zh-CN)、
 [订阅云文档事件](https://open.feishu.cn/document/server-docs/docs/drive-v1/event/subscribe?lang=zh-CN)
 和[发送消息](https://open.feishu.cn/document/server-docs/im-v1/message/create?lang=zh-CN)。
+
+systemd 按业务需要最小授权：
+
+| Unit | Agent | Listener |
+|---|---:|---:|
+| morning/evening Futu + NAV | 是 | 否 |
+| cash-flow scan | 是 | 否 |
+| loopback API | 是 | 否 |
+| quality refresh | 是 | 否 |
+| receipt dispatcher | 是 | 否 |
+| holdings/cash-flow event listener | 是 | 是 |
+| Feishu secure preflight | 是 | 是 |
+| 一次性 event subscribe | 否 | 是 |
 
 先通过组织认可的安全终端流程把两份 Secret 加密到 systemd credential store。
 下面的示例使用隐藏输入；Secret 不进入命令行参数、shell history、YAML 或 env：
 
 ```bash
 sudo install -d -m 0700 /etc/credstore.encrypted
-systemd-ask-password "Bitable App Secret" | \
-  sudo systemd-creds encrypt --name=pm-feishu-bitable-app-secret - \
-  /etc/credstore.encrypted/pm-feishu-bitable-app-secret
-systemd-ask-password "Conversation App Secret" | \
-  sudo systemd-creds encrypt --name=pm-feishu-conversation-app-secret - \
-  /etc/credstore.encrypted/pm-feishu-conversation-app-secret
+systemd-ask-password "Agent App Secret" | \
+  sudo systemd-creds encrypt --name=pm-feishu-agent-app-secret - \
+  /etc/credstore.encrypted/pm-feishu-agent-app-secret
+systemd-ask-password "Listener App Secret" | \
+  sudo systemd-creds encrypt --name=pm-feishu-listener-app-secret - \
+  /etc/credstore.encrypted/pm-feishu-listener-app-secret
 
-# 两份 encrypted credentials 就绪后才写部署资产；仍不会自动启用服务
+# canonical 非秘密映射与两份 encrypted credentials 就绪后才写部署资产
 sudo scripts/install.sh --apply
 ```
 
@@ -154,6 +171,10 @@ journalctl -u portfolio-feishu-preflight.service -n 100 --no-pager
 `pm events status --json`；不请求飞书、不订阅、不连接 listener、不发送消息，也不写
 业务数据。成功只证明配置解析、两份 credential 注入、SDK 与本地 target/inbox
 状态通过，不证明远端权限、订阅或连接健康。
+任何 `scripts/install.sh --apply --enable-*` 组合都会在
+`daemon-reload` 之后、任何 `enable --now` 之前强制运行该 preflight；
+失败时不启用任何消费者。不带 `--enable-*` 的 apply 只生成资产，
+由操作者按上述命令单独预检。
 
 开发环境不使用 secure systemd unit 时，可另外执行只读检查：
 
@@ -259,21 +280,27 @@ Futu CASH 只保留原币观测证据，不与 PM 的 `CNY-CASH` 人民币汇总
 也不生成 reconciliation effect；股票/ETF 与 MMF 保持各自同步。
 Cash Flow 激活、备份和恢复见 `docs/cash-flow-effects-runbook.md`。
 
-完整 Futu 同步还需要配置 Conversation 应用的非秘密身份：
+完整 Futu 同步和回执需要 Agent 应用的非秘密身份：
 
 ```yaml
 feishu:
-  conversation:
+  agent:
     app_id: "cli_..."
     open_id: "ou_..."
+  listener:
+    app_id: "cli_..."
 ```
 
-`FEISHU_CONVERSATION_APP_ID` 和 `FEISHU_CONVERSATION_OPEN_ID` 可覆盖这两个
-非秘密值。安装器也可从 options-monitor 兼容读取
-`OM_FEISHU_BOT_APP_ID`/`OM_FEISHU_BOT_USER_OPEN_ID`，但绝不会导入
-`OM_FEISHU_BOT_APP_SECRET`。`feishu.receipt.*`、`FEISHU_RECEIPT_*`、
-`feishu.app_*`、`FEISHU_APP_*` 和 `OM_FEISHU_BOT_*` 的 Secret 形式都只用于
-识别旧安装的迁移 shadow，不是生产稳态配置。
+`FEISHU_AGENT_APP_ID`、`FEISHU_AGENT_OPEN_ID` 和
+`FEISHU_LISTENER_APP_ID` 可覆盖对应非秘密值。安装器只扫描旧
+`FEISHU_BITABLE_*`、`FEISHU_CONVERSATION_*`、`FEISHU_RECEIPT_*` 和
+`OM_FEISHU_BOT_*` 的 key 名作为迁移证据；它不读取、推断、复制或提升
+其中的值。旧 `feishu.bitable.*`、`feishu.conversation.*` 和
+`feishu.receipt.*` 同样不会自动映射；必须由操作者核对应用身份后显式填入
+canonical Agent/Listener 字段。
+已存在的目标 EnvironmentFile 始终原样保留；安装器只在文件不存在时
+生成不含 Feishu Secret 的默认文件。Canonical 非秘密 env 值可参与
+角色映射校验；它们与 YAML 同时存在时必须一致。
 
 生产 secure mode 不会回退到任何明文 Secret。Futu 真实写入成功或失败都会分别
 发送回执；多账户 NAV 任务会再发送一条汇总回执。dry-run 不发送。
@@ -283,10 +310,11 @@ feishu:
 按以下状态逐步推进，每一步都要独立确认，不能因前一步成功自动执行后一步：
 
 ```text
-旧明文仍在
+旧角色配置或明文 shadow 仍在
   -> 仅准备 credential-capable checkout/venv（不 apply system assets）
-  -> 轮换并配置两份 encrypted credentials
-  -> apply credential-capable config/env/units
+  -> 人工核对并写入 canonical Agent/Listener 非秘密映射
+  -> 轮换已暴露的 Agent Secret，并配置两份新 encrypted credentials
+  -> apply credential-capable env/units
   -> secure preflight 通过
   -> 按授权切换非 listener 消费者
   -> 单独完成 Base subscription
@@ -295,13 +323,19 @@ feishu:
   -> 单独授权后清理明文 shadow
 ```
 
+- 这是显式迁移停止点：新 credential 文件、`feishu.agent.app_id`、
+  `feishu.agent.open_id` 或 `feishu.listener.app_id` 任一缺失时，
+  `--apply` 在写入 env/unit 之前失败。旧角色名不能替代明确映射。
 - 安装不会自动启用 timer、API 或 listener；订阅也不会启用 listener。
 - `config inspect`/doctor 报告 `plaintext_shadow_detected` 时，credential 仍优先，
   canary 不会因旧值不同而失败；不要在验证前删除旧行。
 - canary 通过后，使用 `sudoedit` 从目标 env/config 和 options-monitor 源中逐项移除
   shadow key。删除属于单独的破坏性操作；安装器绝不代做。清理后再次运行 secure
   preflight。
-- 轮换时先用相同 `--name` 生成新的 encrypted 文件，经 preflight 验证后再按明确
+- 本次 Agent Secret 曾出现在明文配置/对话证据中，所以上线前必须在飞书后台
+  轮换；不得把已暴露值改名后继续使用。Listener Secret 只在有单独暴露证据时
+  必须轮换，但仍要迁移到新的 credential 名。
+- 轮换时先用新 role `--name` 生成 encrypted 文件，经 preflight 验证后再按明确
   授权重启消费者。不要把明文 Secret 放进命令参数或临时文件。
 - 明文清理前可回滚到上一套 credential-capable unit；清理后不得回滚到只支持明文
   的版本。此时应恢复已备份的 encrypted credential 或再次轮换，而不是重建明文。

@@ -64,13 +64,13 @@ cash_flow:
 finnhub_api_key: ""
 
 feishu:
-  # Base API reads/writes plus record-change subscriptions and long connection.
-  bitable:
-    app_id: ""
-  # Workflow receipt bot. App Secret is not stored in this file.
-  conversation:
+  # Original Agent bot: all Base reads/writes plus conversations and receipts.
+  agent:
     app_id: ""
     open_id: ""
+  # Listener bot: holdings/cash-flow subscription and long-connection ingress only.
+  listener:
+    app_id: ""
   app_token: ""
   connect_timeout: 5
   read_timeout: 30

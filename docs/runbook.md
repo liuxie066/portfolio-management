@@ -30,11 +30,13 @@ refresh even when NAV skips an existing date.
 A real write sends a success/failure receipt from the configured Feishu
 “刘看山” app. Dry-runs do not send. Check `receipt.status` in JSON output;
 notification failure does not replace the holdings sync result. Required
-configuration: `feishu.conversation.app_id`,
-`feishu.conversation.open_id`, and the
-`pm-feishu-conversation-app-secret` systemd credential. The Bitable identity is
-never used for receipts. Legacy `feishu.receipt.*` and `OM_FEISHU_BOT_*` names
-are migration-only; production secure mode rejects plaintext Secret fallback.
+configuration: `feishu.agent.app_id`, `feishu.agent.open_id`, and the
+`pm-feishu-agent-app-secret` systemd credential. This same Agent identity owns
+all Base reads/writes. The Listener identity is limited to holdings/cash-flow
+event ingress and is never used for receipts. Legacy `feishu.bitable.*`,
+`feishu.conversation.*`, `feishu.receipt.*`, and `OM_FEISHU_BOT_*` names are
+migration evidence only; production secure mode rejects plaintext Secret
+fallback.
 Run `systemctl start portfolio-feishu-preflight.service` before enabling jobs.
 
 ## Read-Only Checks

@@ -10,9 +10,10 @@ write permission, guess FX, or confirm CASH holding effects.
 - One long connection accepts only `drive.file.bitable_record_changed_v1` for
   the configured holdings and cash-flow Base targets. A Base document is the
   subscription boundary; exact app/file/table routing remains local.
-- The same Bitable application owns Base reads/writes, document subscription,
-  and the long connection. There is no third event-only identity. The separate
-  Conversation application only sends receipts.
+- The Listener application owns only document subscription and the long
+  connection. The original Agent application owns every Base fresh read/write
+  and every conversation/receipt. There is no third identity and no cross-role
+  fallback.
 - The callback validates and durably inserts trigger metadata, then returns. A
   worker fresh-reads the exact record before validation.
 - Added and edited records may create validation cases and receipt outbox rows.
@@ -34,20 +35,23 @@ write permission, guess FX, or confirm CASH holding effects.
 
 Stop unless every item is independently confirmed:
 
-1. `feishu.bitable.app_id` belongs to the PM Bitable enterprise custom app and
-   `pm-feishu-bitable-app-secret` exists as an encrypted systemd credential.
-   Neither value belongs to the Conversation receipt bot.
-2. `feishu.tables.holdings` and `feishu.tables.cash_flow` each resolve
+1. `feishu.agent.app_id` belongs to the original Agent bot, has access to the
+   target Base, and `pm-feishu-agent-app-secret` exists as an encrypted systemd
+   credential. `feishu.agent.open_id` names the receipt recipient.
+2. `feishu.listener.app_id` belongs to the Listener bot and
+   `pm-feishu-listener-app-secret` exists as an encrypted systemd credential.
+   This app is used only for event subscription and long-connection ingress.
+3. `feishu.tables.holdings` and `feishu.tables.cash_flow` each resolve
    unambiguously to the intended `app_token/table_id`. Their
    `(app_id,file_token,table_id)` identities must be distinct. If a value is
    only a table id, `feishu.app_token` is set.
-3. The enterprise app has the required Base/Drive record-event permissions and
-   the app identity can access the configured Base document.
-4. The app event configuration includes the exact record-change event and the
+4. The Agent app can access the configured Base, while the Listener app has the
+   required Drive record-event permission and document subscription access.
+5. The Listener app event configuration includes the exact record-change event and the
    updated app configuration has been published.
-5. The operation-state database and its parent directory are writable by the
+6. The operation-state database and its parent directory are writable by the
    systemd `User`, with the same `PM_DATA_DIR` used by the receipt timer.
-6. The installed environment contains the official `lark-oapi` dependency.
+7. The installed environment contains the official `lark-oapi` dependency.
 
 Local secure preflight, with no Feishu request:
 
@@ -61,10 +65,12 @@ systemctl cat portfolio-holdings-event-listener.service
 The preflight unit loads both named credentials and runs
 `pm config doctor --require-secure-feishu --json` followed by
 `pm events status --json`. Required success evidence includes both exact target
-identities, a valid target registry, `credentials.role=bitable`,
-`app_secret_configured=true`, `sdk_available=true`, readable local inboxes, and
-both remote health booleans still `false`. Those false values are not failures;
-they prevent local status from pretending to verify external state.
+identities, a valid target registry,
+`credentials.listener_ingress.app_secret_configured=true`,
+`credentials.agent_worker.app_secret_configured=true`, `sdk_available=true`,
+readable local inboxes, and both remote health booleans still `false`. Those
+false values are not failures; they prevent local status from pretending to
+verify external state.
 
 ## Separately confirmed subscription
 
@@ -79,7 +85,7 @@ sudo systemd-run --wait --pipe --collect \
   --property=WorkingDirectory=/opt/portfolio-management/current \
   --property=EnvironmentFile=/etc/portfolio-management/portfolio-management.env \
   --property=Environment=PM_REQUIRE_SECURE_FEISHU_CREDENTIALS=1 \
-  --property=LoadCredentialEncrypted=pm-feishu-bitable-app-secret \
+  --property=LoadCredentialEncrypted=pm-feishu-listener-app-secret \
   /usr/bin/env PM_REQUIRE_SECURE_FEISHU_CREDENTIALS=1 \
   CREDENTIALS_DIRECTORY=/run/credentials/portfolio-feishu-subscribe-once.service \
   /usr/local/bin/pm events subscribe --confirm --json
@@ -87,7 +93,7 @@ sudo systemd-run --wait --pipe --collect \
 
 This command subscribes each distinct configured Base document exactly once.
 When both tables share a Base, it performs one document subscription. It does
-not load the Conversation credential, edit the app event configuration, or
+loads no Agent credential, does not edit the app event configuration, and does not
 enable the listener. `file_type=bitable` is sent and outbound `event_type` is
 omitted; the inbound registration remains exactly
 `drive.file.bitable_record_changed_v1`. Failure, partial success, or ambiguous

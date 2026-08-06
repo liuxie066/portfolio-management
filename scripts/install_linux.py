@@ -3,7 +3,7 @@
 
 The script is intentionally conservative:
 - default mode is dry-run;
-- it never overwrites an existing config.yaml unless --overwrite-config is set;
+- it requires and never overwrites an explicitly prepared config.yaml;
 - it only enables timers or the loopback API when explicitly requested.
 """
 from __future__ import annotations
@@ -12,6 +12,7 @@ import argparse
 import getpass
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -29,8 +30,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.configuration.feishu_credentials import (  # noqa: E402
-    BITABLE_APP_SECRET_CREDENTIAL,
-    CONVERSATION_APP_SECRET_CREDENTIAL,
+    AGENT_APP_SECRET_CREDENTIAL,
+    LISTENER_APP_SECRET_CREDENTIAL,
 )
 
 
@@ -58,21 +59,47 @@ RECEIPT_LOCK_FILE = "/var/lock/portfolio-management-receipts.lock"
 DEFAULT_OPTIONS_MONITOR_ENV_FILE = "/etc/options-monitor/options-monitor.env"
 ENCRYPTED_CREDENTIAL_STORE_DIR = Path("/etc/credstore.encrypted")
 FEISHU_CREDENTIAL_NAMES = (
-    BITABLE_APP_SECRET_CREDENTIAL,
-    CONVERSATION_APP_SECRET_CREDENTIAL,
+    AGENT_APP_SECRET_CREDENTIAL,
+    LISTENER_APP_SECRET_CREDENTIAL,
+)
+LEGACY_FEISHU_ROLE_ENV_KEYS = frozenset(
+    {
+        "FEISHU_BITABLE_APP_ID",
+        "FEISHU_BITABLE_APP_SECRET",
+        "FEISHU_CONVERSATION_APP_ID",
+        "FEISHU_CONVERSATION_APP_SECRET",
+        "FEISHU_CONVERSATION_OPEN_ID",
+        "FEISHU_RECEIPT_APP_ID",
+        "FEISHU_RECEIPT_APP_SECRET",
+        "FEISHU_RECEIPT_OPEN_ID",
+        "OM_FEISHU_BOT_APP_ID",
+        "OM_FEISHU_BOT_APP_SECRET",
+        "OM_FEISHU_BOT_USER_OPEN_ID",
+    }
 )
 OPTIONS_MONITOR_FEISHU_KEYS = (
     "OM_FEISHU_BOT_APP_ID",
+    "OM_FEISHU_BOT_APP_SECRET",
     "OM_FEISHU_BOT_USER_OPEN_ID",
 )
 PLAINTEXT_FEISHU_SECRET_ENV_KEYS = frozenset(
     {
         "FEISHU_APP_SECRET",
+        "FEISHU_AGENT_APP_SECRET",
+        "FEISHU_LISTENER_APP_SECRET",
         "FEISHU_BITABLE_APP_SECRET",
         "FEISHU_CONVERSATION_APP_SECRET",
         "FEISHU_RECEIPT_APP_SECRET",
         "OM_FEISHU_BOT_APP_SECRET",
     }
+)
+CANONICAL_FEISHU_NONSECRET_ENV_KEYS = {
+    "FEISHU_AGENT_APP_ID": "feishu.agent.app_id",
+    "FEISHU_AGENT_OPEN_ID": "feishu.agent.open_id",
+    "FEISHU_LISTENER_APP_ID": "feishu.listener.app_id",
+}
+YAML_APP_SECRET_KEY_PATTERN = re.compile(
+    r"(?:^|[\s{,\-])(?:app_secret|'app_secret'|\"app_secret\")\s*:"
 )
 
 
@@ -170,8 +197,8 @@ def render_config_yaml(paths: InstallPaths) -> str:
         },
         "finnhub_api_key": "",
         "feishu": {
-            "bitable": {"app_id": ""},
-            "conversation": {"app_id": "", "open_id": ""},
+            "agent": {"app_id": "", "open_id": ""},
+            "listener": {"app_id": ""},
             "app_token": "",
             "tables": {
                 "holdings": "",
@@ -207,27 +234,37 @@ def _env_assignments(content: str, *, label: str) -> dict[str, int]:
     return positions
 
 
-def read_options_monitor_feishu_env(path: str | Path) -> dict[str, str]:
-    """Read only non-secret conversation identity values from options-monitor."""
+def detect_legacy_feishu_role_env_keys(
+    path: str | Path,
+    *,
+    location: str,
+) -> list[dict[str, str]]:
+    """Report legacy role key names without retaining or returning values."""
     source = _as_path(path)
     if not source.exists():
-        return {}
+        return []
 
-    content = source.read_text(encoding="utf-8")
-    _env_assignments(content, label="options-monitor")
-    selected: dict[str, str] = {}
-    for line in content.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        key, value = stripped.split("=", 1)
-        key = key.strip()
-        if key not in OPTIONS_MONITOR_FEISHU_KEYS:
-            continue
-        value = value.strip()
-        if value not in {"", "''", '""'}:
-            selected[key] = value
-    return selected
+    detected = []
+    positions: set[str] = set()
+    with source.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key = stripped.split("=", 1)[0].strip()
+            if key in positions:
+                label = (
+                    "options-monitor"
+                    if location == "options_monitor_env"
+                    else "target"
+                    if location == "target_env"
+                    else location
+                )
+                raise ValueError(f"duplicate {label} env key: {key}")
+            positions.add(key)
+            if key in LEGACY_FEISHU_ROLE_ENV_KEYS:
+                detected.append({"location": location, "key": key})
+    return sorted(detected, key=lambda item: item["key"])
 
 
 def _env_secret_key_presence(path: Path, *, location: str) -> list[dict[str, str]]:
@@ -253,7 +290,7 @@ def _yaml_secret_key_presence(path: Path) -> list[dict[str, str]]:
             stripped = line.lstrip()
             if not stripped or stripped.startswith("#") or ":" not in stripped:
                 continue
-            if stripped.split(":", 1)[0].strip() == "app_secret":
+            if YAML_APP_SECRET_KEY_PATTERN.search(stripped):
                 return [{"location": "config_file", "key": "app_secret"}]
     return []
 
@@ -276,13 +313,119 @@ def detect_plaintext_feishu_shadows(
     return sorted(findings, key=lambda item: (item["location"], item["key"]))
 
 
+def _canonical_nonsecret_env_mapping(path: str | Path) -> dict[str, str]:
+    source = _as_path(path)
+    if not source.exists():
+        return {}
+    selected = {}
+    with source.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key = stripped.split("=", 1)[0].strip()
+            logical_key = CANONICAL_FEISHU_NONSECRET_ENV_KEYS.get(key)
+            if logical_key is None:
+                continue
+            value = stripped.split("=", 1)[1].strip().strip("'\"")
+            if value:
+                selected[logical_key] = value
+    return selected
+
+
+def verify_feishu_role_mapping(
+    config_file: str | Path,
+    *,
+    env_file: str | Path | None = None,
+) -> dict[str, object]:
+    """Require explicit canonical non-secret roles before deployment writes."""
+
+    path = _as_path(config_file)
+    if not path.is_file():
+        raise RuntimeError(
+            "Feishu role mapping not verified: create config.yaml with explicit "
+            "feishu.agent and feishu.listener mappings before --apply"
+        )
+    if _yaml_secret_key_presence(path):
+        raise RuntimeError(
+            "Feishu role mapping not verified: plaintext app_secret in config.yaml"
+        )
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        raise RuntimeError(
+            "Feishu role mapping not verified: invalid config.yaml"
+        ) from None
+    feishu = payload.get("feishu") if isinstance(payload, dict) else None
+    agent = feishu.get("agent") if isinstance(feishu, dict) else None
+    listener = feishu.get("listener") if isinstance(feishu, dict) else None
+    configured = {
+        "feishu.agent.app_id": (
+            agent.get("app_id") if isinstance(agent, dict) else None
+        ),
+        "feishu.agent.open_id": (
+            agent.get("open_id") if isinstance(agent, dict) else None
+        ),
+        "feishu.listener.app_id": (
+            listener.get("app_id") if isinstance(listener, dict) else None
+        ),
+    }
+    env_mapping = (
+        _canonical_nonsecret_env_mapping(env_file) if env_file is not None else {}
+    )
+    conflicts = [
+        key
+        for key, config_value in configured.items()
+        if isinstance(config_value, str)
+        and config_value.strip()
+        and key in env_mapping
+        and config_value.strip() != env_mapping[key]
+    ]
+    if conflicts:
+        raise RuntimeError(
+            "Feishu role mapping not verified: conflicting canonical key(s): "
+            + ", ".join(conflicts)
+        )
+    resolved = {
+        key: (
+            value.strip()
+            if isinstance(value, str) and value.strip()
+            else env_mapping.get(key)
+        )
+        for key, value in configured.items()
+    }
+    missing = [
+        key
+        for key, value in resolved.items()
+        if not isinstance(value, str) or not value.strip()
+    ]
+    if missing:
+        raise RuntimeError(
+            "Feishu role mapping not verified: missing canonical key(s): "
+            + ", ".join(missing)
+        )
+    legacy_roles = [
+        f"feishu.{role}"
+        for role in ("bitable", "conversation", "receipt")
+        if isinstance(feishu, dict) and role in feishu
+    ]
+    return {
+        "verified": True,
+        "required_keys": list(configured),
+        "sources": {
+            key: "target_env" if key in env_mapping else "config_file"
+            for key in configured
+        },
+        "legacy_role_keys_detected": legacy_roles,
+        "secret_values_read": False,
+    }
+
+
 def render_env_file(
     paths: InstallPaths,
     *,
-    receipt_env: dict[str, str] | None = None,
     existing_content: str | None = None,
 ) -> str:
-    receipt_env = receipt_env or {}
     if existing_content is None:
         existing_content = "\n".join([
             f"PORTFOLIO_CONFIG_FILE={paths.config_file}",
@@ -294,25 +437,8 @@ def render_env_file(
             "",
         ])
 
-    positions = _env_assignments(existing_content, label="target")
-    if not receipt_env:
-        return existing_content
-
-    lines = existing_content.splitlines(keepends=True)
-    for key in OPTIONS_MONITOR_FEISHU_KEYS:
-        if key not in receipt_env:
-            continue
-        value = receipt_env[key]
-        if key in positions:
-            index = positions[key]
-            newline = "\n" if lines[index].endswith("\n") else ""
-            lines[index] = f"{key}={value}{newline}"
-            continue
-        if lines and not lines[-1].endswith("\n"):
-            lines[-1] += "\n"
-        positions[key] = len(lines)
-        lines.append(f"{key}={value}\n")
-    return "".join(lines)
+    _env_assignments(existing_content, label="target")
+    return existing_content
 
 
 def render_launcher(paths: InstallPaths) -> str:
@@ -328,8 +454,8 @@ exec "{paths.python_bin}" "{paths.app_dir / "scripts" / "pm.py"}" "$@"
 
 def _render_feishu_credential_directives(*roles: str) -> str:
     credential_by_role = {
-        "bitable": BITABLE_APP_SECRET_CREDENTIAL,
-        "conversation": CONVERSATION_APP_SECRET_CREDENTIAL,
+        "agent": AGENT_APP_SECRET_CREDENTIAL,
+        "listener": LISTENER_APP_SECRET_CREDENTIAL,
     }
     invalid = [role for role in roles if role not in credential_by_role]
     if invalid:
@@ -377,7 +503,7 @@ Environment=APP_DIR={paths.app_dir}
 Environment=PYTHON_BIN={paths.python_bin}
 Environment=PORTFOLIO_PM_BIN={paths.launcher_path}
 EnvironmentFile={paths.env_file}
-{_render_feishu_credential_directives("bitable", "conversation")}
+{_render_feishu_credential_directives("agent")}
 ExecStart={_secure_feishu_exec(f"/usr/bin/flock -n {SCHEDULE_LOCK_FILE} {schedule_script} {mode}", unit_name=unit_name)}
 """
 
@@ -394,7 +520,7 @@ User={run_user}
 WorkingDirectory={paths.app_dir}
 Environment=TZ=Asia/Shanghai
 EnvironmentFile={paths.env_file}
-{_render_feishu_credential_directives("bitable", "conversation")}
+{_render_feishu_credential_directives("agent")}
 ExecStart={_secure_feishu_exec(f"{paths.launcher_path} cash-flow effects scan --json", unit_name=CASH_FLOW_SERVICE_NAME)}
 """
 
@@ -411,7 +537,7 @@ User={run_user}
 WorkingDirectory={paths.app_dir}
 Environment=TZ=Asia/Shanghai
 EnvironmentFile={paths.env_file}
-{_render_feishu_credential_directives("bitable", "conversation")}
+{_render_feishu_credential_directives("agent")}
 ExecStart={_secure_feishu_exec(f"{paths.python_bin} {paths.app_dir / 'scripts' / 'serve.py'} --host 127.0.0.1 --port 8765", unit_name=API_SERVICE_NAME)}
 Restart=on-failure
 RestartSec=5
@@ -433,7 +559,7 @@ User={run_user}
 WorkingDirectory={paths.app_dir}
 Environment=TZ=Asia/Shanghai
 EnvironmentFile={paths.env_file}
-{_render_feishu_credential_directives("bitable")}
+{_render_feishu_credential_directives("agent")}
 ExecStart={_secure_feishu_exec(f"/usr/bin/flock -n {QUALITY_LOCK_FILE} {paths.launcher_path} quality refresh --json", unit_name=QUALITY_SERVICE_NAME)}
 RuntimeMaxSec=300
 """
@@ -451,7 +577,7 @@ User={run_user}
 WorkingDirectory={paths.app_dir}
 Environment=TZ=Asia/Shanghai
 EnvironmentFile={paths.env_file}
-{_render_feishu_credential_directives("conversation")}
+{_render_feishu_credential_directives("agent")}
 ExecStart={_secure_feishu_exec(f"/usr/bin/flock -n {RECEIPT_LOCK_FILE} {paths.launcher_path} receipts dispatch --limit 100 --confirm --json", unit_name=RECEIPT_SERVICE_NAME)}
 RuntimeMaxSec=60
 """
@@ -469,7 +595,7 @@ User={run_user}
 WorkingDirectory={paths.app_dir}
 Environment=TZ=Asia/Shanghai
 EnvironmentFile={paths.env_file}
-{_render_feishu_credential_directives("bitable")}
+{_render_feishu_credential_directives("agent", "listener")}
 ExecStart={_secure_feishu_exec(f"{paths.launcher_path} events listen --confirm --json", unit_name=HOLDINGS_EVENT_SERVICE_NAME)}
 Restart=always
 RestartSec=5
@@ -493,7 +619,7 @@ User={run_user}
 WorkingDirectory={paths.app_dir}
 Environment=TZ=Asia/Shanghai
 EnvironmentFile={paths.env_file}
-{_render_feishu_credential_directives("bitable", "conversation")}
+{_render_feishu_credential_directives("agent", "listener")}
 ExecStart={_secure_feishu_exec(f"{paths.launcher_path} config doctor --require-secure-feishu --json", unit_name=FEISHU_PREFLIGHT_SERVICE_NAME)}
 ExecStart={_secure_feishu_exec(f"{paths.launcher_path} events status --json", unit_name=FEISHU_PREFLIGHT_SERVICE_NAME)}
 """
@@ -586,8 +712,13 @@ def build_plan(args) -> dict:
             str(paths.launcher_path.parent),
         ],
         "files": [
-            {"path": str(paths.config_file), "mode": "0600", "overwrite": bool(args.overwrite_config)},
-            {"path": str(paths.env_file), "mode": "0600", "overwrite": True},
+            {
+                "path": str(paths.config_file),
+                "mode": "0600",
+                "overwrite": False,
+                "required_before_apply": True,
+            },
+            {"path": str(paths.env_file), "mode": "0600", "overwrite": False},
             {"path": str(paths.launcher_path), "mode": "0755", "overwrite": True},
             *[
                 {"path": str(path), "mode": "0644", "overwrite": True}
@@ -650,13 +781,33 @@ def build_plan(args) -> dict:
                 },
                 "preflight_service": FEISHU_PREFLIGHT_SERVICE_NAME,
                 "preflight_enabled": False,
+                "preflight_required_before_activation": True,
+            },
+            "feishu_role_mapping": {
+                "required_before_apply": True,
+                "verified": False,
+                "required_keys": [
+                    "feishu.agent.app_id",
+                    "feishu.agent.open_id",
+                    "feishu.listener.app_id",
+                ],
             },
         },
-        "feishu_receipt_env": {
+        "legacy_feishu_role_sources": {
             "source": str(_as_path(args.options_monitor_env_file)),
             "target": str(paths.env_file),
-            "keys": list(OPTIONS_MONITOR_FEISHU_KEYS),
-            "secret_imported": False,
+            "detected": [
+                *detect_legacy_feishu_role_env_keys(
+                    args.options_monitor_env_file,
+                    location="options_monitor_env",
+                ),
+                *detect_legacy_feishu_role_env_keys(
+                    paths.env_file,
+                    location="target_env",
+                ),
+            ],
+            "copied": False,
+            "values_read": False,
         },
         "plaintext_feishu_shadows": {
             "detected": detect_plaintext_feishu_shadows(
@@ -748,7 +899,7 @@ Description=portfolio-management systemd credential capability probe
 
 [Service]
 Type=oneshot
-{_render_feishu_credential_directives("bitable", "conversation")}
+{_render_feishu_credential_directives("agent", "listener")}
 ExecStart=/bin/true
 """
 
@@ -806,26 +957,38 @@ def verify_systemd_credential_capability(
 def apply_install(args) -> dict:
     paths = build_paths(args)
     units = _unit_paths(paths)
-    receipt_env = read_options_monitor_feishu_env(args.options_monitor_env_file)
-    existing_env = paths.env_file.read_text(encoding="utf-8") if paths.env_file.exists() else None
-    rendered_env = render_env_file(paths, receipt_env=receipt_env, existing_content=existing_env)
+    if args.overwrite_config:
+        raise RuntimeError(
+            "--overwrite-config is disabled: prepare and verify the canonical "
+            "Agent/Listener mapping before --apply"
+        )
+    rendered_env = render_env_file(paths)
+    legacy_role_sources = [
+        *detect_legacy_feishu_role_env_keys(
+            args.options_monitor_env_file,
+            location="options_monitor_env",
+        ),
+        *detect_legacy_feishu_role_env_keys(
+            paths.env_file,
+            location="target_env",
+        ),
+    ]
+    role_mapping = verify_feishu_role_mapping(
+        paths.config_file,
+        env_file=paths.env_file,
+    )
     credential_presence = verify_encrypted_credential_presence()
     credential_capability = verify_systemd_credential_capability()
     _mkdirs([paths.config_dir, paths.data_dir, paths.reports_dir, paths.systemd_dir, paths.launcher_path.parent])
     ownership_commands = _prepare_runtime_ownership(paths, run_user=args.run_user)
 
     writes = {
-        str(paths.config_file): _write_text(
-            paths.config_file,
-            render_config_yaml(paths),
-            mode=0o600,
-            overwrite=bool(args.overwrite_config),
-        ),
+        str(paths.config_file): "verified_existing",
         str(paths.env_file): _write_text(
             paths.env_file,
             rendered_env,
             mode=0o600,
-            overwrite=True,
+            overwrite=False,
         ),
         str(paths.launcher_path): _write_text(paths.launcher_path, render_launcher(paths), mode=0o755, overwrite=True),
         str(units["morning_service"]): _write_text(
@@ -931,7 +1094,19 @@ def apply_install(args) -> dict:
         ),
     }
 
+    activation_requested = any(
+        (
+            args.enable_timer,
+            args.enable_api_service,
+            args.enable_quality_timer,
+            args.enable_holdings_event_listener,
+        )
+    )
     systemd_commands = [["systemctl", "daemon-reload"]]
+    if activation_requested:
+        systemd_commands.append(
+            ["systemctl", "start", FEISHU_PREFLIGHT_SERVICE_NAME]
+        )
     if args.enable_timer:
         systemd_commands.append([
             "systemctl",
@@ -959,16 +1134,12 @@ def apply_install(args) -> dict:
     result["runtime_ownership"] = ownership_commands
     result["systemd"]["feishu_credentials"]["capability"] = credential_capability
     result["systemd"]["feishu_credentials"]["presence"] = credential_presence
-    source_exists = _as_path(args.options_monitor_env_file).exists()
-    result["feishu_receipt_env"]["status"] = (
-        "imported_nonsecret_values"
-        if receipt_env
-        else "no_nonsecret_values"
-        if source_exists
-        else "source_missing"
+    result["systemd"]["feishu_credentials"]["preflight_run"] = (
+        activation_requested
     )
+    result["systemd"]["feishu_role_mapping"] = role_mapping
+    result["legacy_feishu_role_sources"]["detected"] = legacy_role_sources
     result["next_steps"] = [
-        f"edit {paths.config_file} and fill non-secret Feishu/Futu settings",
         "fill the explicit futu.profiles mappings and cash_flow.effects.cutover_date",
         f"systemctl start {FEISHU_PREFLIGHT_SERVICE_NAME}",
         f"systemctl status {TIMER_NAME} {EVENING_TIMER_NAME} {CASH_FLOW_TIMER_NAME} {RECEIPT_TIMER_NAME}",
@@ -1021,8 +1192,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--options-monitor-env-file",
         default=DEFAULT_OPTIONS_MONITOR_ENV_FILE,
         help=(
-            "source env file for the two non-secret OM_FEISHU_BOT_* "
-            "conversation identity values"
+            "legacy options-monitor env file scanned for Feishu role key "
+            "names only; no values are imported"
         ),
     )
     parser.add_argument("--data-dir", default="/var/lib/portfolio-management/.data", help="runtime state/cache directory")
@@ -1048,7 +1219,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_CASH_FLOW_ON_CALENDAR,
         help="systemd OnCalendar value for the 15-minute Cash Flow scanner",
     )
-    parser.add_argument("--overwrite-config", action="store_true", help="overwrite an existing config.yaml")
+    parser.add_argument(
+        "--overwrite-config",
+        action="store_true",
+        help="disabled safety flag; production config is never overwritten",
+    )
     parser.add_argument("--enable-timer", action="store_true", help="run systemctl enable --now for all three timers")
     parser.add_argument(
         "--enable-api-service",

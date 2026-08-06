@@ -11,7 +11,7 @@ delivery. The existing durable compensation log owns compensation task state.
    `deposit/withdraw/add_cash/sub_cash`.
 2. Configure one persistent `data.dir`, `cash_flow.effects.db_path`, immutable
    `cash_flow.effects.cutover_date`, `futu.profiles`, and the existing
-   `feishu.receipt.*` values.
+   canonical `feishu.agent.app_id` / `feishu.agent.open_id` receipt values.
    On upgrade, confirmations in the default `cash_flow_effects.sqlite3` are
    imported idempotently into `pm_operation_state.sqlite3` by NAV preflight.
    For a non-default legacy DB path, import it before enabling timers:
@@ -47,7 +47,7 @@ delivery. The existing durable compensation log owns compensation task state.
      --apply --confirm
    ```
 
-   In a future controlled activation, the combined Bitable listener removes
+   In a future controlled activation, the combined event listener removes
    this remembered step for deterministic CNY rows. Before enabling it, run the
    read-only target preflight, then separately confirm the Base subscription:
 

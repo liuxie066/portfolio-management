@@ -39,11 +39,11 @@ cp config.example.yaml config.yaml
 
 ```yaml
 feishu:
-  bitable:
-    app_id: ""       # Base 读写、订阅和表格变更长连接
-  conversation:
-    app_id: ""       # 对话/回执机器人
+  agent:
+    app_id: ""       # 原 Agent 机器人：全部 Base 读写和消息/回执
     open_id: ""      # 回执接收人
+  listener:
+    app_id: ""       # 仅 holdings/cash-flow 事件订阅和长连接入口
   app_token: ""
   tables:
     holdings: ""
@@ -53,8 +53,8 @@ feishu:
 ```
 
 两个 App Secret 都不写入 YAML。Linux 生产环境分别通过 systemd encrypted
-credential `pm-feishu-bitable-app-secret` 和
-`pm-feishu-conversation-app-secret` 注入；完整配置、迁移和轮换步骤见
+credential `pm-feishu-agent-app-secret` 和
+`pm-feishu-listener-app-secret` 注入。完整配置、迁移和轮换步骤见
 `docs/deploy-linux.md`。如果表配置写成 `app_token/table_id`，可以不单独配置
 `feishu.app_token`。真实密钥、运行缓存和报告产物不要提交到仓库。
 
@@ -117,9 +117,11 @@ artifact，不会触发 OpenD 刷新、飞书写入或重新计算；它使用�
 ```
 
 `pm futu sync` 真实写入完成后会通过飞书“刘看山”发送成功或失败回执；
-dry-run 不发消息。回执只使用 `feishu.conversation.app_id`、systemd
-Conversation credential 和 `feishu.conversation.open_id`；它不会复用 Bitable
-应用。旧 `feishu.receipt.*` / `OM_FEISHU_BOT_*` 只用于迁移兼容，生产 secure
+dry-run 不发消息。回执、Agent 对话和全部 Base 读写都使用
+`feishu.agent.app_id`、Agent systemd credential 和
+`feishu.agent.open_id`。Listener 应用只接收 holdings/cash-flow 变更事件，
+不拥有 Base 业务读写或消息发送权限。旧 `feishu.bitable.*` /
+`feishu.conversation.*` / `feishu.receipt.*` / `OM_FEISHU_BOT_*` 只用于迁移识别，生产 secure
 mode 不接受明文 Secret。通知失败会记录在返回值的 `receipt` 字段，不会覆盖
 已经完成的 holdings 同步结果。Futu CASH 在该命令中始终
 observe-only：`cn_cash/us_cash/hk_cash` 只保留为来源证据，不与 holdings
@@ -252,9 +254,9 @@ sudo scripts/install.sh --apply --enable-quality-timer
 - `PM_DATA_DIR`
 - `PM_REPORTS_DIR`
 - `PM_BUSINESS_HOLIDAYS`
-- `FEISHU_BITABLE_APP_ID`
-- `FEISHU_CONVERSATION_APP_ID`
-- `FEISHU_CONVERSATION_OPEN_ID`
+- `FEISHU_AGENT_APP_ID`
+- `FEISHU_AGENT_OPEN_ID`
+- `FEISHU_LISTENER_APP_ID`
 - `FEISHU_APP_TOKEN`
 
 ## 代码边界

@@ -44,13 +44,13 @@ Usage:
   scripts/install.sh [options]
 
 Options:
-  --apply                 Write config/env/systemd/launcher files.
+  --apply                 Verify config/credentials, then write env/systemd/launcher files.
   --enable-timer          Enable morning NAV, evening Futu, Cash Flow, and receipt timers.
   --enable-api-service     Enable and start the loopback-only portfolio HTTP API.
   --enable-quality-timer   Enable the independent 15-minute quality refresh timer.
   --enable-holdings-event-listener
                            Enable the Feishu holdings long-connection service.
-  --overwrite-config      Replace an existing config.yaml.
+  --overwrite-config      Disabled safety flag; config.yaml is never overwritten.
   --repo URL              Git repository URL.
   --ref REF               Branch, tag, or commit to checkout (default: main).
   --dir PATH              App checkout directory.
@@ -71,11 +71,12 @@ Defaults:
 By default this prepares code and the Python environment, then prints the
 system install plan. Add --apply to write system files.
 
-When /etc/options-monitor/options-monitor.env exists, --apply may copy only the
-non-secret OM_FEISHU_BOT_APP_ID and OM_FEISHU_BOT_USER_OPEN_ID compatibility
-values. Feishu App Secrets must already be provisioned as the two named encrypted
-systemd credentials; the installer never imports, copies from the source,
-creates, or prints secret values.
+When /etc/options-monitor/options-monitor.env exists, the installer scans only
+legacy Feishu role key names as migration evidence and copies no values. The
+explicit feishu.agent/feishu.listener mapping and encrypted credentials
+pm-feishu-agent-app-secret and pm-feishu-listener-app-secret must already be
+prepared. The installer never imports, copies from the source, creates,
+decrypts, or prints secret values.
 USAGE
 }
 
@@ -237,7 +238,9 @@ run_asset_installer
 cat <<EOF
 
 Next:
-  edit $CONFIG_DIR/config.yaml with non-secret routing values
+  create and review $CONFIG_DIR/config.yaml with canonical non-secret Agent/Listener routing
+  provision both role-named encrypted credentials
+  rerun this installer with --apply
   sudo systemctl start portfolio-feishu-preflight.service
   $LAUNCHER daily-job --json --no-service
 
