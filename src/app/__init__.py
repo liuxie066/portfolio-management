@@ -36,6 +36,7 @@ from .nav_initialization_service import NavInitializationService
 from .nav_preview_service import NavPreviewService
 from .nav_record_service import NavRecordService
 from .nav_summary_printer import NavSummaryPrinter
+from .nav_valuation_evidence_service import NavValuationEvidenceStore
 from .portfolio_read_service import PortfolioReadService
 from .report_generation_service import ReportGenerationService
 from .report_query_service import ReportQueryService

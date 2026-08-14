@@ -1401,6 +1401,89 @@ def test_pm_daily_job_prefers_service_client():
     ]
 
 
+def test_pm_daily_job_passes_valuation_reference():
+    import src.service.client as client_module
+
+    calls = []
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def daily_nav_job(self, **kwargs):
+            calls.append(kwargs)
+            return {"success": True, "status": "completed", "items": []}
+
+    old_client = client_module.PortfolioServiceClient
+    try:
+        client_module.PortfolioServiceClient = FakeClient
+        with redirect_stdout(io.StringIO()):
+            assert pm.main([
+                "daily-job",
+                "--account", "lx",
+                "--nav-date", "2026-08-13",
+                "--valuation-ref", "nav-valuation-evidence:v1:lx:2026-08-13:" + "1" * 64,
+                "--json",
+            ]) == 0
+    finally:
+        client_module.PortfolioServiceClient = old_client
+
+    assert calls[0]["account"] == "lx"
+    assert calls[0]["nav_date"] == "2026-08-13"
+    assert calls[0]["valuation_ref"].startswith("nav-valuation-evidence:v1:lx:")
+
+
+def test_pm_historical_evidence_preview_and_write_guard():
+    calls = []
+
+    class FakePortfolioService:
+        def prepare_historical_nav_valuation_evidence(self, **kwargs):
+            calls.append(kwargs)
+            return {
+                "success": True,
+                "status": "preview",
+                "artifact_digest": "a" * 64,
+            }
+
+    base = [
+        "nav",
+        "evidence",
+        "prepare-historical",
+        "--account",
+        "lx",
+        "--nav-date",
+        "2026-08-13",
+        "--source-run-id",
+        "daily-nav-job-source:lx",
+        "--expected-holdings-digest",
+        "1" * 64,
+        "--expected-cash-flow-fingerprint",
+        "2" * 64,
+        "--source-effect-store-revision",
+        "cfs_source",
+        "--valuation-as-of",
+        "2026-08-14T08:11:45.216546",
+        "--usdcny",
+        "6.757",
+        "--hkdcny",
+        "0.8611",
+    ]
+    stdout = io.StringIO()
+    with _PortfolioServicePatch(FakePortfolioService), redirect_stdout(stdout):
+        assert pm.main([*base, "--json"]) == 0
+
+    assert json.loads(stdout.getvalue())["status"] == "preview"
+    assert calls[0]["write"] is False
+
+    with _PortfolioServicePatch(FakePortfolioService):
+        try:
+            pm.main([*base, "--write", "--json"])
+        except SystemExit as exc:
+            assert "--confirm and --expected-digest" in str(exc)
+        else:
+            raise AssertionError("expected historical evidence write guard")
+
+
 def test_pm_config_inspect_outputs_yaml_sources_and_redacts_secrets():
     from src import config
 

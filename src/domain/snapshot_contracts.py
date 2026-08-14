@@ -1060,6 +1060,119 @@ class NormalizedValuationSnapshot:
         return snapshot
 
     @classmethod
+    def _from_evidence_payload(
+        cls,
+        payload: Mapping[str, Any],
+        *,
+        expected_digest: str,
+    ) -> "NormalizedValuationSnapshot":
+        """Rehydrate only a fully validated canonical evidence payload."""
+
+        if not isinstance(payload, Mapping):
+            raise TypeError("normalized valuation evidence must be an object")
+        if payload.get("contract_version") != NORMALIZED_VALUATION_VERSION:
+            raise ValueError("unsupported normalized valuation evidence version")
+        if payload.get("official_eligible") is not True:
+            raise ValueError("normalized valuation evidence is not official")
+        if payload.get("source") != "valuation_service":
+            raise ValueError("normalized valuation evidence source mismatch")
+
+        rows = tuple(
+            NormalizedValuationRow(
+                record_id=(str(row.get("record_id") or "").strip() or None),
+                account=str(row.get("account") or ""),
+                asset_id=str(row.get("asset_id") or ""),
+                asset_name=str(row.get("asset_name") or ""),
+                asset_type=str(row.get("asset_type") or ""),
+                normalized_type=str(row.get("normalized_type") or ""),
+                broker=str(row.get("broker") or ""),
+                quantity=normalize_quantity(row.get("quantity")),
+                avg_cost=(
+                    finite_decimal(row.get("avg_cost"), field="avg_cost")
+                    if row.get("avg_cost") is not None
+                    else None
+                ),
+                currency=str(row.get("currency") or ""),
+                asset_class=(
+                    str(row.get("asset_class"))
+                    if row.get("asset_class") is not None
+                    else None
+                ),
+                industry=(
+                    str(row.get("industry"))
+                    if row.get("industry") is not None
+                    else None
+                ),
+                tags=tuple(str(item) for item in (row.get("tags") or [])),
+                price=(
+                    finite_decimal(row.get("price"), field="price")
+                    if row.get("price") is not None
+                    else None
+                ),
+                cny_price=(
+                    finite_decimal(row.get("cny_price"), field="cny_price")
+                    if row.get("cny_price") is not None
+                    else None
+                ),
+                market_value_cny=(
+                    finite_decimal(
+                        row.get("market_value_cny"),
+                        field="market_value_cny",
+                    )
+                    if row.get("market_value_cny") is not None
+                    else None
+                ),
+                source=str(row.get("source") or ""),
+            )
+            for row in payload.get("rows") or []
+        )
+        components = tuple(
+            ValuationComponent.build(
+                name=str(component.get("name") or ""),
+                category=str(component.get("category") or ""),
+                value_cny=component.get("value_cny"),
+                source=str(component.get("source") or ""),
+                provenance=dict(component.get("provenance") or {}),
+            )
+            for component in payload.get("components") or []
+        )
+        snapshot = cls(
+            account=str(payload.get("account") or ""),
+            rows=rows,
+            components=components,
+            shares=(
+                finite_decimal(payload.get("shares"), field="shares")
+                if payload.get("shares") is not None
+                else None
+            ),
+            nav_override=(
+                finite_decimal(payload.get("nav_override"), field="nav_override")
+                if payload.get("nav_override") is not None
+                else None
+            ),
+            price_evidence_json=_freeze_json(dict(payload.get("price_evidence") or {})),
+            holdings_provenance_json=_freeze_json(
+                dict(payload.get("holdings_provenance") or {})
+            ),
+            warnings=tuple(str(item) for item in (payload.get("warnings") or [])),
+            excluded_zero_count=int(payload.get("excluded_zero_count", -1)),
+            excluded_zero_key_digest=str(
+                payload.get("excluded_zero_key_digest") or ""
+            ),
+            source=str(payload.get("source") or ""),
+            source_provenance_json=_freeze_json(
+                dict(payload.get("source_provenance") or {})
+            ),
+            contract_version=str(payload.get("contract_version") or ""),
+        )
+        object.__setattr__(snapshot, "_official_issuer", _OFFICIAL_ISSUER)
+        if snapshot.canonical_payload() != dict(payload):
+            raise ValueError("normalized valuation evidence is not canonical")
+        if snapshot.digest != str(expected_digest or ""):
+            raise ValueError("normalized valuation evidence digest mismatch")
+        return snapshot
+
+    @classmethod
     def from_closed_input(
         cls,
         target: Any,

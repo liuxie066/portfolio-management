@@ -1419,6 +1419,7 @@ def cmd_daily_job(args):
             "sync_futu_cash_mmf": bool(args.sync_futu_cash_mmf),
             "force_non_business_day": bool(args.force_non_business_day),
             "run_id": getattr(args, "run_id", None),
+            "valuation_ref": getattr(args, "valuation_ref", None),
         }
         if getattr(args, "sync_futu_dry_run", None) is not None:
             kwargs["sync_futu_dry_run"] = bool(args.sync_futu_dry_run)
@@ -1452,6 +1453,39 @@ def cmd_nav_duplicates(args):
     res = _service_or_fallback(args, via_service, direct, allow_fallback=True)
     _dump(res, args.json)
     return res
+
+
+def cmd_nav_evidence_prepare_historical(args):
+    if bool(args.write) and (
+        not bool(args.confirm) or not str(args.expected_digest or "").strip()
+    ):
+        raise SystemExit(
+            "historical evidence write requires --confirm and --expected-digest"
+        )
+
+    from src.service.application import PortfolioService
+
+    result = _call_backend(
+        args,
+        lambda: PortfolioService().prepare_historical_nav_valuation_evidence(
+            account=args.account,
+            nav_date=args.nav_date,
+            source_run_id=args.source_run_id,
+            expected_holdings_digest=args.expected_holdings_digest,
+            expected_cash_flow_fingerprint=(
+                args.expected_cash_flow_fingerprint
+            ),
+            source_effect_store_revision=args.source_effect_store_revision,
+            valuation_as_of=args.valuation_as_of,
+            usdcny=args.usdcny,
+            hkdcny=args.hkdcny,
+            write=bool(args.write),
+            confirm=bool(args.confirm),
+            expected_digest=args.expected_digest,
+        ),
+    )
+    _dump(result, bool(args.json))
+    return result
 
 
 def cmd_config_inspect(args):
@@ -1668,6 +1702,11 @@ def build_parser() -> argparse.ArgumentParser:
         subparser.add_argument("--sync-futu-write", dest="sync_futu_dry_run", action="store_false", help="persist MMF sync and CASH reconciliation observations when NAV is also writing")
         subparser.add_argument("--force-non-business-day", action="store_true", help="run even when calendar marks the NAV date non-business")
         subparser.add_argument("--run-id", default=None, help="operator-supplied run id for tracing")
+        subparser.add_argument(
+            "--valuation-ref",
+            default=None,
+            help="server-side immutable valuation reference for one-account replay",
+        )
         subparser.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
 
     p_daily = sp.add_parser("daily", help="calculate daily NAV and position distribution; dry-run by default")
@@ -2105,6 +2144,44 @@ def build_parser() -> argparse.ArgumentParser:
     p_nav_duplicates.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
     add_service_args(p_nav_duplicates)
     p_nav_duplicates.set_defaults(func=cmd_nav_duplicates)
+    p_nav_evidence = nav_sub.add_parser(
+        "evidence",
+        help="prepare immutable NAV valuation evidence",
+    )
+    nav_evidence_sub = p_nav_evidence.add_subparsers(
+        dest="nav_evidence_cmd",
+        required=True,
+    )
+    p_nav_evidence_historical = nav_evidence_sub.add_parser(
+        "prepare-historical",
+        help="prepare one historical valuation artifact; preview by default",
+    )
+    p_nav_evidence_historical.add_argument("--account", required=True)
+    p_nav_evidence_historical.add_argument("--nav-date", required=True)
+    p_nav_evidence_historical.add_argument("--source-run-id", required=True)
+    p_nav_evidence_historical.add_argument(
+        "--expected-holdings-digest", required=True
+    )
+    p_nav_evidence_historical.add_argument(
+        "--expected-cash-flow-fingerprint", required=True
+    )
+    p_nav_evidence_historical.add_argument(
+        "--source-effect-store-revision", required=True
+    )
+    p_nav_evidence_historical.add_argument("--valuation-as-of", required=True)
+    p_nav_evidence_historical.add_argument("--usdcny", required=True)
+    p_nav_evidence_historical.add_argument("--hkdcny", required=True)
+    p_nav_evidence_historical.add_argument(
+        "--write", action="store_true", help="persist the prepared artifact"
+    )
+    p_nav_evidence_historical.add_argument("--confirm", action="store_true")
+    p_nav_evidence_historical.add_argument("--expected-digest")
+    p_nav_evidence_historical.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS
+    )
+    p_nav_evidence_historical.set_defaults(
+        func=cmd_nav_evidence_prepare_historical
+    )
 
     p_positions = sp.add_parser("positions", help="position analytics")
     positions_sub = p_positions.add_subparsers(dest="positions_cmd", required=True)

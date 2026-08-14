@@ -854,6 +854,113 @@ def test_daily_nav_job_auto_date_uses_previous_business_day():
     assert context.run_id == "run-job-auto-date:alice"
 
 
+def test_daily_nav_job_replay_requires_explicit_single_account_scope():
+    service = DailyNavJobService(
+        storage=SimpleNamespace(),
+        portfolio=SimpleNamespace(reporting_service=object()),
+        calendar=BusinessCalendarService(),
+    )
+
+    missing_account = service.run(
+        nav_date="2026-05-22",
+        accounts="alice,bob",
+        valuation_ref="nav-valuation-evidence:v1:x:2026-05-22:" + "1" * 64,
+    )
+    missing_date = service.run(
+        account="alice",
+        valuation_ref="nav-valuation-evidence:v1:alice:2026-05-22:" + "1" * 64,
+    )
+    multiple_accounts = service.run(
+        nav_date="2026-05-22",
+        account="alice,bob",
+        valuation_ref="nav-valuation-evidence:v1:alice:2026-05-22:" + "1" * 64,
+    )
+
+    assert missing_account["success"] is False
+    assert missing_date["success"] is False
+    assert multiple_accounts["success"] is False
+    assert "one explicit account and nav_date" in missing_account["error"]
+
+
+def test_daily_nav_job_passes_replay_ref_with_replay_finality():
+    calls = []
+
+    class EvidenceStore:
+        @staticmethod
+        def load(reference, **_kwargs):
+            return {"valuation_ref": reference}
+
+    class Storage:
+        @staticmethod
+        def audit_nav_history_duplicates(account=None):
+            return {"success": True, "duplicate_group_count": 0}
+
+        @staticmethod
+        def get_nav_on_date(account, nav_date):
+            return None
+
+    class Runner:
+        def __init__(self, account):
+            self.account = account
+
+        def run(self, **kwargs):
+            calls.append(kwargs)
+            return {"success": True, "account": self.account}
+
+    reference = "nav-valuation-evidence:v1:alice:2026-05-22:" + "1" * 64
+    result = DailyNavJobService(
+        storage=Storage(),
+        portfolio=SimpleNamespace(reporting_service=object()),
+        calendar=BusinessCalendarService(),
+        account_runner_factory=Runner,
+        holdings_preflight=_PassingGlobalHoldingsPreflight(),
+        valuation_evidence_store=EvidenceStore(),
+    ).run(
+        nav_date="2026-05-22",
+        account="alice",
+        valuation_ref=reference,
+    )
+
+    assert result["success"] is True
+    assert calls[0]["valuation_ref"] == reference
+    assert calls[0]["nav_write_context"].write_reason == (
+        "canonical_daily_nav_replay"
+    )
+
+
+def test_daily_nav_job_rejects_invalid_replay_before_any_preflight():
+    class Storage:
+        @staticmethod
+        def audit_nav_history_duplicates(**_kwargs):
+            raise AssertionError("duplicate audit must not run")
+
+    class EvidenceStore:
+        @staticmethod
+        def load(*_args, **_kwargs):
+            raise ValueError("invalid replay capability")
+
+    class Preflight:
+        @staticmethod
+        def scan_global_orphans(**_kwargs):
+            raise AssertionError("global preflight must not run")
+
+    result = DailyNavJobService(
+        storage=Storage(),
+        portfolio=SimpleNamespace(reporting_service=object()),
+        calendar=BusinessCalendarService(),
+        holdings_preflight=Preflight(),
+        valuation_evidence_store=EvidenceStore(),
+    ).run(
+        nav_date="2026-05-22",
+        account="alice",
+        valuation_ref="invalid",
+    )
+
+    assert result["success"] is False
+    assert result["stage"] == "valuation_evidence_preflight"
+    assert result["error"] == "invalid replay capability"
+
+
 def test_daily_nav_job_skips_existing_nav_when_no_overwrite():
     calls = []
 

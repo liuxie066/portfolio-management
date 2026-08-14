@@ -223,6 +223,8 @@ def test_http_service_routes_delegate_to_portfolio_service():
     assert client.get("/report/full", params={"account": "alice/bob", "price_timeout": 9}).json()["account"] == "alice/bob"
     assert client.post("/report/daily-bundle", json={"account": "alice/bob", "price_timeout": 10, "dry_run": False, "confirm": True, "use_bulk_persist": True, "sync_futu_cash_mmf": True, "sync_futu_dry_run": False, "run_id": "run-report-1"}).json()["dry_run"] is False
     assert client.post("/daily-nav-job", json={"accounts": ["alice", "bob"], "nav_date": "2026-05-22", "price_timeout": 12, "dry_run": True, "overwrite_existing": False}).json()["status"] == "completed"
+    replay_ref = "nav-valuation-evidence:v1:alice:2026-05-22:" + "1" * 64
+    assert client.post("/daily-nav-job", json={"account": "alice", "nav_date": "2026-05-22", "valuation_ref": replay_ref}).json()["status"] == "completed"
     assert client.get("/report/monthly", params={"account": "alice/bob", "price_timeout": 11}).json()["report_type"] == "monthly"
 
     assert service.calls == [
@@ -244,6 +246,7 @@ def test_http_service_routes_delegate_to_portfolio_service():
         ("full_report", {"account": "alice/bob", "price_timeout": 9}),
         ("daily_report_bundle", {"account": "alice/bob", "price_timeout": 10, "dry_run": False, "confirm": True, "overwrite_existing": False, "use_bulk_persist": True, "sync_futu_cash_mmf": True, "sync_futu_dry_run": False, "run_id": "run-report-1"}),
         ("daily_nav_job", {"accounts": ["alice", "bob"], "nav_date": "2026-05-22", "price_timeout": 12, "dry_run": True, "confirm": False, "overwrite_existing": False, "use_bulk_persist": False, "sync_futu_cash_mmf": False, "force_non_business_day": False}),
+        ("daily_nav_job", {"account": "alice", "nav_date": "2026-05-22", "price_timeout": 30, "dry_run": True, "confirm": False, "overwrite_existing": False, "use_bulk_persist": False, "sync_futu_cash_mmf": False, "force_non_business_day": False, "valuation_ref": replay_ref}),
         ("generate_report", {"account": "alice/bob", "report_type": "monthly", "price_timeout": 11}),
     ]
 

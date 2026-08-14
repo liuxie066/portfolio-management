@@ -94,12 +94,23 @@ class AccountNavRecorderService:
         portfolio: Any,
         read_service: Any,
         holdings_preflight: Any = None,
+        valuation_evidence_store: Any = None,
     ):
         self.account = account
         self.storage = storage
         self.portfolio = portfolio
         self.read_service = read_service
         self.holdings_preflight = holdings_preflight
+        self.valuation_evidence_store = valuation_evidence_store
+
+    def _valuation_evidence_store(self) -> Any:
+        if self.valuation_evidence_store is None:
+            from src.app.nav_valuation_evidence_service import (
+                NavValuationEvidenceStore,
+            )
+
+            self.valuation_evidence_store = NavValuationEvidenceStore()
+        return self.valuation_evidence_store
 
     def record(
         self,
@@ -116,6 +127,7 @@ class AccountNavRecorderService:
         run_id: Optional[str] = None,
         nav_write_context: Optional[NavWriteContext] = None,
         run_quote_pool: Any = None,
+        valuation_ref: Optional[str] = None,
     ) -> Dict[str, Any]:
         from src.app import FutuBalanceSyncService
         from src.run_id import new_run_id
@@ -152,6 +164,8 @@ class AccountNavRecorderService:
             }
 
         holdings_preflight_result = None
+        cash_flow_dataset = None
+        loaded_evidence = None
         try:
             futu_sync_result = None
             project_futu_dry_run = False
@@ -170,7 +184,7 @@ class AccountNavRecorderService:
                 project_futu_dry_run = bool(resolved_sync_futu_dry_run)
 
             if self.holdings_preflight is not None:
-                if snapshot is not None:
+                if snapshot is not None and valuation_ref is None:
                     raise ValueError(
                         "official holdings preflight does not accept a caller snapshot"
                     )
@@ -205,7 +219,35 @@ class AccountNavRecorderService:
                     )
                     return failure
 
-            if snapshot is None:
+            if valuation_ref is not None:
+                if snapshot is not None:
+                    raise ValueError("NAV valuation replay does not accept caller snapshot")
+                if self.holdings_preflight is None or holdings_preflight_result is None:
+                    raise PermissionError(
+                        "NAV valuation replay requires official holdings preflight"
+                    )
+                loaded_evidence = self._valuation_evidence_store().load(
+                    valuation_ref,
+                    expected_account=self.account,
+                    expected_nav_date=today,
+                )
+                artifact = loaded_evidence["artifact"]
+                validated = holdings_preflight_result["validated_snapshot"]
+                if (
+                    validated.normalized_holdings_digest
+                    != artifact.get("holdings_digest")
+                ):
+                    raise ValueError(
+                        "NAV valuation replay holdings digest mismatch"
+                    )
+                t_snapshot = _now_ms()
+                snapshot = self.read_service.build_snapshot_from_normalized(
+                    normalized_valuation=loaded_evidence["normalized_valuation"],
+                    snapshot_time=str(artifact.get("snapshot_time") or ""),
+                    holdings_snapshot=validated.provenance(),
+                )
+                snapshot_ms = _now_ms() - t_snapshot
+            elif snapshot is None:
                 t_snapshot = _now_ms()
                 snapshot_kwargs = {"price_timeout_seconds": price_timeout}
                 if run_quote_pool is not None:
@@ -229,6 +271,15 @@ class AccountNavRecorderService:
                 nav_date=today,
                 run_id=resolved_run_id,
             )
+            if loaded_evidence is not None:
+                artifact = loaded_evidence["artifact"]
+                if (
+                    cash_flow_dataset.financial_fingerprint
+                    != artifact.get("cash_flow_financial_fingerprint")
+                ):
+                    raise ValueError(
+                        "NAV valuation replay cash-flow fingerprint mismatch"
+                    )
             resolved_context = nav_write_context or NavWriteContext(
                 status="manual",
                 writer="nav-record",
@@ -236,6 +287,20 @@ class AccountNavRecorderService:
                 nav_date=today,
                 run_id=resolved_run_id,
             )
+            if loaded_evidence is not None:
+                artifact = loaded_evidence["artifact"]
+                resolved_context = resolved_context.with_provenance({
+                    "mode": "valuation_evidence_replay",
+                    "valuation_ref": str(valuation_ref),
+                    "source_run_id": artifact["source_run_id"],
+                    "valuation_digest": artifact["valuation_digest"],
+                    "source_effect_store_revision": artifact[
+                        "source_effect_store_revision"
+                    ],
+                    "replay_effect_store_revision": (
+                        cash_flow_dataset.effect_store_revision
+                    ),
+                })
             resolved_context = resolved_context.with_runtime(
                 valuation_as_of=snapshot.get("snapshot_time"),
                 run_id=resolved_run_id,
@@ -361,6 +426,56 @@ class AccountNavRecorderService:
             )
             if public_preflight is not None:
                 failure["holdings_preflight"] = public_preflight
+            capture_reasons = {
+                "CASH_FLOW_DATASET_BLOCKED",
+                "CASH_FLOW_EFFECT_GATE_INCOMPLETE",
+            }
+            writer = getattr(nav_write_context, "writer", None)
+            normalized = (
+                snapshot.get("normalized_valuation")
+                if isinstance(snapshot, dict)
+                else None
+            )
+            if (
+                valuation_ref is None
+                and not dry_run
+                and confirm
+                and writer == "daily-nav-job"
+                and exc.reason_code in capture_reasons
+                and normalized is not None
+                and cash_flow_dataset is not None
+                and cash_flow_dataset.account == self.account
+                and cash_flow_dataset.nav_date == today
+                and cash_flow_dataset.run_id == resolved_run_id
+                and str(cash_flow_dataset.financial_fingerprint or "").strip()
+                and str(cash_flow_dataset.effect_store_revision or "").strip()
+            ):
+                try:
+                    validated = holdings_preflight_result["validated_snapshot"]
+                    prepared = self._valuation_evidence_store().prepare(
+                        account=self.account,
+                        nav_date=today,
+                        source_run_id=resolved_run_id,
+                        snapshot_time=str(snapshot.get("snapshot_time") or ""),
+                        holdings_digest=validated.normalized_holdings_digest,
+                        cash_flow_financial_fingerprint=(
+                            cash_flow_dataset.financial_fingerprint
+                        ),
+                        source_effect_store_revision=(
+                            cash_flow_dataset.effect_store_revision
+                        ),
+                        normalized_valuation=normalized,
+                        preparation="cash_flow_gate_failure",
+                    )
+                    saved = self._valuation_evidence_store().save(prepared)
+                    failure["valuation_ref"] = saved["valuation_ref"]
+                    failure["valuation_evidence_digest"] = saved[
+                        "artifact_digest"
+                    ]
+                except Exception as evidence_exc:
+                    failure["valuation_evidence_error"] = (
+                        str(evidence_exc) or evidence_exc.__class__.__name__
+                    )
             return failure
         except Exception as e:
             failure = {
