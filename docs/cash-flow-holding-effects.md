@@ -362,13 +362,14 @@ scanner 同时比较 CASH holding 当前指纹与 `last_confirmed_hash`：
 - 变化能与持锁执行中的 effect target 对应时，等待该 effect 的 fresh
   readback 核销，不创建竞争事件；confirm/apply 与 scanner 共用 scanner/account
   锁，避免把授权写入误判为外部修改。
-- 变化不能由已确认 effect 解释时，创建或更新
-  `cash_holding_external_change`，并阻断正式 NAV。
+- compensation target 尚未完成时，该 identity 继续由 compensation
+  流程独占，不得将部分写入误认为人工 baseline。
 - Futu 以对应 profile 的 OpenD 分币种现金作为恢复 target；scanner 本身不连接
-  OpenD，target 在 review/preview 时获取，仍需逐条确认后才能写 holding。
-- 非 Futu 必须逐条选择：明确 `record_only` 接受当前值为新 baseline，或以
-  `apply` 恢复 `last_confirmed_amount`；两种选择都进入 preview hash 并要求
-  `--confirm`。
+  OpenD，target 在 review/preview 时获取，仍需逐条确认后才能写 holding；
+  未解释变化仍阻断正式 NAV。
+- 非 Futu 没有第二数据源可验证人工 holding；当前值是权威事实。scanner
+  将变化记录为 terminal `record_only` 审计 effect，确认新 fingerprint
+  baseline，不写 holding，也不阻断 NAV。
 - 直接修改后的当前值恰好等于 last confirmed target 时，记录审计 observation
   后可核销为无 drift，不产生多余写入。
 
@@ -420,11 +421,23 @@ target = fresh_current_holding + signed_cash_flow_amount
 要求：
 
 - holding 必须通过 Feishu 强制新鲜读取，不能使用内存或磁盘缓存。
+- apply-mode 事件预览必须明确选择
+  `--external-action apply_delta`；这表示当前 holding 尚未包含该笔出入金。
 - 目标标记 `target_source=estimated_current_plus_event`。
 - 非 Futu 出金计算后若 target < 0，阻断。
 - 不做币种转换。
 - 不跨 broker 寻找“同名现金”。
 - holding 不存在时，current 按 0 处理；创建目标仍需确认。
+
+若人工维护的当前 holding 已经包含该笔出入金，预览必须改用：
+
+```text
+--external-action already_reflected
+```
+
+此时 target 等于 fresh current，不重复增减 holding；effect 仍终结为
+`applied`，以便之后修改或删除 cash-flow 时只应用与上一 applied version
+的差额。不使用日期、更新时间或金额相似度猜测是否已计入。
 
 已 applied 事件的修改使用净变化：
 
@@ -749,8 +762,8 @@ broker 字段当成可选能力。
 ./pm cash-flow effects scan [--account ACCOUNT] [--json]
 ./pm cash-flow effects list [--account ACCOUNT] [--json]
 ./pm cash-flow effects show --effect-id ID [--json]
-./pm cash-flow effects preview --effect-id ID [--historical-apply] [--json]
-./pm cash-flow effects confirm --effect-id ID --preview-hash HASH --confirm
+./pm cash-flow effects preview --effect-id ID [--external-action ACTION] [--historical-apply] [--json]
+./pm cash-flow effects confirm --effect-id ID --preview-hash HASH [--external-action ACTION] --confirm
 ./pm cash-flow effects record-only --effect-id ID --confirm
 ./pm cash-flow effects retry --effect-id ID --confirm
 ./pm cash-flow effects audit --account ACCOUNT [--json]
@@ -879,7 +892,9 @@ effect 的精确 `effects preview --effect-id ... --json` 命令。未知
 
 至少覆盖以下场景：
 
-1. 手工新增非 Futu CNY 入金，preview 为 current + amount，确认后只更新同 broker 的 CNY-CASH。
+1. 手工新增非 Futu CNY 入金，`apply_delta` preview 为 current +
+   amount；`already_reflected` preview 保持 current。两者确认后都只处理同
+   broker 的 CNY-CASH，且后续 correction 只应用差额。
 2. 非 Futu 出金会产生负目标时阻断。
 3. USD/HKD 事件不触碰 CNY-CASH。
 4. broker 缺失或无法匹配时阻断。
@@ -920,10 +935,11 @@ effect 的精确 `effects preview --effect-id ... --json` 命令。未知
     更早 nav_date。
 36. 有 NAV 历史的账户到达 flow_date 时，前一业务日 NAV 未 final 会阻断
     effect 转 pending，但不会阻止补齐该前一业务日 NAV。
-37. 飞书 CASH holding 被直接修改时，scanner 创建
-    `cash_holding_external_change` 并阻断 NAV；授权 effect 写入不会被误报。
-38. 非 Futu 外部 holding 修改只能经逐条确认接受为 baseline 或恢复最后确认值；
-    Futu preview 只使用对应 OpenD 分币种现金作为恢复 target。
+37. 飞书 CASH holding 被直接修改时，非 Futu 变化自动成为 terminal
+    审计 baseline 且不阻断 NAV；Futu 变化仍使用 OpenD target 并 fail
+    closed；授权 effect 写入和 compensation 不会被误报为人工变化。
+38. 非 Futu cash-flow 必须明确选择 `apply_delta` 或
+    `already_reflected`；显式 historical apply 也不得绕过该契约。
 39. 历史 provider 无 rate 时，完整的人工 rate/date/source 经独立确认后可通过；
     缺字段、日期不符、source 含糊或未确认均阻断。
 40. 从未有 NAV 的账户到达 flow_date 时直接转 pending；effect 完成前阻断

@@ -136,12 +136,20 @@ Cash Flow 主要入口是飞书多维表手工录入。系统只接受带 broker
 
 ```bash
 ./pm cash-flow review --account lx --json
-./pm cash-flow effects preview --effect-id EFFECT_ID --json
+./pm cash-flow effects preview \
+  --effect-id EFFECT_ID \
+  --external-action apply_delta --json
 ./pm cash-flow effects confirm \
   --effect-id EFFECT_ID \
   --preview-hash PREVIEW_HASH \
+  --external-action apply_delta \
   --confirm --json
 ```
+
+非 Futu 出入金预览必须选择 `apply_delta`（当前 CASH 尚未计入）或
+`already_reflected`（人工余额已经计入）。非 Futu 买卖、费用和结算导致的
+Holdings 变化仍由人工维护，scanner 将当前值视为权威 baseline；Futu
+仍以 OpenD 绝对现金观测为准。
 
 确认 hash 绑定当前 Feishu fact、fresh holding 和全部目标；任一变化都要求重新
 预览确认。正式 NAV 同时要求 generated FX fields 与 holding effects 完成。

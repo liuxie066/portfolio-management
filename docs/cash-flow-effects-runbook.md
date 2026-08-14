@@ -65,9 +65,11 @@ delivery. The existing durable compensation log owns compensation task state.
 
    ```bash
    pm cash-flow review --json
-   pm cash-flow effects preview --effect-id ID --json
+   pm cash-flow effects preview --effect-id ID \
+     --external-action apply_delta --json
    pm cash-flow effects confirm \
-     --effect-id ID --preview-hash HASH --confirm
+     --effect-id ID --preview-hash HASH \
+     --external-action apply_delta --confirm
    pm cash-flow effects record-only --effect-id ID --confirm
    pm cash-flow effects audit --account ACCOUNT --json
    ```
@@ -104,7 +106,29 @@ source evidence only: they are not compared with PM's CNY-denominated aggregate
 does not change the separately confirmed effect workflow for Feishu cash-flow
 ledger facts.
 
-If a CASH row was changed directly in Feishu, choose one explicit path:
+For a non-Futu cash-flow effect, declare whether the current manual CASH
+holding already includes the event:
+
+```bash
+pm cash-flow effects preview --effect-id ID \
+  --external-action apply_delta --json
+pm cash-flow effects confirm --effect-id ID --preview-hash HASH \
+  --external-action apply_delta --confirm
+
+pm cash-flow effects preview --effect-id ID \
+  --external-action already_reflected --json
+pm cash-flow effects confirm --effect-id ID --preview-hash HASH \
+  --external-action already_reflected --confirm
+```
+
+Use `apply_delta` when the fresh holding does not contain the deposit or
+withdrawal. Use `already_reflected` when it does; the holding then remains
+unchanged while the cash-flow version is still recorded as applied. The same
+choice is mandatory for an explicit historical apply.
+
+A direct non-Futu CASH edit is the broker-authoritative manual balance. The
+scanner records it as a terminal audit baseline and does not block NAV. The
+legacy actions below remain only for old unresolved external-change effects:
 
 ```bash
 pm cash-flow effects preview --effect-id ID \
@@ -118,6 +142,7 @@ pm cash-flow effects confirm --effect-id ID --preview-hash HASH \
   --external-action restore --confirm
 ```
 
+Futu external drift continues to use the OpenD absolute target and fail closed.
 Legacy Futu per-currency reconciliation is not an active source of new effects.
 
 ## Compensation

@@ -5,8 +5,8 @@
 - Branch: `fix/non-futu-cash-holdings-authority`
 - Design source: confirmed user requirements, read-only incident evidence, and
   current repository behavior
-- Current gate: `implementation S1`
-- Next entry point: implement the approved S1 authority and preview contract
+- Current gate: `accepted S1 commit`
+- Next entry point: commit accepted S1, then implement S2
 - Work unit status: `planned`
 
 ## Goal and motivation

@@ -2009,7 +2009,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_effects_preview.add_argument("--effect-id", required=True)
     p_effects_preview.add_argument(
         "--external-action",
-        choices=("accept_current", "restore"),
+        choices=(
+            "accept_current",
+            "restore",
+            "apply_delta",
+            "already_reflected",
+        ),
     )
     p_effects_preview.add_argument("--historical-apply", action="store_true")
     p_effects_preview.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
@@ -2020,7 +2025,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_effects_confirm.add_argument("--preview-hash", required=True)
     p_effects_confirm.add_argument(
         "--external-action",
-        choices=("accept_current", "restore"),
+        choices=(
+            "accept_current",
+            "restore",
+            "apply_delta",
+            "already_reflected",
+        ),
     )
     p_effects_confirm.add_argument("--historical-apply", action="store_true")
     p_effects_confirm.add_argument("--confirm", action="store_true")

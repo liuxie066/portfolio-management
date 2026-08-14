@@ -658,17 +658,22 @@ class CashFlowEffectService:
                 amount=observed_amount,
                 observation_hash=observed_hash,
             )
+            if identity in compensation_identities:
+                # A partially applied target belongs to the compensation
+                # workflow, not to holding-drift reconciliation.
+                continue
             if fingerprint and fingerprint.get("last_confirmed_hash") == observed_hash:
                 latest = self.store.get_latest_for_record(
                     f"holding:{identity}",
                     effect_kind="cash_holding_external_change",
                 )
-                if latest and latest["state"] in UNRESOLVED_STATES:
+                resolvable_states = UNRESOLVED_STATES - {"compensation_pending"}
+                if latest and latest["state"] in resolvable_states:
                     self.store.update_effect(
                         latest["effect_id"],
                         state="applied",
                         event_type="resolved_by_observation",
-                        expected_states=UNRESOLVED_STATES,
+                        expected_states=resolvable_states,
                     )
                     changed_effect_ids.append(latest["effect_id"])
                     changed += 1
@@ -677,10 +682,6 @@ class CashFlowEffectService:
                 previous_amount = None
             else:
                 previous_amount = fingerprint.get("last_confirmed_amount")
-            if identity in compensation_identities:
-                # A partially applied target belongs to the compensation
-                # workflow, not to an independent direct Feishu edit.
-                continue
             asset_id, row_account, broker = identity.split("|", 2)
             currency = asset_id.split("-", 1)[0]
             existing_external = self.store.get_latest_for_record(
@@ -710,6 +711,69 @@ class CashFlowEffectService:
                 "contract": HASH_CONTRACT_VERSION,
                 "source": source,
             })
+            if broker != FUTU_BROKER:
+                if (
+                    existing_external
+                    and existing_external["state"] == "compensation_pending"
+                ):
+                    continue
+                confirmation = {
+                    "method": "automatic_policy",
+                    "policy": "non_futu_manual_holding_authority",
+                    "confirmed_at": bj_now_naive().isoformat(),
+                }
+                if (
+                    existing_external
+                    and existing_external["source_hash"] == source_hash
+                ):
+                    accepted = self.store.update_effect(
+                        existing_external["effect_id"],
+                        state="record_only",
+                        fields={
+                            "target_source": None,
+                            "before_json": None,
+                            "targets_json": None,
+                            "preview_hash": None,
+                            "warnings_json": None,
+                            "confirmation_json": confirmation,
+                            "compensation_task_id": None,
+                            "last_error": None,
+                        },
+                        event_type="manual_baseline_auto_accepted",
+                        event_payload={"holding_identity": identity},
+                        expected_states=(
+                            TERMINAL_STATES
+                            | (UNRESOLVED_STATES - {"compensation_pending"})
+                        ),
+                    )
+                    changed_effect_ids.append(accepted["effect_id"])
+                    changed += 1
+                else:
+                    accepted = self.store.create_version(
+                        source=source,
+                        source_hash=source_hash,
+                        state="record_only",
+                        mode="record_only",
+                        effect_kind="cash_holding_external_change",
+                        event_type="manual_baseline_auto_accepted",
+                    )
+                    accepted = self.store.update_effect(
+                        accepted["effect_id"],
+                        fields={"confirmation_json": confirmation},
+                        event_type="manual_baseline_confirmed",
+                        event_payload={"holding_identity": identity},
+                        expected_states={"record_only"},
+                    )
+                    changed_effect_ids.append(accepted["effect_id"])
+                    changed += 1
+                self.store.confirm_fingerprint(
+                    holding_identity=identity,
+                    holding_record_id=holding.record_id if holding else None,
+                    amount=observed_amount,
+                    confirmation_hash=observed_hash,
+                    effect_id=accepted["effect_id"],
+                )
+                continue
             if (
                 existing_external
                 and existing_external["source_hash"] == source_hash
@@ -1271,6 +1335,14 @@ class CashFlowEffectService:
                     source,
                 )
             ]
+            if any(
+                operation_source.get("broker") != FUTU_BROKER
+                for operation_source, _ in operations
+            ) and external_action not in {"apply_delta", "already_reflected"}:
+                raise ValueError(
+                    "non-Futu cash-flow preview requires "
+                    "external_action=apply_delta or already_reflected"
+                )
         else:
             operations = [(source, None)]
 
@@ -1357,6 +1429,16 @@ class CashFlowEffectService:
                         f"variance={self._money(variance)}"
                     )
                 row_target_source = "futu_opend_currency_cash"
+            elif (
+                effect["effect_kind"] == "cash_flow"
+                and external_action == "already_reflected"
+            ):
+                target_amount = self._money(before_payload["quantity"])
+                row_target_source = "manual_current_includes_event"
+                warnings.append(
+                    "operator declared that the fresh non-Futu holding already "
+                    f"includes the event for {self._source_identity(operation_source)}"
+                )
             else:
                 target_decimal = self._decimal(before_payload["quantity"]) + (
                     delta or Decimal("0")
@@ -1401,7 +1483,7 @@ class CashFlowEffectService:
         target_source = (
             target_sources[0]
             if len(set(target_sources)) == 1
-            else "mixed_futu_exact_and_estimated"
+            else "mixed"
         )
         befores = [row["before"] for row in target_rows]
         targets = [row["target"] for row in target_rows]
