@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.38 - 2026-08-14
+
+- Preserve immutable normalized valuation evidence when a confirmed Daily NAV
+  write is blocked by supported cash-flow gates.
+- Add exact account/date valuation replay through fresh Holdings and cash-flow
+  authority checks without refetching prices.
+- Add preview-first historical evidence preparation from dated OpenD and
+  Eastmoney facts with explicit FX and digest-confirmed persistence.
+
 ## 0.1.37 - 2026-08-14
 
 - Treat direct non-Futu cash holding edits as authoritative manual baselines,
