@@ -233,18 +233,33 @@ class AccountNavRecorderService:
                 )
                 artifact = loaded_evidence["artifact"]
                 validated = holdings_preflight_result["validated_snapshot"]
+                historical_receipt_replay = (
+                    artifact.get("preparation")
+                    == "historical_receipt_recovery"
+                )
                 if (
                     validated.normalized_holdings_digest
                     != artifact.get("holdings_digest")
+                    and not historical_receipt_replay
                 ):
                     raise ValueError(
                         "NAV valuation replay holdings digest mismatch"
                     )
+                evidence_holdings_provenance = dict(
+                    loaded_evidence["normalized_valuation"]
+                    .canonical_payload()
+                    .get("holdings_provenance")
+                    or {}
+                )
                 t_snapshot = _now_ms()
                 snapshot = self.read_service.build_snapshot_from_normalized(
                     normalized_valuation=loaded_evidence["normalized_valuation"],
                     snapshot_time=str(artifact.get("snapshot_time") or ""),
-                    holdings_snapshot=validated.provenance(),
+                    holdings_snapshot=(
+                        evidence_holdings_provenance
+                        if historical_receipt_replay
+                        else validated.provenance()
+                    ),
                 )
                 snapshot_ms = _now_ms() - t_snapshot
             elif snapshot is None:
@@ -289,7 +304,7 @@ class AccountNavRecorderService:
             )
             if loaded_evidence is not None:
                 artifact = loaded_evidence["artifact"]
-                resolved_context = resolved_context.with_provenance({
+                replay_provenance = {
                     "mode": "valuation_evidence_replay",
                     "valuation_ref": str(valuation_ref),
                     "source_run_id": artifact["source_run_id"],
@@ -300,7 +315,26 @@ class AccountNavRecorderService:
                     "replay_effect_store_revision": (
                         cash_flow_dataset.effect_store_revision
                     ),
-                })
+                }
+                if artifact.get("preparation") == "historical_receipt_recovery":
+                    replay_provenance.update(
+                        {
+                            "source_receipt_key": artifact[
+                                "source_receipt_key"
+                            ],
+                            "historical_holdings_digest": artifact[
+                                "holdings_digest"
+                            ],
+                            "fresh_holdings_digest": (
+                                holdings_preflight_result[
+                                    "validated_snapshot"
+                                ].normalized_holdings_digest
+                            ),
+                        }
+                    )
+                resolved_context = resolved_context.with_provenance(
+                    replay_provenance
+                )
             resolved_context = resolved_context.with_runtime(
                 valuation_as_of=snapshot.get("snapshot_time"),
                 run_id=resolved_run_id,

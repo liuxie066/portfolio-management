@@ -76,6 +76,7 @@ class NavValuationEvidenceStore:
         normalized_valuation: NormalizedValuationSnapshot,
         preparation: str,
         captured_at: Optional[str] = None,
+        source_receipt_key: Optional[str] = None,
     ) -> dict[str, Any]:
         account = str(account or "").strip()
         nav_date_text = _date_text(nav_date)
@@ -88,6 +89,8 @@ class NavValuationEvidenceStore:
         source_effect_store_revision = str(
             source_effect_store_revision or ""
         ).strip()
+        preparation = str(preparation or "").strip()
+        source_receipt_key = str(source_receipt_key or "").strip() or None
         if not account or not source_run_id or not snapshot_time:
             raise ValueError("NAV valuation evidence scope is incomplete")
         if not _DIGEST_RE.fullmatch(holdings_digest):
@@ -113,6 +116,19 @@ class NavValuationEvidenceStore:
         if valuation_holdings_digest != holdings_digest:
             raise ValueError("NAV valuation evidence holdings digest mismatch")
         datetime.fromisoformat(snapshot_time.replace("Z", "+00:00"))
+        historical_receipt = preparation == "historical_receipt_recovery"
+        expected_source_receipt_key = None
+        source_suffix = f":{account}"
+        if historical_receipt:
+            if not source_run_id.endswith(source_suffix):
+                raise ValueError("historical receipt source run scope mismatch")
+            expected_source_receipt_key = (
+                f"nav:{source_run_id[:-len(source_suffix)]}"
+            )
+            if source_receipt_key != expected_source_receipt_key:
+                raise ValueError("historical receipt key mismatch")
+        elif source_receipt_key is not None:
+            raise ValueError("source receipt key is not allowed for this preparation")
 
         body = {
             "schema_version": EVIDENCE_VERSION,
@@ -126,10 +142,12 @@ class NavValuationEvidenceStore:
             "source_effect_store_revision": source_effect_store_revision,
             "valuation_digest": normalized_valuation.digest,
             "valuation": valuation_payload,
-            "preparation": str(preparation or "").strip(),
+            "preparation": preparation,
         }
         if not body["preparation"]:
             raise ValueError("NAV valuation evidence preparation is required")
+        if source_receipt_key is not None:
+            body["source_receipt_key"] = source_receipt_key
         artifact_digest = digest_payload(body)
         artifact = {**body, "artifact_digest": artifact_digest}
         return {
@@ -237,11 +255,23 @@ class NavValuationEvidenceStore:
         datetime.fromisoformat(
             str(artifact["captured_at"]).replace("Z", "+00:00")
         )
-        if artifact.get("preparation") not in {
+        preparation = artifact.get("preparation")
+        if preparation not in {
             "cash_flow_gate_failure",
             "historical_recovery",
+            "historical_receipt_recovery",
         }:
             raise ValueError("NAV valuation evidence preparation is invalid")
+        source_receipt_key = str(artifact.get("source_receipt_key") or "").strip()
+        if preparation == "historical_receipt_recovery":
+            source_run_id = str(artifact.get("source_run_id") or "")
+            source_suffix = f":{expected_account}"
+            if not source_run_id.endswith(source_suffix):
+                raise ValueError("NAV valuation evidence source run scope mismatch")
+            if source_receipt_key != f"nav:{source_run_id[:-len(source_suffix)]}":
+                raise ValueError("NAV valuation evidence source receipt mismatch")
+        elif source_receipt_key:
+            raise ValueError("NAV valuation evidence source receipt is not allowed")
         holdings_digest = str(artifact.get("holdings_digest") or "")
         if not _DIGEST_RE.fullmatch(holdings_digest):
             raise ValueError("NAV valuation evidence holdings digest is invalid")
@@ -269,6 +299,20 @@ class NavValuationEvidenceStore:
         )
         if valuation_holdings_digest != holdings_digest:
             raise ValueError("NAV valuation evidence holdings digest mismatch")
+        if preparation == "historical_receipt_recovery":
+            holdings_provenance = dict(
+                normalized.canonical_payload().get("holdings_provenance") or {}
+            )
+            if (
+                holdings_provenance.get("source_mode") != "nav_receipt_outbox"
+                or not _DIGEST_RE.fullmatch(
+                    str(holdings_provenance.get("raw_record_digest") or "")
+                )
+                or int(holdings_provenance.get("record_count") or 0) <= 0
+            ):
+                raise ValueError(
+                    "NAV valuation evidence historical holdings provenance is invalid"
+                )
         return normalized
 
 
@@ -518,6 +562,7 @@ class HistoricalNavValuationEvidenceService:
         portfolio: Any,
         holdings_preflight: Any = None,
         evidence_store: Optional[NavValuationEvidenceStore] = None,
+        receipt_store: Any = None,
         price_snapshot_builder: Callable[..., dict[str, dict[str, Any]]] = (
             build_historical_price_snapshot
         ),
@@ -526,7 +571,66 @@ class HistoricalNavValuationEvidenceService:
         self.portfolio = portfolio
         self.holdings_preflight = holdings_preflight
         self.evidence_store = evidence_store or NavValuationEvidenceStore()
+        self.receipt_store = receipt_store
         self.price_snapshot_builder = price_snapshot_builder
+
+    def _load_receipt_holdings(
+        self,
+        *,
+        account: str,
+        nav_date: date,
+        source_run_id: str,
+        expected_holdings_digest: str,
+    ) -> tuple[Any, str]:
+        from src.app.holdings_nav_preflight_service import (
+            ValidatedHoldingsSnapshot,
+        )
+        from src.app.operation_state_store import OperationStateStore
+
+        suffix = f":{account}"
+        if not source_run_id.endswith(suffix) or len(source_run_id) == len(suffix):
+            raise ValueError("historical receipt source run scope mismatch")
+        parent_run_id = source_run_id[: -len(suffix)]
+        receipt_key = f"nav:{parent_run_id}"
+        receipt_store = self.receipt_store or OperationStateStore()
+        receipt = receipt_store.get_nav_receipt(receipt_key)
+        if not receipt:
+            raise ValueError("historical NAV receipt not found")
+        payload = dict(receipt.get("payload") or {})
+        if (
+            payload.get("run_id") != parent_run_id
+            or str(payload.get("date") or "")[:10] != nav_date.isoformat()
+            or payload.get("dry_run") is not False
+            or payload.get("confirm") is not True
+            or payload.get("success") is not False
+            or payload.get("status") not in {"failed", "partial"}
+        ):
+            raise ValueError("historical NAV receipt scope mismatch")
+        matches = [
+            dict(item)
+            for item in list(payload.get("items") or [])
+            if isinstance(item, Mapping) and item.get("run_id") == source_run_id
+        ]
+        if len(matches) != 1:
+            raise ValueError("historical NAV receipt account item is not unique")
+        item = matches[0]
+        if (
+            item.get("account") != account
+            or str(item.get("date") or "")[:10] != nav_date.isoformat()
+            or item.get("dry_run") is not False
+            or item.get("confirm") is not True
+            or item.get("success") is not False
+            or item.get("status") != "failed"
+        ):
+            raise ValueError("historical NAV receipt account scope mismatch")
+        holdings_preflight = dict(item.get("holdings_preflight") or {})
+        snapshot = ValidatedHoldingsSnapshot.from_public_validation(
+            account=account,
+            validation=dict(holdings_preflight.get("validation") or {}),
+            provenance=dict(holdings_preflight.get("holdings_snapshot") or {}),
+            expected_normalized_holdings_digest=expected_holdings_digest,
+        )
+        return snapshot, receipt_key
 
     def prepare(
         self,
@@ -595,8 +699,16 @@ class HistoricalNavValuationEvidenceService:
                 preflight_result.get("error") or "holdings preflight failed"
             )
         validated = preflight_result["validated_snapshot"]
+        preparation = "historical_recovery"
+        source_receipt_key = None
         if validated.normalized_holdings_digest != expected_holdings_digest:
-            raise ValueError("historical evidence holdings digest mismatch")
+            validated, source_receipt_key = self._load_receipt_holdings(
+                account=account,
+                nav_date=target_date,
+                source_run_id=source_run_id,
+                expected_holdings_digest=expected_holdings_digest,
+            )
+            preparation = "historical_receipt_recovery"
 
         preparation_run_id = (
             f"nav-valuation-evidence-prepare:{account}:{target_date.isoformat()}"
@@ -640,7 +752,8 @@ class HistoricalNavValuationEvidenceService:
             cash_flow_financial_fingerprint=expected_cash_flow_fingerprint,
             source_effect_store_revision=source_effect_store_revision,
             normalized_valuation=normalized,
-            preparation="historical_recovery",
+            preparation=preparation,
+            source_receipt_key=source_receipt_key,
         )
         result = {
             "success": True,
@@ -649,6 +762,10 @@ class HistoricalNavValuationEvidenceService:
             "account": account,
             "nav_date": target_date.isoformat(),
             "current_effect_store_revision": dataset.effect_store_revision,
+            "holdings_source": (
+                "nav_receipt_outbox" if source_receipt_key else "current_preflight"
+            ),
+            "source_receipt_key": source_receipt_key,
             **prepared,
         }
         if not write:
