@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.39 - 2026-08-14
+
+- Recover a legacy NAV Holdings snapshot from its exact durable receipt when
+  current Holdings changed after the failed run.
+- Recompute record, raw, and normalized digests and rerun current Holdings
+  validation before creating historical valuation evidence.
+- Permit only receipt-bound historical evidence to replay against healthy but
+  newer Holdings while preserving fresh cash-flow gates and both audit digests.
+
 ## 0.1.38 - 2026-08-14
 
 - Preserve immutable normalized valuation evidence when a confirmed Daily NAV
