@@ -17,7 +17,15 @@ from .holdings_reconciliation_service import (
     HoldingsReconciliationEvaluation,
     HoldingsReconciliationService,
 )
-from .holdings_validation import canonical_record_payload
+from .holdings_validation import (
+    ASSET_CLASS_POLICY_VERSION,
+    CURRENCY_POLICY_VERSION,
+    VALIDATION_POLICY_VERSION,
+    VALIDATION_RELEVANT_FIELDS,
+    HoldingsValidator,
+    canonical_record_payload,
+    record_digest,
+)
 from .holdings_workflow_service import HoldingsWorkflowService
 
 
@@ -271,6 +279,127 @@ class ValidatedHoldingsSnapshot:
             source_mode=source_mode,
             warnings=tuple(str(item) for item in warnings if str(item).strip()),
         )
+
+    @classmethod
+    def from_public_validation(
+        cls,
+        *,
+        account: str,
+        validation: Mapping[str, Any],
+        provenance: Mapping[str, Any],
+        expected_normalized_holdings_digest: str,
+    ) -> "ValidatedHoldingsSnapshot":
+        """Revalidate raw holdings facts retained in a public NAV receipt."""
+
+        account = str(account or "").strip()
+        validation = dict(validation or {})
+        provenance = dict(provenance or {})
+        if not account:
+            raise ValueError("receipt holdings account is required")
+        expected_policies = {
+            "policy_version": VALIDATION_POLICY_VERSION,
+            "currency_policy_version": CURRENCY_POLICY_VERSION,
+            "asset_class_policy_version": ASSET_CLASS_POLICY_VERSION,
+        }
+        if (
+            validation.get("success") is not True
+            or validation.get("status") != "valid"
+            or validation.get("read_only") is not True
+            or int(validation.get("blocking_record_count") or 0) != 0
+            or int(validation.get("actionable_record_count") or 0) != 0
+            or dict(validation.get("evidence_errors") or {})
+        ):
+            raise ValueError("receipt holdings validation is not a valid snapshot")
+        for field_name, expected in expected_policies.items():
+            if validation.get(field_name) != expected:
+                raise ValueError(f"receipt holdings {field_name} mismatch")
+            if provenance.get(field_name) != expected:
+                raise ValueError(f"receipt holdings provenance {field_name} mismatch")
+
+        source_fetch_time = datetime.fromisoformat(
+            str(provenance.get("source_fetch_time") or "").replace("Z", "+00:00")
+        )
+        if source_fetch_time.tzinfo is None or source_fetch_time.utcoffset() is None:
+            raise ValueError("receipt holdings source_fetch_time must be timezone-aware")
+        serialized_records = list(validation.get("records") or [])
+        record_count = int(validation.get("record_count") or 0)
+        if (
+            not serialized_records
+            or record_count != len(serialized_records)
+            or int(provenance.get("record_count") or 0) != record_count
+            or provenance.get("account") != account
+        ):
+            raise ValueError("receipt holdings record scope mismatch")
+
+        required_fields = set(VALIDATION_RELEVANT_FIELDS)
+        raw_records: list[RawHoldingRecord] = []
+        seen_record_ids: set[str] = set()
+        for serialized in serialized_records:
+            if not isinstance(serialized, Mapping):
+                raise ValueError("receipt holdings record is invalid")
+            record_id = str(serialized.get("record_id") or "").strip()
+            if not record_id or record_id in seen_record_ids:
+                raise ValueError("receipt holdings record id is missing or duplicated")
+            seen_record_ids.add(record_id)
+            outcomes = list(serialized.get("outcomes") or [])
+            fields: dict[str, Any] = {}
+            for outcome in outcomes:
+                if not isinstance(outcome, Mapping):
+                    raise ValueError("receipt holdings outcome is invalid")
+                field_name = str(outcome.get("field") or "").strip()
+                if field_name not in required_fields or field_name in fields:
+                    raise ValueError("receipt holdings outcome field is invalid")
+                fields[field_name] = outcome.get("current")
+            if set(fields) != required_fields:
+                raise ValueError("receipt holdings outcome fields are incomplete")
+            identity = dict(serialized.get("identity") or {})
+            for field_name in ("asset_id", "account", "broker"):
+                identity_value = str(identity.get(field_name) or "").strip()
+                field_value = str(fields.get(field_name) or "").strip()
+                if identity_value != field_value:
+                    raise ValueError("receipt holdings identity mismatch")
+            if str(fields.get("account") or "").strip() != account:
+                raise ValueError("receipt holdings account mismatch")
+            if record_digest(fields) != str(serialized.get("record_digest") or ""):
+                raise ValueError("receipt holdings record digest mismatch")
+            raw_records.append(
+                RawHoldingRecord(
+                    record_id=record_id,
+                    raw_fields=fields,
+                    source="nav_receipt_outbox",
+                    fetched_at=source_fetch_time,
+                )
+            )
+
+        report = HoldingsValidator().validate(raw_records)
+        if report.blocking_count or report.actionable_count or report.evidence_errors:
+            raise ValueError("receipt holdings facts fail current validation")
+        evaluation = HoldingsReconciliationEvaluation(
+            report=report,
+            account=account,
+            record_id=None,
+            evidence_by_account={},
+        )
+        snapshot = cls.from_evaluation(
+            account=account,
+            records=raw_records,
+            evaluation=evaluation,
+            source_fetch_time=source_fetch_time,
+            source_mode="nav_receipt_outbox",
+            warnings=tuple(provenance.get("warnings") or ()),
+        )
+        if snapshot.raw_record_digest != provenance.get("raw_record_digest"):
+            raise ValueError("receipt holdings raw digest mismatch")
+        recorded_normalized_digest = str(
+            provenance.get("normalized_holdings_digest") or ""
+        )
+        if (
+            snapshot.normalized_holdings_digest != recorded_normalized_digest
+            or snapshot.normalized_holdings_digest
+            != str(expected_normalized_holdings_digest or "")
+        ):
+            raise ValueError("receipt holdings normalized digest mismatch")
+        return snapshot
 
     def to_valuation_holdings(self) -> list[Holding]:
         """Return private copies because valuation mutates runtime fields."""

@@ -25,9 +25,15 @@ snapshot 仍由现有正式写入路径计算和保存。
 前提：
 
 - 已处理目标日期的 cash-flow blocker，当前 gate 能通过；
-- 当前 Holdings digest 仍等于失败回执中的 digest；
+- 失败运行的 durable NAV receipt 仍在本机 outbox，且包含完整 Holdings
+  validation records；
 - OpenD 可用，且能访问 Eastmoney 历史基金净值接口；
 - 使用失败运行原始的 FX 和 valuation-as-of，不使用当前汇率。
+
+命令仍会先执行当前 Holdings preflight。若当前 digest 已因后续合法同步而变化，
+只允许按精确 `source-run-id` 读取对应 outbox receipt：逐条重算 record/raw digest，
+用当前纯 Holdings validator 重新验证，再要求 normalized digest 等于命令中的
+expected digest。不会修改或回滚当前 Holdings。
 
 先 preview。以下是 `lx / 2026-08-13` 的已确认输入：
 
@@ -47,7 +53,9 @@ snapshot 仍由现有正式写入路径计算和保存。
 
 Preview 必须返回 `status=preview`，且不会写 artifact。核对：
 
-- Holdings 和 cash-flow fingerprint 均未变化；
+- Holdings 来源为 `current_preflight` 或 `nav_receipt_outbox`；后一种必须显示
+  精确的 `source_receipt_key`，且 historical digest 与失败回执一致；
+- cash-flow fingerprint 未变化；
 - A/H/US 股票及场内基金的 `provider=futu_opend`、`fact_date=2026-08-13`；
 - 场外基金的 `provider=eastmoney` 且 `fact_date <= 2026-08-13`；
 - CASH/MMF/crypto 的 FX 与命令输入一致；
@@ -65,6 +73,10 @@ Preview 必须返回 `status=preview`，且不会写 artifact。核对：
 
 成功会返回 `status=written` 和 `valuation_ref`。随后使用上一节的 `daily-job
 --valuation-ref` 命令先 dry-run，再在核对输出后执行 `--write --confirm`。
+
+`historical_receipt_recovery` replay 仍要求当前 Holdings preflight 成功，但允许
+当前 digest 与历史 digest 不同；NAV 和目标日期 Holdings snapshot 使用 artifact
+中的历史事实，fresh digest 和 source receipt key 会写入 finality provenance。
 
 任一日期、digest、provider fact、FX、Holdings 或 cash-flow 变化都会 fail closed；
 不要修改 artifact 文件或改用当前价格规避失败。

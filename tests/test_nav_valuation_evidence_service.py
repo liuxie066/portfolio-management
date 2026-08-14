@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 import json
 import sys
 from types import SimpleNamespace
@@ -8,6 +8,11 @@ from types import SimpleNamespace
 import pytest
 
 from src.app.account_nav_recorder_service import AccountNavRecorderService
+from src.app.holdings_nav_preflight_service import ValidatedHoldingsSnapshot
+from src.app.holdings_reconciliation_service import (
+    HoldingsReconciliationEvaluation,
+)
+from src.app.holdings_validation import HoldingsValidator
 from src.app.nav_finality import NavWriteContext
 from src.app.nav_valuation_evidence_service import NavValuationEvidenceStore
 from src.app.nav_valuation_evidence_service import (
@@ -20,6 +25,7 @@ from src.domain.cash_flow_contracts import (
     CashFlowDatasetBlocker,
     CashFlowDatasetRefusal,
 )
+from src.domain.holdings import RawHoldingRecord
 from src.domain.snapshot_contracts import (
     NormalizedValuationRow,
     NormalizedValuationSnapshot,
@@ -32,7 +38,10 @@ HOLDINGS_DIGEST = "1" * 64
 CASH_FLOW_FINGERPRINT = "2" * 64
 
 
-def _official(account: str = "lx") -> NormalizedValuationSnapshot:
+def _official(
+    account: str = "lx",
+    holdings_provenance: dict | None = None,
+) -> NormalizedValuationSnapshot:
     holding = Holding(
         record_id="rec_1",
         asset_id="CNY-CASH",
@@ -65,7 +74,7 @@ def _official(account: str = "lx") -> NormalizedValuationSnapshot:
                 "source": "fixed",
             }
         },
-        holdings_provenance={
+        holdings_provenance=holdings_provenance or {
             "normalized_holdings_digest": HOLDINGS_DIGEST,
         },
         source_provenance={"price_mode": "snapshot"},
@@ -163,6 +172,123 @@ class _Preflight:
             "validated_snapshot": _Validated(),
             "holdings_snapshot": _Validated.provenance(),
         }
+
+
+def _receipt_holdings() -> tuple[ValidatedHoldingsSnapshot, dict]:
+    raw = RawHoldingRecord(
+        record_id="rec_old",
+        raw_fields={
+            "asset_id": "CNY-MMF",
+            "account": "lx",
+            "broker": "富途",
+            "quantity": "752628.22",
+            "asset_type": "mmf",
+            "asset_name": "货币基金",
+            "currency": "CNY",
+            "asset_class": "现金",
+            "avg_cost": None,
+            "industry": "现金",
+            "tag": [],
+            "created_at": None,
+            "updated_at": "2026/08/14",
+        },
+        fetched_at=datetime(2026, 8, 14, 0, 11, 40, tzinfo=UTC),
+    )
+    report = HoldingsValidator().validate([raw])
+    snapshot = ValidatedHoldingsSnapshot.from_evaluation(
+        account="lx",
+        records=[raw],
+        evaluation=HoldingsReconciliationEvaluation(
+            report=report,
+            account="lx",
+            record_id=None,
+            evidence_by_account={},
+        ),
+        source_fetch_time=raw.fetched_at,
+        source_mode="feishu",
+    )
+    return snapshot, {
+        "validation": report.as_dict(),
+        "holdings_snapshot": snapshot.provenance(),
+    }
+
+
+def _receipt_row(source_run_id: str, holdings_preflight: dict) -> dict:
+    parent_run_id = source_run_id.rsplit(":", 1)[0]
+    return {
+        "receipt_key": f"nav:{parent_run_id}",
+        "status": "sent",
+        "payload": {
+            "run_id": parent_run_id,
+            "date": "2026-08-13",
+            "dry_run": False,
+            "confirm": True,
+            "success": False,
+            "status": "partial",
+            "items": [
+                {
+                    "run_id": source_run_id,
+                    "account": "lx",
+                    "date": "2026-08-13",
+                    "dry_run": False,
+                    "confirm": True,
+                    "success": False,
+                    "status": "failed",
+                    "holdings_preflight": holdings_preflight,
+                }
+            ],
+        },
+    }
+
+
+def test_receipt_holdings_reconstructs_raw_facts_and_reruns_validation():
+    original, public = _receipt_holdings()
+    public["validation"]["records"][0]["outcomes"][0]["status"] = "invalid"
+
+    restored = ValidatedHoldingsSnapshot.from_public_validation(
+        account="lx",
+        validation=public["validation"],
+        provenance=public["holdings_snapshot"],
+        expected_normalized_holdings_digest=(
+            original.normalized_holdings_digest
+        ),
+    )
+
+    assert restored.raw_record_digest == original.raw_record_digest
+    assert restored.normalized_holdings_digest == (
+        original.normalized_holdings_digest
+    )
+    assert restored.source_mode == "nav_receipt_outbox"
+
+    account_outcome = next(
+        item
+        for item in public["validation"]["records"][0]["outcomes"]
+        if item["field"] == "account"
+    )
+    account_outcome["current"] = "sy"
+    public["validation"]["records"][0]["identity"]["account"] = "sy"
+    with pytest.raises(ValueError, match="account mismatch"):
+        ValidatedHoldingsSnapshot.from_public_validation(
+            account="lx",
+            validation=public["validation"],
+            provenance=public["holdings_snapshot"],
+            expected_normalized_holdings_digest=(
+                original.normalized_holdings_digest
+            ),
+        )
+    account_outcome["current"] = "lx"
+    public["validation"]["records"][0]["identity"]["account"] = "lx"
+
+    public["validation"]["records"][0]["outcomes"][3]["current"] = "1"
+    with pytest.raises(ValueError, match="record digest mismatch"):
+        ValidatedHoldingsSnapshot.from_public_validation(
+            account="lx",
+            validation=public["validation"],
+            provenance=public["holdings_snapshot"],
+            expected_normalized_holdings_digest=(
+                original.normalized_holdings_digest
+            ),
+        )
 
 
 class _Dataset:
@@ -362,6 +488,164 @@ def test_replay_uses_evidence_without_price_fetch_and_audits_revisions(tmp_path)
     assert record_context.provenance["source_effect_store_revision"] == "cfs_source"
     assert record_context.provenance["replay_effect_store_revision"] == "cfs_replay"
     assert calls[0][0] == "rehydrate"
+
+
+def test_historical_receipt_replay_allows_audited_current_holdings_drift(tmp_path):
+    source, public = _receipt_holdings()
+    historical = ValidatedHoldingsSnapshot.from_public_validation(
+        account="lx",
+        validation=public["validation"],
+        provenance=public["holdings_snapshot"],
+        expected_normalized_holdings_digest=(
+            source.normalized_holdings_digest
+        ),
+    )
+    store = NavValuationEvidenceStore(tmp_path)
+    saved = store.save(
+        store.prepare(
+            account="lx",
+            nav_date="2026-08-13",
+            source_run_id="daily-nav-job-source:lx",
+            snapshot_time="2026-08-14T08:11:45.216546",
+            holdings_digest=historical.normalized_holdings_digest,
+            cash_flow_financial_fingerprint=CASH_FLOW_FINGERPRINT,
+            source_effect_store_revision="cfs_source",
+            normalized_valuation=_official(
+                holdings_provenance=historical.provenance()
+            ),
+            preparation="historical_receipt_recovery",
+            source_receipt_key="nav:daily-nav-job-source",
+        )
+    )
+    calls = []
+
+    class CurrentValidated(_Validated):
+        normalized_holdings_digest = "9" * 64
+
+        @staticmethod
+        def provenance():
+            return {"normalized_holdings_digest": "9" * 64}
+
+    class CurrentPreflight:
+        @staticmethod
+        def prepare_account(**_kwargs):
+            return {
+                "success": True,
+                "validated_snapshot": CurrentValidated(),
+            }
+
+    class Read:
+        @staticmethod
+        def build_snapshot(**_kwargs):
+            raise AssertionError("historical replay must not fetch prices")
+
+        @staticmethod
+        def build_snapshot_from_normalized(**kwargs):
+            calls.append(("rehydrate", kwargs))
+            normalized = kwargs["normalized_valuation"]
+            return {
+                "snapshot_time": kwargs["snapshot_time"],
+                "normalized_valuation": normalized,
+                "valuation": normalized.to_portfolio_valuation(),
+                "holdings_snapshot": kwargs["holdings_snapshot"],
+            }
+
+    dataset = _Dataset()
+    dataset.run_id = "daily-nav-job-replay:lx"
+    dataset.effect_store_revision = "cfs_replay"
+
+    class Portfolio:
+        @staticmethod
+        def build_cash_flow_dataset(**_kwargs):
+            return dataset
+
+        @staticmethod
+        def record_nav(*_args, **kwargs):
+            calls.append(("record", kwargs))
+            return SimpleNamespace(
+                record_id=None,
+                date=date(2026, 8, 13),
+                account="lx",
+                total_value=100.0,
+                cash_value=100.0,
+                stock_value=0.0,
+                fund_value=0.0,
+                shares=100.0,
+                nav=1.0,
+                cash_flow=0.0,
+                share_change=0.0,
+                pnl=0.0,
+                mtd_nav_change=0.0,
+                ytd_nav_change=0.0,
+                mtd_pnl=0.0,
+                ytd_pnl=0.0,
+                details={},
+            )
+
+    result = AccountNavRecorderService(
+        account="lx",
+        storage=SimpleNamespace(),
+        portfolio=Portfolio(),
+        read_service=Read(),
+        holdings_preflight=CurrentPreflight(),
+        valuation_evidence_store=store,
+    ).record(
+        nav_date="2026-08-13",
+        dry_run=True,
+        run_id="daily-nav-job-replay:lx",
+        nav_write_context=NavWriteContext(
+            status="final",
+            writer="daily-nav-job",
+            write_reason="canonical_daily_nav_replay",
+            nav_date=date(2026, 8, 13),
+            run_id="daily-nav-job-replay:lx",
+        ),
+        valuation_ref=saved["valuation_ref"],
+    )
+
+    assert result["success"] is True
+    assert calls[0][1]["holdings_snapshot"]["source_mode"] == (
+        "nav_receipt_outbox"
+    )
+    provenance = calls[-1][1]["nav_write_context"].provenance
+    assert provenance["historical_holdings_digest"] == (
+        historical.normalized_holdings_digest
+    )
+    assert provenance["fresh_holdings_digest"] == "9" * 64
+    assert provenance["source_receipt_key"] == "nav:daily-nav-job-source"
+
+
+def test_normal_replay_still_rejects_current_holdings_drift(tmp_path):
+    store = NavValuationEvidenceStore(tmp_path)
+    saved = store.save(_prepared(store))
+
+    class CurrentValidated(_Validated):
+        normalized_holdings_digest = "9" * 64
+
+    class CurrentPreflight:
+        @staticmethod
+        def prepare_account(**_kwargs):
+            return {
+                "success": True,
+                "validated_snapshot": CurrentValidated(),
+            }
+
+    result = AccountNavRecorderService(
+        account="lx",
+        storage=SimpleNamespace(),
+        portfolio=SimpleNamespace(),
+        read_service=SimpleNamespace(),
+        holdings_preflight=CurrentPreflight(),
+        valuation_evidence_store=store,
+    ).record(
+        nav_date="2026-08-13",
+        dry_run=True,
+        run_id="daily-nav-job-replay:lx",
+        valuation_ref=saved["valuation_ref"],
+    )
+
+    assert result["success"] is False
+    assert result["error"] == "NAV valuation replay holdings digest mismatch"
 
 
 def test_replay_rejects_cash_flow_fingerprint_change(tmp_path):
@@ -630,3 +914,107 @@ def test_historical_prepare_is_preview_first_and_digest_bound(tmp_path):
     assert store.load(written["valuation_ref"])["artifact_digest"] == (
         preview["artifact_digest"]
     )
+
+
+def test_historical_prepare_falls_back_to_exact_receipt_holdings(tmp_path):
+    historical, public = _receipt_holdings()
+    source_run_id = "daily-nav-job-source:lx"
+    receipt = _receipt_row(source_run_id, public)
+
+    class CurrentValidated(_Validated):
+        normalized_holdings_digest = "9" * 64
+
+    class CurrentPreflight:
+        @staticmethod
+        def prepare_account(**_kwargs):
+            return {"success": True, "validated_snapshot": CurrentValidated()}
+
+    class ReceiptStore:
+        @staticmethod
+        def get_nav_receipt(receipt_key):
+            assert receipt_key == "nav:daily-nav-job-source"
+            return receipt
+
+    class Dataset(_Dataset):
+        effect_store_revision = "cfs_current"
+
+        @staticmethod
+        def assert_official_scope(**_kwargs):
+            return None
+
+    class Portfolio:
+        @staticmethod
+        def build_cash_flow_dataset(**_kwargs):
+            return Dataset()
+
+        @staticmethod
+        def calculate_normalized_valuation(**kwargs):
+            return _official(
+                holdings_provenance=kwargs["holdings_provenance"]
+            )
+
+    store = NavValuationEvidenceStore(tmp_path)
+    service = HistoricalNavValuationEvidenceService(
+        storage=SimpleNamespace(),
+        portfolio=Portfolio(),
+        holdings_preflight=CurrentPreflight(),
+        evidence_store=store,
+        receipt_store=ReceiptStore(),
+        price_snapshot_builder=lambda *_args, **_kwargs: {
+            "CNY-MMF": {"price": 1, "cny_price": 1, "currency": "CNY"}
+        },
+    )
+    kwargs = {
+        "account": "lx",
+        "nav_date": "2026-08-13",
+        "source_run_id": source_run_id,
+        "expected_holdings_digest": historical.normalized_holdings_digest,
+        "expected_cash_flow_fingerprint": CASH_FLOW_FINGERPRINT,
+        "source_effect_store_revision": "cfs_source",
+        "valuation_as_of": "2026-08-14T08:11:45.216546",
+        "usdcny": "6.757",
+        "hkdcny": "0.8611",
+    }
+
+    preview = service.prepare(**kwargs)
+    assert preview["status"] == "preview"
+    assert preview["holdings_source"] == "nav_receipt_outbox"
+    assert preview["source_receipt_key"] == "nav:daily-nav-job-source"
+    assert preview["artifact"]["preparation"] == (
+        "historical_receipt_recovery"
+    )
+    assert not list(tmp_path.rglob("*.json"))
+
+    written = service.prepare(
+        **kwargs,
+        write=True,
+        confirm=True,
+        expected_digest=preview["artifact_digest"],
+    )
+    loaded = store.load(written["valuation_ref"])
+    assert loaded["artifact"]["source_receipt_key"] == (
+        "nav:daily-nav-job-source"
+    )
+    assert (
+        loaded["normalized_valuation"]
+        .canonical_payload()["holdings_provenance"]["source_mode"]
+        == "nav_receipt_outbox"
+    )
+
+
+def test_historical_receipt_artifact_requires_bound_source_key(tmp_path):
+    historical, _public = _receipt_holdings()
+    normalized = _official(holdings_provenance=historical.provenance())
+
+    with pytest.raises(ValueError, match="receipt key mismatch"):
+        NavValuationEvidenceStore(tmp_path).prepare(
+            account="lx",
+            nav_date="2026-08-13",
+            source_run_id="daily-nav-job-source:lx",
+            snapshot_time="2026-08-14T08:11:45.216546",
+            holdings_digest=historical.normalized_holdings_digest,
+            cash_flow_financial_fingerprint=CASH_FLOW_FINGERPRINT,
+            source_effect_store_revision="cfs_source",
+            normalized_valuation=normalized,
+            preparation="historical_receipt_recovery",
+        )
