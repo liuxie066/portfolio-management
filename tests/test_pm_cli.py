@@ -1401,6 +1401,38 @@ def test_pm_daily_job_prefers_service_client():
     ]
 
 
+def test_pm_daily_job_passes_valuation_reference():
+    import src.service.client as client_module
+
+    calls = []
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def daily_nav_job(self, **kwargs):
+            calls.append(kwargs)
+            return {"success": True, "status": "completed", "items": []}
+
+    old_client = client_module.PortfolioServiceClient
+    try:
+        client_module.PortfolioServiceClient = FakeClient
+        with redirect_stdout(io.StringIO()):
+            assert pm.main([
+                "daily-job",
+                "--account", "lx",
+                "--nav-date", "2026-08-13",
+                "--valuation-ref", "nav-valuation-evidence:v1:lx:2026-08-13:" + "1" * 64,
+                "--json",
+            ]) == 0
+    finally:
+        client_module.PortfolioServiceClient = old_client
+
+    assert calls[0]["account"] == "lx"
+    assert calls[0]["nav_date"] == "2026-08-13"
+    assert calls[0]["valuation_ref"].startswith("nav-valuation-evidence:v1:lx:")
+
+
 def test_pm_config_inspect_outputs_yaml_sources_and_redacts_secrets():
     from src import config
 

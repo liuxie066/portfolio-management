@@ -41,6 +41,7 @@ class NavWriteContext:
     nav_date: date
     valuation_as_of: Optional[str] = None
     run_id: Optional[str] = None
+    provenance: Optional[Mapping[str, Any]] = None
 
     def __post_init__(self) -> None:
         if self.status not in FINALITY_STATUSES:
@@ -60,6 +61,8 @@ class NavWriteContext:
         if self.run_id is not None:
             run_id = str(self.run_id).strip()
             object.__setattr__(self, "run_id", run_id or None)
+        if self.provenance is not None:
+            object.__setattr__(self, "provenance", dict(self.provenance))
 
     def with_runtime(
         self,
@@ -81,6 +84,9 @@ class NavWriteContext:
             run_id=self.run_id or runtime_run_id,
         )
 
+    def with_provenance(self, provenance: Mapping[str, Any]) -> "NavWriteContext":
+        return replace(self, provenance=dict(provenance))
+
     def to_details(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "version": FINALITY_VERSION,
@@ -92,6 +98,8 @@ class NavWriteContext:
         }
         if self.run_id:
             payload["run_id"] = self.run_id
+        if self.provenance:
+            payload["provenance"] = dict(self.provenance)
         return payload
 
 

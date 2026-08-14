@@ -31,6 +31,7 @@ class DailyNavJobService:
         calendar: Optional[BusinessCalendarService] = None,
         account_runner_factory: Optional[Callable[[str], Any]] = None,
         holdings_preflight: Any = None,
+        valuation_evidence_store: Any = None,
     ):
         self.storage = storage
         self.portfolio = portfolio
@@ -39,6 +40,16 @@ class DailyNavJobService:
         self.calendar = calendar or BusinessCalendarService.from_config()
         self.account_runner_factory = account_runner_factory
         self._holdings_preflight_instance = holdings_preflight
+        self._valuation_evidence_store_instance = valuation_evidence_store
+
+    def _valuation_evidence_store(self) -> Any:
+        if self._valuation_evidence_store_instance is None:
+            from src.app.nav_valuation_evidence_service import (
+                NavValuationEvidenceStore,
+            )
+
+            self._valuation_evidence_store_instance = NavValuationEvidenceStore()
+        return self._valuation_evidence_store_instance
 
     def _holdings_preflight(self) -> Any:
         if self._holdings_preflight_instance is None:
@@ -79,6 +90,7 @@ class DailyNavJobService:
             portfolio=self.portfolio,
             read_service=self._read_service(account),
             holdings_preflight=self._holdings_preflight(),
+            valuation_evidence_store=self._valuation_evidence_store_instance,
         )
 
     def _resolve_accounts(self, accounts: Any = None, account: Optional[str] = None) -> Dict[str, Any]:
@@ -194,6 +206,7 @@ class DailyNavJobService:
         resolved_sync_futu_dry_run: bool,
         resolved_run_id: str,
         run_quote_pool: RunQuotePool,
+        valuation_ref: Optional[str],
     ) -> Dict[str, Any]:
         stage = "account_nav"
         try:
@@ -201,7 +214,11 @@ class DailyNavJobService:
             write_context = NavWriteContext(
                 status="final",
                 writer="daily-nav-job",
-                write_reason="canonical_daily_nav_job",
+                write_reason=(
+                    "canonical_daily_nav_replay"
+                    if valuation_ref
+                    else "canonical_daily_nav_job"
+                ),
                 nav_date=resolved_nav_date,
                 run_id=item_run_id,
             )
@@ -217,6 +234,7 @@ class DailyNavJobService:
                 run_id=item_run_id,
                 nav_write_context=write_context,
                 run_quote_pool=run_quote_pool,
+                valuation_ref=valuation_ref,
             )
             result.setdefault("account", target_account)
             result.setdefault("date", resolved_nav_date.isoformat())
@@ -301,6 +319,7 @@ class DailyNavJobService:
         sync_futu_dry_run: Optional[bool] = None,
         force_non_business_day: bool = False,
         run_id: Optional[str] = None,
+        valuation_ref: Optional[str] = None,
     ) -> Dict[str, Any]:
         from src.run_id import new_run_id
 
@@ -311,6 +330,55 @@ class DailyNavJobService:
         )
         resolved_run_id = run_id or new_run_id("daily-nav-job", account or "multi")
         calendar_info = self.calendar.explain(resolved_nav_date)
+
+        if valuation_ref is not None:
+            replay_accounts = normalize_accounts(account)
+            if (
+                not str(valuation_ref).strip()
+                or not replay_accounts
+                or len(replay_accounts) != 1
+                or accounts is not None
+                or nav_date is None
+                or str(nav_date) == "auto"
+                or sync_futu_cash_mmf
+                or sync_futu_dry_run is not None
+            ):
+                return {
+                    "success": False,
+                    "status": "failed",
+                    "stage": "valuation_evidence_preflight",
+                    "error": (
+                        "valuation replay requires one explicit account and nav_date, "
+                        "and does not accept accounts or Futu sync flags"
+                    ),
+                    "date": resolved_nav_date.isoformat(),
+                    "run_id": resolved_run_id,
+                    "dry_run": dry_run,
+                    "confirm": confirm,
+                }
+            try:
+                self._valuation_evidence_store().load(
+                    valuation_ref,
+                    expected_account=replay_accounts[0],
+                    expected_nav_date=resolved_nav_date,
+                )
+            except Exception as exc:
+                error = str(exc) or exc.__class__.__name__
+                return {
+                    "success": False,
+                    "status": "failed",
+                    "stage": "valuation_evidence_preflight",
+                    "error": error,
+                    "failure": {
+                        "stage": "valuation_evidence_preflight",
+                        "exception_type": exc.__class__.__name__,
+                        "message": error,
+                    },
+                    "date": resolved_nav_date.isoformat(),
+                    "run_id": resolved_run_id,
+                    "dry_run": dry_run,
+                    "confirm": confirm,
+                }
 
         if (not dry_run) and (not confirm):
             return {
@@ -424,6 +492,7 @@ class DailyNavJobService:
                         resolved_sync_futu_dry_run=resolved_sync_futu_dry_run,
                         resolved_run_id=resolved_run_id,
                         run_quote_pool=run_quote_pool,
+                        valuation_ref=valuation_ref,
                     )
 
         items = [items_by_account[target_account] for target_account in target_accounts]

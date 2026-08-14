@@ -20,12 +20,14 @@ class DailyAccountNavService:
         portfolio: Any,
         read_service: Any,
         holdings_preflight: Any = None,
+        valuation_evidence_store: Any = None,
     ):
         self.account = account
         self.storage = storage
         self.portfolio = portfolio
         self.read_service = read_service
         self.holdings_preflight = holdings_preflight
+        self.valuation_evidence_store = valuation_evidence_store
 
     def run(
         self,
@@ -41,6 +43,7 @@ class DailyAccountNavService:
         run_id: Optional[str] = None,
         nav_write_context: Optional[NavWriteContext] = None,
         run_quote_pool: Any = None,
+        valuation_ref: Optional[str] = None,
     ) -> Dict[str, Any]:
         resolved_date = _coerce_date(nav_date) if nav_date is not None else bj_today()
         resolved_context = nav_write_context or NavWriteContext(
@@ -56,6 +59,7 @@ class DailyAccountNavService:
             portfolio=self.portfolio,
             read_service=self.read_service,
             holdings_preflight=self.holdings_preflight,
+            valuation_evidence_store=self.valuation_evidence_store,
         ).record(
             nav_date=nav_date,
             price_timeout=price_timeout,
@@ -68,6 +72,7 @@ class DailyAccountNavService:
             run_id=run_id,
             nav_write_context=resolved_context,
             run_quote_pool=run_quote_pool,
+            valuation_ref=valuation_ref,
         )
         if not record_result.get("success"):
             nav_result = record_result.get("nav_result")

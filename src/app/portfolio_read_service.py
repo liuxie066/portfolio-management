@@ -260,6 +260,42 @@ class PortfolioReadService:
             )
             valuation = normalized_valuation.to_portfolio_valuation()
             normalized_valuation.assert_compatible(valuation)
+        return self._snapshot_payload(
+            normalized_valuation=normalized_valuation,
+            valuation=valuation,
+            snapshot_time=bj_now_naive().isoformat(),
+            holdings_snapshot=holdings_provenance,
+        )
+
+    def build_snapshot_from_normalized(
+        self,
+        *,
+        normalized_valuation: NormalizedValuationSnapshot,
+        snapshot_time: str,
+        holdings_snapshot: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        normalized_valuation.assert_official_eligible(
+            expected_source="valuation_service"
+        )
+        if normalized_valuation.account != self.account:
+            raise ValueError("normalized valuation account mismatch")
+        valuation = normalized_valuation.to_portfolio_valuation()
+        normalized_valuation.assert_compatible(valuation)
+        return self._snapshot_payload(
+            normalized_valuation=normalized_valuation,
+            valuation=valuation,
+            snapshot_time=snapshot_time,
+            holdings_snapshot=holdings_snapshot,
+        )
+
+    @staticmethod
+    def _snapshot_payload(
+        *,
+        normalized_valuation: NormalizedValuationSnapshot,
+        valuation: Any,
+        snapshot_time: str,
+        holdings_snapshot: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
         valuation_holdings = valuation.holdings or []
         holdings_list = []
         for h in valuation_holdings:
@@ -287,10 +323,10 @@ class PortfolioReadService:
         hk_exposure_value = getattr(valuation, "hk_asset_value", 0.0)
 
         return {
-            "snapshot_time": bj_now_naive().isoformat(),
+            "snapshot_time": snapshot_time,
             "normalized_valuation": normalized_valuation,
             "valuation": valuation,
-            "holdings_snapshot": dict(holdings_provenance or {}),
+            "holdings_snapshot": dict(holdings_snapshot or {}),
             "holdings_data": {
                 "success": True,
                 "holdings": holdings_list,

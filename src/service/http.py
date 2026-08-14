@@ -82,6 +82,7 @@ class DailyNavJobRequest(BaseModel):
     sync_futu_dry_run: Optional[bool] = None
     force_non_business_day: bool = False
     run_id: Optional[str] = None
+    valuation_ref: Optional[str] = None
 
 
 class ValuationEvidenceRequest(BaseModel):

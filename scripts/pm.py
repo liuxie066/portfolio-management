@@ -1419,6 +1419,7 @@ def cmd_daily_job(args):
             "sync_futu_cash_mmf": bool(args.sync_futu_cash_mmf),
             "force_non_business_day": bool(args.force_non_business_day),
             "run_id": getattr(args, "run_id", None),
+            "valuation_ref": getattr(args, "valuation_ref", None),
         }
         if getattr(args, "sync_futu_dry_run", None) is not None:
             kwargs["sync_futu_dry_run"] = bool(args.sync_futu_dry_run)
@@ -1668,6 +1669,11 @@ def build_parser() -> argparse.ArgumentParser:
         subparser.add_argument("--sync-futu-write", dest="sync_futu_dry_run", action="store_false", help="persist MMF sync and CASH reconciliation observations when NAV is also writing")
         subparser.add_argument("--force-non-business-day", action="store_true", help="run even when calendar marks the NAV date non-business")
         subparser.add_argument("--run-id", default=None, help="operator-supplied run id for tracing")
+        subparser.add_argument(
+            "--valuation-ref",
+            default=None,
+            help="server-side immutable valuation reference for one-account replay",
+        )
         subparser.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
 
     p_daily = sp.add_parser("daily", help="calculate daily NAV and position distribution; dry-run by default")

@@ -334,6 +334,7 @@ class PortfolioServiceClient:
         sync_futu_dry_run: Optional[bool] = None,
         force_non_business_day: bool = False,
         run_id: Optional[str] = None,
+        valuation_ref: Optional[str] = None,
     ) -> Dict[str, Any]:
         body = {
             "price_timeout": price_timeout,
@@ -352,6 +353,7 @@ class PortfolioServiceClient:
             "nav_date": _body_value(nav_date),
             "run_date": _body_value(run_date),
             "run_id": run_id,
+            "valuation_ref": valuation_ref,
         }
         body.update({key: value for key, value in optional.items() if value is not None})
         return self._post("/daily-nav-job", body)

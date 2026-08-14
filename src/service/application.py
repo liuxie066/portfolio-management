@@ -654,6 +654,7 @@ class PortfolioService:
         sync_futu_dry_run: Optional[bool] = None,
         force_non_business_day: bool = False,
         run_id: Optional[str] = None,
+        valuation_ref: Optional[str] = None,
     ) -> Dict[str, Any]:
         from src.app.business_calendar_service import BusinessCalendarService
         from src.app import DailyNavJobService
@@ -685,6 +686,7 @@ class PortfolioService:
                 sync_futu_dry_run=sync_futu_dry_run,
                 force_non_business_day=force_non_business_day,
                 run_id=resolved_run_id,
+                valuation_ref=valuation_ref,
             )
         except Exception as exc:
             error = str(exc) or exc.__class__.__name__
