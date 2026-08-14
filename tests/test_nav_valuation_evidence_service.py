@@ -241,6 +241,24 @@ def test_daily_gate_failure_captures_evidence_but_scope_failure_does_not(tmp_pat
         "daily-nav-job-source:lx"
     )
 
+    preview_store = NavValuationEvidenceStore(tmp_path / "preview")
+    preview = AccountNavRecorderService(
+        account="lx",
+        storage=SimpleNamespace(),
+        portfolio=Portfolio(),
+        read_service=Read(),
+        holdings_preflight=_Preflight(),
+        valuation_evidence_store=preview_store,
+    ).record(
+        nav_date="2026-08-13",
+        dry_run=True,
+        confirm=False,
+        run_id="daily-nav-job-source:lx",
+        nav_write_context=context,
+    )
+    assert "valuation_ref" not in preview
+    assert not list((tmp_path / "preview").rglob("*.json"))
+
     class ScopeFailurePortfolio(Portfolio):
         @staticmethod
         def record_nav(*_args, **_kwargs):

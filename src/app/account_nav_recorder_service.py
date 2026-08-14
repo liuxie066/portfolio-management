@@ -164,7 +164,6 @@ class AccountNavRecorderService:
             }
 
         holdings_preflight_result = None
-        snapshot = snapshot
         cash_flow_dataset = None
         loaded_evidence = None
         try:
@@ -439,6 +438,8 @@ class AccountNavRecorderService:
             )
             if (
                 valuation_ref is None
+                and not dry_run
+                and confirm
                 and writer == "daily-nav-job"
                 and exc.reason_code in capture_reasons
                 and normalized is not None
