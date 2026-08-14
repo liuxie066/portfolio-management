@@ -6,10 +6,12 @@ from unittest.mock import Mock
 
 import pytest
 
+from src.app.cash_flow_effect_service import CashFlowEffectService
 from src.app.cash_flow_summary_service import CashFlowSummaryService
 from src.domain.cash_flow_contracts import (
     CASH_FLOW_DATASET_CONTRACT_VERSION,
     CashFlowContractError,
+    CashFlowDatasetRefusal,
     CompletedCashFlowFacts,
     RawCashFlowRecord,
     expected_cash_flow_dedup_key_from_values,
@@ -201,13 +203,16 @@ def test_cash_flow_dataset_missing_date_blocks_without_partial_authority():
         blocker.reason_code for blocker in dataset.blockers
     }
     assert dataset.cumulative == Decimal("50.00")
-    with pytest.raises(ValueError, match="has blockers"):
+    with pytest.raises(CashFlowDatasetRefusal, match="has blockers") as exc_info:
         dataset.assert_official_scope(
             account="a",
             nav_date=date(2025, 3, 14),
             run_id="run-missing-date",
             start_year=2025,
         )
+    assert exc_info.value.reason_code == "CASH_FLOW_DATASET_BLOCKED"
+    assert exc_info.value.blockers == dataset.blockers
+    assert exc_info.value.blockers[0].reason_code == "FLOW_DATE_MISSING"
 
 
 def test_cash_flow_dataset_future_rows_are_audit_only_and_do_not_affect_totals():
@@ -289,13 +294,15 @@ def test_cash_flow_dataset_rejects_completed_rows_detached_from_raw_source():
         cumulative=Decimal("0"),
     )
 
-    with pytest.raises(ValueError, match="completed_rows"):
+    with pytest.raises(CashFlowDatasetRefusal, match="completed_rows") as exc_info:
         detached.assert_official_scope(
             account="a",
             nav_date=date(2025, 3, 14),
             run_id="run-integrity",
             start_year=2025,
         )
+    assert exc_info.value.reason_code == "CASH_FLOW_DATASET_SCOPE_MISMATCH"
+    assert tuple(exc_info.value.details["mismatches"]) == ("completed_rows",)
 
 
 def test_cash_flow_dataset_repeated_source_record_id_blocks_aggregation():
@@ -356,3 +363,75 @@ def test_cash_flow_dataset_blocks_effect_revision_for_another_source():
     assert "EFFECT_SOURCE_FINGERPRINT_MISMATCH" in {
         blocker.reason_code for blocker in dataset.blockers
     }
+
+
+def test_effect_nav_gate_projects_account_specific_correction_operations():
+    service = object.__new__(CashFlowEffectService)
+    previous = {
+        "source": {
+            "account": "lx",
+            "broker": "平安证券",
+            "currency": "CNY",
+            "signed_amount": "20.00",
+            "flow_date": "2026-08-13",
+        }
+    }
+    service.store = SimpleNamespace(
+        get_previous_applied=lambda _effect_id: previous
+    )
+    service.scan = lambda **_kwargs: {
+        "scan_run": {"scan_run_id": "scan-safe-blocker"}
+    }
+    service._blockers_for_account = lambda **_kwargs: [{
+        "effect_id": "cfe_pending",
+        "effect_kind": "cash_flow",
+        "state": "pending",
+        "record_id": "cf_1",
+        "flow_date": "2026-08-13",
+        "account": "sy",
+        "broker": "华泰证券",
+        "currency": "CNY",
+        "signed_amount": "20.00",
+        "source": {
+            "account": "sy",
+            "broker": "华泰证券",
+            "currency": "CNY",
+            "signed_amount": "20.00",
+            "flow_date": "2026-08-13",
+        },
+        "last_error": None,
+    }]
+    lx_dataset = SimpleNamespace(
+        account="lx",
+        nav_date=date(2026, 8, 13),
+        financial_fingerprint="cash-fingerprint",
+    )
+    sy_dataset = SimpleNamespace(
+        account="sy",
+        nav_date=date(2026, 8, 13),
+        financial_fingerprint="cash-fingerprint",
+    )
+
+    lx_gate = service.nav_gate(
+        account="lx",
+        nav_date=date(2026, 8, 13),
+        cash_flow_dataset=lx_dataset,
+    )
+    sy_gate = service.nav_gate(
+        account="sy",
+        nav_date=date(2026, 8, 13),
+        cash_flow_dataset=sy_dataset,
+    )
+
+    assert lx_gate["blockers"][0]["broker"] == "平安证券"
+    assert lx_gate["blockers"][0]["signed_amount"] == "-20.00"
+    assert lx_gate["blockers"][0]["operations"] == [{
+        "account": "lx",
+        "broker": "平安证券",
+        "currency": "CNY",
+        "signed_amount": "-20.00",
+        "flow_date": "2026-08-13",
+    }]
+    assert sy_gate["blockers"][0]["broker"] == "华泰证券"
+    assert sy_gate["blockers"][0]["signed_amount"] == "20.00"
+    assert sy_gate["blockers"][0]["operations"][0]["account"] == "sy"

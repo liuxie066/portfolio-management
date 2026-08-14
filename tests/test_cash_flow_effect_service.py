@@ -7,11 +7,16 @@ from src import config
 from src.app.cash_flow_summary_service import CashFlowSummaryService
 from src.app.cash_flow_effect_receipt_service import CashFlowEffectReceiptService
 from src.app.cash_flow_effect_service import CashFlowEffectService
-from src.app.cash_flow_effect_store import CashFlowEffectStore
+from src.app.cash_flow_effect_store import (
+    HASH_CONTRACT_VERSION,
+    CashFlowEffectStore,
+    sha256_json,
+)
 from src.app.futu_balance_sync_service import FutuBalanceSnapshot
 from src.domain.cash_flow_contracts import CompletedCashFlowFacts
 from src.domain.holding_mutations import HoldingTarget
 from src.models import AssetClass, AssetType, Holding
+from src.time_utils import bj_today
 
 
 class FakeStorage:
@@ -146,10 +151,11 @@ def _flow(
     broker="某券商",
     record_id="cf_1",
     account="lx",
+    flow_date=date(2026, 7, 26),
 ):
     rate = Decimal("1") if currency == "CNY" else Decimal("7.2")
     return CompletedCashFlowFacts.build(
-        flow_date=date(2026, 7, 26),
+        flow_date=flow_date,
         account=account,
         broker=broker,
         amount=amount,
@@ -263,7 +269,12 @@ def test_non_futu_effect_requires_preview_hash_and_writes_absolute_target(
         item for item in review["effects"]
         if item["effect_kind"] == "cash_flow"
     )
-    preview = service.preview(effect["effect_id"])
+    with pytest.raises(ValueError, match="external_action=apply_delta"):
+        service.preview(effect["effect_id"])
+    preview = service.preview(
+        effect["effect_id"],
+        external_action="apply_delta",
+    )
 
     assert preview["targets"][0]["quantity"] == 120.0
     assert preview["target_source"] == "estimated_current_plus_event"
@@ -272,6 +283,7 @@ def test_non_futu_effect_requires_preview_hash_and_writes_absolute_target(
     result = service.confirm(
         effect["effect_id"],
         preview_hash=preview["preview_hash"],
+        external_action="apply_delta",
         confirm=True,
     )
 
@@ -333,13 +345,17 @@ def test_holding_change_after_preview_invalidates_confirmation(tmp_path, monkeyp
         item for item in service.review(account="lx")["effects"]
         if item["effect_kind"] == "cash_flow"
     )
-    preview = service.preview(effect["effect_id"])
+    preview = service.preview(
+        effect["effect_id"],
+        external_action="apply_delta",
+    )
     storage.holdings[("CNY-CASH", "lx", "某券商")].quantity = 101
 
     with pytest.raises(ValueError, match="stale"):
         service.confirm(
             effect["effect_id"],
             preview_hash=preview["preview_hash"],
+            external_action="apply_delta",
             confirm=True,
         )
 
@@ -358,7 +374,10 @@ def test_holding_change_after_hash_recheck_fails_before_applying(
         item for item in service.review(account="lx")["effects"]
         if item["effect_kind"] == "cash_flow"
     )
-    preview = service.preview(effect["effect_id"])
+    preview = service.preview(
+        effect["effect_id"],
+        external_action="apply_delta",
+    )
     original_build_preview = service._build_preview
 
     def build_then_change(*args, **kwargs):
@@ -372,6 +391,7 @@ def test_holding_change_after_hash_recheck_fails_before_applying(
         service.confirm(
             effect["effect_id"],
             preview_hash=preview["preview_hash"],
+            external_action="apply_delta",
             confirm=True,
         )
 
@@ -392,7 +412,10 @@ def test_unowned_manual_metadata_change_is_preserved_during_confirmation(
         item for item in service.review(account="lx")["effects"]
         if item["effect_kind"] == "cash_flow"
     )
-    preview = service.preview(effect["effect_id"])
+    preview = service.preview(
+        effect["effect_id"],
+        external_action="apply_delta",
+    )
     original_build_preview = service._build_preview
 
     def build_then_change_metadata(*args, **kwargs):
@@ -405,6 +428,7 @@ def test_unowned_manual_metadata_change_is_preserved_during_confirmation(
     result = service.confirm(
         effect["effect_id"],
         preview_hash=preview["preview_hash"],
+        external_action="apply_delta",
         confirm=True,
     )
 
@@ -455,12 +479,43 @@ def test_non_futu_negative_estimate_blocks_preview(tmp_path, monkeypatch):
     )
 
     with pytest.raises(ValueError, match="cannot be negative"):
-        service.preview(effect["effect_id"])
+        service.preview(
+            effect["effect_id"],
+            external_action="apply_delta",
+        )
 
     assert service.store.get_effect(effect["effect_id"])["state"] == "blocked"
 
 
-def test_direct_feishu_cash_change_requires_explicit_baseline_action(
+def test_historical_non_futu_apply_requires_explicit_holding_action(
+    tmp_path,
+    monkeypatch,
+):
+    storage = FakeStorage(
+        flows=[_flow(flow_date=date(2026, 6, 30))],
+        holdings=[_cash(quantity=100)],
+    )
+    service = _service(tmp_path, monkeypatch, storage)
+    service.initialize_fingerprints()
+    effect = next(
+        item for item in service.review(account="lx")["effects"]
+        if item["effect_kind"] == "cash_flow"
+    )
+
+    assert service.preview(effect["effect_id"])["mode"] == "record_only"
+    with pytest.raises(ValueError, match="external_action=apply_delta"):
+        service.preview(effect["effect_id"], historical_apply=True)
+
+    preview = service.preview(
+        effect["effect_id"],
+        external_action="apply_delta",
+        historical_apply=True,
+    )
+    assert preview["mode"] == "apply"
+    assert preview["targets"][0]["quantity"] == 120.0
+
+
+def test_direct_non_futu_cash_change_auto_accepts_authoritative_baseline(
     tmp_path,
     monkeypatch,
 ):
@@ -470,29 +525,198 @@ def test_direct_feishu_cash_change_requires_explicit_baseline_action(
     storage.holdings[("CNY-CASH", "lx", "某券商")].quantity = 130
 
     review = service.review(account="lx")
-    effect = next(
-        item for item in review["effects"]
-        if item["effect_kind"] == "cash_holding_external_change"
+    effect = service.store.get_latest_for_record(
+        "holding:CNY-CASH|lx|某券商",
+        effect_kind="cash_holding_external_change",
+    )
+    assert review["count"] == 0
+    assert effect is not None
+    assert effect["state"] == "record_only"
+    assert effect["mode"] == "record_only"
+    assert effect["confirmation"]["policy"] == (
+        "non_futu_manual_holding_authority"
     )
     assert service.scan()["changed"] == 0
-    with pytest.raises(ValueError, match="external_action"):
-        service.preview(effect["effect_id"])
-
-    preview = service.preview(
-        effect["effect_id"],
-        external_action="accept_current",
-    )
-    result = service.confirm(
-        effect["effect_id"],
-        preview_hash=preview["preview_hash"],
-        external_action="accept_current",
-        confirm=True,
-    )
-
-    assert result["success"] is True
-    assert service.store.get_effect(effect["effect_id"])["state"] == "record_only"
     fingerprint = service.store.get_fingerprint("CNY-CASH|lx|某券商")
     assert fingerprint["last_confirmed_amount"] == "130.00"
+    assert fingerprint["confirmed_by_effect_id"] == effect["effect_id"]
+    assert service.nav_gate(
+        account="lx",
+        nav_date=date(2026, 7, 26),
+    )["blocker_count"] == 0
+
+
+def test_existing_pending_non_futu_drift_converges_to_terminal_baseline(
+    tmp_path,
+    monkeypatch,
+):
+    holding = _cash(quantity=100)
+    storage = FakeStorage(holdings=[holding])
+    service = _service(tmp_path, monkeypatch, storage)
+    service.initialize_fingerprints()
+    holding.quantity = 130
+    identity = "CNY-CASH|lx|某券商"
+    source = {
+        "record_id": f"holding:{identity}",
+        "holding_identity": identity,
+        "holding_record_id": holding.record_id,
+        "flow_date": bj_today().isoformat(),
+        "account": "lx",
+        "broker": "某券商",
+        "currency": "CNY",
+        "signed_amount": "0.00",
+        "observed_amount": "130.00",
+        "observed_hash": service._holding_hash(holding),
+        "last_confirmed_amount": "100.00",
+    }
+    legacy = service.store.create_version(
+        source=source,
+        source_hash=sha256_json({
+            "contract": HASH_CONTRACT_VERSION,
+            "source": source,
+        }),
+        state="pending",
+        mode="apply",
+        effect_kind="cash_holding_external_change",
+        event_type="external_holding_change",
+    )
+    first = service.scan(account="lx")
+    migrated = service.store.get_effect(legacy["effect_id"])
+    second = service.scan(account="lx")
+
+    assert first["changed"] == 1
+    assert migrated["state"] == "record_only"
+    assert migrated["confirmation"]["policy"] == (
+        "non_futu_manual_holding_authority"
+    )
+    assert second["changed"] == 0
+    assert service.store.get_fingerprint(identity)["last_confirmed_amount"] == (
+        "130.00"
+    )
+    assert service.nav_gate(
+        account="lx",
+        nav_date=date(2026, 7, 26),
+    )["blocker_count"] == 0
+
+
+def test_compensation_owned_identity_is_not_resolved_by_matching_observation(
+    tmp_path,
+    monkeypatch,
+):
+    holding = _cash(quantity=100)
+    storage = FakeStorage(holdings=[holding])
+    service = _service(tmp_path, monkeypatch, storage)
+    service.initialize_fingerprints()
+    identity = "CNY-CASH|lx|某券商"
+    source = {
+        "record_id": f"holding:{identity}",
+        "holding_identity": identity,
+        "holding_record_id": holding.record_id,
+        "flow_date": bj_today().isoformat(),
+        "account": "lx",
+        "broker": "某券商",
+        "currency": "CNY",
+        "signed_amount": "0.00",
+        "observed_amount": "100.00",
+        "observed_hash": service._holding_hash(holding),
+        "last_confirmed_amount": "100.00",
+    }
+    effect = service.store.create_version(
+        source=source,
+        source_hash=sha256_json({
+            "contract": HASH_CONTRACT_VERSION,
+            "source": source,
+        }),
+        state="compensation_pending",
+        mode="apply",
+        effect_kind="cash_holding_external_change",
+        event_type="compensation_created",
+    )
+    service.store.update_effect(
+        effect["effect_id"],
+        fields={
+            "targets_json": [{
+                "asset_id": "CNY-CASH",
+                "account": "lx",
+                "broker": "某券商",
+            }],
+            "compensation_task_id": "ct_test",
+        },
+        event_type="compensation_test_setup",
+        expected_states={"compensation_pending"},
+    )
+
+    scan = service.scan(account="lx")
+
+    assert scan["changed"] == 0
+    assert service.store.get_effect(effect["effect_id"])["state"] == (
+        "compensation_pending"
+    )
+
+
+def test_repeated_manual_value_reclassifies_prior_restore_as_manual_baseline(
+    tmp_path,
+    monkeypatch,
+):
+    holding = _cash(quantity=100)
+    storage = FakeStorage(holdings=[holding])
+    service = _service(tmp_path, monkeypatch, storage)
+    service.initialize_fingerprints()
+    holding.quantity = 130
+    identity = "CNY-CASH|lx|某券商"
+    source = {
+        "record_id": f"holding:{identity}",
+        "holding_identity": identity,
+        "holding_record_id": holding.record_id,
+        "flow_date": bj_today().isoformat(),
+        "account": "lx",
+        "broker": "某券商",
+        "currency": "CNY",
+        "signed_amount": "0.00",
+        "observed_amount": "130.00",
+        "observed_hash": service._holding_hash(holding),
+        "last_confirmed_amount": "100.00",
+    }
+    effect = service.store.create_version(
+        source=source,
+        source_hash=sha256_json({
+            "contract": HASH_CONTRACT_VERSION,
+            "source": source,
+        }),
+        state="pending",
+        mode="apply",
+        effect_kind="cash_holding_external_change",
+        event_type="external_holding_change",
+    )
+    preview = service.preview(
+        effect["effect_id"],
+        external_action="restore",
+    )
+    restored = service.confirm(
+        effect["effect_id"],
+        preview_hash=preview["preview_hash"],
+        external_action="restore",
+        confirm=True,
+    )
+    assert restored["effect"]["state"] == "applied"
+    storage.holdings[("CNY-CASH", "lx", "某券商")].quantity = 130
+
+    first = service.scan(account="lx")
+    accepted = service.store.get_effect(effect["effect_id"])
+    second = service.scan(account="lx")
+
+    assert first["changed"] == 1
+    assert accepted["state"] == "record_only"
+    assert accepted["confirmation"]["policy"] == (
+        "non_futu_manual_holding_authority"
+    )
+    assert accepted["target_source"] is None
+    assert accepted["targets"] is None
+    assert accepted["preview_hash"] is None
+    assert second["changed"] == 0
+    assert service.store.get_fingerprint(identity)["last_confirmed_amount"] == (
+        "130.00"
+    )
 
 
 def test_account_change_previews_and_confirms_old_and_new_cash_targets(
@@ -513,10 +737,14 @@ def test_account_change_previews_and_confirms_old_and_new_cash_targets(
         item for item in service.review(account="lx")["effects"]
         if item["effect_kind"] == "cash_flow"
     )
-    first_preview = service.preview(first["effect_id"])
+    first_preview = service.preview(
+        first["effect_id"],
+        external_action="apply_delta",
+    )
     service.confirm(
         first["effect_id"],
         preview_hash=first_preview["preview_hash"],
+        external_action="apply_delta",
         confirm=True,
     )
 
@@ -526,7 +754,10 @@ def test_account_change_previews_and_confirms_old_and_new_cash_targets(
         item for item in service.review(account="lx")["effects"]
         if item["effect_kind"] == "cash_flow"
     )
-    preview = service.preview(correction["effect_id"])
+    preview = service.preview(
+        correction["effect_id"],
+        external_action="apply_delta",
+    )
     targets = {
         (item["account"], item["broker"], item["currency"]): item["quantity"]
         for item in preview["targets"]
@@ -548,6 +779,7 @@ def test_account_change_previews_and_confirms_old_and_new_cash_targets(
     result = service.confirm(
         correction["effect_id"],
         preview_hash=preview["preview_hash"],
+        external_action="apply_delta",
         confirm=True,
     )
 
@@ -570,10 +802,14 @@ def test_amount_correction_applies_only_delta_and_deletion_reverses_it(
         item for item in service.review(account="lx")["effects"]
         if item["effect_kind"] == "cash_flow"
     )
-    first_preview = service.preview(first["effect_id"])
+    first_preview = service.preview(
+        first["effect_id"],
+        external_action="apply_delta",
+    )
     service.confirm(
         first["effect_id"],
         preview_hash=first_preview["preview_hash"],
+        external_action="apply_delta",
         confirm=True,
     )
     flow.amount = 30
@@ -582,11 +818,15 @@ def test_amount_correction_applies_only_delta_and_deletion_reverses_it(
         item for item in service.review(account="lx")["effects"]
         if item["effect_kind"] == "cash_flow"
     )
-    correction_preview = service.preview(correction["effect_id"])
+    correction_preview = service.preview(
+        correction["effect_id"],
+        external_action="apply_delta",
+    )
     assert correction_preview["targets"][0]["quantity"] == 130.0
     service.confirm(
         correction["effect_id"],
         preview_hash=correction_preview["preview_hash"],
+        external_action="apply_delta",
         confirm=True,
     )
 
@@ -595,16 +835,114 @@ def test_amount_correction_applies_only_delta_and_deletion_reverses_it(
         item for item in service.review(account="lx")["effects"]
         if item["effect_kind"] == "cash_flow"
     )
-    deletion_preview = service.preview(deletion["effect_id"])
+    deletion_preview = service.preview(
+        deletion["effect_id"],
+        external_action="apply_delta",
+    )
 
     assert deletion_preview["targets"][0]["quantity"] == 100.0
     result = service.confirm(
         deletion["effect_id"],
         preview_hash=deletion_preview["preview_hash"],
+        external_action="apply_delta",
         confirm=True,
     )
     assert result["success"] is True
     assert storage.holdings[("CNY-CASH", "lx", "某券商")].quantity == 100.0
+
+
+def test_already_reflected_is_applied_noop_and_correction_uses_delta(
+    tmp_path,
+    monkeypatch,
+):
+    flow = _flow(amount=20)
+    storage = FakeStorage(flows=[flow], holdings=[_cash(quantity=120)])
+    service = _service(tmp_path, monkeypatch, storage)
+    service.initialize_fingerprints()
+    effect = next(
+        item for item in service.review(account="lx")["effects"]
+        if item["effect_kind"] == "cash_flow"
+    )
+
+    preview = service.preview(
+        effect["effect_id"],
+        external_action="already_reflected",
+    )
+    assert preview["targets"][0]["quantity"] == 120.0
+    assert preview["target_source"] == "manual_current_includes_event"
+    result = service.confirm(
+        effect["effect_id"],
+        preview_hash=preview["preview_hash"],
+        external_action="already_reflected",
+        confirm=True,
+    )
+
+    assert result["effect"]["state"] == "applied"
+    assert result["already_applied"] is True
+    assert storage.replacements == []
+
+    flow.amount = 30
+    _refresh_flow_contract(flow)
+    correction = next(
+        item for item in service.review(account="lx")["effects"]
+        if item["effect_kind"] == "cash_flow"
+    )
+    correction_preview = service.preview(
+        correction["effect_id"],
+        external_action="apply_delta",
+    )
+
+    assert correction_preview["targets"][0]["quantity"] == 130.0
+
+
+def test_mixed_futu_and_already_reflected_preview_has_neutral_source(
+    tmp_path,
+    monkeypatch,
+):
+    flow = _flow(amount=10, currency="USD", broker="富途")
+    provider = FakeFutuProvider({"CNY": 0, "USD": 110, "HKD": 0})
+    storage = FakeStorage(
+        flows=[flow],
+        holdings=[
+            _cash(quantity=100, currency="USD", broker="富途"),
+            _cash(quantity=10, currency="USD", broker="某券商"),
+        ],
+    )
+    service = _service(
+        tmp_path,
+        monkeypatch,
+        storage,
+        futu_provider=provider,
+    )
+    service.initialize_fingerprints()
+    first = next(
+        item for item in service.review(account="lx")["effects"]
+        if item["effect_kind"] == "cash_flow"
+    )
+    first_preview = service.preview(first["effect_id"])
+    service.confirm(
+        first["effect_id"],
+        preview_hash=first_preview["preview_hash"],
+        confirm=True,
+    )
+    flow.broker = "某券商"
+    _refresh_flow_contract(flow)
+    provider.balances["USD"] = 100
+    correction = next(
+        item for item in service.review(account="lx")["effects"]
+        if item["effect_kind"] == "cash_flow"
+    )
+
+    preview = service.preview(
+        correction["effect_id"],
+        external_action="already_reflected",
+    )
+
+    assert set(preview["target_sources"]) == {
+        "futu_opend_currency_cash",
+        "manual_current_includes_event",
+    }
+    assert preview["target_source"] == "mixed"
 
 
 def test_applied_receipt_renders_every_confirmed_cash_target():
@@ -736,10 +1074,14 @@ def test_partial_multi_target_write_requires_confirmed_compensation_retry(
         effect for effect in service.review()["effects"]
         if effect["effect_kind"] == "cash_flow"
     )
-    first_preview = service.preview(first["effect_id"])
+    first_preview = service.preview(
+        first["effect_id"],
+        external_action="apply_delta",
+    )
     service.confirm(
         first["effect_id"],
         preview_hash=first_preview["preview_hash"],
+        external_action="apply_delta",
         confirm=True,
     )
 
@@ -749,10 +1091,14 @@ def test_partial_multi_target_write_requires_confirmed_compensation_retry(
         effect for effect in service.review()["effects"]
         if effect["effect_kind"] == "cash_flow"
     )
-    preview = service.preview(correction["effect_id"])
+    preview = service.preview(
+        correction["effect_id"],
+        external_action="apply_delta",
+    )
     result = service.confirm(
         correction["effect_id"],
         preview_hash=preview["preview_hash"],
+        external_action="apply_delta",
         confirm=True,
     )
 
@@ -800,10 +1146,14 @@ def test_source_change_waits_for_compensation_then_requires_new_confirmation(
         effect for effect in service.review()["effects"]
         if effect["effect_kind"] == "cash_flow"
     )
-    first_preview = service.preview(first["effect_id"])
+    first_preview = service.preview(
+        first["effect_id"],
+        external_action="apply_delta",
+    )
     service.confirm(
         first["effect_id"],
         preview_hash=first_preview["preview_hash"],
+        external_action="apply_delta",
         confirm=True,
     )
 
@@ -813,10 +1163,14 @@ def test_source_change_waits_for_compensation_then_requires_new_confirmation(
         effect for effect in service.review()["effects"]
         if effect["effect_kind"] == "cash_flow"
     )
-    correction_preview = service.preview(correction["effect_id"])
+    correction_preview = service.preview(
+        correction["effect_id"],
+        external_action="apply_delta",
+    )
     failed = service.confirm(
         correction["effect_id"],
         preview_hash=correction_preview["preview_hash"],
+        external_action="apply_delta",
         confirm=True,
     )
     assert failed["status"] == "compensation_pending"
@@ -833,6 +1187,9 @@ def test_source_change_waits_for_compensation_then_requires_new_confirmation(
         effect for effect in service.store.list_effects(latest_only=True)
         if effect["effect_kind"] == "cash_holding_external_change"
     ]
+    assert service.store.get_fingerprint(
+        "CNY-CASH|lx|某券商"
+    )["last_confirmed_amount"] == "120.00"
     assert service.nav_gate(
         account="lx",
         nav_date=date(2026, 7, 26),
@@ -849,11 +1206,15 @@ def test_source_change_waits_for_compensation_then_requires_new_confirmation(
 
     next_effect = service.store.get_effect(retried["correction_effect_id"])
     assert next_effect["state"] == "pending"
-    next_preview = service.preview(next_effect["effect_id"])
+    next_preview = service.preview(
+        next_effect["effect_id"],
+        external_action="apply_delta",
+    )
     assert next_preview["targets"][0]["quantity"] == 80.0
     applied = service.confirm(
         next_effect["effect_id"],
         preview_hash=next_preview["preview_hash"],
+        external_action="apply_delta",
         confirm=True,
     )
     assert applied["success"] is True

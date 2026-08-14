@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 
 from src.app.nav_finality import NavWriteContext
 from src.app.nav_payload import format_nav_payload
+from src.domain.cash_flow_contracts import CashFlowDatasetRefusal
 from src.time_utils import bj_today
 
 
@@ -52,6 +53,33 @@ def _public_holdings_preflight(payload: Any) -> Optional[Dict[str, Any]]:
         key: value
         for key, value in payload.items()
         if key != "validated_snapshot"
+    }
+
+
+def _cash_flow_refusal_result(
+    refusal: CashFlowDatasetRefusal,
+    *,
+    account: str,
+    nav_date: date,
+    run_id: str,
+    dry_run: bool,
+    confirm: bool,
+) -> Dict[str, Any]:
+    structured = {
+        "code": refusal.reason_code,
+        "blockers": [item.as_dict() for item in refusal.blockers],
+    }
+    if refusal.details:
+        structured["details"] = dict(refusal.details)
+    return {
+        "success": False,
+        "error": str(refusal),
+        "failure": structured,
+        "account": account,
+        "date": nav_date.isoformat(),
+        "run_id": run_id,
+        "dry_run": dry_run,
+        "confirm": confirm,
     }
 
 
@@ -319,6 +347,21 @@ class AccountNavRecorderService:
                 "holdings_snapshot": holdings_snapshot,
                 "cash_flow_dataset": cash_flow_dataset.details(),
             }
+        except CashFlowDatasetRefusal as exc:
+            failure = _cash_flow_refusal_result(
+                exc,
+                account=self.account,
+                nav_date=today,
+                run_id=resolved_run_id,
+                dry_run=dry_run,
+                confirm=confirm,
+            )
+            public_preflight = _public_holdings_preflight(
+                holdings_preflight_result
+            )
+            if public_preflight is not None:
+                failure["holdings_preflight"] = public_preflight
+            return failure
         except Exception as e:
             failure = {
                 "success": False,
@@ -458,6 +501,15 @@ class AccountNavRecorderService:
                     f"尚未完成: {failure['snapshot_error']}"
                 )
             return result
+        except CashFlowDatasetRefusal as exc:
+            return _cash_flow_refusal_result(
+                exc,
+                account=self.account,
+                nav_date=today,
+                run_id=resolved_run_id,
+                dry_run=dry_run,
+                confirm=confirm,
+            )
         except Exception as exc:
             return {
                 "success": False,

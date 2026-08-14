@@ -11,6 +11,10 @@ from src.app.daily_account_nav_service import DailyAccountNavService
 from src.app.daily_nav_job_service import DailyNavJobService
 from src.app.daily_report_payload_service import DailyReportPayloadService
 from src.app.nav_initialization_service import NavInitializationService
+from src.domain.cash_flow_contracts import (
+    CashFlowDatasetBlocker,
+    CashFlowDatasetRefusal,
+)
 from src.domain.holdings import RawHoldingRecord
 from src.domain.snapshot_contracts import NormalizedValuationSnapshot
 from src.models import AssetType
@@ -261,6 +265,72 @@ def test_account_nav_recorder_records_nav_without_report_reads():
     assert context.valuation_as_of == "2026-05-22T18:00:00"
     assert context.run_id == "run-recorder-1"
     assert result["stage_timings"].keys() == {"snapshot_ms", "record_nav_ms"}
+
+
+def test_account_nav_recorder_preserves_structured_cash_flow_refusal():
+    snapshot = {
+        "valuation": SimpleNamespace(warnings=[]),
+        "normalized_valuation": _normalized("lx"),
+        "snapshot_time": "2026-08-14T08:00:00",
+    }
+    blocker = CashFlowDatasetBlocker(
+        reason_code="EFFECT_GATE_BLOCKED",
+        message="cash-flow holding effects are unresolved",
+        details={
+            "gate": {
+                "blockers": [{
+                    "effect_id": "cfe_pending",
+                    "effect_kind": "cash_flow",
+                    "state": "pending",
+                    "record_id": "cf_1",
+                    "flow_date": "2026-08-13",
+                    "broker": "平安证券",
+                    "currency": "CNY",
+                    "signed_amount": "1000.00",
+                    "last_error": None,
+                }]
+            }
+        },
+    )
+    refusal = CashFlowDatasetRefusal(
+        reason_code="CASH_FLOW_DATASET_BLOCKED",
+        message="NAV 写入拒绝：cash-flow dataset has blockers: diagnostic",
+        blockers=(blocker,),
+    )
+
+    class FakeReadService:
+        @staticmethod
+        def build_snapshot(**_kwargs):
+            return snapshot
+
+    class FakePortfolio:
+        @staticmethod
+        def build_cash_flow_dataset(**_kwargs):
+            return _CashFlowDatasetStub("blocked-dataset")
+
+        @staticmethod
+        def record_nav(*_args, **_kwargs):
+            raise refusal
+
+    result = AccountNavRecorderService(
+        account="lx",
+        storage=SimpleNamespace(),
+        portfolio=FakePortfolio(),
+        read_service=FakeReadService(),
+    ).record(
+        nav_date="2026-08-13",
+        dry_run=False,
+        confirm=True,
+        run_id="daily-nav-job-blocked",
+    )
+
+    assert result["success"] is False
+    assert result["error"] == str(refusal)
+    assert result["failure"] == {
+        "code": "CASH_FLOW_DATASET_BLOCKED",
+        "blockers": [blocker.as_dict()],
+    }
+    assert result["run_id"] == "daily-nav-job-blocked"
 
 
 def test_account_nav_recorder_syncs_futu_before_snapshot_and_passes_run_pool(monkeypatch):
