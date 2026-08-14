@@ -638,6 +638,27 @@ class PortfolioService:
             run_id=run_id,
         )
 
+    def prepare_historical_nav_valuation_evidence(
+        self,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        from src.app.nav_valuation_evidence_service import (
+            HistoricalNavValuationEvidenceService,
+        )
+
+        try:
+            return HistoricalNavValuationEvidenceService(
+                storage=self.storage,
+                portfolio=self.portfolio,
+            ).prepare(**kwargs)
+        except Exception as exc:
+            return {
+                "success": False,
+                "status": "failed",
+                "stage": "historical_valuation_evidence",
+                "error": str(exc) or exc.__class__.__name__,
+            }
+
     def daily_nav_job(
         self,
         *,

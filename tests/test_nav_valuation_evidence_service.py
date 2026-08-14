@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 import json
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -9,11 +10,21 @@ import pytest
 from src.app.account_nav_recorder_service import AccountNavRecorderService
 from src.app.nav_finality import NavWriteContext
 from src.app.nav_valuation_evidence_service import NavValuationEvidenceStore
+from src.app.nav_valuation_evidence_service import (
+    HistoricalNavValuationEvidenceService,
+    _fetch_eastmoney_fund_nav,
+    _fetch_opend_daily_closes,
+    build_historical_price_snapshot,
+)
 from src.domain.cash_flow_contracts import (
     CashFlowDatasetBlocker,
     CashFlowDatasetRefusal,
 )
-from src.domain.snapshot_contracts import NormalizedValuationRow, NormalizedValuationSnapshot
+from src.domain.snapshot_contracts import (
+    NormalizedValuationRow,
+    NormalizedValuationSnapshot,
+    digest_payload,
+)
 from src.models import AssetClass, AssetType, Holding
 
 
@@ -114,6 +125,21 @@ def test_evidence_store_rejects_holdings_digest_not_bound_to_valuation(tmp_path)
             normalized_valuation=_official(),
             preparation="cash_flow_gate_failure",
         )
+
+
+def test_evidence_store_load_rejects_rehashed_incomplete_audit_fields(tmp_path):
+    store = NavValuationEvidenceStore(tmp_path)
+    artifact = dict(_prepared(store)["artifact"])
+    artifact["source_run_id"] = ""
+    body = {key: value for key, value in artifact.items() if key != "artifact_digest"}
+    digest = digest_payload(body)
+    artifact["artifact_digest"] = digest
+    path = tmp_path / "lx" / "2026-08-13" / f"{digest}.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="source_run_id is required"):
+        store.load(f"nav-valuation-evidence:v1:lx:2026-08-13:{digest}")
 
 
 class _Validated:
@@ -366,3 +392,223 @@ def test_replay_rejects_cash_flow_fingerprint_change(tmp_path):
 
     assert result["success"] is False
     assert result["error"] == "NAV valuation replay cash-flow fingerprint mismatch"
+
+
+def test_historical_prices_bind_symbols_fact_dates_and_supplied_fx():
+    holdings = [
+        Holding(
+            asset_id=code,
+            asset_name=code,
+            asset_type=asset_type,
+            account="lx",
+            broker="manual",
+            quantity=1,
+            currency=currency,
+        )
+        for code, asset_type, currency in (
+            ("600519", AssetType.A_STOCK, "CNY"),
+            ("159941", AssetType.FUND, "CNY"),
+            ("00700", AssetType.HK_STOCK, "HKD"),
+            ("BRK.B", AssetType.US_STOCK, "USD"),
+            ("007722", AssetType.FUND, "CNY"),
+            ("USD-CASH", AssetType.CASH, "USD"),
+            ("HKD-MMF", AssetType.MMF, "HKD"),
+            ("BTC-CRYPTO-USD", AssetType.CRYPTO, "USD"),
+        )
+    ]
+    symbols = []
+
+    def load_opend(requested, target_date):
+        symbols.extend(requested)
+        return {
+            symbol: {"fact_date": target_date.isoformat(), "price": "10"}
+            for symbol in requested
+        }
+
+    prices = build_historical_price_snapshot(
+        holdings,
+        nav_date=date(2026, 8, 13),
+        valuation_as_of="2026-08-14T08:11:45.216546",
+        usdcny="6.757",
+        hkdcny="0.8611",
+        opend_loader=load_opend,
+        fund_loader=lambda _code, _date: {
+            "fact_date": "2026-08-12",
+            "price": "1.2345",
+        },
+    )
+
+    assert symbols == ["HK.00700", "SH.600519", "SZ.159941", "US.BRK.B"]
+    assert prices["BRK.B"]["cny_price"] == 67.57
+    assert prices["00700"]["cny_price"] == 8.61
+    assert prices["007722"]["fact_date"] == "2026-08-12"
+    assert prices["USD-CASH"]["exchange_rate"] == 6.757
+    assert all(
+        payload["retrieved_at"] == "2026-08-14T08:11:45.216546"
+        for payload in prices.values()
+    )
+
+    with pytest.raises(ValueError, match="after target date"):
+        build_historical_price_snapshot(
+            [holdings[4]],
+            nav_date=date(2026, 8, 13),
+            valuation_as_of="2026-08-14T08:11:45.216546",
+            usdcny="6.757",
+            hkdcny="0.8611",
+            fund_loader=lambda _code, _date: {
+                "fact_date": "2026-08-14",
+                "price": "1.2",
+            },
+        )
+
+
+def test_default_historical_provider_parsers_use_exact_eligible_facts(monkeypatch):
+    calls = []
+
+    class Frame:
+        @staticmethod
+        def to_dict(orient):
+            assert orient == "records"
+            return [{"time_key": "2026-08-13 00:00:00", "close": "40.24"}]
+
+    class QuoteContext:
+        def request_history_kline(self, **kwargs):
+            calls.append(kwargs)
+            return 0, Frame(), None
+
+        def close(self):
+            calls.append("closed")
+
+    fake_futu = SimpleNamespace(
+        RET_OK=0,
+        KLType=SimpleNamespace(K_DAY="K_DAY"),
+        AuType=SimpleNamespace(NONE="NONE"),
+        OpenQuoteContext=lambda **_kwargs: QuoteContext(),
+    )
+    monkeypatch.setitem(sys.modules, "futu", fake_futu)
+    closes = _fetch_opend_daily_closes(
+        ["SZ.000651"],
+        date(2026, 8, 13),
+    )
+    assert closes["SZ.000651"] == {
+        "fact_date": "2026-08-13",
+        "price": "40.24",
+    }
+    assert calls[0]["autype"] == "NONE"
+    assert calls[0]["start"] == calls[0]["end"] == "2026-08-13"
+    assert calls[-1] == "closed"
+
+    class Response:
+        @staticmethod
+        def raise_for_status():
+            return None
+
+        @staticmethod
+        def json():
+            return {
+                "Data": {
+                    "LSJZList": [
+                        {"FSRQ": "2026-08-14", "DWJZ": "9.9"},
+                        {"FSRQ": "2026-08-12", "DWJZ": "1.02"},
+                        {"FSRQ": "2026-08-13", "DWJZ": "1.03"},
+                    ]
+                }
+            }
+
+    import requests
+
+    monkeypatch.setattr(requests, "get", lambda *_args, **_kwargs: Response())
+    assert _fetch_eastmoney_fund_nav("007722", date(2026, 8, 13)) == {
+        "fact_date": "2026-08-13",
+        "price": "1.03",
+    }
+
+
+def test_historical_prepare_is_preview_first_and_digest_bound(tmp_path):
+    calls = []
+
+    class Validated(_Validated):
+        @staticmethod
+        def to_valuation_holdings():
+            return [
+                Holding(
+                    asset_id="CNY-CASH",
+                    asset_name="人民币现金",
+                    asset_type=AssetType.CASH,
+                    account="lx",
+                    broker="平安证券",
+                    quantity=100,
+                    currency="CNY",
+                    asset_class=AssetClass.CASH,
+                )
+            ]
+
+    class Preflight:
+        @staticmethod
+        def prepare_account(**kwargs):
+            calls.append(("preflight", kwargs))
+            return {"success": True, "validated_snapshot": Validated()}
+
+    class Dataset(_Dataset):
+        effect_store_revision = "cfs_current"
+
+        def assert_official_scope(self, **kwargs):
+            calls.append(("dataset", kwargs))
+
+    class Portfolio:
+        @staticmethod
+        def build_cash_flow_dataset(**_kwargs):
+            return Dataset()
+
+        @staticmethod
+        def calculate_normalized_valuation(**kwargs):
+            calls.append(("valuation", kwargs))
+            return _official()
+
+    store = NavValuationEvidenceStore(tmp_path)
+    service = HistoricalNavValuationEvidenceService(
+        storage=SimpleNamespace(),
+        portfolio=Portfolio(),
+        holdings_preflight=Preflight(),
+        evidence_store=store,
+        price_snapshot_builder=lambda *_args, **_kwargs: {
+            "CNY-CASH": {"price": 1, "cny_price": 1, "currency": "CNY"}
+        },
+    )
+    kwargs = {
+        "account": "lx",
+        "nav_date": "2026-08-13",
+        "source_run_id": "daily-nav-job-source:lx",
+        "expected_holdings_digest": HOLDINGS_DIGEST,
+        "expected_cash_flow_fingerprint": CASH_FLOW_FINGERPRINT,
+        "source_effect_store_revision": "cfs_source",
+        "valuation_as_of": "2026-08-14T08:11:45.216546",
+        "usdcny": "6.757",
+        "hkdcny": "0.8611",
+    }
+
+    preview = service.prepare(**kwargs)
+    assert preview["status"] == "preview"
+    assert not list(tmp_path.rglob("*.json"))
+    assert calls[0][1]["dry_run"] is True
+    assert calls[-1][1]["fetch_prices"] is False
+
+    with pytest.raises(ValueError, match="expected digest mismatch"):
+        service.prepare(
+            **kwargs,
+            write=True,
+            confirm=True,
+            expected_digest="9" * 64,
+        )
+    assert not list(tmp_path.rglob("*.json"))
+
+    written = service.prepare(
+        **kwargs,
+        write=True,
+        confirm=True,
+        expected_digest=preview["artifact_digest"],
+    )
+    assert written["status"] == "written"
+    assert store.load(written["valuation_ref"])["artifact_digest"] == (
+        preview["artifact_digest"]
+    )

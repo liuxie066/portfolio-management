@@ -131,6 +131,10 @@ observe-only：`cn_cash/us_cash/hk_cash` 只保留为来源证据，不与 holdi
 
 `daily-job` 是单账户和多账户的统一入口。未显式传 `--nav-date` 时，它会取运行日前最近业务日。只有带受支持 `details.finality`、明确 `status=final` 且日期匹配的同日记录才会幂等返回 `skipped_existing_nav`；旧记录、手工记录或 finality 不匹配会阻断为 `existing_nav_not_final`，不会因“行已存在”而误判完成。真实执行完成后会通过同一“刘看山”应用发送一条多账户 NAV 汇总回执；dry-run 不发送，通知失败不会覆盖 NAV 写入结果。
 
+如果 daily-job 在估值完成后被 cash-flow gate 阻断，可在处理 blocker 后使用其
+`valuation_ref` 重放；旧失败记录需先按两步 digest 确认生成历史证据。完整流程见
+`docs/nav-valuation-evidence-replay.md`。
+
 Cash Flow 主要入口是飞书多维表手工录入。系统只接受带 broker 的外部
 `DEPOSIT/WITHDRAW`，scanner 只发现、不写 holding：
 
