@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.37 - 2026-08-14
+
+- Treat direct non-Futu cash holding edits as authoritative manual baselines,
+  while preserving Futu OpenD and compensation ownership.
+- Require an explicit `apply_delta` or `already_reflected` choice before
+  applying non-Futu deposit or withdrawal effects to Holdings.
+- Render Cash Flow NAV refusals as actionable user-facing receipts while
+  retaining structured diagnostics for operators.
+
 ## 0.1.36 - 2026-08-06
 
 - Corrected the Feishu two-application authority model so the Agent identity
