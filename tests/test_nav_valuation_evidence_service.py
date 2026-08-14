@@ -260,6 +260,25 @@ def test_receipt_holdings_reconstructs_raw_facts_and_reruns_validation():
     )
     assert restored.source_mode == "nav_receipt_outbox"
 
+    account_outcome = next(
+        item
+        for item in public["validation"]["records"][0]["outcomes"]
+        if item["field"] == "account"
+    )
+    account_outcome["current"] = "sy"
+    public["validation"]["records"][0]["identity"]["account"] = "sy"
+    with pytest.raises(ValueError, match="account mismatch"):
+        ValidatedHoldingsSnapshot.from_public_validation(
+            account="lx",
+            validation=public["validation"],
+            provenance=public["holdings_snapshot"],
+            expected_normalized_holdings_digest=(
+                original.normalized_holdings_digest
+            ),
+        )
+    account_outcome["current"] = "lx"
+    public["validation"]["records"][0]["identity"]["account"] = "lx"
+
     public["validation"]["records"][0]["outcomes"][3]["current"] = "1"
     with pytest.raises(ValueError, match="record digest mismatch"):
         ValidatedHoldingsSnapshot.from_public_validation(

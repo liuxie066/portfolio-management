@@ -358,6 +358,8 @@ class ValidatedHoldingsSnapshot:
                 field_value = str(fields.get(field_name) or "").strip()
                 if identity_value != field_value:
                     raise ValueError("receipt holdings identity mismatch")
+            if str(fields.get("account") or "").strip() != account:
+                raise ValueError("receipt holdings account mismatch")
             if record_digest(fields) != str(serialized.get("record_digest") or ""):
                 raise ValueError("receipt holdings record digest mismatch")
             raw_records.append(
