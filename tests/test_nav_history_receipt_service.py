@@ -337,6 +337,163 @@ def test_nav_receipt_formats_partial_failure_and_price_warning():
     assert "## 告警\nlx: FUTU price unavailable" in text
 
 
+def test_nav_receipt_formats_structured_cash_flow_blockers_without_raw_json():
+    raw_error = (
+        'NAV 写入拒绝：cash-flow dataset has blockers: '
+        '[{"reason_code":"EFFECT_GATE_BLOCKED",'
+        '"effect_store_revision":"internal-revision"}]'
+    )
+    text = NavHistoryReceiptService.build_message(
+        {
+            "success": False,
+            "status": "partial",
+            "dry_run": False,
+            "date": "2026-08-13",
+            "run_id": "daily-nav-job-friendly",
+            "items": [
+                {
+                    "success": False,
+                    "status": "failed",
+                    "account": "lx",
+                    "error": raw_error,
+                    "failure": {
+                        "code": "CASH_FLOW_DATASET_BLOCKED",
+                        "blockers": [{
+                            "reason_code": "EFFECT_GATE_BLOCKED",
+                            "message": "cash-flow holding effects are unresolved",
+                            "record_id": "",
+                            "field": None,
+                            "details": {
+                                "gate": {
+                                    "blockers": [{
+                                        "effect_id": "cfe_cash_flow",
+                                        "effect_kind": "cash_flow",
+                                        "state": "pending",
+                                        "record_id": "cf_1",
+                                        "flow_date": "2026-08-13",
+                                        "broker": "平安证券",
+                                        "currency": "CNY",
+                                        "signed_amount": "1000.00",
+                                        "last_error": None,
+                                    }]
+                                }
+                            },
+                        }],
+                    },
+                },
+                {
+                    "success": False,
+                    "status": "failed",
+                    "account": "sy",
+                    "error": raw_error,
+                    "failure": {
+                        "code": "CASH_FLOW_DATASET_BLOCKED",
+                        "blockers": [{
+                            "reason_code": "EFFECT_GATE_BLOCKED",
+                            "message": "cash-flow holding effects are unresolved",
+                            "record_id": "",
+                            "field": None,
+                            "details": {
+                                "gate": {
+                                    "blockers": [{
+                                        "effect_id": "cfe_futu",
+                                        "effect_kind": "broker_cash_reconciliation",
+                                        "state": "pending",
+                                        "record_id": "futu-reconciliation:USD",
+                                        "flow_date": "2026-08-13",
+                                        "broker": "富途",
+                                        "currency": "USD",
+                                        "signed_amount": "0.00",
+                                        "last_error": None,
+                                    }]
+                                }
+                            },
+                        }],
+                    },
+                },
+            ],
+        },
+        executed_at=datetime(2026, 8, 14, 8, 13),
+    )
+
+    assert (
+        "❌ lx｜出入金待确认｜平安证券 CNY｜金额 +1,000.00 CNY"
+        "｜日期 2026-08-13｜处理：运行 pm cash-flow review --account lx --json，"
+        "按提示预览并确认"
+    ) in text
+    assert (
+        "❌ sy｜Futu 现金待核对｜富途 USD｜日期 2026-08-13"
+        "｜处理：检查 OpenD 后运行 pm cash-flow review --account sy --json"
+    ) in text
+    assert "EFFECT_GATE_BLOCKED" not in text
+    assert "effect_store_revision" not in text
+    assert "internal-revision" not in text
+    assert raw_error not in text
+
+
+def test_nav_receipt_unknown_structured_cash_flow_refusal_uses_run_id_guidance():
+    row = NavHistoryReceiptService._item_row({
+        "success": False,
+        "status": "failed",
+        "account": "lx",
+        "error": "internal mismatch details",
+        "failure": {
+            "code": "CASH_FLOW_DATASET_SCOPE_MISMATCH",
+            "blockers": [],
+        },
+    })
+
+    assert row == (
+        "❌ lx｜Cash Flow 数据校验未通过"
+        "｜处理：请根据本回执 Run ID 排查后重试"
+    )
+    assert "internal mismatch details" not in row
+
+
+def test_nav_receipt_does_not_claim_generic_structured_failure_is_cash_flow():
+    row = NavHistoryReceiptService._item_row({
+        "success": False,
+        "status": "failed",
+        "account": "lx",
+        "stage": "existing_nav_check",
+        "error": "existing NAV read failed",
+        "failure": {
+            "stage": "existing_nav_check",
+            "exception_type": "RuntimeError",
+            "message": "existing NAV read failed",
+        },
+    })
+
+    assert row == (
+        "❌ lx｜failed｜阶段 existing_nav_check｜existing NAV read failed"
+    )
+    assert "Cash Flow" not in row
+
+
+def test_nav_receipt_effect_gate_failure_does_not_instruct_table_edit():
+    row = NavHistoryReceiptService._item_row({
+        "success": False,
+        "status": "failed",
+        "account": "lx",
+        "error": "durable diagnostic",
+        "failure": {
+            "code": "CASH_FLOW_DATASET_BLOCKED",
+            "blockers": [{
+                "reason_code": "EFFECT_GATE_FAILED",
+                "message": "cash-flow holding effect gate failed",
+                "record_id": "",
+                "field": None,
+            }],
+        },
+    })
+
+    assert row == (
+        "❌ lx｜Cash Flow 处理状态校验未完成"
+        "｜处理：请根据本回执 Run ID 排查 effect gate 后重试"
+    )
+    assert "修正 Cash Flow 表" not in row
+
+
 def test_nav_receipt_formats_snapshot_recovery_error():
     text = NavHistoryReceiptService.build_message(
         {

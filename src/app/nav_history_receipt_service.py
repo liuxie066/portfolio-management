@@ -333,12 +333,114 @@ class NavHistoryReceiptService:
             suffix = f"｜{'｜'.join(details)}" if details else ""
             return f"⏭ {account}｜{label}{suffix}{digest_text}"
 
+        cash_flow_row = cls._cash_flow_failure_row(item)
+        if cash_flow_row:
+            return cash_flow_row + digest_text
+
         error = item.get("error") or "unknown error"
         stage = str(item.get("stage") or "").strip()
         stage_text = f"｜阶段 {stage}" if stage else ""
         return (
             f"❌ {account}｜{status or 'failed'}{stage_text}｜{error}"
             f"{digest_text}"
+        )
+
+    @staticmethod
+    def _cash_flow_failure_row(item: dict[str, Any]) -> Optional[str]:
+        failure = item.get("failure")
+        if not isinstance(failure, dict):
+            return None
+        account = item.get("account") or "-"
+        code = str(failure.get("code") or "")
+        if not code.startswith("CASH_FLOW_"):
+            return None
+        if code != "CASH_FLOW_DATASET_BLOCKED":
+            return (
+                f"❌ {account}｜Cash Flow 数据校验未通过"
+                "｜处理：请根据本回执 Run ID 排查后重试"
+            )
+        blockers = [
+            blocker
+            for blocker in list(failure.get("blockers") or [])
+            if isinstance(blocker, dict)
+        ]
+        effect_blockers: list[dict[str, Any]] = []
+        for blocker in blockers:
+            if blocker.get("reason_code") != "EFFECT_GATE_BLOCKED":
+                continue
+            details = blocker.get("details")
+            gate = details.get("gate") if isinstance(details, dict) else None
+            if isinstance(gate, dict):
+                effect_blockers.extend(
+                    row
+                    for row in list(gate.get("blockers") or [])
+                    if isinstance(row, dict)
+                )
+        if not effect_blockers:
+            first = blockers[0] if blockers else {}
+            if str(first.get("reason_code") or "").startswith("EFFECT_"):
+                return (
+                    f"❌ {account}｜Cash Flow 处理状态校验未完成"
+                    "｜处理：请根据本回执 Run ID 排查 effect gate 后重试"
+                )
+            record = first.get("record_id") or "-"
+            field = first.get("field") or "-"
+            return (
+                f"❌ {account}｜Cash Flow 数据待修正"
+                f"｜记录 {record}｜字段 {field}"
+                "｜处理：修正 Cash Flow 表后按本回执 Run ID 重试"
+            )
+
+        effect = effect_blockers[0]
+        operations = [
+            operation
+            for operation in list(effect.get("operations") or [])
+            if isinstance(operation, dict)
+        ]
+        operation = operations[0] if operations else effect
+        kind = str(effect.get("effect_kind") or "")
+        state = str(effect.get("state") or "")
+        broker = str(operation.get("broker") or "").strip()
+        currency = str(operation.get("currency") or "").strip()
+        identity = " ".join(part for part in (broker, currency) if part)
+        identity_text = f"｜{identity}" if identity else ""
+        amount = _as_float(operation.get("signed_amount"))
+        amount_text = (
+            f"｜金额 {amount:+,.2f}{f' {currency}' if currency else ''}"
+            if amount is not None and amount != 0
+            else ""
+        )
+        date_text = (
+            f"｜日期 {operation['flow_date']}"
+            if operation.get("flow_date")
+            else ""
+        )
+        if state == "compensation_pending":
+            label = "Cash Flow 写入恢复未完成"
+            action = (
+                "运行 pm cash-flow effects retry "
+                f"--effect-id {effect.get('effect_id') or 'EFFECT_ID'} --confirm"
+            )
+        elif kind == "cash_flow":
+            label = "出入金待确认"
+            action = (
+                f"运行 pm cash-flow review --account {account} --json，"
+                "按提示预览并确认"
+            )
+        elif broker == "富途" or kind == "broker_cash_reconciliation":
+            label = "Futu 现金待核对"
+            action = (
+                "检查 OpenD 后运行 "
+                f"pm cash-flow review --account {account} --json"
+            )
+        else:
+            label = "现金余额待处理"
+            action = f"运行 pm cash-flow review --account {account} --json"
+        omitted = len(effect_blockers) - 1 + max(len(operations) - 1, 0)
+        omitted_text = f"｜另有 {omitted} 项" if omitted else ""
+        return (
+            f"❌ {account}｜{label}{identity_text}{amount_text}{date_text}"
+            f"｜处理：{action}{omitted_text}"
         )
 
     @staticmethod

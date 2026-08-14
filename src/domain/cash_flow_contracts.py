@@ -628,6 +628,25 @@ class CashFlowDatasetBlocker:
         return payload
 
 
+class CashFlowDatasetRefusal(ValueError):
+    """Structured refusal raised when a dataset cannot authorize NAV."""
+
+    def __init__(
+        self,
+        *,
+        reason_code: str,
+        message: str,
+        blockers: Iterable[CashFlowDatasetBlocker] = (),
+        details: Optional[Mapping[str, Any]] = None,
+    ):
+        self.reason_code = str(reason_code or "").strip()
+        self.blockers = tuple(blockers)
+        self.details = _freeze_mapping(details or {})
+        if not self.reason_code:
+            raise ValueError("cash-flow dataset refusal requires reason_code")
+        super().__init__(message)
+
+
 @dataclass(frozen=True)
 class CashFlowDatasetRowDerivation:
     """Canonical raw-row validation result for one account dataset."""
@@ -948,22 +967,35 @@ class CashFlowDatasetSnapshot:
             ):
                 mismatches.append("effect_gate_financial_fingerprint")
         if mismatches:
-            raise ValueError(
-                "NAV 写入拒绝：cash-flow dataset scope/integrity mismatch: "
-                + ", ".join(sorted(set(mismatches)))
+            mismatch_fields = tuple(sorted(set(mismatches)))
+            raise CashFlowDatasetRefusal(
+                reason_code="CASH_FLOW_DATASET_SCOPE_MISMATCH",
+                message=(
+                    "NAV 写入拒绝：cash-flow dataset scope/integrity mismatch: "
+                    + ", ".join(mismatch_fields)
+                ),
+                details={"mismatches": mismatch_fields},
             )
         if self.blockers:
-            raise ValueError(
-                "NAV 写入拒绝：cash-flow dataset has blockers: "
-                + json.dumps(
-                    [item.as_dict() for item in self.blockers],
-                    ensure_ascii=False,
-                    default=str,
-                )
+            raise CashFlowDatasetRefusal(
+                reason_code="CASH_FLOW_DATASET_BLOCKED",
+                message=(
+                    "NAV 写入拒绝：cash-flow dataset has blockers: "
+                    + json.dumps(
+                        [item.as_dict() for item in self.blockers],
+                        ensure_ascii=False,
+                        default=str,
+                    )
+                ),
+                blockers=self.blockers,
             )
         if not self.complete:
-            raise ValueError(
-                "NAV 写入拒绝：cash-flow dataset effect gate is incomplete"
+            raise CashFlowDatasetRefusal(
+                reason_code="CASH_FLOW_EFFECT_GATE_INCOMPLETE",
+                message=(
+                    "NAV 写入拒绝：cash-flow dataset effect gate is incomplete"
+                ),
+                details={"effect_store_revision": self.effect_store_revision},
             )
 
 

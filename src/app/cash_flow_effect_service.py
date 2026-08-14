@@ -1230,6 +1230,53 @@ class CashFlowEffectService:
             and self._is_nav_blocker(effect, nav_date)
         ]
 
+    def _nav_blocker_payload(
+        self,
+        effect: Dict[str, Any],
+        *,
+        account: str,
+    ) -> Dict[str, Any]:
+        operations: list[Dict[str, Any]] = []
+        if effect["effect_kind"] == "cash_flow":
+            try:
+                operations = [
+                    {
+                        "account": operation_source.get("account"),
+                        "broker": operation_source.get("broker"),
+                        "currency": operation_source.get("currency"),
+                        "signed_amount": self._money(delta),
+                        "flow_date": operation_source.get("flow_date"),
+                    }
+                    for operation_source, delta in self._cash_flow_operations(effect)
+                    if operation_source.get("account") == account
+                ]
+            except (TypeError, ValueError):
+                operations = []
+        if not operations and (
+            effect["effect_kind"] != "cash_flow"
+            or effect.get("account") == account
+        ):
+            operations = [{
+                "account": effect.get("account"),
+                "broker": effect.get("broker"),
+                "currency": effect.get("currency"),
+                "signed_amount": effect.get("signed_amount"),
+                "flow_date": effect.get("flow_date"),
+            }]
+        unique_operation = operations[0] if len(operations) == 1 else {}
+        return {
+            "effect_id": effect["effect_id"],
+            "effect_kind": effect["effect_kind"],
+            "state": effect["state"],
+            "record_id": effect["record_id"],
+            "flow_date": unique_operation.get("flow_date"),
+            "broker": unique_operation.get("broker"),
+            "currency": unique_operation.get("currency"),
+            "signed_amount": unique_operation.get("signed_amount"),
+            "operations": operations,
+            "last_error": effect.get("last_error"),
+        }
+
     def _futu_target(
         self,
         source: Dict[str, Any],
@@ -2153,14 +2200,7 @@ class CashFlowEffectService:
             ),
             "blocker_count": len(blockers),
             "blockers": [
-                {
-                    "effect_id": item["effect_id"],
-                    "effect_kind": item["effect_kind"],
-                    "state": item["state"],
-                    "record_id": item["record_id"],
-                    "flow_date": item["flow_date"],
-                    "last_error": item.get("last_error"),
-                }
+                self._nav_blocker_payload(item, account=account)
                 for item in blockers
             ],
         }
