@@ -21,3 +21,6 @@ __pycache__/
 reports/
 audit/
 public/
+
+# AI review artifacts（deepreview/planreview/code-review 过程产物）
+docs/reviews/
