@@ -700,56 +700,73 @@ class HoldingCaseMixin:
         now = self.now_factory().isoformat()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            for candidate in cases:
-                case_key = str(candidate["case_key"])
-                row = conn.execute(
-                    "SELECT * FROM holding_reconciliation_cases WHERE case_key = ?",
-                    (case_key,),
-                ).fetchone()
-                allowed_states = tuple(candidate.get("allowed_states") or ())
-                if not row or row["state"] not in allowed_states:
-                    raise ValueError(
-                        f"holding case is not applicable: {case_key}: "
-                        f"{row['state'] if row else 'missing'}"
-                    )
-                if row["case_precondition_digest"] != candidate["case_precondition_digest"]:
-                    raise ValueError(f"holding case precondition changed: {case_key}")
-                resolution = {
-                    "operator_context": dict(operator_context),
-                    "decision": candidate.get("decision"),
-                    "reason": candidate.get("reason"),
-                    "confirmation_scope": candidate.get("confirmation_scope"),
-                }
-                conn.execute(
-                    """
-                    UPDATE holding_reconciliation_cases
-                    SET state = 'applying', target_json = ?, before_json = ?,
-                        apply_attempt_id = ?, resolution_json = ?,
-                        remote_attempt_started_at = NULL, last_error = NULL,
-                        updated_at = ?
-                    WHERE case_key = ?
-                    """,
-                    (
-                        _canonical_json(candidate.get("target")),
-                        _canonical_json(candidate.get("before")),
-                        apply_attempt_id,
-                        _canonical_json(resolution),
-                        now,
-                        case_key,
-                    ),
+            self._prepare_holding_apply_tx(
+                conn,
+                cases=cases,
+                apply_attempt_id=apply_attempt_id,
+                operator_context=operator_context,
+                now=now,
+            )
+
+    def _prepare_holding_apply_tx(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        cases: list[Dict[str, Any]],
+        apply_attempt_id: str,
+        operator_context: Dict[str, Any],
+        now: str,
+    ) -> None:
+        for candidate in cases:
+            case_key = str(candidate["case_key"])
+            row = conn.execute(
+                "SELECT * FROM holding_reconciliation_cases WHERE case_key = ?",
+                (case_key,),
+            ).fetchone()
+            allowed_states = tuple(candidate.get("allowed_states") or ())
+            if not row or row["state"] not in allowed_states:
+                raise ValueError(
+                    f"holding case is not applicable: {case_key}: "
+                    f"{row['state'] if row else 'missing'}"
                 )
-                self._insert_case_event_tx(
-                    conn,
-                    case_key=case_key,
-                    event_type="apply_prepared",
-                    payload={
-                        "apply_attempt_id": apply_attempt_id,
-                        "target": candidate.get("target"),
-                        "before": candidate.get("before"),
-                        **resolution,
-                    },
-                    created_at=now,
-                )
+            if row["case_precondition_digest"] != candidate["case_precondition_digest"]:
+                raise ValueError(f"holding case precondition changed: {case_key}")
+            resolution = {
+                "operator_context": dict(operator_context),
+                "decision": candidate.get("decision"),
+                "reason": candidate.get("reason"),
+                "confirmation_scope": candidate.get("confirmation_scope"),
+            }
+            conn.execute(
+                """
+                UPDATE holding_reconciliation_cases
+                SET state = 'applying', target_json = ?, before_json = ?,
+                    apply_attempt_id = ?, resolution_json = ?,
+                    remote_attempt_started_at = NULL, last_error = NULL,
+                    updated_at = ?
+                WHERE case_key = ?
+                """,
+                (
+                    _canonical_json(candidate.get("target")),
+                    _canonical_json(candidate.get("before")),
+                    apply_attempt_id,
+                    _canonical_json(resolution),
+                    now,
+                    case_key,
+                ),
+            )
+            self._insert_case_event_tx(
+                conn,
+                case_key=case_key,
+                event_type="apply_prepared",
+                payload={
+                    "apply_attempt_id": apply_attempt_id,
+                    "target": candidate.get("target"),
+                    "before": candidate.get("before"),
+                    **resolution,
+                },
+                created_at=now,
+            )
 
     def materialize_and_prepare_holding_apply(
         self,
@@ -765,281 +782,18 @@ class HoldingCaseMixin:
 
         if not apply_cases:
             raise ValueError("holding apply requires at least one case")
+        if not observed_cases:
+            raise ValueError("holding apply lacks a fresh observed case set")
         now = self.now_factory().isoformat()
-        receipt_by_case = {
-            str(item.get("case_key") or ""): dict(item)
-            for item in discovery_receipts
-        }
-        created: list[str] = []
-        refreshed: list[str] = []
-        reopened: list[str] = []
-        closed: list[str] = []
-        superseded: list[str] = []
-        receipt_keys: list[str] = []
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            for candidate in observed_cases:
-                case_key = str(candidate.get("case_key") or "").strip()
-                record_id = str(candidate.get("record_id") or "").strip()
-                field = str(candidate.get("field") or "").strip()
-                kind = str(candidate.get("kind") or "").strip()
-                state = str(candidate.get("state") or "").strip()
-                policy_version = str(candidate.get("policy_version") or "").strip()
-                precondition = str(
-                    candidate.get("case_precondition_digest") or ""
-                ).strip()
-                current_json = _canonical_json(candidate.get("current"))
-                proposed_json = _canonical_json(candidate.get("proposed"))
-                evidence_json = _canonical_json(candidate.get("evidence") or {})
-                if not all(
-                    (
-                        case_key,
-                        record_id,
-                        field,
-                        kind,
-                        state,
-                        policy_version,
-                        precondition,
-                        candidate.get("record_digest"),
-                    )
-                ):
-                    raise ValueError("holding case is missing a required identity field")
-                old_rows = conn.execute(
-                    """
-                    SELECT * FROM holding_reconciliation_cases
-                    WHERE record_id = ? AND field = ? AND case_key != ?
-                      AND state IN ({})
-                    """.format(",".join("?" for _ in _SUPERSEDEABLE_HOLDING_CASE_STATES)),
-                    (record_id, field, case_key, *_SUPERSEDEABLE_HOLDING_CASE_STATES),
-                ).fetchall()
-                for old in old_rows:
-                    resolution = {
-                        "reason": "semantic_case_changed",
-                        "replacement_case_key": case_key,
-                        "trigger": dict(trigger or {}),
-                    }
-                    if old["resolution_json"]:
-                        resolution["previous_resolution"] = json.loads(
-                            old["resolution_json"]
-                        )
-                    conn.execute(
-                        """
-                        UPDATE holding_reconciliation_cases
-                        SET state = 'superseded', resolution_json = ?, updated_at = ?
-                        WHERE case_key = ? AND state IN ({})
-                        """.format(",".join("?" for _ in _SUPERSEDEABLE_HOLDING_CASE_STATES)),
-                        (
-                            _canonical_json(resolution),
-                            now,
-                            old["case_key"],
-                            *_SUPERSEDEABLE_HOLDING_CASE_STATES,
-                        ),
-                    )
-                    self._insert_case_event_tx(
-                        conn,
-                        case_key=old["case_key"],
-                        event_type="superseded",
-                        payload=resolution,
-                        created_at=now,
-                    )
-                    closure_key = (
-                        f"holdings:case:closed:{old['case_key']}:superseded:"
-                        f"{candidate['record_digest']}"
-                    )
-                    if self._insert_repeatable_closure_receipt_tx(
-                        conn,
-                        receipt_key=closure_key,
-                        payload={
-                            "case_key": old["case_key"],
-                            "record_id": old["record_id"],
-                            "field": old["field"],
-                            "terminal_state": "superseded",
-                            **resolution,
-                        },
-                        now=now,
-                    ):
-                        receipt_keys.append(closure_key)
-                    superseded.append(old["case_key"])
-
-                existing = conn.execute(
-                    "SELECT * FROM holding_reconciliation_cases WHERE case_key = ?",
-                    (case_key,),
-                ).fetchone()
-                if existing:
-                    immutable = {
-                        "record_id": record_id,
-                        "identity_json": _canonical_json(candidate.get("identity") or {}),
-                        "field": field,
-                        "kind": kind,
-                        "policy_version": policy_version,
-                        "authority_id": candidate.get("authority_id"),
-                        "current_json": current_json,
-                        "proposed_json": proposed_json,
-                        "case_precondition_digest": precondition,
-                    }
-                    if existing["identity_json"] == "{}":
-                        conn.execute(
-                            """
-                            UPDATE holding_reconciliation_cases
-                            SET identity_json = ?, updated_at = ? WHERE case_key = ?
-                            """,
-                            (immutable["identity_json"], now, case_key),
-                        )
-                    elif existing["identity_json"] != immutable["identity_json"]:
-                        raise ValueError(
-                            "holding case key collision with different identity: "
-                            f"{case_key}"
-                        )
-                    existing = conn.execute(
-                        "SELECT * FROM holding_reconciliation_cases WHERE case_key = ?",
-                        (case_key,),
-                    ).fetchone()
-                    self._migrate_case_precondition_tx(
-                        conn,
-                        existing=existing,
-                        candidate=candidate,
-                        trigger=trigger,
-                        now=now,
-                    )
-                    existing = conn.execute(
-                        "SELECT * FROM holding_reconciliation_cases WHERE case_key = ?",
-                        (case_key,),
-                    ).fetchone()
-                    if any(
-                        existing[key] != value
-                        for key, value in immutable.items()
-                        if key != "identity_json"
-                    ):
-                        raise ValueError(
-                            "holding case key collision with different semantics: "
-                            f"{case_key}"
-                        )
-                    if existing["state"] in _REOPENABLE_HOLDING_CASE_STATES:
-                        conn.execute(
-                            """
-                            UPDATE holding_reconciliation_cases
-                            SET state = ?, identity_json = ?,
-                                latest_evidence_instance_id = ?, evidence_json = ?,
-                                record_digest = ?, resolution_json = NULL,
-                                target_json = NULL, before_json = NULL,
-                                apply_attempt_id = NULL,
-                                remote_attempt_started_at = NULL,
-                                last_error = NULL, updated_at = ?
-                            WHERE case_key = ?
-                            """,
-                            (
-                                state,
-                                immutable["identity_json"],
-                                candidate.get("latest_evidence_instance_id"),
-                                evidence_json,
-                                candidate["record_digest"],
-                                now,
-                                case_key,
-                            ),
-                        )
-                        self._insert_case_event_tx(
-                            conn,
-                            case_key=case_key,
-                            event_type="reopened",
-                            payload={
-                                "from_state": existing["state"],
-                                "to_state": state,
-                                "record_digest": candidate["record_digest"],
-                                "trigger": dict(trigger or {}),
-                            },
-                            created_at=now,
-                        )
-                        reopened.append(case_key)
-                    elif (
-                        existing["latest_evidence_instance_id"]
-                        != candidate.get("latest_evidence_instance_id")
-                        or existing["evidence_json"] != evidence_json
-                        or existing["record_digest"] != candidate["record_digest"]
-                    ):
-                        conn.execute(
-                            """
-                            UPDATE holding_reconciliation_cases
-                            SET latest_evidence_instance_id = ?, evidence_json = ?,
-                                record_digest = ?, updated_at = ?
-                            WHERE case_key = ?
-                            """,
-                            (
-                                candidate.get("latest_evidence_instance_id"),
-                                evidence_json,
-                                candidate["record_digest"],
-                                now,
-                                case_key,
-                            ),
-                        )
-                        self._insert_case_event_tx(
-                            conn,
-                            case_key=case_key,
-                            event_type="evidence_refreshed",
-                            payload={
-                                "evidence_instance_id": candidate.get(
-                                    "latest_evidence_instance_id"
-                                ),
-                                "record_digest": candidate["record_digest"],
-                            },
-                            created_at=now,
-                        )
-                        refreshed.append(case_key)
-                else:
-                    conn.execute(
-                        """
-                        INSERT INTO holding_reconciliation_cases(
-                            case_key, record_id, account, identity_json, field, kind,
-                            blocks_official_nav, policy_version, authority_id,
-                            current_json, proposed_json, record_digest,
-                            case_precondition_digest, latest_evidence_instance_id,
-                            evidence_json, state, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            case_key,
-                            record_id,
-                            candidate.get("account"),
-                            _canonical_json(candidate.get("identity") or {}),
-                            field,
-                            kind,
-                            int(bool(candidate.get("blocks_official_nav"))),
-                            policy_version,
-                            candidate.get("authority_id"),
-                            current_json,
-                            proposed_json,
-                            candidate["record_digest"],
-                            precondition,
-                            candidate.get("latest_evidence_instance_id"),
-                            evidence_json,
-                            state,
-                            now,
-                            now,
-                        ),
-                    )
-                    self._insert_case_event_tx(
-                        conn,
-                        case_key=case_key,
-                        event_type="discovered",
-                        payload={"state": state, "trigger": dict(trigger or {})},
-                        created_at=now,
-                    )
-                    receipt = receipt_by_case.get(case_key)
-                    if receipt is None:
-                        raise ValueError(
-                            f"new holding case lacks discovery receipt: {case_key}"
-                        )
-                    if self._insert_operation_receipt_tx(
-                        conn,
-                        receipt_key=str(receipt["receipt_key"]),
-                        receipt_type=str(receipt["receipt_type"]),
-                        payload=dict(receipt["payload"]),
-                        now=now,
-                    ):
-                        receipt_keys.append(str(receipt["receipt_key"]))
-                    created.append(case_key)
-
-            if not observed_cases:
-                raise ValueError("holding apply lacks a fresh observed case set")
+            stored = self._materialize_holding_cases_tx(
+                conn,
+                cases=observed_cases,
+                discovery_receipts=discovery_receipts,
+                trigger=trigger,
+                now=now,
+            )
             first_observed = observed_cases[0]
             record_ids = {str(item.get("record_id") or "") for item in observed_cases}
             identities = {
@@ -1059,67 +813,22 @@ class HoldingCaseMixin:
                 trigger=trigger,
                 now=now,
             )
-            closed.extend(absent["closed_case_keys"])
-            superseded.extend(absent["superseded_case_keys"])
-            receipt_keys.extend(absent["enqueued_receipt_keys"])
-
-            for candidate in apply_cases:
-                case_key = str(candidate["case_key"])
-                row = conn.execute(
-                    "SELECT * FROM holding_reconciliation_cases WHERE case_key = ?",
-                    (case_key,),
-                ).fetchone()
-                allowed_states = tuple(candidate.get("allowed_states") or ())
-                if not row or row["state"] not in allowed_states:
-                    raise ValueError(
-                        f"holding case is not applicable: {case_key}: "
-                        f"{row['state'] if row else 'missing'}"
-                    )
-                if row["case_precondition_digest"] != candidate["case_precondition_digest"]:
-                    raise ValueError(f"holding case precondition changed: {case_key}")
-                resolution = {
-                    "operator_context": dict(operator_context),
-                    "decision": candidate.get("decision"),
-                    "reason": candidate.get("reason"),
-                    "confirmation_scope": candidate.get("confirmation_scope"),
-                }
-                conn.execute(
-                    """
-                    UPDATE holding_reconciliation_cases
-                    SET state = 'applying', target_json = ?, before_json = ?,
-                        apply_attempt_id = ?, resolution_json = ?,
-                        remote_attempt_started_at = NULL, last_error = NULL,
-                        updated_at = ?
-                    WHERE case_key = ?
-                    """,
-                    (
-                        _canonical_json(candidate.get("target")),
-                        _canonical_json(candidate.get("before")),
-                        apply_attempt_id,
-                        _canonical_json(resolution),
-                        now,
-                        case_key,
-                    ),
-                )
-                self._insert_case_event_tx(
-                    conn,
-                    case_key=case_key,
-                    event_type="apply_prepared",
-                    payload={
-                        "apply_attempt_id": apply_attempt_id,
-                        "target": candidate.get("target"),
-                        "before": candidate.get("before"),
-                        **resolution,
-                    },
-                    created_at=now,
-                )
+            self._prepare_holding_apply_tx(
+                conn,
+                cases=apply_cases,
+                apply_attempt_id=apply_attempt_id,
+                operator_context=operator_context,
+                now=now,
+            )
         return {
-            "created_case_keys": created,
-            "refreshed_case_keys": refreshed,
-            "reopened_case_keys": reopened,
-            "closed_case_keys": closed,
-            "superseded_case_keys": superseded,
-            "enqueued_receipt_keys": receipt_keys,
+            "created_case_keys": stored["created_case_keys"],
+            "refreshed_case_keys": stored["refreshed_case_keys"],
+            "reopened_case_keys": stored["reopened_case_keys"],
+            "closed_case_keys": absent["closed_case_keys"],
+            "superseded_case_keys": stored["superseded_case_keys"]
+            + absent["superseded_case_keys"],
+            "enqueued_receipt_keys": stored["enqueued_receipt_keys"]
+            + absent["enqueued_receipt_keys"],
         }
 
     def mark_holding_remote_attempt(

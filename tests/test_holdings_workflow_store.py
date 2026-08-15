@@ -409,7 +409,7 @@ def test_combined_materialize_and_prepare_migrates_before_applying_atomically(tm
         for event in store.list_holding_case_events(candidate["case_key"])
     ][-3:] == [
         "precondition_contract_migrated",
-        "evidence_refreshed",
+        "record_refreshed",
         "apply_prepared",
     ]
 
