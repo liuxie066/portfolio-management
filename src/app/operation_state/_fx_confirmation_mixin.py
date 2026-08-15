@@ -7,7 +7,7 @@ from typing import Optional
 from pathlib import Path
 import json
 import sqlite3
-from ._base import _canonical_json
+from .._json import canonical_json as _canonical_json
 
 
 

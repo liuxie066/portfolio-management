@@ -1,14 +1,12 @@
 """Shared SQLite connection, schema, and migration for operation state."""
 from __future__ import annotations
 
-from typing import Any
 from typing import Callable
 from typing import Optional
 from pathlib import Path
 from src.time_utils import bj_now_naive
 from src import config
 from datetime import datetime
-import json
 import sqlite3
 
 SCHEMA_VERSION = "2"
@@ -16,16 +14,6 @@ HOLDINGS_WORKFLOW_SCHEMA_VERSION = "1"
 CASH_FLOW_EVENT_SCHEMA_VERSION = "1"
 _RETRY_MINUTES = (1, 5, 15, 60)
 _CLAIM_LEASE_MINUTES = 5
-
-
-def _canonical_json(value: Any) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    )
 
 
 class OperationStateBase:

@@ -7,7 +7,8 @@ from typing import Optional
 import json
 from datetime import timedelta
 from uuid import uuid4
-from ._base import _CLAIM_LEASE_MINUTES, _RETRY_MINUTES, _canonical_json
+from ._base import _CLAIM_LEASE_MINUTES, _RETRY_MINUTES
+from .._json import canonical_json as _canonical_json
 
 
 
