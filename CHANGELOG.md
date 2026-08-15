@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.40 - 2026-08-16
+
+- Add month-to-date NAV change to the consolidated multi-account NAV receipt.
+- Split the operation-state SQLite store into focused base/schema/mixin modules
+  without changing the persisted schema or runtime behavior, and fix the default
+  data-directory resolution that moved with the refactor.
+- Route diagnostic and warning output through the logging module instead of
+  stdout so the HTTP service stdout stays clean.
+- Deduplicate canonical-JSON helpers, remove dead imports and package re-exports,
+  and stop tracking AI review artifacts under docs/reviews.
+
 ## 0.1.39 - 2026-08-14
 
 - Recover a legacy NAV Holdings snapshot from its exact durable receipt when
