@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
+from ._json import canonical_json as _canonical_json
 import re
 from typing import Any, Iterable, Mapping, Optional
 
@@ -33,16 +34,6 @@ _CASH_ASSET_ID_RE = re.compile(r"^([A-Z]{3,5})-(CASH|MMF)$")
 _MARKET_SUFFIX_RE = re.compile(r"\.([A-Z]{2})$")
 _FUTU_MARKETS = {"US", "HK", "SH", "SZ", "CN"}
 VALIDATION_RELEVANT_FIELDS = tuple(_HOLDINGS_TABLE_CONTRACT.fields_by_name)
-
-
-def _canonical_json(value: Any) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    )
 
 
 def _digest(value: Any) -> str:

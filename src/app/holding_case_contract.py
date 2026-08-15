@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-import json
+from ._json import canonical_json as _canonical_json
 import re
 from typing import Any, Mapping
 
@@ -39,16 +39,6 @@ _SEMANTIC_FIELDS = (
     "authority_id",
     "policy_version",
 )
-
-
-def _canonical_json(value: Any) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    )
 
 
 def _digest(value: Any) -> str:

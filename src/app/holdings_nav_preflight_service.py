@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 import hashlib
-import json
+from ._json import canonical_json as _canonical_json
 from typing import Any, Callable, Iterable, Mapping, Optional
 
 from src.domain.holdings import RawHoldingRecord
@@ -30,16 +30,6 @@ from .holdings_workflow_service import HoldingsWorkflowService
 
 
 _MAX_ACTION_ITEMS_PER_SCOPE = 5
-
-
-def _canonical_json(value: Any) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    )
 
 
 def _digest(value: Any) -> str:

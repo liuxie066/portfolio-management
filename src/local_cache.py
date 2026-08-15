@@ -6,7 +6,6 @@
 """
 import json
 import threading
-import time
 from datetime import date, datetime
 
 from .time_utils import bj_now_naive

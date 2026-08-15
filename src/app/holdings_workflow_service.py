@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import ExitStack
 import getpass
 import hashlib
-import json
+from ._json import canonical_json as _canonical_json
 import socket
 from typing import Any, Dict, Iterable, Optional
 from uuid import uuid4
@@ -43,16 +43,6 @@ _ACTIONABLE_OUTCOMES = {
     "missing_manual",
     "invalid",
 }
-
-
-def _canonical_json(value: Any) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    )
 
 
 def _digest(value: Any) -> str:

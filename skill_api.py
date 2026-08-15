@@ -693,7 +693,7 @@ def init_db(
             "initial_cash": initial_cash,
             "current_holdings": len(holdings),
             "nav_records": len(nav_history),
-            "message": f"已初始化飞书多维表\n" +
+            "message": "已初始化飞书多维表\n" +
                       f"  - 持仓记录: {len(holdings)} 条\n" +
                       f"  - 净值记录: {len(nav_history)} 条\n" +
                       (f"  - 初始现金: ¥{initial_cash:,.2f}" if initial_cash > 0 else "")
