@@ -5,7 +5,38 @@ import pytest
 
 from src.app.nav_receipt_outbox_service import NavReceiptOutboxService
 from src.app.operation_state_store import OperationStateStore
+from src.app.operation_state import (
+    CashFlowEventMixin,
+    FxConfirmationMixin,
+    HoldingCaseMixin,
+    HoldingEventMixin,
+    NavReceiptMixin,
+    OperationReceiptMixin,
+    OperationStateBase,
+)
 from src.app.cash_flow_effect_store import CashFlowEffectStore
+
+
+def test_operation_state_mixins_have_disjoint_method_names():
+    mixins = [
+        OperationStateBase,
+        FxConfirmationMixin,
+        NavReceiptMixin,
+        HoldingCaseMixin,
+        HoldingEventMixin,
+        CashFlowEventMixin,
+        OperationReceiptMixin,
+    ]
+    seen: dict[str, str] = {}
+    for mixin in mixins:
+        for name in vars(mixin):
+            if name.startswith("__") and name.endswith("__"):
+                continue
+            if name in seen:
+                raise AssertionError(
+                    f"method {name!r} defined in both {seen[name]} and {mixin.__name__}"
+                )
+            seen[name] = mixin.__name__
 
 
 def test_operation_store_upgrades_v1_outbox_for_claims(tmp_path):

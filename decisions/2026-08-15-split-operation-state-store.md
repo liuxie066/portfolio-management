@@ -72,3 +72,13 @@ src/app/operation_state/
 - 与 PR #49（ponytail cleanup，未合并）都改 `operation_state_store.py`，合并时可能冲突 → 由后续合并解决
 - 测试子类化（`FailMarkStore(OperationStateStore)` 覆盖 `mark_operation_receipt`）需保持兼容 → mixin 继承天然满足
 - `test_pm_cli.py` patch `store_module.OperationStateStore` → shim 必须 re-export 同一个类对象
+
+## code review（Kimi）结论
+
+- **无 blocking finding**，重构成立。验证：56 方法无丢失/重复，54 个逐字节一致，仅 2 处有意修复。
+- deferred-with-owner（均拆分前已存在，本轮不改）：
+  1. 跨 mixin 隐式 `_tx` 依赖：可降为模块级函数显式 import（holding_event→holding_case→operation_receipt 无环）
+  2. `_base.py` 的 ~175 行 DDL：抽 `_schema.py` 纯数据模块，别拆给 mixin
+  3. `_holding_case_mixin.py` 1220 行内 ~370 行自我重复（`materialize_and_prepare_holding_apply` 内联重写了 materialize）：先去重再评估拆文件
+- accepted（无动作）：shim 只 re-export 一个类足够；`__module__` 变化仅理论风险（仓库内无 pickle/反射用法）
+- 本轮新增：`tests/test_operation_state_store.py::test_operation_state_mixins_have_disjoint_method_names` 把「mixin 方法名不相交」的隐式契约变显式断言
