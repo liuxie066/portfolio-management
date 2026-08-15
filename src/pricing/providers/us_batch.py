@@ -1,5 +1,6 @@
 """Deadline-bound US batch quote provider."""
 from __future__ import annotations
+import logging
 
 import time
 from typing import Dict, List
@@ -42,7 +43,7 @@ def fetch_us_batch(
             )
         )
     except Exception as exc:
-        print(
+        logging.getLogger(__name__).warning(
             "[美股价格] provider=sina_us "
             f"error_type={type(exc).__name__}"
         )
@@ -57,7 +58,7 @@ def fetch_us_batch(
             remaining_timeout(finnhub_deadline, FINNHUB_REQUEST_BUDGET_SEC)
         except TimeoutError:
             remaining_count = len(leftover) - index
-            print(
+            logging.getLogger(__name__).warning(
                 "[美股价格] provider=finnhub "
                 f"error_type=DeadlineExceeded remaining={remaining_count}"
             )
@@ -66,7 +67,7 @@ def fetch_us_batch(
         try:
             result = us_provider.fetch_finnhub(quote_code, finnhub_key, deadline=finnhub_deadline)
         except Exception as exc:
-            print(
+            logging.getLogger(__name__).warning(
                 "[美股价格] provider=finnhub "
                 f"symbol={code} error_type={type(exc).__name__}"
             )
@@ -79,7 +80,7 @@ def fetch_us_batch(
 
     for code in codes:
         if code not in results:
-            print(f"[美股价格] symbol={code} status=missing fallback=expired_cache")
+            logging.getLogger(__name__).warning(f"[美股价格] symbol={code} status=missing fallback=expired_cache")
             use_expired_cache(code)
 
     return results

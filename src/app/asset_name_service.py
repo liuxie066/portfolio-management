@@ -1,5 +1,6 @@
 """Asset display-name lookup service."""
 from __future__ import annotations
+import logging
 
 import threading
 from typing import Any
@@ -28,9 +29,9 @@ class AssetNameService:
         if result["data"] and result["data"].get("name"):
             return result["data"]["name"]
         if thread.is_alive():
-            print(f"[警告] 获取资产名称超时 {asset_id}，使用备选名称")
+            logging.getLogger(__name__).warning(f"[警告] 获取资产名称超时 {asset_id}，使用备选名称")
         elif result["error"]:
-            print(f"[警告] 获取资产名称失败 {asset_id}: {result['error']}")
+            logging.getLogger(__name__).warning(f"[警告] 获取资产名称失败 {asset_id}: {result['error']}")
 
         if user_provided_name:
             return user_provided_name

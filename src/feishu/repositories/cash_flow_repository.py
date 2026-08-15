@@ -1,4 +1,5 @@
 """Repository for the Feishu cash_flow table."""
+import logging
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Dict, List, Optional
@@ -91,7 +92,7 @@ class CashFlowRepository:
                                 f"expected_dedup_key={facts.dedup_key}"
                             )
                 if existing_facts is not None:
-                    print(
+                    logging.getLogger(__name__).info(
                         "[防重保护] 发现相同内容出入金"
                         f"(dedup_key={facts.dedup_key})，跳过创建"
                     )

@@ -1,5 +1,6 @@
 """Optimized batch quote planner used by the PriceFetcher facade."""
 from __future__ import annotations
+import logging
 
 from typing import Any, Dict, List
 
@@ -213,7 +214,7 @@ class BatchPricePlanner:
                 errors.append(f"{code}: {exc}")
 
         if errors and len(errors) <= 3:
-            print(f"部分资产查询失败: {'; '.join(errors[:3])}")
+            logging.getLogger(__name__).warning(f"部分资产查询失败: {'; '.join(errors[:3])}")
         return results
 
     @staticmethod

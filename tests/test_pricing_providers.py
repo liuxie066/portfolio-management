@@ -244,7 +244,7 @@ def test_us_single_prefers_sina_and_skips_finnhub(monkeypatch):
     assert finnhub_calls == []
 
 
-def test_us_single_failure_logs_redact_finnhub_request_url(monkeypatch, capsys):
+def test_us_single_failure_logs_redact_finnhub_request_url(monkeypatch, caplog):
     fetcher = PriceFetcher()
     monkeypatch.setattr(
         USStockProvider,
@@ -267,7 +267,7 @@ def test_us_single_failure_logs_redact_finnhub_request_url(monkeypatch, capsys):
     )
 
     result = USStockProvider(fetcher).fetch_us_stock("AAPL")
-    output = capsys.readouterr().out
+    output = caplog.text
 
     assert result is None
     assert "provider=finnhub symbol=AAPL error_type=RuntimeError" in output
@@ -303,7 +303,7 @@ def test_us_batch_uses_one_sina_request_and_skips_finnhub_when_complete(monkeypa
 
 
 def test_us_batch_finnhub_failure_circuits_remaining_missing_symbols(
-    monkeypatch, capsys
+    monkeypatch, caplog
 ):
     fetcher = PriceFetcher()
     fetcher._fetch_exchange_rates = lambda **kw: {"USDCNY": 7.1}
@@ -326,7 +326,7 @@ def test_us_batch_finnhub_failure_circuits_remaining_missing_symbols(
     monkeypatch.setattr(USStockProvider, "fetch_finnhub", fail_finnhub)
 
     result = fetch_us_batch(fetcher, codes, name_map={}, expired_cache={}, _nested=True)
-    output = capsys.readouterr().out
+    output = caplog.text
 
     assert len(requests) == 1
     assert finnhub_calls == ["BABA"]

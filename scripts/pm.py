@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import logging
 import os
 import json
 import sys
@@ -2229,6 +2230,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    logging.basicConfig(level=logging.INFO)
     parser = build_parser()
     args = parser.parse_args(argv)
     try:

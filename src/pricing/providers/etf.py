@@ -1,5 +1,6 @@
 """ETF quote provider."""
 from __future__ import annotations
+import logging
 
 import re
 import time
@@ -74,5 +75,5 @@ class ETFProvider:
                 }
             )
         except Exception as exc:
-            print(f"获取ETF价格失败 {code}: {exc}")
+            logging.getLogger(__name__).warning(f"获取ETF价格失败 {code}: {exc}")
             return None

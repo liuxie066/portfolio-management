@@ -1,5 +1,6 @@
 """US stock quote provider."""
 from __future__ import annotations
+import logging
 
 import time
 from typing import Optional
@@ -80,7 +81,7 @@ class USStockProvider:
                     f"error_type={type(exc).__name__}"
                 )
 
-        print(f"获取美股价格失败 {code}: {'; '.join(errors)}")
+        logging.getLogger(__name__).warning(f"获取美股价格失败 {code}: {'; '.join(errors)}")
         return None
 
     def fetch_finnhub(self, code: str, api_key: str, *, deadline: float | None = None) -> Optional[dict]:
