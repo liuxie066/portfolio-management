@@ -10,7 +10,6 @@
 4. 美股多数据源备选，防止限流
 """
 import requests
-import time
 import random
 from typing import Dict, Optional, List, Any
 

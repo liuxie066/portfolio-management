@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from ._json import canonical_json as _canonical_json
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -44,16 +45,6 @@ _REOPENABLE_HOLDING_CASE_STATES = (
     "resolved_external",
     "superseded",
 )
-
-
-def _canonical_json(value: Any) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    )
 
 
 class OperationStateStore:

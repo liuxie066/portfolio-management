@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
-import json
+from ._json import canonical_json as _canonical_json
 from typing import Any, Dict, Optional
 
 from src import config
@@ -28,16 +28,6 @@ IGNORED_CASH_FLOW_ACTIONS = frozenset({"record_deleted"})
 
 class CashFlowEventTargetMismatch(ValueError):
     """A valid event belongs to another configured resource."""
-
-
-def _canonical_json(value: Any) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    )
 
 
 @dataclass(frozen=True)

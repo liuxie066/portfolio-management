@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 import hashlib
-import json
+from ._json import canonical_json as _canonical_json
 from typing import Any, Dict, Optional
 
 from src.domain.cash_flow_contracts import CASH_FLOW_MANUAL_REQUIRED_FIELDS
@@ -24,16 +24,6 @@ _FX_ATTENTION_MESSAGES = {
     "fx_confirmation_missing": "foreign cash-flow FX confirmation is missing",
     "fx_confirmation_stale": "foreign cash-flow FX confirmation is stale",
 }
-
-
-def _canonical_json(value: Any) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    )
 
 
 def _normalize_value(value: Any) -> Any:

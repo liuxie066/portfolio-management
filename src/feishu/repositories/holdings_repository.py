@@ -9,7 +9,6 @@ from ...domain.holding_dates import format_holding_date, parse_holding_date
 from ...domain.holding_mutations import (
     AmbiguousHoldingIdentityError,
     HOLDING_REQUIRED_VALUE_FIELDS,
-    HOLDING_VALUE_FIELDS,
     HoldingIdentity,
     HoldingMutationConflictError,
     HoldingMutationProofError,
@@ -17,7 +16,6 @@ from ...domain.holding_mutations import (
     HoldingRepairPatch,
     HoldingTarget,
     canonical_holding,
-    canonical_holding_value,
     explicit_holding_owned_fields,
     holding_owned_fields_match,
     raw_holding_state_digest,
