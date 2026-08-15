@@ -90,7 +90,7 @@ class FxRateService:
             if (now - file_cache_time).total_seconds() < 86400:
                 self._rate_cache = file_rates
                 self._rate_cache_time = file_cache_time
-                logging.getLogger(__name__).warning(
+                logging.getLogger(__name__).info(
                     f"[汇率] 从文件加载缓存: USD/CNY={file_rates['USDCNY']}, "
                     f"HKD/CNY={file_rates['HKDCNY']}"
                 )
@@ -126,7 +126,7 @@ class FxRateService:
             self._rate_cache = validated
             self._rate_cache_time = now
             self.save_cache_to_file(validated)
-            logging.getLogger(__name__).warning(f"[汇率] 已更新缓存: USD/CNY={validated['USDCNY']}, HKD/CNY={validated['HKDCNY']}")
+            logging.getLogger(__name__).info(f"[汇率] 已更新缓存: USD/CNY={validated['USDCNY']}, HKD/CNY={validated['HKDCNY']}")
             return dict(validated)
         except Exception as exc:
             fallback_rates = memory_rates or file_rates

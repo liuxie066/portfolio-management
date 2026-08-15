@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 from pathlib import Path
@@ -25,6 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    logging.basicConfig(level=logging.INFO)
     args = build_parser().parse_args(argv)
 
     from src.service.bind import ALLOW_REMOTE_ENV, validate_bind_host

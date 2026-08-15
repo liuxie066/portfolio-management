@@ -92,7 +92,7 @@ class CashFlowRepository:
                                 f"expected_dedup_key={facts.dedup_key}"
                             )
                 if existing_facts is not None:
-                    logging.getLogger(__name__).warning(
+                    logging.getLogger(__name__).info(
                         "[防重保护] 发现相同内容出入金"
                         f"(dedup_key={facts.dedup_key})，跳过创建"
                     )
