@@ -1,5 +1,6 @@
 """FX rate service with memory and file fallback cache."""
 from __future__ import annotations
+import logging
 
 import json
 from datetime import datetime
@@ -47,7 +48,7 @@ class FxRateService:
                     "timestamp": data.get("timestamp"),
                 }
         except (json.JSONDecodeError, IOError) as e:
-            print(f"[警告] 加载汇率缓存文件失败: {e}")
+            logging.getLogger(__name__).warning(f"[警告] 加载汇率缓存文件失败: {e}")
         return None
 
     def save_cache_to_file(self, rates: Dict[str, float]) -> None:
@@ -65,7 +66,7 @@ class FxRateService:
             with open(self.cache_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except IOError as e:
-            print(f"[警告] 保存汇率缓存文件失败: {e}")
+            logging.getLogger(__name__).warning(f"[警告] 保存汇率缓存文件失败: {e}")
 
     def fetch_exchange_rates(self, max_retries: int = 3, *, deadline: float | None = None) -> Dict[str, float]:
         now = bj_now_naive()
@@ -89,7 +90,7 @@ class FxRateService:
             if (now - file_cache_time).total_seconds() < 86400:
                 self._rate_cache = file_rates
                 self._rate_cache_time = file_cache_time
-                print(
+                logging.getLogger(__name__).warning(
                     f"[汇率] 从文件加载缓存: USD/CNY={file_rates['USDCNY']}, "
                     f"HKD/CNY={file_rates['HKDCNY']}"
                 )
@@ -125,7 +126,7 @@ class FxRateService:
             self._rate_cache = validated
             self._rate_cache_time = now
             self.save_cache_to_file(validated)
-            print(f"[汇率] 已更新缓存: USD/CNY={validated['USDCNY']}, HKD/CNY={validated['HKDCNY']}")
+            logging.getLogger(__name__).warning(f"[汇率] 已更新缓存: USD/CNY={validated['USDCNY']}, HKD/CNY={validated['HKDCNY']}")
             return dict(validated)
         except Exception as exc:
             fallback_rates = memory_rates or file_rates
@@ -134,8 +135,8 @@ class FxRateService:
                 age_str = "未知"
                 if fallback_time is not None:
                     age_str = f"{(now - fallback_time).total_seconds() / 3600:.1f}"
-                print(f"[⚠️ 警告] 获取实时汇率失败: {exc}")
-                print(
+                logging.getLogger(__name__).warning(f"[⚠️ 警告] 获取实时汇率失败: {exc}")
+                logging.getLogger(__name__).warning(
                     f"[⚠️ 警告] 使用 {age_str} 小时前的过期汇率: "
                     f"USD/CNY={fallback_rates['USDCNY']}, HKD/CNY={fallback_rates['HKDCNY']}"
                 )

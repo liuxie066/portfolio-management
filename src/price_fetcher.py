@@ -9,6 +9,7 @@
 3. 非交易时间延长缓存，交易时间缩短缓存
 4. 美股多数据源备选，防止限流
 """
+import logging
 import requests
 import random
 from typing import Dict, Optional, List, Any
@@ -218,7 +219,7 @@ class PriceFetcher:
                 if attempt < max_retries - 1:
                     # 指数退避 + 随机抖动
                     delay = base_delay * (2 ** attempt) + random.uniform(0, 0.5)
-                    print(f"  请求限流，{delay:.1f}秒后重试 ({attempt + 1}/{max_retries - 1})...")
+                    logging.getLogger(__name__).warning(f"  请求限流，{delay:.1f}秒后重试 ({attempt + 1}/{max_retries - 1})...")
                     sleep_with_deadline(delay, deadline)
 
         raise last_exception

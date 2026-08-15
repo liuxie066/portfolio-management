@@ -1,4 +1,5 @@
 """Repository for the Feishu nav_history table."""
+import logging
 import json
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
@@ -1162,7 +1163,7 @@ class NavHistoryRepository:
         matches = [n for n in navs if n.date == nav_date]
 
         if len(matches) > 1:
-            print(f"[警告] nav_history 存在重复日期记录: account={account}, date={nav_date}, count={len(matches)}")
+            logging.getLogger(__name__).warning(f"[警告] nav_history 存在重复日期记录: account={account}, date={nav_date}, count={len(matches)}")
 
         return matches[0] if matches else None
 

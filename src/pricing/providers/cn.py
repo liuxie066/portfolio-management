@@ -1,5 +1,6 @@
 """China A-share quote provider."""
 from __future__ import annotations
+import logging
 
 import time
 from typing import Optional
@@ -49,9 +50,9 @@ class CNStockProvider:
             if result:
                 return result
         except requests.Timeout:
-            print(f"[超时] 腾讯API获取A股价格 {code}")
+            logging.getLogger(__name__).warning(f"[超时] 腾讯API获取A股价格 {code}")
         except Exception as exc:
-            print(f"[腾讯API失败] 获取A股价格 {code}: {exc}")
+            logging.getLogger(__name__).warning(f"[腾讯API失败] 获取A股价格 {code}: {exc}")
         return None
 
     def fetch_from_tencent(self, code: str, *, deadline: float | None = None) -> Optional[dict]:

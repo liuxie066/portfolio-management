@@ -4,6 +4,7 @@
 统一管理资产代码的标准化、校验、类型检测。
 合并了原 skill_api.py、portfolio.py、price_fetcher.py 中的重复逻辑。
 """
+import logging
 import re
 from datetime import datetime
 
@@ -239,7 +240,7 @@ def parse_date(date_str: Optional[str]):
     try:
         return datetime.strptime(date_str, '%Y-%m-%d').date()
     except ValueError:
-        print(f"日期格式错误: {date_str}, 使用今天(北京时间)")
+        logging.getLogger(__name__).warning(f"日期格式错误: {date_str}, 使用今天(北京时间)")
         return bj_today()
 
 

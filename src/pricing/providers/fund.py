@@ -1,5 +1,6 @@
 """Fund quote provider."""
 from __future__ import annotations
+import logging
 
 import re
 import time
@@ -125,5 +126,5 @@ class FundProvider:
                 }
             )
         except Exception as exc:
-            print(f"从东方财富获取基金价格失败 {code}: {exc}")
+            logging.getLogger(__name__).warning(f"从东方财富获取基金价格失败 {code}: {exc}")
             return None

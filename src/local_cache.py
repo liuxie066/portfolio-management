@@ -4,6 +4,7 @@
 从 feishu_storage.py 提取。使用本地 JSON 文件存储价格缓存，
 替代飞书多维表存储，节省 API 配额。
 """
+import logging
 import json
 import threading
 from datetime import date, datetime
@@ -76,7 +77,7 @@ class LocalPriceCache:
             self._dirty_count = 0
             self._dirty_flag = False
         except IOError as e:
-            print(f"[警告] 保存本地价格缓存失败: {e}")
+            logging.getLogger(__name__).warning(f"[警告] 保存本地价格缓存失败: {e}")
 
     def _schedule_flush(self):
         """调度延迟写入（无锁版本，需在锁内调用）"""
@@ -341,7 +342,7 @@ class LocalHoldingsIndexCache:
             self._dirty_count = 0
             self._dirty_flag = False
         except IOError as e:
-            print(f"[警告] 保存本地持仓索引缓存失败: {e}")
+            logging.getLogger(__name__).warning(f"[警告] 保存本地持仓索引缓存失败: {e}")
 
     def _schedule_flush(self):
         if self._shutdown:
@@ -461,7 +462,7 @@ class LocalNavIndexCache:
             self._dirty_count = 0
             self._dirty_flag = False
         except IOError as e:
-            print(f"[警告] 保存本地 NAV 索引缓存失败: {e}")
+            logging.getLogger(__name__).warning(f"[警告] 保存本地 NAV 索引缓存失败: {e}")
 
     def _schedule_flush(self):
         if self._shutdown:
@@ -640,7 +641,7 @@ class LocalCashFlowAggCache:
             self._dirty_count = 0
             self._dirty_flag = False
         except IOError as e:
-            print(f"[警告] 保存本地现金流聚合缓存失败: {e}")
+            logging.getLogger(__name__).warning(f"[警告] 保存本地现金流聚合缓存失败: {e}")
 
     def _schedule_flush(self):
         if self._shutdown:

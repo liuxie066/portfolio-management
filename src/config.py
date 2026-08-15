@@ -3,6 +3,7 @@
 
 优先级：环境变量 > config.yaml > 默认值
 """
+import logging
 import json
 import os
 import hashlib
@@ -292,7 +293,7 @@ def _load_config_file() -> dict:
         try:
             _cached_config = _load_structured_config(config_file)
         except (json.JSONDecodeError, yaml.YAMLError, ValueError, IOError) as e:
-            print(f"[配置] 加载 {config_file} 失败: {e}")
+            logging.getLogger(__name__).warning(f"[配置] 加载 {config_file} 失败: {e}")
             _cached_config = {}
     else:
         _cached_config = {}
