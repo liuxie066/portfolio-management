@@ -11,6 +11,7 @@ from datetime import timedelta
 from uuid import uuid4
 from ._base import _CLAIM_LEASE_MINUTES, _RETRY_MINUTES
 from .._json import canonical_json as _canonical_json
+from ._receipt_tx import insert_operation_receipt_tx
 
 
 
@@ -40,7 +41,7 @@ class CashFlowEventMixin:
             if not claimed:
                 raise KeyError(f"cash flow event claim not found: {event_id}")
             for receipt in list(receipts or ()):
-                inserted = self._insert_operation_receipt_tx(
+                inserted = insert_operation_receipt_tx(
                     conn,
                     receipt_key=str(receipt["receipt_key"]),
                     receipt_type=str(receipt["receipt_type"]),
@@ -222,7 +223,7 @@ class CashFlowEventMixin:
                 for receipt in receipts:
                     receipt_key = str(receipt["receipt_key"])
                     receipt_keys.append(receipt_key)
-                    inserted = self._insert_operation_receipt_tx(
+                    inserted = insert_operation_receipt_tx(
                         conn,
                         receipt_key=receipt_key,
                         receipt_type=str(receipt["receipt_type"]),

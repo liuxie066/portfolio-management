@@ -16,6 +16,10 @@ from pathlib import Path
 import json
 import sqlite3
 from .._json import canonical_json as _canonical_json
+from ._receipt_tx import (
+    insert_operation_receipt_tx,
+    insert_repeatable_closure_receipt_tx,
+)
 
 _OPEN_HOLDING_CASE_STATES = (
     "pending_apply",
@@ -240,7 +244,7 @@ class HoldingCaseMixin:
                     f"holdings:case:closed:{old['case_key']}:superseded:"
                     f"{record_digest}"
                 )
-                if enqueue_receipts and self._insert_repeatable_closure_receipt_tx(
+                if enqueue_receipts and insert_repeatable_closure_receipt_tx(
                     conn,
                     receipt_key=closure_key,
                     payload={
@@ -427,7 +431,7 @@ class HoldingCaseMixin:
             receipt = receipt_by_case.get(case_key)
             if receipt is None:
                 raise ValueError(f"new holding case lacks discovery receipt: {case_key}")
-            if enqueue_receipts and self._insert_operation_receipt_tx(
+            if enqueue_receipts and insert_operation_receipt_tx(
                 conn,
                 receipt_key=str(receipt["receipt_key"]),
                 receipt_type=str(receipt["receipt_type"]),
@@ -664,7 +668,7 @@ class HoldingCaseMixin:
                 f"holdings:case:closed:{row['case_key']}:{terminal_state}:"
                 f"{record_digest}"
             )
-            if enqueue_receipts and self._insert_repeatable_closure_receipt_tx(
+            if enqueue_receipts and insert_repeatable_closure_receipt_tx(
                 conn,
                 receipt_key=receipt_key,
                 payload={
@@ -920,7 +924,7 @@ class HoldingCaseMixin:
                 )
                 receipt = receipts_by_case.get(case_key)
                 if receipt:
-                    self._insert_operation_receipt_tx(
+                    insert_operation_receipt_tx(
                         conn,
                         receipt_key=str(receipt["receipt_key"]),
                         receipt_type=str(receipt["receipt_type"]),
