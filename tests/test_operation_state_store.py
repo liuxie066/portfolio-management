@@ -39,6 +39,72 @@ def test_operation_state_mixins_have_disjoint_method_names():
             seen[name] = mixin.__name__
 
 
+def test_operation_state_connections_commit_rollback_and_close(tmp_path):
+    path = tmp_path / "operations.sqlite3"
+    store = OperationStateStore(path)
+
+    with store._connect() as committed:
+        committed.execute("CREATE TABLE lifecycle_test (value TEXT)")
+        committed.execute("INSERT INTO lifecycle_test VALUES ('committed')")
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        committed.execute("SELECT 1")
+
+    with pytest.raises(RuntimeError, match="rollback"):
+        with store._connect() as rolled_back:
+            rolled_back.execute("INSERT INTO lifecycle_test VALUES ('rolled back')")
+            raise RuntimeError("rollback")
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        rolled_back.execute("SELECT 1")
+
+    with sqlite3.connect(path) as conn:
+        values = [row[0] for row in conn.execute("SELECT value FROM lifecycle_test")]
+    assert values == ["committed"]
+
+
+def test_inbox_accept_connections_always_close(tmp_path):
+    store = OperationStateStore(tmp_path / "operations.sqlite3")
+
+    with store._connect_inbox_accept() as normal:
+        normal.execute("SELECT 1")
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        normal.execute("SELECT 1")
+
+    with pytest.raises(RuntimeError, match="close"):
+        with store._connect_inbox_accept() as exceptional:
+            raise RuntimeError("close")
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        exceptional.execute("SELECT 1")
+
+
+def test_empty_event_claims_explicitly_close_every_connection(tmp_path, monkeypatch):
+    opened = []
+    real_connect = sqlite3.connect
+
+    class TrackingConnection(sqlite3.Connection):
+        closed = False
+
+        def close(self):
+            self.closed = True
+            super().close()
+
+    def tracking_connect(*args, **kwargs):
+        connection = real_connect(*args, **kwargs, factory=TrackingConnection)
+        opened.append(connection)
+        return connection
+
+    monkeypatch.setattr(
+        "src.app.operation_state._base.sqlite3.connect", tracking_connect
+    )
+    store = OperationStateStore(tmp_path / "operations.sqlite3")
+
+    for _ in range(3):
+        assert store.claim_holding_events() == []
+        assert store.claim_cash_flow_events() == []
+
+    assert opened
+    assert all(connection.closed for connection in opened)
+
+
 def test_operation_store_upgrades_v1_outbox_for_claims(tmp_path):
     path = tmp_path / "operations.sqlite3"
     with sqlite3.connect(path) as conn:

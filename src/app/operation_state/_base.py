@@ -1,13 +1,16 @@
 """Shared SQLite connection, schema, and migration for operation state."""
 from __future__ import annotations
 
-from typing import Callable
-from typing import Optional
-from pathlib import Path
-from src.time_utils import bj_now_naive
-from src import config
+from contextlib import contextmanager
 from datetime import datetime
+from pathlib import Path
 import sqlite3
+from typing import Callable
+from typing import Iterator
+from typing import Optional
+
+from src import config
+from src.time_utils import bj_now_naive
 
 from ._schema import (
     CASH_FLOW_EVENT_SCHEMA_VERSION,
@@ -65,24 +68,35 @@ class OperationStateBase:
             data_dir = Path(__file__).resolve().parents[3] / data_dir
         return data_dir / "pm_operation_state.sqlite3"
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.db_path, timeout=10)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout = 10000")
-        conn.execute("PRAGMA journal_mode = WAL")
-        return conn
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout = 10000")
+            conn.execute("PRAGMA journal_mode = WAL")
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
-    def _connect_inbox_accept(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect_inbox_accept(self) -> Iterator[sqlite3.Connection]:
         """Open the pre-initialized inbox with a bounded receiver lock wait."""
 
         conn = sqlite3.connect(self.db_path, timeout=1)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout = 1000")
-        return conn
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout = 1000")
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _initialize(self) -> None:
         with self._connect() as conn:
             initialize_schema(conn)
+
     def _validate(self) -> None:
         try:
             with self._connect() as conn:
@@ -124,4 +138,3 @@ class OperationStateBase:
             raise RuntimeError(
                 f"operation state database is corrupt: {self.db_path}: {exc}"
             ) from exc
-

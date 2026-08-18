@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import importlib.util
 import json
+import logging
 from typing import Any, Callable, Dict, Iterable, Optional
 
 from src import config
@@ -11,7 +13,70 @@ from src.app.bitable_event_contract import (
     BITABLE_FILE_TYPE,
     BITABLE_RECORD_CHANGED_EVENT_TYPE,
     BITABLE_SUBSCRIPTION_EVENT_TYPE,
+    MAX_EVENT_IDENTIFIER_LENGTH,
 )
+
+
+_LOG = logging.getLogger(__name__)
+_ACCEPTED_TARGETS = {"cash_flow", "holdings"}
+
+
+def _safe_identifier(value: Any) -> str:
+    resolved = value.strip() if isinstance(value, str) else ""
+    return resolved if len(resolved) <= MAX_EVENT_IDENTIFIER_LENGTH else ""
+
+
+def _event_identity(payload: Any) -> Dict[str, str]:
+    header = payload.get("header") if isinstance(payload, dict) else None
+    event = payload.get("event") if isinstance(payload, dict) else None
+    header = header if isinstance(header, dict) else {}
+    event = event if isinstance(event, dict) else {}
+    return {
+        "event_id": _safe_identifier(header.get("event_id")),
+        "event_type": _safe_identifier(header.get("event_type")),
+        "file_token": _safe_identifier(event.get("file_token")),
+        "table_id": _safe_identifier(event.get("table_id")),
+    }
+
+
+def _log_stage_failure(stage: str, exc: Exception) -> None:
+    _LOG.error(
+        "feishu_bitable_event %s",
+        json.dumps(
+            {"exception_class": exc.__class__.__name__, "stage": stage},
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
+
+
+def _log_callback(payload: Any, outcome: Any, exc: Optional[Exception] = None) -> None:
+    accepted_by = []
+    success = None
+    if isinstance(outcome, Mapping):
+        raw_accepted_by = outcome.get("accepted_by")
+        if isinstance(raw_accepted_by, list):
+            accepted_by = [
+                item
+                for item in raw_accepted_by
+                if isinstance(item, str) and item in _ACCEPTED_TARGETS
+            ]
+        raw_success = outcome.get("success")
+        if isinstance(raw_success, bool):
+            success = raw_success
+    fields = {
+        **_event_identity(payload),
+        "accepted_by": accepted_by,
+        "exception_class": exc.__class__.__name__ if exc is not None else None,
+        "stage": "callback",
+        "success": success,
+    }
+    level = logging.ERROR if exc is not None or success is False else logging.INFO
+    _LOG.log(
+        level,
+        "feishu_bitable_event %s",
+        json.dumps(fields, sort_keys=True, separators=(",", ":")),
+    )
 
 
 def validate_bitable_targets(targets: Iterable[Any]) -> tuple[Any, ...]:
@@ -84,8 +149,22 @@ class FeishuBitableEventAdapter:
         lark = self._sdk()
 
         def on_event(data: Any) -> None:
-            payload = json.loads(lark.JSON.marshal(data))
-            callback(payload)
+            try:
+                marshalled = lark.JSON.marshal(data)
+            except Exception as exc:
+                _log_stage_failure("sdk_marshal", exc)
+                raise
+            try:
+                payload = json.loads(marshalled)
+            except Exception as exc:
+                _log_stage_failure("json_decode", exc)
+                raise
+            try:
+                outcome = callback(payload)
+            except Exception as exc:
+                _log_callback(payload, None, exc)
+                raise
+            _log_callback(payload, outcome)
 
         handler = (
             lark.EventDispatcherHandler.builder("", "")

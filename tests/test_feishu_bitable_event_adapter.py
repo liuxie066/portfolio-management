@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -116,6 +117,26 @@ def _adapter(sdk, targets):
     )
 
 
+def _event_payload(*, table_id="tbl_holdings"):
+    return {
+        "schema": "2.0",
+        "header": {
+            "event_id": "evt-1",
+            "event_type": HOLDINGS_EVENT_TYPE,
+        },
+        "event": {
+            "file_token": "base_portfolio",
+            "table_id": table_id,
+        },
+    }
+
+
+def _logged_fields(caplog):
+    prefix, payload = caplog.records[-1].getMessage().split(" ", 1)
+    assert prefix == "feishu_bitable_event"
+    return json.loads(payload)
+
+
 def test_adapter_default_secret_uses_only_listener_role(monkeypatch):
     requested = []
 
@@ -165,6 +186,109 @@ def test_shared_adapter_registers_one_event_callback():
     assert received == [{"schema": "2.0"}]
     assert state["ws_init"] == ("cli_data", "secret", "handler", "info")
     assert state["ws_started"] is True
+
+
+@pytest.mark.parametrize(
+    ("table_id", "accepted_by"),
+    [
+        ("tbl_holdings", ["holdings"]),
+        ("tbl_cash_flow", ["cash_flow"]),
+        ("tbl_unknown", []),
+    ],
+)
+def test_event_callback_logs_allowlisted_routing_once(
+    caplog, table_id, accepted_by
+):
+    sdk, state = _sdk()
+
+    with caplog.at_level(logging.INFO, logger="src.feishu.bitable_event_adapter"):
+        _adapter(sdk, _targets()).start(
+            lambda _payload: {"success": True, "accepted_by": accepted_by}
+        )
+        state["registered"][1](_event_payload(table_id=table_id))
+
+    assert len(caplog.records) == 1
+    assert _logged_fields(caplog) == {
+        "accepted_by": accepted_by,
+        "event_id": "evt-1",
+        "event_type": HOLDINGS_EVENT_TYPE,
+        "exception_class": None,
+        "file_token": "base_portfolio",
+        "stage": "callback",
+        "success": True,
+        "table_id": table_id,
+    }
+
+
+def test_event_callback_discards_untrusted_outcome_values(caplog):
+    sdk, state = _sdk()
+
+    with caplog.at_level(logging.INFO, logger="src.feishu.bitable_event_adapter"):
+        _adapter(sdk, _targets()).start(
+            lambda _payload: {
+                "success": 1,
+                "accepted_by": ["holdings", "record-secret", 7, {"secret": 1}],
+            }
+        )
+        returned = state["registered"][1](_event_payload())
+
+    assert returned is None
+    assert _logged_fields(caplog)["accepted_by"] == ["holdings"]
+    assert _logged_fields(caplog)["success"] is None
+    assert "record-secret" not in caplog.text
+    assert '"secret"' not in caplog.text
+
+
+def test_event_callback_logs_marshal_and_decode_stages_without_raw_data(caplog):
+    sdk, state = _sdk()
+
+    def fail_marshal(_value):
+        raise ValueError("raw-marshal-secret")
+
+    sdk.JSON.marshal = fail_marshal
+    _adapter(sdk, _targets()).start(lambda _payload: None)
+    with caplog.at_level(logging.ERROR, logger="src.feishu.bitable_event_adapter"):
+        with pytest.raises(ValueError, match="raw-marshal-secret"):
+            state["registered"][1]({"raw-marshal-secret": True})
+
+    assert _logged_fields(caplog) == {
+        "exception_class": "ValueError",
+        "stage": "sdk_marshal",
+    }
+    assert "raw-marshal-secret" not in caplog.text
+
+    caplog.clear()
+    sdk, state = _sdk()
+    sdk.JSON.marshal = lambda _value: "raw-decode-secret"
+    _adapter(sdk, _targets()).start(lambda _payload: None)
+    with caplog.at_level(logging.ERROR, logger="src.feishu.bitable_event_adapter"):
+        with pytest.raises(json.JSONDecodeError):
+            state["registered"][1]({"ignored": True})
+
+    assert _logged_fields(caplog) == {
+        "exception_class": "JSONDecodeError",
+        "stage": "json_decode",
+    }
+    assert "raw-decode-secret" not in caplog.text
+
+
+def test_event_callback_logs_and_reraises_callback_failure(caplog):
+    sdk, state = _sdk()
+
+    def fail_callback(_payload):
+        raise RuntimeError("callback-business-secret")
+
+    _adapter(sdk, _targets()).start(fail_callback)
+    with caplog.at_level(logging.ERROR, logger="src.feishu.bitable_event_adapter"):
+        with pytest.raises(RuntimeError, match="callback-business-secret"):
+            state["registered"][1](_event_payload())
+
+    fields = _logged_fields(caplog)
+    assert fields["stage"] == "callback"
+    assert fields["exception_class"] == "RuntimeError"
+    assert fields["event_id"] == "evt-1"
+    assert "callback-business-secret" not in caplog.text
+    assert caplog.records[-1].exc_info is None
 
 
 def test_subscribe_deduplicates_same_file_and_reports_distinct_files():
