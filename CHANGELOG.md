@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.41 - 2026-08-18
+
+- Close operation-state SQLite connections after every transaction to prevent
+  descriptor exhaustion in the resident Bitable event workers.
+- Add allowlisted callback-stage logs for event delivery and routing failures
+  without exposing raw payloads, exception messages, or business values.
+
 ## 0.1.40 - 2026-08-16
 
 - Add month-to-date NAV change to the consolidated multi-account NAV receipt.
