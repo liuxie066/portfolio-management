@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.42 - 2026-08-19
+
+- Confirm non-Futu cash-flow effects automatically: the system now detects
+  whether a deposit/withdraw is already reflected in the broker cash holding
+  (apply_delta vs already_reflected) instead of requiring the operator to pick
+  manually, avoiding double-counting when holdings were edited by hand; a clear
+  error shows current/baseline/event amounts when the decision is ambiguous.
+- Make historical NAV valuation evidence digests deterministic so the
+  prepare-and-write CAS flow works across separate invocations.
+- Allow overwriting an existing NAV row whose pnl/ytd_pnl are legitimately empty
+  (weekend gap or missing year-end baseline) instead of failing on the write
+  guard.
+
 ## 0.1.41 - 2026-08-18
 
 - Close operation-state SQLite connections after every transaction to prevent

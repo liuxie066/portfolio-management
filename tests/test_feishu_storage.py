@@ -146,6 +146,29 @@ class TestFeishuStorageFieldConversion:
         assert result['avg_cost'] == 10.5    # 数字类型
         assert result['tag'] == json.dumps(['银行', '金融'], ensure_ascii=False)
 
+    def test_to_feishu_fields_preserve_none_drops_non_clearable_only(self):
+        """Regression: preserve_none must not emit None for non-clearable fields
+        (previously an overwrite with legitimately-None NAV pnl/ytd_pnl was
+        rejected by the write guard as 'fields cannot be cleared')."""
+        # nav_history has NO clearable fields -> every None is dropped on update
+        nav = self.storage._to_feishu_fields(
+            {'pnl': None, 'ytd_pnl': None, 'nav': 1.0}, 'nav_history', preserve_none=True
+        )
+        assert 'pnl' not in nav
+        assert 'ytd_pnl' not in nav
+        assert nav.get('nav') == 1.0
+        # non-preserve behavior is unchanged (None simply skipped)
+        plain = self.storage._to_feishu_fields({'pnl': None, 'nav': 1.0}, 'nav_history')
+        assert 'pnl' not in plain and plain.get('nav') == 1.0
+        # holdings: clearable avg_cost None IS kept, non-clearable tag None is NOT
+        holdings = self.storage._to_feishu_fields(
+            {'asset_name': 'x', 'avg_cost': None, 'tag': None},
+            'holdings',
+            preserve_none=True,
+        )
+        assert holdings['avg_cost'] is None
+        assert 'tag' not in holdings
+
     def test_to_feishu_fields_transactions(self):
         """测试交易表字段转换（数字类型）"""
         data = {

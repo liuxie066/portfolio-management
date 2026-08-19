@@ -269,15 +269,15 @@ def test_non_futu_effect_requires_preview_hash_and_writes_absolute_target(
         item for item in review["effects"]
         if item["effect_kind"] == "cash_flow"
     )
-    with pytest.raises(ValueError, match="external_action=apply_delta"):
-        service.preview(effect["effect_id"])
-    preview = service.preview(
-        effect["effect_id"],
-        external_action="apply_delta",
-    )
+    # current(100) == baseline(100) -> auto-detected apply_delta
+    preview = service.preview(effect["effect_id"])
 
     assert preview["targets"][0]["quantity"] == 120.0
     assert preview["target_source"] == "estimated_current_plus_event"
+    assert any(
+        "auto-detected external_action=apply_delta" in w
+        for w in preview["warnings"]
+    )
     assert storage.replacements == []
 
     result = service.confirm(
@@ -503,8 +503,11 @@ def test_historical_non_futu_apply_requires_explicit_holding_action(
     )
 
     assert service.preview(effect["effect_id"])["mode"] == "record_only"
-    with pytest.raises(ValueError, match="external_action=apply_delta"):
-        service.preview(effect["effect_id"], historical_apply=True)
+    # current(100) == baseline(100) -> auto-detected apply_delta even for
+    # historical_apply, so no explicit external_action is required.
+    preview = service.preview(effect["effect_id"], historical_apply=True)
+    assert preview["mode"] == "apply"
+    assert preview["targets"][0]["quantity"] == 120.0
 
     preview = service.preview(
         effect["effect_id"],
@@ -893,6 +896,165 @@ def test_already_reflected_is_applied_noop_and_correction_uses_delta(
     )
 
     assert correction_preview["targets"][0]["quantity"] == 130.0
+
+
+def test_non_futu_cash_flow_auto_detects_already_reflected(tmp_path, monkeypatch):
+    """Deposit already reflected in manually-updated holdings must auto-detect
+    already_reflected (no double-count) instead of requiring a manual choice."""
+    storage = FakeStorage(flows=[_flow(amount=20)], holdings=[_cash(quantity=120)])
+    service = _service(tmp_path, monkeypatch, storage)
+    service.initialize_fingerprints()  # baseline = 120
+    # operator manually updated the holding to include the +20 deposit -> 140
+    storage.holdings[("CNY-CASH", "lx", "某券商")].quantity = 140
+    effect = next(
+        item for item in service.review(account="lx")["effects"]
+        if item["effect_kind"] == "cash_flow"
+    )
+
+    preview = service.preview(effect["effect_id"])
+
+    assert preview["targets"][0]["quantity"] == 140.0
+    assert preview["target_source"] == "manual_current_includes_event"
+    assert any(
+        "auto-detected external_action=already_reflected" in w
+        for w in preview["warnings"]
+    )
+    assert storage.replacements == []
+
+
+def test_non_futu_cash_flow_ambiguous_reflection_requires_explicit_action(
+    tmp_path,
+    monkeypatch,
+):
+    """Deposit + concurrent trade leaves the holding between baseline and
+    baseline+event -> must raise a clear, actionable ambiguity instead of
+    silently picking either side."""
+    storage = FakeStorage(flows=[_flow(amount=20)], holdings=[_cash(quantity=120)])
+    service = _service(tmp_path, monkeypatch, storage)
+    service.initialize_fingerprints()  # baseline = 120
+    # deposit 20 reflected but a concurrent trade moved 10 out -> 130
+    storage.holdings[("CNY-CASH", "lx", "某券商")].quantity = 130
+    effect = next(
+        item for item in service.review(account="lx")["effects"]
+        if item["effect_kind"] == "cash_flow"
+    )
+
+    with pytest.raises(ValueError, match="ambiguous cash-flow reflection"):
+        service.preview(effect["effect_id"])
+
+    # explicit action still works and shows the operator the numbers
+    preview = service.preview(
+        effect["effect_id"],
+        external_action="already_reflected",
+    )
+    assert preview["targets"][0]["quantity"] == 130.0
+
+
+def test_non_futu_cash_flow_already_reflected_survives_prior_scan_auto_accept(
+    tmp_path,
+    monkeypatch,
+):
+    """Regression (deepreview F1): if the operator updates holdings and a scan
+    auto-accepts the baseline BEFORE logging the cash flow, the detection must
+    still auto-pick already_reflected instead of double-applying."""
+    storage = FakeStorage(flows=[], holdings=[_cash(quantity=120)])
+    service = _service(tmp_path, monkeypatch, storage)
+    service.initialize_fingerprints()  # baseline = 120
+    # operator reflects a future deposit in holdings before logging it
+    storage.holdings[("CNY-CASH", "lx", "某券商")].quantity = 140
+    # a scan runs before any cash flow exists -> auto-accepts 120->140,
+    # resetting the fingerprint baseline to 140 and recording an external change
+    service.review(account="lx")
+    assert service.store.get_latest_for_record(
+        "holding:CNY-CASH|lx|某券商",
+        effect_kind="cash_holding_external_change",
+    )
+    # now the operator logs the +20 deposit
+    storage.flows.append(_flow(amount=20))
+    effect = next(
+        item for item in service.review(account="lx")["effects"]
+        if item["effect_kind"] == "cash_flow"
+    )
+    preview = service.preview(effect["effect_id"])
+
+    assert preview["targets"][0]["quantity"] == 140.0
+    assert preview["target_source"] == "manual_current_includes_event"
+    assert any(
+        "auto-detected external_action=already_reflected" in w
+        for w in preview["warnings"]
+    )
+
+
+def test_non_futu_cash_flow_auto_detected_confirm_is_idempotent_noop(
+    tmp_path,
+    monkeypatch,
+):
+    """Auto-detect -> confirm without an explicit external_action must converge
+    to applied with no holding mutation (no double-count)."""
+    storage = FakeStorage(flows=[_flow(amount=20)], holdings=[_cash(quantity=120)])
+    service = _service(tmp_path, monkeypatch, storage)
+    service.initialize_fingerprints()  # baseline = 120
+    storage.holdings[("CNY-CASH", "lx", "某券商")].quantity = 140
+    effect = next(
+        item for item in service.review(account="lx")["effects"]
+        if item["effect_kind"] == "cash_flow"
+    )
+    preview = service.preview(effect["effect_id"])  # auto already_reflected
+
+    result = service.confirm(
+        effect["effect_id"],
+        preview_hash=preview["preview_hash"],
+        confirm=True,
+    )
+
+    assert result["effect"]["state"] == "applied"
+    assert storage.replacements == []
+    assert storage.holdings[("CNY-CASH", "lx", "某券商")].quantity == 140.0
+
+
+def test_non_futu_cash_flow_negative_delta_auto_detects_apply(tmp_path, monkeypatch):
+    """Withdrawal (negative delta) with untouched holdings auto-picks apply_delta."""
+    storage = FakeStorage(flows=[_flow(amount=-20)], holdings=[_cash(quantity=120)])
+    service = _service(tmp_path, monkeypatch, storage)
+    service.initialize_fingerprints()  # baseline = 120, current == baseline
+    effect = next(
+        item for item in service.review(account="lx")["effects"]
+        if item["effect_kind"] == "cash_flow"
+    )
+    preview = service.preview(effect["effect_id"])
+
+    assert preview["targets"][0]["quantity"] == 100.0
+    assert preview["target_source"] == "estimated_current_plus_event"
+    assert any(
+        "auto-detected external_action=apply_delta" in w
+        for w in preview["warnings"]
+    )
+
+
+def test_unrelated_drift_on_cash_flow_owned_identity_is_still_surfaced(
+    tmp_path,
+    monkeypatch,
+):
+    """A manual cash change on an identity with an active cash-flow effect that
+    is NOT explained by the flow must still be surfaced as an external-change
+    effect (deepreview F2), not silently swallowed by the baseline-ownership
+    guard."""
+    storage = FakeStorage(flows=[_flow(amount=20)], holdings=[_cash(quantity=120)])
+    service = _service(tmp_path, monkeypatch, storage)
+    service.initialize_fingerprints()  # baseline = 120
+    service.review(account="lx")  # creates active cash-flow effect (+20)
+    # unrelated manual +5 change, not explained by the deposit
+    storage.holdings[("CNY-CASH", "lx", "某券商")].quantity = 125
+
+    service.review(account="lx")
+    external = service.store.get_latest_for_record(
+        "holding:CNY-CASH|lx|某券商",
+        effect_kind="cash_holding_external_change",
+    )
+
+    assert external is not None, (
+        "unrelated drift must still be recorded as an external_change effect"
+    )
 
 
 def test_mixed_futu_and_already_reflected_preview_has_neutral_source(

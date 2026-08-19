@@ -4,6 +4,7 @@ from __future__ import annotations
 import getpass
 import socket
 import uuid
+from collections import defaultdict
 from contextlib import ExitStack
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -645,6 +646,38 @@ class CashFlowEffectService:
             for target in (effect.get("targets") or [])
             if isinstance(target, dict)
         }
+        # An active cash-flow effect is the authority over its holding identity's
+        # baseline ONLY for the drift it explains (deposit/withdraw reflected by a
+        # manual holdings edit). For those identities we defer holding-drift
+        # reconciliation so the cash-flow confirmation decides apply_delta vs
+        # already_reflected against an un-bumped baseline (otherwise the drift
+        # scan would auto-accept and reset the baseline, hiding the pre-deposit
+        # amount and double-applying). Drift NOT explained by the cash flow (e.g.
+        # an unrelated manual cash change on the same identity) still falls
+        # through to external-change handling.
+        active_cash_flow_net: dict[str, Decimal] = defaultdict(Decimal)
+        active_cash_flow_identities: set[str] = set()
+        for effect in self.store.list_effects(
+            latest_only=True,
+            states=UNRESOLVED_STATES,
+        ):
+            if effect["effect_kind"] != "cash_flow":
+                continue
+            source = effect.get("source")
+            if not isinstance(source, dict):
+                continue
+            currency = str(source.get("currency") or "").upper()
+            if currency not in CASH_ASSETS:
+                continue
+            identity = self._identity(
+                CASH_ASSETS[currency], source["account"], source["broker"]
+            )
+            active_cash_flow_identities.add(identity)
+            try:
+                for _operation_source, delta in self._cash_flow_operations(effect):
+                    active_cash_flow_net[identity] += self._decimal(delta)
+            except (TypeError, ValueError):
+                continue
         changed = 0
         changed_effect_ids: list[str] = []
         for identity in sorted(set(cash_holdings) | set(known)):
@@ -662,6 +695,23 @@ class CashFlowEffectService:
                 # A partially applied target belongs to the compensation
                 # workflow, not to holding-drift reconciliation.
                 continue
+            if identity in active_cash_flow_identities:
+                confirmed = (
+                    fingerprint.get("last_confirmed_amount")
+                    if fingerprint
+                    else None
+                )
+                net = active_cash_flow_net.get(identity, Decimal("0"))
+                if (
+                    confirmed is not None
+                    and self._money(observed_amount)
+                    == self._money(self._decimal(confirmed) + net)
+                ):
+                    # Drift is fully explained by the active cash-flow effect;
+                    # it owns this baseline.
+                    continue
+                # Otherwise the drift has a residual not explained by the cash
+                # flow -> fall through to external-change handling.
             if fingerprint and fingerprint.get("last_confirmed_hash") == observed_hash:
                 latest = self.store.get_latest_for_record(
                     f"holding:{identity}",
@@ -1339,6 +1389,103 @@ class CashFlowEffectService:
             industry="现金",
         )
 
+    def _detect_reflection_action(
+        self,
+        *,
+        operations: list[tuple[Dict[str, Any], Optional[Decimal]]],
+        holdings_snapshot: Optional[dict[str, Optional[Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Auto-decide whether each non-Futu cash-flow operation is already
+        reflected in the fresh holding, against the confirmed fingerprint
+        baseline.
+
+        Returns {"action": "already_reflected" | "apply_delta" | None,
+        "rows": [...]} so the caller can render a helpful message when the
+        decision is ambiguous (e.g. a deposit followed by a concurrent trade
+        moved the cash between the baseline and baseline+event).
+        """
+        net: dict[str, Decimal] = defaultdict(Decimal)
+        for operation_source, delta in operations:
+            if delta is None:
+                continue
+            asset_id = CASH_ASSETS.get(
+                str(operation_source.get("currency") or "").upper()
+            )
+            if not asset_id:
+                continue
+            identity = self._identity(
+                asset_id,
+                operation_source.get("account"),
+                operation_source.get("broker"),
+            )
+            net[identity] += self._decimal(delta)
+        if not net:
+            return {"action": None, "rows": []}
+        fingerprints = {
+            row["holding_identity"]: row
+            for row in self.store.list_fingerprints(account=None)
+        }
+        decisions: list[str] = []
+        rows: list[Dict[str, Any]] = []
+        all_have_baseline = True
+        for identity, delta in net.items():
+            asset_id, account, broker = identity.split("|", 2)
+            if holdings_snapshot is not None:
+                holding = holdings_snapshot.get(identity)
+            else:
+                holding = self.storage.get_holding_fresh(asset_id, account, broker)
+            current = self._money(holding.quantity if holding else 0)
+            # Prefer the baseline recorded by a non-Futu manual holding
+            # auto-accept (cash_holding_external_change). Its source preserves
+            # the pre-change amount even after the fingerprint baseline was
+            # reset to the current (post-edit) value, which happens when the
+            # operator updated holdings before logging the cash flow. Falling
+            # back to the live fingerprint keeps the plain "deposit not yet
+            # reflected" case working.
+            external = self.store.get_latest_for_record(
+                f"holding:{identity}",
+                effect_kind="cash_holding_external_change",
+            )
+            external_baseline = None
+            if external and isinstance(external.get("source"), dict):
+                external_baseline = (external.get("source") or {}).get(
+                    "last_confirmed_amount"
+                )
+            baseline = external_baseline or (
+                (fingerprints.get(identity) or {}).get(
+                    "last_confirmed_amount"
+                )
+            )
+            rows.append({
+                "broker": broker,
+                "currency": asset_id.split("-", 1)[0],
+                "current": current,
+                "baseline": (
+                    baseline if baseline is not None else "unset"
+                ),
+                "expected": (
+                    self._money(self._decimal(baseline) + delta)
+                    if baseline is not None
+                    else None
+                ),
+                "delta": self._money(delta),
+            })
+            if baseline is None:
+                all_have_baseline = False
+                continue
+            if current == self._money(self._decimal(baseline) + delta):
+                decisions.append("already_reflected")
+            elif current == self._money(baseline):
+                decisions.append("apply_delta")
+        if not all_have_baseline or not decisions:
+            return {"action": None, "rows": rows}
+        action = (
+            decisions[0]
+            if all(decision == decisions[0] for decision in decisions)
+            else None
+        )
+        return {"action": action, "rows": rows}
+
     def _build_preview(
         self,
         effect: Dict[str, Any],
@@ -1373,6 +1520,7 @@ class CashFlowEffectService:
 
         warnings: list[str] = []
         snapshot_cache: Dict[str, Any] = {}
+        operation_holdings: dict[str, Optional[Holding]] = {}
         operations: list[tuple[Dict[str, Any], Optional[Decimal]]]
         if effect["effect_kind"] == "cash_flow":
             operations = [
@@ -1382,13 +1530,45 @@ class CashFlowEffectService:
                     source,
                 )
             ]
+            # Fetch the fresh holding once per involved identity and share it
+            # between reflection detection and target building.
+            for operation_source, _ in operations:
+                currency = str(operation_source.get("currency") or "").upper()
+                if currency not in CASH_ASSETS:
+                    continue
+                identity = self._identity(
+                    CASH_ASSETS[currency],
+                    operation_source.get("account"),
+                    operation_source.get("broker"),
+                )
+                if identity not in operation_holdings:
+                    operation_holdings[identity] = self._fresh_holding(
+                        operation_source
+                    )
             if any(
                 operation_source.get("broker") != FUTU_BROKER
                 for operation_source, _ in operations
             ) and external_action not in {"apply_delta", "already_reflected"}:
-                raise ValueError(
-                    "non-Futu cash-flow preview requires "
-                    "external_action=apply_delta or already_reflected"
+                detection = self._detect_reflection_action(
+                    operations=operations,
+                    holdings_snapshot=operation_holdings,
+                )
+                if detection["action"] is None:
+                    detail = "; ".join(
+                        f"{row['broker']}/{row['currency']} "
+                        f"current={row['current']} "
+                        f"baseline={row['baseline']} "
+                        f"baseline+event={row['expected']}"
+                        for row in detection["rows"]
+                    )
+                    raise ValueError(
+                        "ambiguous cash-flow reflection (current matches neither "
+                        f"baseline nor baseline+event): {detail}; specify "
+                        "external_action=apply_delta or already_reflected"
+                    )
+                external_action = detection["action"]
+                warnings.append(
+                    f"auto-detected external_action={external_action}"
                 )
         else:
             operations = [(source, None)]
@@ -1406,7 +1586,17 @@ class CashFlowEffectService:
             if not operation_source.get("broker"):
                 raise ValueError("target broker is required")
 
-            before = self._fresh_holding(operation_source)
+            if operation_holdings:
+                identity = self._identity(
+                    CASH_ASSETS[currency],
+                    operation_source["account"],
+                    operation_source["broker"],
+                )
+                before = operation_holdings.get(identity)
+                if before is None:
+                    before = self._fresh_holding(operation_source)
+            else:
+                before = self._fresh_holding(operation_source)
             before_payload = self._holding_payload(before)
             evidence: Optional[Dict[str, Any]] = None
 

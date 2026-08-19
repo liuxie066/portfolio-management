@@ -30,6 +30,34 @@ def _date_text(value: Any) -> str:
     return date.fromisoformat(str(value)[:10]).isoformat()
 
 
+# ``holdings_provenance.source_fetch_time`` is the wall-clock moment the
+# holdings were read from Feishu. It changes on every run and is not part of
+# the *content* (the holdings themselves are fingerprinted by
+# ``raw_record_digest`` / ``normalized_holdings_digest``). If it stayed in the
+# evidence payload, the preview->write CAS digest would never match because
+# each invocation re-fetches holdings at a different timestamp. We normalize it
+# away so the evidence artifact digest is deterministic across runs.
+_EVIDENCE_PROVENANCE_EXCLUDED_KEYS = frozenset({"source_fetch_time"})
+
+
+def _evidence_valuation_payload(
+    normalized_valuation: NormalizedValuationSnapshot,
+) -> dict[str, Any]:
+    """Return the canonical valuation payload with volatile provenance metadata
+    removed so the evidence digest is content-deterministic."""
+    payload = normalized_valuation.canonical_payload()
+    provenance = dict(payload.get("holdings_provenance") or {})
+    removed = {
+        key: provenance.pop(key)
+        for key in _EVIDENCE_PROVENANCE_EXCLUDED_KEYS
+        if key in provenance
+    }
+    if removed:
+        payload = dict(payload)
+        payload["holdings_provenance"] = provenance
+    return payload
+
+
 class NavValuationEvidenceStore:
     """Save and load digest-addressed evidence beneath the runtime data root."""
 
@@ -106,7 +134,7 @@ class NavValuationEvidenceStore:
         )
         if normalized_valuation.account != account:
             raise ValueError("NAV valuation evidence account mismatch")
-        valuation_payload = normalized_valuation.canonical_payload()
+        valuation_payload = _evidence_valuation_payload(normalized_valuation)
         valuation_holdings_digest = str(
             (valuation_payload.get("holdings_provenance") or {}).get(
                 "normalized_holdings_digest"
@@ -140,7 +168,7 @@ class NavValuationEvidenceStore:
             "holdings_digest": holdings_digest,
             "cash_flow_financial_fingerprint": cash_flow_financial_fingerprint,
             "source_effect_store_revision": source_effect_store_revision,
-            "valuation_digest": normalized_valuation.digest,
+            "valuation_digest": digest_payload(valuation_payload),
             "valuation": valuation_payload,
             "preparation": preparation,
         }

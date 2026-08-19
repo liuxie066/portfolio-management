@@ -260,9 +260,31 @@ class FeishuStorage(
         number_fields = _wire_fields_by_encoding(table, FieldEncoding.NUMBER)
         json_text_fields = _wire_fields_by_encoding(table, FieldEncoding.JSON_TEXT)
 
+        # Non-clearable fields (e.g. NAV pnl/ytd_pnl) must never be cleared on
+        # update. When ``preserve_none=True`` we are explicitly clearing, so we
+        # drop None values for non-clearable fields to leave their existing
+        # value untouched instead of sending a payload the write guard would
+        # reject ("fields cannot be cleared"). Local-only tables without a
+        # registry contract keep the legacy behavior.
+        try:
+            _table_contract = get_table_contract(table)
+        except Exception:
+            _table_contract = None
+        _clearable = (
+            frozenset(
+                field.name
+                for field in _table_contract.fields
+                if field.clearable
+            )
+            if _table_contract is not None
+            else None
+        )
+
         for key, value in data.items():
             if value is None:
                 if preserve_none:
+                    if _clearable is not None and key not in _clearable:
+                        continue
                     result[key] = None
                 continue
 

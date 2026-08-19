@@ -119,6 +119,47 @@ def test_evidence_store_round_trips_idempotently_and_detects_tampering(tmp_path)
         store.load(first["valuation_ref"])
 
 
+def test_evidence_digest_is_deterministic_across_source_fetch_time(tmp_path):
+    """Regression: volatile source_fetch_time must not break the preview->write
+    CAS digest (Bug: prepare-historical --write could never match expected_digest)."""
+    store = NavValuationEvidenceStore(tmp_path)
+
+    def _prepared_at(fetch_time: str) -> dict:
+        provenance = {
+            "normalized_holdings_digest": HOLDINGS_DIGEST,
+            "source_mode": "feishu",
+            "record_count": 1,
+            "raw_record_digest": "a" * 64,
+            "source_fetch_time": fetch_time,
+        }
+        return store.prepare(
+            account="lx",
+            nav_date="2026-08-13",
+            source_run_id="daily-nav-job-source:lx",
+            snapshot_time="2026-08-14T08:11:45.216546",
+            holdings_digest=HOLDINGS_DIGEST,
+            cash_flow_financial_fingerprint=CASH_FLOW_FINGERPRINT,
+            source_effect_store_revision="cfs_source",
+            normalized_valuation=_official(holdings_provenance=provenance),
+            preparation="cash_flow_gate_failure",
+        )
+
+    a = _prepared_at("2026-08-19T01:00:00+00:00")
+    b = _prepared_at("2026-08-19T09:59:59+00:00")
+
+    assert a["artifact_digest"] == b["artifact_digest"]
+    # volatile provenance metadata is normalized out of the stored payload
+    assert "source_fetch_time" not in a["artifact"]["valuation"]["holdings_provenance"]
+    # the normalized payload still round-trips through the store
+    saved = store.save(a)
+    loaded = store.load(
+        saved["valuation_ref"],
+        expected_account="lx",
+        expected_nav_date=date(2026, 8, 13),
+    )
+    assert loaded["normalized_valuation"].official_eligible is True
+
+
 def test_evidence_store_rejects_holdings_digest_not_bound_to_valuation(tmp_path):
     store = NavValuationEvidenceStore(tmp_path)
 
