@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.43 - 2026-08-25
+
+- Display the compound annual growth rate in each successful NAV History
+  receipt account row beside MTD and YTD performance, preserving the existing
+  NAV calculation and showing unavailable values explicitly.
+
 ## 0.1.42 - 2026-08-19
 
 - Confirm non-Futu cash-flow effects automatically: the system now detects
