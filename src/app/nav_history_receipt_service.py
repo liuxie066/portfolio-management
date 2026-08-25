@@ -315,6 +315,7 @@ class NavHistoryReceiptService:
                 f"｜当期盈亏 {_format_signed_money(report.get('pnl'))}"
                 f"｜MTD NAV {_format_signed_pct(report.get('mtd_nav_change'))}"
                 f"｜YTD NAV {_format_signed_pct(report.get('ytd_nav_change'))}"
+                f"｜复合增长率 {_format_signed_pct(report.get('cagr'))}"
                 f"｜股票 {_format_pct(overview.get('stock_ratio'))}"
                 f"｜基金 {_format_pct(overview.get('fund_ratio'))}"
                 f"｜现金 {_format_pct(overview.get('cash_ratio'))}"
