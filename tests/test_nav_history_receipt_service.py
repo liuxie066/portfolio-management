@@ -12,6 +12,7 @@ def _written(
     cash_flow=0.0,
     mtd_nav_change=0.02,
     ytd_nav_change=0.05,
+    cagr=0.0888,
     warnings=None,
 ):
     return {
@@ -25,6 +26,7 @@ def _written(
             "cash_flow": cash_flow,
             "mtd_nav_change": mtd_nav_change,
             "ytd_nav_change": ytd_nav_change,
+            "cagr": cagr,
             "overview": {"stock_ratio": 0.7, "fund_ratio": 0.1, "cash_ratio": 0.2},
             "warnings": warnings or [],
         },
@@ -98,7 +100,7 @@ def test_nav_receipt_sends_one_consolidated_success_message():
     assert "结果｜写入 3，跳过 0，失败 0" in text
     assert "✅ lx｜NAV 0.957931｜总资产 ¥3,893,292.82｜当期盈亏 +¥65,375.44" in text
     assert "✅ hb｜NAV 1.023482｜总资产 ¥1,286,450.20｜当期盈亏 -¥3,421.18" in text
-    assert "MTD NAV +2.00%｜YTD NAV +5.00%｜股票 70.00%｜基金 10.00%｜现金 20.00%" in text
+    assert "MTD NAV +2.00%｜YTD NAV +5.00%｜复合增长率 +8.88%｜股票 70.00%｜基金 10.00%｜现金 20.00%" in text
     assert "资金变动 +¥5,000.00" in text
     assert "## 告警" not in text
     assert "Run ID｜daily-nav-job-multi-1" in text
@@ -281,16 +283,18 @@ def test_nav_receipt_renders_global_blocker_once_despite_account_copies():
 
 def test_nav_receipt_formats_negative_and_missing_nav_changes():
     negative = NavHistoryReceiptService._item_row(
-        _written("lx", mtd_nav_change=-0.0456, ytd_nav_change=-0.0123)
+        _written("lx", mtd_nav_change=-0.0456, ytd_nav_change=-0.0123, cagr=-0.0456)
     )
     missing = NavHistoryReceiptService._item_row(
-        _written("hb", mtd_nav_change=None, ytd_nav_change=None)
+        _written("hb", mtd_nav_change=None, ytd_nav_change=None, cagr=None)
     )
 
     assert "MTD NAV -4.56%" in negative
     assert "YTD NAV -1.23%" in negative
+    assert "复合增长率 -4.56%" in negative
     assert "MTD NAV -｜" in missing
     assert "YTD NAV -｜" in missing
+    assert "复合增长率 -｜" in missing
 
 
 def test_nav_receipt_formats_existing_nav_skip():
