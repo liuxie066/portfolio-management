@@ -5,10 +5,14 @@ This layer gives HTTP, CLI, and future workers one application boundary.
 """
 from __future__ import annotations
 
+import logging
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 from uuid import uuid4
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class PortfolioService:
@@ -379,7 +383,7 @@ class PortfolioService:
 
         return CashService(self.storage).get_cash(self._resolve_account(account))
 
-    def sync_futu_holdings(
+    def _run_futu_holdings_sync(
         self,
         *,
         account: Optional[str] = None,
@@ -388,18 +392,19 @@ class PortfolioService:
         allow_empty_stock_snapshot: bool = False,
     ) -> Dict[str, Any]:
         from src.app import FutuBalanceSyncService
-        from src.app.futu_sync_receipt_service import FutuSyncReceiptService
+        from src.process_lock import futu_full_sync_lock_key, process_lock
 
         resolved_account = self._resolve_account(account)
         try:
-            result = FutuBalanceSyncService(self.storage).sync_portfolio(
-                account=resolved_account,
-                dry_run=dry_run,
-                confirm=confirm,
-                allow_empty_stock_snapshot=allow_empty_stock_snapshot,
-            )
+            with process_lock(futu_full_sync_lock_key(resolved_account)):
+                result = FutuBalanceSyncService(self.storage).sync_portfolio(
+                    account=resolved_account,
+                    dry_run=dry_run,
+                    confirm=confirm,
+                    allow_empty_stock_snapshot=allow_empty_stock_snapshot,
+                )
         except Exception as exc:
-            result = {
+            return {
                 "success": False,
                 "status": "failed",
                 "account": resolved_account,
@@ -407,10 +412,51 @@ class PortfolioService:
                 "dry_run": dry_run,
                 "error": str(exc),
             }
+        return dict(result)
 
+    def sync_futu_holdings(
+        self,
+        *,
+        account: Optional[str] = None,
+        dry_run: bool = True,
+        confirm: bool = False,
+        allow_empty_stock_snapshot: bool = False,
+    ) -> Dict[str, Any]:
+        from src.app.futu_sync_receipt_service import FutuSyncReceiptService
+
+        result = self._run_futu_holdings_sync(
+            account=account,
+            dry_run=dry_run,
+            confirm=confirm,
+            allow_empty_stock_snapshot=allow_empty_stock_snapshot,
+        )
         receipt_service = self._futu_receipt_service or FutuSyncReceiptService()
-        result = dict(result)
         result["receipt"] = receipt_service.send(result)
+        return result
+
+    def refresh_futu_holdings(self, *, account: str, request_id: str) -> Dict[str, Any]:
+        """Run the non-durable OM refresh hint without a user receipt."""
+        try:
+            result = self._run_futu_holdings_sync(
+                account=account,
+                dry_run=False,
+                confirm=True,
+                allow_empty_stock_snapshot=False,
+            )
+        except Exception:
+            LOGGER.exception(
+                "pm_futu_refresh_failed account=%s request_id=%s",
+                account,
+                request_id,
+            )
+            return {"success": False, "status": "failed", "account": account}
+        LOGGER.info(
+            "pm_futu_refresh_completed account=%s request_id=%s success=%s status=%s",
+            account,
+            request_id,
+            bool(result.get("success")),
+            str(result.get("status") or "unknown"),
+        )
         return result
 
     def get_nav(self, *, account: Optional[str] = None, days: int = 30) -> Dict[str, Any]:

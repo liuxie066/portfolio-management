@@ -3,7 +3,11 @@ from queue import Empty
 
 import pytest
 
-from src.process_lock import cash_flow_record_lock_key, process_lock
+from src.process_lock import (
+    cash_flow_record_lock_key,
+    futu_full_sync_lock_key,
+    process_lock,
+)
 
 
 def _hold_lock(data_dir, events, release):
@@ -49,3 +53,8 @@ def test_cash_flow_record_lock_key_is_exact_and_rejects_empty_identity():
     )
     with pytest.raises(ValueError, match="requires record_id"):
         cash_flow_record_lock_key(" ")
+
+
+def test_futu_full_sync_lock_key_is_account_scoped():
+    assert futu_full_sync_lock_key("lx") == "futu-full-sync:lx"
+    assert futu_full_sync_lock_key("sy") == "futu-full-sync:sy"

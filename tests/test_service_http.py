@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from unittest.mock import Mock
+
 from fastapi.testclient import TestClient
 
+from src.service import PortfolioService
 from src.service.http import app as module_app, create_app
 
 
@@ -96,6 +99,10 @@ class FakePortfolioService:
             "items": [],
             "count": 0,
         }
+
+    def refresh_futu_holdings(self, **kwargs):
+        self.calls.append(("refresh_futu_holdings", kwargs))
+        return {"success": True, "status": "written", **kwargs}
 
     def get_nav(self, **kwargs):
         self.calls.append(("nav", kwargs))
@@ -371,6 +378,75 @@ def test_http_futu_holdings_sync_routes_delegate_to_service():
             "allow_empty_stock_snapshot": True,
         }),
     ]
+
+
+def test_http_futu_holdings_refresh_accepts_and_runs_background_task_once():
+    service = FakePortfolioService()
+    response = _client(create_app(service=service)).post(
+        "/api/v1/futu/holdings/refresh-requests",
+        json={"account": "lx", "request_id": "stock-refresh:abc_123"},
+    )
+
+    assert response.status_code == 202
+    assert response.json() == {
+        "success": True,
+        "status": "accepted",
+        "account": "lx",
+        "request_id": "stock-refresh:abc_123",
+    }
+    assert response.headers["x-pm-api-version"] == "portfolio.api.v1"
+    assert service.calls == [
+        (
+            "refresh_futu_holdings",
+            {"account": "lx", "request_id": "stock-refresh:abc_123"},
+        )
+    ]
+
+
+def test_http_futu_holdings_refresh_rejects_invalid_or_extra_input():
+    service = FakePortfolioService()
+    client = _client(create_app(service=service))
+
+    for payload in (
+        {"account": "LX", "request_id": "stock-refresh:abc"},
+        {"account": "lx", "request_id": "stock/refresh/abc"},
+        {"account": "lx", "request_id": "stock-refresh:abc", "quantity": 100},
+    ):
+        response = client.post(
+            "/api/v1/futu/holdings/refresh-requests",
+            json=payload,
+        )
+        assert response.status_code == 422
+        assert response.json()["error_code"] == "INPUT_VALIDATION_ERROR"
+
+    assert service.calls == []
+
+
+def test_http_futu_holdings_refresh_remains_accepted_when_background_sync_fails(
+    caplog,
+):
+    service = PortfolioService(storage=object(), futu_receipt_service=Mock())
+    service._run_futu_holdings_sync = Mock(side_effect=RuntimeError("sync failed"))
+    response = _client(create_app(service=service)).post(
+        "/api/v1/futu/holdings/refresh-requests",
+        json={"account": "lx", "request_id": "stock-refresh:failed"},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "accepted"
+    service._futu_receipt_service.send.assert_not_called()
+    assert "pm_futu_refresh_failed account=lx request_id=stock-refresh:failed" in caplog.text
+
+
+def test_http_futu_holdings_refresh_rejects_remote_clients():
+    service = FakePortfolioService()
+    response = _client(create_app(service=service), "203.0.113.5").post(
+        "/api/v1/futu/holdings/refresh-requests",
+        json={"account": "lx", "request_id": "stock-refresh:abc"},
+    )
+
+    assert response.status_code == 403
+    assert service.calls == []
 
 
 def test_om_facing_v1_routes_match_legacy_and_expose_version_headers():

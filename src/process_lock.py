@@ -14,6 +14,10 @@ def account_lock_key(account: str) -> str:
     return f"account-write:{account}"
 
 
+def futu_full_sync_lock_key(account: str) -> str:
+    return f"futu-full-sync:{account}"
+
+
 def nav_history_lock_key() -> str:
     """Return the repository-wide same-host NAV mutation lock key."""
     return "nav-history-write"

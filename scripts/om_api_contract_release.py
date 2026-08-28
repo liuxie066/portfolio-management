@@ -46,7 +46,7 @@ def validate_release(
     source_root = source_root.resolve()
     manifest = _json(source_root / "contracts" / "om-api" / "manifest.json")
     if manifest.get("release_state") != "published" or not manifest.get("contract_release"):
-        raise APIContractError("PM API contract is not published; validate the pinned source_commit instead")
+        raise APIContractError("PM API contract is not published; validate the checked-in SHA-256 instead")
     if tag != manifest.get("contract_release"):
         raise APIContractError("tag does not match manifest contract_release")
     if require_annotated_tag and _git(source_root, "cat-file", "-t", tag) != "tag":

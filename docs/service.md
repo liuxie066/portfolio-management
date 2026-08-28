@@ -93,6 +93,7 @@ curl -X POST http://127.0.0.1:8765/analysis/valuation-evidence \
 ## Write Endpoints
 
 - `POST /futu/holdings/sync`
+- `POST /api/v1/futu/holdings/refresh-requests`
 - `POST /nav/record`
 - `POST /report/daily-bundle`
 - `POST /daily-nav-job`
@@ -101,6 +102,11 @@ Writes are dry-run by default. A real write requires `dry_run=false` and
 `confirm=true`. If a write POST loses its response, the result is reported as unknown and the
 CLI does not automatically replay it through the direct backend. Inspect state before retrying;
 use `--no-service` only when intentionally bypassing the service.
+
+The versioned refresh-request endpoint is reserved for OM's post-trade hint. It
+accepts only lowercase `account` and an opaque `request_id`, returns 202, and
+runs the confirmed full sync as a non-durable background task. It sends no user
+receipt; the scheduled sync remains recovery if PM exits after acceptance.
 
 ## Futu Holdings Sync
 
@@ -126,8 +132,8 @@ deprecated `cost_price`. Real MMF/stock writes require
 while existing Futu stocks are non-zero; the override also requires
 `confirm=true`.
 
-For real writes, the application service sends a Feishu receipt through the
-configured “刘看山” app and adds a `receipt` object to the response. Dry-runs
+Manual real writes send a Feishu receipt through the
+configured “刘看山” app and add a `receipt` object to the response. Dry-runs
 return `receipt.status=skipped`. Delivery failure is reported as
 `receipt.status=failed` without changing the holdings sync `success` value.
 The canonical receipt identity is `feishu.agent.app_id` plus
@@ -138,6 +144,10 @@ subscription and long-connection ingress and never supplies receipt or Base
 worker authority. Old `feishu.bitable.*`, `feishu.conversation.*`,
 `feishu.receipt.*`, and `OM_FEISHU_BOT_*` inputs are migration evidence only;
 the installer reports key names and imports no values.
+
+Every full holdings sync is serialized per account from the Futu snapshot read
+through sync-evidence persistence. Receipt delivery happens after that lock is
+released.
 
 Run this endpoint or `pm futu sync` before `daily-nav-job`. Keeping the commands independent ensures holdings still refresh when NAV recording skips an existing date. Production ordering is owned by `scripts/portfolio_scheduled_job.sh`, not by `DailyNavJobService`.
 

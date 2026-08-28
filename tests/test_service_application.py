@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
+import threading
 import time
+from contextlib import contextmanager
 from datetime import date
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -1043,6 +1046,7 @@ def _snapshot(*, total_value: float, cash_ratio: float, stock_ratio: float, fund
 
 def test_portfolio_service_sync_futu_holdings_uses_resolved_account(monkeypatch):
     calls = []
+    lock_held = False
 
     class FakeSyncService:
         def __init__(self, storage):
@@ -1054,13 +1058,27 @@ def test_portfolio_service_sync_futu_holdings_uses_resolved_account(monkeypatch)
 
     class FakeReceiptService:
         def send(self, result):
+            assert lock_held is False
             calls.append(("receipt", result))
             return {"success": True, "status": "sent"}
 
+    @contextmanager
+    def fake_process_lock(key):
+        nonlocal lock_held
+        calls.append(("lock-enter", key))
+        lock_held = True
+        try:
+            yield
+        finally:
+            lock_held = False
+            calls.append(("lock-exit", key))
+
     import src.app as app_module
+    import src.process_lock as process_lock_module
 
     storage = object()
     monkeypatch.setattr(app_module, "FutuBalanceSyncService", FakeSyncService)
+    monkeypatch.setattr(process_lock_module, "process_lock", fake_process_lock)
     result = PortfolioService(
         storage=storage,
         default_account="lx",
@@ -1073,16 +1091,159 @@ def test_portfolio_service_sync_futu_holdings_uses_resolved_account(monkeypatch)
 
     assert result["success"] is True
     assert result["receipt"] == {"success": True, "status": "sent"}
-    assert calls[0] == ("init", storage)
-    assert calls[1] == ("sync", {
+    assert calls[0] == ("lock-enter", "futu-full-sync:lx")
+    assert calls[1] == ("init", storage)
+    assert calls[2] == ("sync", {
         "account": "lx",
         "dry_run": False,
         "confirm": True,
         "allow_empty_stock_snapshot": True,
     })
-    assert calls[2][0] == "receipt"
-    assert calls[2][1]["account"] == "lx"
-    assert "cash_effects" not in calls[2][1]
+    assert calls[3] == ("lock-exit", "futu-full-sync:lx")
+    assert calls[4][0] == "receipt"
+    assert calls[4][1]["account"] == "lx"
+    assert "cash_effects" not in calls[4][1]
+
+
+def test_portfolio_service_background_refresh_is_confirmed_silent_and_bounded(
+    monkeypatch,
+    caplog,
+):
+    sync = Mock(return_value={"success": True, "status": "written", "account": "lx"})
+
+    class FakeSyncService:
+        def __init__(self, _storage):
+            pass
+
+        sync_portfolio = sync
+
+    receipt = Mock()
+    import src.app as app_module
+
+    monkeypatch.setattr(app_module, "FutuBalanceSyncService", FakeSyncService)
+    with caplog.at_level(logging.INFO, logger="src.service.application"):
+        result = PortfolioService(
+            storage=object(),
+            futu_receipt_service=receipt,
+        ).refresh_futu_holdings(account="lx", request_id="stock-refresh:abc")
+
+    assert result["status"] == "written"
+    sync.assert_called_once_with(
+        account="lx",
+        dry_run=False,
+        confirm=True,
+        allow_empty_stock_snapshot=False,
+    )
+    receipt.send.assert_not_called()
+    assert "pm_futu_refresh_completed account=lx request_id=stock-refresh:abc" in caplog.text
+
+
+def test_portfolio_service_full_sync_failure_releases_lock(monkeypatch):
+    calls = []
+
+    class FakeSyncService:
+        def __init__(self, _storage):
+            pass
+
+        def sync_portfolio(self, **_kwargs):
+            calls.append("sync")
+            raise RuntimeError("broker unavailable")
+
+    @contextmanager
+    def fake_process_lock(key):
+        calls.append(("enter", key))
+        try:
+            yield
+        finally:
+            calls.append(("exit", key))
+
+    import src.app as app_module
+    import src.process_lock as process_lock_module
+
+    monkeypatch.setattr(app_module, "FutuBalanceSyncService", FakeSyncService)
+    monkeypatch.setattr(process_lock_module, "process_lock", fake_process_lock)
+    result = PortfolioService(storage=object())._run_futu_holdings_sync(
+        account="lx",
+        dry_run=False,
+    )
+
+    assert result == {
+        "success": False,
+        "status": "failed",
+        "account": "lx",
+        "broker": "富途",
+        "dry_run": False,
+        "error": "broker unavailable",
+    }
+    assert calls == [
+        ("enter", "futu-full-sync:lx"),
+        "sync",
+        ("exit", "futu-full-sync:lx"),
+    ]
+
+
+def test_portfolio_service_full_sync_lock_serializes_only_same_account(monkeypatch):
+    account_locks: dict[str, threading.Lock] = {}
+
+    @contextmanager
+    def fake_process_lock(key):
+        with account_locks.setdefault(key, threading.Lock()):
+            yield
+
+    import src.process_lock as process_lock_module
+
+    monkeypatch.setattr(process_lock_module, "process_lock", fake_process_lock)
+
+    def run_pair(accounts):
+        entered = []
+        first_entered = threading.Event()
+        both_entered = threading.Event()
+        release = threading.Event()
+        entered_lock = threading.Lock()
+
+        class FakeSyncService:
+            def __init__(self, _storage):
+                pass
+
+            def sync_portfolio(self, **kwargs):
+                with entered_lock:
+                    entered.append(kwargs["account"])
+                    first_entered.set()
+                    if len(entered) == 2:
+                        both_entered.set()
+                release.wait(timeout=2)
+                return {"success": True, **kwargs}
+
+        import src.app as app_module
+
+        monkeypatch.setattr(app_module, "FutuBalanceSyncService", FakeSyncService)
+        threads = [
+            threading.Thread(
+                target=PortfolioService(storage=object())._run_futu_holdings_sync,
+                kwargs={"account": account},
+            )
+            for account in accounts
+        ]
+        for thread in threads:
+            thread.start()
+        return threads, entered, first_entered, both_entered, release
+
+    same_threads, same_entered, same_first, same_both, same_release = run_pair(("lx", "lx"))
+    assert same_first.wait(timeout=2) is True
+    assert same_both.wait(timeout=0.1) is False
+    assert same_entered == ["lx"]
+    same_release.set()
+    for thread in same_threads:
+        thread.join(timeout=2)
+        assert thread.is_alive() is False
+
+    different_threads, different_entered, _, different_both, different_release = run_pair(("lx", "sy"))
+    assert different_both.wait(timeout=2) is True
+    assert set(different_entered) == {"lx", "sy"}
+    different_release.set()
+    for thread in different_threads:
+        thread.join(timeout=2)
+        assert thread.is_alive() is False
 
 
 def test_portfolio_service_receipt_failure_does_not_change_sync_success(monkeypatch):

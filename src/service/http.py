@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
@@ -66,6 +66,12 @@ class FutuHoldingsSyncRequest(BaseModel):
     dry_run: bool = True
     confirm: bool = False
     allow_empty_stock_snapshot: bool = False
+
+
+class FutuHoldingsRefreshRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    account: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")
+    request_id: str = Field(min_length=1, max_length=96, pattern=r"^[A-Za-z0-9._:-]{1,96}$")
 
 
 class DailyNavJobRequest(BaseModel):
@@ -180,6 +186,13 @@ class FutuHoldingsSyncResponse(BaseModel):
     positions: list[dict[str, Any]]
 
 
+class FutuHoldingsRefreshAcceptedResponse(BaseModel):
+    success: Literal[True]
+    status: Literal["accepted"]
+    account: str
+    request_id: str
+
+
 class CapitalFactsResponse(PublicResponse):
     schema_version: str
     status: str
@@ -218,6 +231,10 @@ V1_RESPONSES = {
     400: {"model": PublicErrorResponse},
     422: {"model": PublicErrorResponse},
     503: {"model": PublicErrorResponse},
+}
+FUTU_REFRESH_RESPONSES = {
+    202: {"headers": _VERSION_HEADER},
+    422: {"model": PublicErrorResponse},
 }
 
 
@@ -546,6 +563,31 @@ def create_app(service: Optional[PortfolioService] = None, allow_remote: Optiona
     @app.post("/api/v1/futu/holdings/sync", tags=["holdings"], response_model=FutuHoldingsSyncResponse, responses=V1_RESPONSES)
     def sync_futu_holdings_query(request: Request, payload: FutuHoldingsSyncRequest):
         return _public_result(request, _service(request).sync_futu_holdings(**_payload_dict(payload)))
+
+
+    @app.post(
+        "/api/v1/futu/holdings/refresh-requests",
+        tags=["holdings"],
+        status_code=202,
+        response_model=FutuHoldingsRefreshAcceptedResponse,
+        responses=FUTU_REFRESH_RESPONSES,
+    )
+    def request_futu_holdings_refresh(
+        request: Request,
+        payload: FutuHoldingsRefreshRequest,
+        background_tasks: BackgroundTasks,
+    ):
+        background_tasks.add_task(
+            _service(request).refresh_futu_holdings,
+            account=payload.account,
+            request_id=payload.request_id,
+        )
+        return {
+            "success": True,
+            "status": "accepted",
+            "account": payload.account,
+            "request_id": payload.request_id,
+        }
 
 
     @app.get("/nav", tags=["nav"], include_in_schema=False)

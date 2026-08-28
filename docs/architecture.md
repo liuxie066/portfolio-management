@@ -165,6 +165,9 @@ date. The embedded daily-job option has the same observe-only CASH semantics.
 
 - `FutuBalanceSyncService` owns broker CASH observation and non-CASH holdings
   synchronization; it never directly writes CASH.
+- `PortfolioService` serializes each account's complete full Futu sync from
+  broker observation through evidence persistence. Its OM refresh-request path
+  is non-durable and silent; 202 is acceptance, not synchronization proof.
 - `CashFlowEffectService` owns durable CASH discovery, preview/confirmation,
   compensation, and the NAV gate.
 - `FutuSyncReceiptService` owns the best-effort Feishu receipt after a real Futu write; delivery failure is reported separately from sync success.
