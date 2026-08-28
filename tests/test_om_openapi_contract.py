@@ -15,8 +15,8 @@ def test_checked_in_openapi_matches_fastapi_and_manifest() -> None:
     assert CONTRACT.read_text(encoding="utf-8") == render_contract()
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     assert manifest["api_version"] == "portfolio.api.v1"
-    assert manifest["release_state"] == "unpublished"
-    assert manifest["planned_contract_release"] == "pm-api-v1.0.0"
+    assert manifest["release_state"] == "published"
+    assert manifest["contract_release"] == "pm-api-v1.0.0"
     assert "source_commit" not in manifest
     assert manifest["sha256"] == hashlib.sha256(CONTRACT.read_bytes()).hexdigest()
 

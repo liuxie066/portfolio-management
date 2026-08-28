@@ -3,9 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
-from scripts.om_api_contract_release import APIContractError, validate_release, vendor_release
+from scripts.om_api_contract_release import validate_release, vendor_release
 
 
 def test_vendor_openapi_contract_updates_om_manifest(tmp_path: Path) -> None:
@@ -35,6 +33,6 @@ def test_vendor_openapi_contract_updates_om_manifest(tmp_path: Path) -> None:
     assert (target / "v1.openapi.json").read_bytes() == source.read_bytes()
 
 
-def test_current_contract_manifest_is_explicitly_unpublished() -> None:
-    with pytest.raises(APIContractError, match="not published"):
-        validate_release(tag="pm-api-v1.0.0")
+def test_current_contract_release_is_validated() -> None:
+    release = validate_release(tag="pm-api-v1.0.0")
+    assert release["contract_release"] == "pm-api-v1.0.0"

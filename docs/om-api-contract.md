@@ -10,10 +10,9 @@ OM vendors that snapshot and verifies every client method against it.
   separate `retrieved_at_utc`; missing owner evidence is reported as
   `unavailable`, never inferred as live by OM.
 - `pm-api-vN.N.N` tags are immutable contract releases, separate from PM application releases.
-- The current `pm-api-v1.0.0` name is planned but unpublished. The producer
-  manifest pins the checked-in SHA-256 and explicitly says `unpublished`; it
-  does not circularly pin its own source commit. After an authorized PM commit,
-  OM records that exact upstream commit when vendoring the snapshot.
+- `pm-api-v1.0.0` is the immutable published V1 contract. The producer manifest
+  pins its checked-in SHA-256 without circularly pinning its own source commit;
+  OM records the tagged upstream commit when vendoring the snapshot.
 - PM CI only validates an explicitly tagged contract release. It has no
   cross-repository credential, schedule, push, or PR authority.
 - An operator vendors the validated snapshot into OM with
