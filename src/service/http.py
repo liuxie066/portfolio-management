@@ -213,11 +213,11 @@ class ValuationEvidenceResponse(PublicResponse):
 
 
 class PublicErrorResponse(BaseModel):
-    success: Literal[False] = False
+    success: Literal[False]
     error_code: str
     message: str
     request_id: str
-    details: dict[str, Any] = Field(default_factory=dict)
+    details: dict[str, Any]
 
 
 _VERSION_HEADER = {
@@ -228,13 +228,13 @@ _VERSION_HEADER = {
 }
 V1_RESPONSES = {
     200: {"headers": _VERSION_HEADER},
-    400: {"model": PublicErrorResponse},
-    422: {"model": PublicErrorResponse},
-    503: {"model": PublicErrorResponse},
+    400: {"model": PublicErrorResponse, "headers": _VERSION_HEADER},
+    422: {"model": PublicErrorResponse, "headers": _VERSION_HEADER},
+    503: {"model": PublicErrorResponse, "headers": _VERSION_HEADER},
 }
 FUTU_REFRESH_RESPONSES = {
     202: {"headers": _VERSION_HEADER},
-    422: {"model": PublicErrorResponse},
+    422: {"model": PublicErrorResponse, "headers": _VERSION_HEADER},
 }
 
 

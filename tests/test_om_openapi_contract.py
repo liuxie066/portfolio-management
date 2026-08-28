@@ -23,6 +23,13 @@ def test_checked_in_openapi_matches_fastapi_and_manifest() -> None:
 
 def test_openapi_required_response_contracts_are_machine_readable() -> None:
     document = json.loads(CONTRACT.read_text(encoding="utf-8"))
+    assert set(document["components"]["schemas"]["PublicErrorResponse"]["required"]) == {
+        "success",
+        "error_code",
+        "message",
+        "request_id",
+        "details",
+    }
     capital = document["paths"]["/api/v1/analysis/capital-facts"]["get"]
     valuation = document["paths"]["/api/v1/analysis/valuation-evidence"]["post"]
     assert capital["responses"]["200"]["content"]["application/json"]["schema"]
@@ -33,6 +40,11 @@ def test_openapi_required_response_contracts_are_machine_readable() -> None:
     assert "200" not in refresh["responses"]
     assert refresh["responses"]["202"]["content"]["application/json"]["schema"]
     assert refresh["responses"]["422"]["content"]["application/json"]["schema"]
+    for response in refresh["responses"].values():
+        assert (
+            response["headers"]["X-PM-API-Version"]["schema"]["const"]
+            == "portfolio.api.v1"
+        )
     request_schema = document["components"]["schemas"]["FutuHoldingsRefreshRequest"]
     assert request_schema["additionalProperties"] is False
     assert "NavRecordRequest" not in document["components"]["schemas"]

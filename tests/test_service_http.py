@@ -417,6 +417,7 @@ def test_http_futu_holdings_refresh_rejects_invalid_or_extra_input():
             json=payload,
         )
         assert response.status_code == 422
+        assert response.headers["x-pm-api-version"] == "portfolio.api.v1"
         assert response.json()["error_code"] == "INPUT_VALIDATION_ERROR"
 
     assert service.calls == []
@@ -569,6 +570,9 @@ def test_openapi_contract_contains_only_real_om_v1_capabilities():
         operation = next(iter(schema["paths"][path].values()))
         header = operation["responses"]["200"]["headers"]["X-PM-API-Version"]
         assert header["schema"]["const"] == "portfolio.api.v1"
+        for status, response in operation["responses"].items():
+            if status != "200":
+                assert response["headers"]["X-PM-API-Version"] == header
     accounts_schema = schema["components"]["schemas"]["AccountsResponse"]
     assert {"success", "accounts", "count", "freshness", "retrieved_at_utc"} <= set(accounts_schema["required"])
     holdings_schema = schema["components"]["schemas"]["HoldingsResponse"]

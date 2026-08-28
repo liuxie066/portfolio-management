@@ -3,7 +3,7 @@
   "release_state": "unpublished",
   "planned_contract_release": "pm-api-v1.0.0",
   "canonical_path": "contracts/om-api/v1.openapi.json",
-  "sha256": "61bdcd69723cb35a9a9cf55cace40869420a6c49ba9479e44e238d9ecfe40b99",
+  "sha256": "73b416b0d6b5d74bb5dacbf4f13c4dc44f68d5163f127ba027e7ce309f2be63a",
   "compatibility": {
     "breaking_change": "new_major_path",
     "legacy_paths_minimum_release_cycles": 2
