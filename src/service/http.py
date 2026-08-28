@@ -229,12 +229,20 @@ _VERSION_HEADER = {
 V1_RESPONSES = {
     200: {"headers": _VERSION_HEADER},
     400: {"model": PublicErrorResponse, "headers": _VERSION_HEADER},
-    422: {"model": PublicErrorResponse, "headers": _VERSION_HEADER},
+    422: {
+        "model": PublicErrorResponse,
+        "description": "Unprocessable Content",
+        "headers": _VERSION_HEADER,
+    },
     503: {"model": PublicErrorResponse, "headers": _VERSION_HEADER},
 }
 FUTU_REFRESH_RESPONSES = {
     202: {"headers": _VERSION_HEADER},
-    422: {"model": PublicErrorResponse, "headers": _VERSION_HEADER},
+    422: {
+        "model": PublicErrorResponse,
+        "description": "Unprocessable Content",
+        "headers": _VERSION_HEADER,
+    },
 }
 
 
