@@ -7,6 +7,7 @@ from src.app.holdings_event_service import (
     MAX_EVENT_ACTIONS,
     HoldingEventTargetMismatch,
     HoldingsEventTarget,
+    NormalizedHoldingEvent,
     normalize_holding_event,
 )
 
@@ -45,6 +46,7 @@ def _payload(*, event_id="evt-1", actions=None, table_id="tbl_holdings"):
 def test_normalize_holding_event_requires_exact_target_and_freezes_trigger_metadata():
     normalized = normalize_holding_event(_payload(), target=TARGET)
 
+    assert isinstance(normalized, NormalizedHoldingEvent)
     assert normalized.event_id == "evt-1"
     assert normalized.revision == "7"
     assert normalized.action_list == (
@@ -53,14 +55,20 @@ def test_normalize_holding_event_requires_exact_target_and_freezes_trigger_metad
     )
     assert len(normalized.payload_digest) == 64
 
-    with pytest.raises(HoldingEventTargetMismatch):
+    with pytest.raises(
+        HoldingEventTargetMismatch,
+        match=r"^holding event target does not match configured app/base/table$",
+    ):
         normalize_holding_event(_payload(table_id="another_table"), target=TARGET)
 
 
 def test_normalize_holding_event_rejects_malformed_or_unbounded_transport():
     malformed = _payload()
     malformed["schema"] = "1.0"
-    with pytest.raises(ValueError, match="schema 2.0"):
+    with pytest.raises(
+        ValueError,
+        match=r"^holding event must use Feishu event schema 2\.0$",
+    ):
         normalize_holding_event(malformed, target=TARGET)
 
     too_many = _payload(
@@ -69,8 +77,21 @@ def test_normalize_holding_event_rejects_malformed_or_unbounded_transport():
             for index in range(MAX_EVENT_ACTIONS + 1)
         ]
     )
-    with pytest.raises(ValueError, match="action_list exceeds"):
+    with pytest.raises(
+        ValueError,
+        match=r"^holding event action_list exceeds the receiver limit$",
+    ):
         normalize_holding_event(too_many, target=TARGET)
+
+    malformed_foreign = _payload(table_id="another_table")
+    malformed_foreign["schema"] = "1.0"
+    with pytest.raises(ValueError, match="schema 2.0"):
+        normalize_holding_event(malformed_foreign, target=TARGET)
+
+    foreign_without_actions = _payload(table_id="another_table")
+    foreign_without_actions["event"]["action_list"] = None
+    with pytest.raises(HoldingEventTargetMismatch):
+        normalize_holding_event(foreign_without_actions, target=TARGET)
 
 
 def test_payload_digest_covers_full_delivery_not_only_frozen_actions():
