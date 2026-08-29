@@ -7,6 +7,7 @@ from src.app.cash_flow_event_service import (
     CASH_FLOW_EVENT_TYPE,
     CashFlowEventTarget,
     CashFlowEventTargetMismatch,
+    NormalizedCashFlowEvent,
     normalize_cash_flow_event,
 )
 from src.app.holdings_event_service import HOLDINGS_EVENT_TYPE, MAX_EVENT_ACTIONS
@@ -51,6 +52,7 @@ def _payload(*, event_id="evt-cf-1", actions=None, table_id="tbl_cash_flow"):
 def test_normalize_cash_flow_event_requires_exact_target_and_freezes_actions():
     normalized = normalize_cash_flow_event(_payload(), target=TARGET)
 
+    assert isinstance(normalized, NormalizedCashFlowEvent)
     assert normalized.event_id == "evt-cf-1"
     assert normalized.revision == "9"
     assert normalized.action_list == (
@@ -59,14 +61,20 @@ def test_normalize_cash_flow_event_requires_exact_target_and_freezes_actions():
     )
     assert len(normalized.payload_digest) == 64
 
-    with pytest.raises(CashFlowEventTargetMismatch):
+    with pytest.raises(
+        CashFlowEventTargetMismatch,
+        match=r"^cash flow event target does not match configured app/base/table$",
+    ):
         normalize_cash_flow_event(_payload(table_id="tbl_holdings"), target=TARGET)
 
 
 def test_normalize_cash_flow_event_rejects_malformed_or_unbounded_transport():
     malformed = _payload()
     malformed["schema"] = "1.0"
-    with pytest.raises(ValueError, match="schema 2.0"):
+    with pytest.raises(
+        ValueError,
+        match=r"^cash flow event must use Feishu event schema 2\.0$",
+    ):
         normalize_cash_flow_event(malformed, target=TARGET)
 
     too_many = _payload(
@@ -75,8 +83,21 @@ def test_normalize_cash_flow_event_rejects_malformed_or_unbounded_transport():
             for index in range(MAX_EVENT_ACTIONS + 1)
         ]
     )
-    with pytest.raises(ValueError, match="action_list exceeds"):
+    with pytest.raises(
+        ValueError,
+        match=r"^cash flow event action_list exceeds the receiver limit$",
+    ):
         normalize_cash_flow_event(too_many, target=TARGET)
+
+    malformed_foreign = _payload(table_id="tbl_holdings")
+    malformed_foreign["schema"] = "1.0"
+    with pytest.raises(ValueError, match="schema 2.0"):
+        normalize_cash_flow_event(malformed_foreign, target=TARGET)
+
+    foreign_without_actions = _payload(table_id="tbl_holdings")
+    foreign_without_actions["event"]["action_list"] = None
+    with pytest.raises(CashFlowEventTargetMismatch):
+        normalize_cash_flow_event(foreign_without_actions, target=TARGET)
 
 
 def test_cash_flow_payload_digest_covers_full_delivery():
