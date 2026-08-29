@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.45 - 2026-08-29
+
+- Centralize Feishu Bitable event normalization shared by Holdings and Cash
+  Flow listeners, preserving their existing service contracts while removing
+  duplicated parsing logic.
+
 ## 0.1.44 - 2026-08-29
 
 - Add a loopback-only asynchronous Futu holdings refresh endpoint for
