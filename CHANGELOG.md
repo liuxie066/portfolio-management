@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.44 - 2026-08-29
+
+- Add a loopback-only asynchronous Futu holdings refresh endpoint for
+  options-monitor, with account-scoped full-sync serialization and silent
+  background execution.
+- Publish the immutable `pm-api-v1.0.0` contract and keep its validation schema
+  stable across supported Python runtimes.
+
 ## 0.1.43 - 2026-08-25
 
 - Display the compound annual growth rate in each successful NAV History
