@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.46 - 2026-08-29
+
+- Restore a clean Ruff baseline for the compatibility API and daily-report
+  entrypoints while preserving their existing import and bootstrap behavior.
+
 ## 0.1.45 - 2026-08-29
 
 - Centralize Feishu Bitable event normalization shared by Holdings and Cash
