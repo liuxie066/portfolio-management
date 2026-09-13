@@ -321,6 +321,7 @@ def test_futu_openapi_provider_reads_exact_currency_cash_and_mmf():
                 "us_cash": "6.7",
                 "hk_cash": "-8.9",
                 "fund_assets": "345.678",
+                "currency": "CNH",
             }]
 
         def position_list_query(self, **kwargs):
@@ -1349,7 +1350,7 @@ def test_futu_portfolio_provider_fetches_average_cost_and_closes_contexts(monkey
             self.position_kwargs = None
 
         def accinfo_query(self, **kwargs):
-            assert kwargs["currency"] == "HKD"
+            assert kwargs["currency"] == "CNH"
             assert kwargs["acc_id"] == 123
             return 0, [{
                 "cash": 999999,
@@ -1357,6 +1358,7 @@ def test_futu_portfolio_provider_fetches_average_cost_and_closes_contexts(monkey
                 "us_cash": 5.67,
                 "hk_cash": -1,
                 "fund_assets": 56.78,
+                "currency": "CNH",
             }]
 
         def position_list_query(self, **kwargs):
@@ -1426,6 +1428,7 @@ def test_futu_portfolio_provider_closes_contexts_when_classification_fails(monke
                 "us_cash": 2,
                 "hk_cash": 3,
                 "fund_assets": 2,
+                "currency": "CNH",
             }]
 
         def position_list_query(self, **kwargs):
@@ -1468,7 +1471,7 @@ def test_futu_portfolio_provider_closes_contexts_when_classification_fails(monke
     assert quote_ctx.closed is True
 
 
-def test_futu_account_info_query_uses_us_market_conversion_currency():
+def test_futu_account_info_query_uses_cnh_for_rmb_mmf():
     sdk = SimpleNamespace(
         TrdEnv=SimpleNamespace(REAL="REAL"),
         Currency=SimpleNamespace(USD="USD"),
@@ -1481,7 +1484,8 @@ def test_futu_account_info_query_uses_us_market_conversion_currency():
 
     assert provider._accinfo_kwargs(sdk) == {
         "trd_env": "REAL",
-        "currency": "USD",
+        "currency": "CNH",
+        "refresh_cache": True,
         "acc_id": 123,
     }
 
@@ -1534,3 +1538,37 @@ def test_portfolio_skill_full_futu_sync_defaults_to_dry_run(monkeypatch):
             "allow_empty_stock_snapshot": False,
         }),
     ]
+
+
+@pytest.mark.parametrize("market", ["HK", "US"])
+def test_futu_mmf_uses_converted_rmb_value_and_keeps_negative_native_cash(market):
+    class Context:
+        def accinfo_query(self, **kwargs):
+            assert kwargs["refresh_cache"] is True
+            currency = kwargs["currency"]
+            amounts = {"HKD": 900.0, "CNH": 770.0}
+            return 0, [{"currency": currency, "fund_assets": amounts[currency],
+                        "hk_cash": -44.0, "us_cash": 0.01, "cn_cash": 0}]
+
+    provider = FutuOpenApiBalanceProvider(acc_id=123, trd_market=market)
+    row = provider._fetch_accinfo_row(SimpleNamespace(RET_OK=0), Context())
+    assert provider._mmf_from_row(row) == 770.0
+    assert provider._cash_balances_from_row(row) == {"HKD": -44.0, "USD": 0.01, "CNY": 0}
+
+
+@pytest.mark.parametrize("currency", [None, "HKD", "USD"])
+def test_futu_account_summary_rejects_unproven_rmb_conversion(currency):
+    ctx = SimpleNamespace(accinfo_query=lambda **kwargs: (0, [{"currency": currency, "fund_assets": 900.0}]))
+    with pytest.raises(RuntimeError, match="explicitly denominated in CNH"):
+        FutuOpenApiBalanceProvider(acc_id=123)._fetch_accinfo_row(SimpleNamespace(RET_OK=0), ctx)
+
+
+def test_futu_account_summary_never_retries_without_requested_currency():
+    calls = []
+    def query(**kwargs):
+        calls.append(kwargs)
+        raise TypeError("unsupported currency argument")
+    with pytest.raises(TypeError):
+        FutuOpenApiBalanceProvider(acc_id=123)._fetch_accinfo_row(SimpleNamespace(RET_OK=0), SimpleNamespace(accinfo_query=query))
+    assert len(calls) == 1
+    assert calls[0]["currency"] == "CNH"

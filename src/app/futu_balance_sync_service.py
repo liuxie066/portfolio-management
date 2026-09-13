@@ -433,13 +433,12 @@ class FutuOpenApiBalanceProvider:
                 "Futu acc_id is required for authoritative cash observations"
             )
         kwargs = self._accinfo_kwargs(futu_sdk)
-        try:
-            ret, data = ctx.accinfo_query(**kwargs)
-        except TypeError:
-            kwargs.pop("currency", None)
-            ret, data = ctx.accinfo_query(**kwargs)
+        ret, data = ctx.accinfo_query(**kwargs)
         self._ensure_ok(futu_sdk, ret, data, "accinfo_query")
-        return _first_row(data)
+        row = _first_row(data)
+        if str(row.get("currency") or "").strip().upper() != "CNH":
+            raise RuntimeError("Futu account summary must be explicitly denominated in CNH")
+        return row
 
     def _fetch_position_rows(self, futu_sdk: Any, ctx: Any) -> list[dict[str, Any]]:
         kwargs: dict[str, Any] = {
@@ -526,13 +525,13 @@ class FutuOpenApiBalanceProvider:
         kwargs: dict[str, Any] = {}
         kwargs["trd_env"] = self._enum_value(futu_sdk, "TrdEnv", self.trd_env)
         market = str(self.trd_market or "").strip().upper()
-        currency_by_market = {"HK": "HKD", "US": "USD"}
-        currency = currency_by_market.get(market)
-        if currency is None:
+        if market not in {"HK", "US"}:
             raise ValueError(
                 f"unsupported Futu trade market for account info query: {self.trd_market}"
             )
-        kwargs["currency"] = self._enum_value(futu_sdk, "Currency", currency)
+        # CNY-MMF stores RMB value; native cash columns retain their own currencies.
+        kwargs["currency"] = self._enum_value(futu_sdk, "Currency", "CNH")
+        kwargs["refresh_cache"] = True
         if self.acc_id is not None:
             kwargs["acc_id"] = self.acc_id
         return kwargs
