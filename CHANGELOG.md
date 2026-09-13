@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.47 - 2026-09-13
+
+- Request and validate refreshed CNH account summaries for Futu fund valuations,
+  preserving native-currency cash balances and rejecting unsafe currency fallbacks.
+
 ## 0.1.46 - 2026-08-29
 
 - Restore a clean Ruff baseline for the compatibility API and daily-report
