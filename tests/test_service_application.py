@@ -515,7 +515,7 @@ def test_portfolio_service_get_holdings_uses_direct_read_service():
 
 
 def test_portfolio_service_get_cash_uses_direct_cash_service():
-    storage = SimpleNamespace(get_holdings=Mock(return_value=[
+    storage = SimpleNamespace(get_holdings=Mock(side_effect=AssertionError("stale cache")), get_holdings_fresh=Mock(return_value=[
         SimpleNamespace(
             asset_id="CNY-CASH",
             asset_name="人民币现金",
@@ -535,7 +535,17 @@ def test_portfolio_service_get_cash_uses_direct_cash_service():
         "items": [{"code": "CNY-CASH", "name": "人民币现金", "amount": 100.0, "currency": "CNY", "type": "cash"}],
         "count": 1,
     }
-    storage.get_holdings.assert_called_once_with(account="alice")
+    storage.get_holdings_fresh.assert_called_once_with(account="alice", include_empty=False)
+    storage.get_holdings.assert_not_called()
+
+    storage.get_holdings_fresh.return_value[0].quantity = 80.0
+    assert service.get_cash(account="alice")["by_currency"] == {"CNY": 80.0}
+
+    storage.get_holdings_fresh.side_effect = RuntimeError("Feishu unavailable")
+    failed = service.get_cash(account="alice")
+    assert failed["success"] is False
+    assert "by_currency" not in failed
+    storage.get_holdings.assert_not_called()
 
 
 def test_portfolio_service_record_nav_uses_direct_portfolio_path():

@@ -126,7 +126,7 @@ def test_cash_service_sync_cash_like_balance_refuses_cash_even_dry_run():
 
 def test_cash_service_get_cash_formats_cash_and_mmf_holdings():
     storage = Mock()
-    storage.get_holdings.return_value = [
+    storage.get_holdings_fresh.return_value = [
         Holding(
             asset_id="CNY-CASH",
             asset_name="人民币现金",
@@ -165,4 +165,4 @@ def test_cash_service_get_cash_formats_cash_and_mmf_holdings():
         ],
         "count": 2,
     }
-    storage.get_holdings.assert_called_once_with(account="a")
+    storage.get_holdings_fresh.assert_called_once_with(account="a", include_empty=False)

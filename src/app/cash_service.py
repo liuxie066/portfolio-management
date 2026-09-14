@@ -163,7 +163,8 @@ class CashService:
 
     def get_cash(self, account: str) -> dict[str, Any]:
         try:
-            holdings = self.storage.get_holdings(account=account)
+            # Sync workers update Feishu outside this process's holdings cache.
+            holdings = self.storage.get_holdings_fresh(account=account, include_empty=False)
             cash_holdings = [h for h in holdings if h.asset_type in [AssetType.CASH, AssetType.MMF]]
 
             items = []
