@@ -1349,6 +1349,50 @@ class NavHistoryRepository:
                 allowed_fields={"details"},
             )
 
+    def patch_nav_cash_restatement(self, *, account, record_id, expected, target):
+        """CAS one cash/total restatement, including its canonical derived fields.
+
+        The caller owns account locking, the full-series plan and durable backup.
+        This lock coordinates repository writers; Feishu has no atomic remote CAS.
+        """
+        from decimal import Decimal
+        from src.maintenance.nav_history_repair.common import (
+            BASE_FIELDS, MAINTENANCE_FIELDS, FieldState,
+        )
+
+        complete = set(BASE_FIELDS) | set(MAINTENANCE_FIELDS)
+        if set(expected) != complete or set(target) != complete:
+            raise ValueError("cash restatement requires complete before/after states")
+        before = {k: FieldState.from_envelope(v) for k, v in expected.items()}
+        after = {k: FieldState.from_envelope(v) for k, v in target.items()}
+        if any(before[k] != after[k] for k in set(BASE_FIELDS) - {"cash_value", "total_value"}):
+            raise ValueError("cash restatement cannot change non-cash base facts")
+        deltas = []
+        for key in ("cash_value", "total_value"):
+            if before[key].state != "value" or after[key].state != "value":
+                raise ValueError("cash and total must be present")
+            values = [Decimal(str(s.value)) for s in (before[key], after[key])]
+            if any(not v.is_finite() for v in values):
+                raise ValueError("cash and total must be finite")
+            deltas.append(values[1] - values[0])
+        if deltas[0] != deltas[1]:
+            raise ValueError("cash and total restatement deltas must agree")
+        changed = {k: s for k, s in after.items() if s != before[k]}
+        with process_lock(nav_history_lock_key()):
+            matches = [r for r in self.read_nav_maintenance_rows(account)
+                       if r["record_id"] == record_id]
+            if len(matches) != 1:
+                raise ValueError("cash restatement target is not unique")
+            live = {k: FieldState.from_envelope(matches[0]["field_states"].get(k, {"state": "missing"}))
+                    for k in complete}
+            if live != before:
+                raise ValueError("cash restatement CAS conflict")
+            return self._patch_nav_fields(
+                record_id,
+                {k: s.value if s.state == "value" else None for k, s in changed.items()},
+                allowed_fields=self.NAV_MAINTENANCE_PATCH_FIELDS | {"cash_value", "total_value"},
+            )
+
     def get_latest_nav_before(self, account: str, before_date: date) -> Optional[NAVHistory]:
         """获取指定日期之前的最新净值记录（优先索引）。"""
         navs = self._get_indexed_navs(account)

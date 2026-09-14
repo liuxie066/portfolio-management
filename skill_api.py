@@ -295,31 +295,9 @@ class PortfolioSkill:
 
     def get_cash(self) -> Dict[str, Any]:
         """获取现金资产明细"""
-        try:
-            holdings = self.storage.get_holdings(account=self.account)
-            cash_holdings = [h for h in holdings if h.asset_type in [AssetType.CASH, AssetType.MMF]]
+        from src.app.cash_service import CashService
 
-            items = []
-            by_currency = {}
-            for h in cash_holdings:
-                currency = h.currency or 'CNY'
-                items.append({
-                    "code": h.asset_id,
-                    "name": h.asset_name,
-                    "amount": h.quantity,
-                    "currency": currency,
-                    "type": h.asset_type.value
-                })
-                by_currency[currency] = by_currency.get(currency, 0) + h.quantity
-
-            return {
-                "success": True,
-                "by_currency": by_currency,
-                "items": items,
-                "count": len(items)
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        return CashService(self.storage).get_cash(self.account)
 
     def add_cash(self, amount: float, asset: str = "CNY-CASH") -> Dict[str, Any]:
         """Increase an existing cash holding under the account write lock."""
