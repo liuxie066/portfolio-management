@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.48 - 2026-09-14
+
+- Read fresh cash holdings after external syncs across service and skill queries.
+- Add guarded historical cash restatement with daily FX provenance, canonical NAV
+  recalculation, immutable backups, resumable writes, and rollback.
+
 ## 0.1.47 - 2026-09-13
 
 - Request and validate refreshed CNH account summaries for Futu fund valuations,
