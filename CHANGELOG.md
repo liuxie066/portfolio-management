@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.49 - 2026-09-26
+
+- Use Futu CN, HK, and US trading calendars to update daily NAV when any
+  market trades, and require fresh calendar evidence before Cash Flow writes.
+
 ## 0.1.48 - 2026-09-14
 
 - Read fresh cash holdings after external syncs across service and skill queries.
