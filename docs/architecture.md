@@ -142,9 +142,9 @@ flowchart TB
 
 `DailyNavJobService` is the canonical scheduled workflow.
 
-1. Resolve NAV date. If omitted, use the most recent business day before the
+1. Resolve NAV date. If omitted, use the most recent CN/HK/US trading day before the
    run date.
-2. Skip NAV dates that are weekends or configured `calendar.holidays`.
+2. Use Futu OpenD's CN/HK/US calendars; skip only when all three markets are closed.
 3. Resolve target accounts from CLI input or current holdings.
 4. Audit duplicate `nav_history` account/date rows and block writes if found.
 5. Reconcile-check manual `cash_flow` rows and block writes if generated fields

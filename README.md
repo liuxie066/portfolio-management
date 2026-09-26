@@ -265,7 +265,7 @@ sudo scripts/install.sh --apply --enable-quality-timer
 - `PORTFOLIO_SERVICE_URL`
 - `PM_DATA_DIR`
 - `PM_REPORTS_DIR`
-- `PM_BUSINESS_HOLIDAYS`
+- `FUTU_OPEND_HOST` / `FUTU_OPEND_PORT`（NAV 交易日历查询）
 - `FEISHU_AGENT_APP_ID`
 - `FEISHU_AGENT_OPEN_ID`
 - `FEISHU_LISTENER_APP_ID`

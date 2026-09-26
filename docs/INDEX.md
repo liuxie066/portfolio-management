@@ -82,8 +82,8 @@ adapter that delegates inward.
 - `nav_history` writes must go through `FeishuStorage.write_nav_record()` or
   `FeishuStorage.write_nav_records()`.
 - `holdings_snapshot` is written only after NAV write success.
-- `daily-job` skips weekend/holiday NAV dates unless explicitly forced; the
-  timer itself should still run by calendar day.
+- `daily-job` uses Futu CN/HK/US trading calendars for NAV dates; any market
+  open makes the date eligible, and the timer still runs by calendar day.
 - `daily-job` must block duplicate `nav_history` account/date rows before
   writing.
 - `cash_flow` rows may be manually entered, but generated fields must be

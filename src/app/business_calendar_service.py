@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
-from typing import Any, Iterable, Optional, Set
+from typing import Any, Callable, Iterable, Optional, Set
 
 from src import config
 from src.time_utils import bj_today
@@ -35,19 +35,60 @@ def _parse_date_set(value: Any) -> Set[date]:
 
 
 class BusinessCalendarService:
-    """Weekend + configured holiday calendar.
+    """NAV calendar: any open CN, HK, or US market makes a business day."""
 
-    The product deliberately uses one simple business calendar for daily NAV
-    jobs.  Market-specific holiday precision can be added later without changing
-    the NAV calculation boundary.
-    """
+    MARKETS = ("CN", "HK", "US")
 
-    def __init__(self, *, holidays: Optional[Iterable[Any]] = None):
+    def __init__(
+        self,
+        *,
+        holidays: Optional[Iterable[Any]] = None,
+        market_days: Optional[Callable[[date], dict[str, Optional[bool]]]] = None,
+    ):
         self.holidays = _parse_date_set(holidays)
+        self._market_days = market_days
 
     @classmethod
     def from_config(cls) -> "BusinessCalendarService":
-        return cls(holidays=config.get("calendar.holidays", []))
+        return cls(market_days=cls._futu_market_days)
+
+    @classmethod
+    def _futu_market_days(cls, day: date) -> dict[str, Optional[bool]]:
+        try:
+            import futu as sdk
+        except ImportError:
+            import moomoo as sdk
+
+        ctx = sdk.OpenQuoteContext(
+            host=config.get("futu.opend.host", "127.0.0.1"),
+            port=int(config.get("futu.opend.port", 11111)),
+        )
+        try:
+            result = {}
+            for market in cls.MARKETS:
+                try:
+                    ret, rows = ctx.request_trading_days(
+                        market=getattr(sdk.TradeDateMarket, market),
+                        start=day.isoformat(),
+                        end=day.isoformat(),
+                    )
+                    result[market] = (
+                        bool(rows)
+                        if ret == sdk.RET_OK
+                        and isinstance(rows, list)
+                        and all(
+                            isinstance(row, dict)
+                            and row.get("time") == day.isoformat()
+                            and row.get("trade_date_type") in {"WHOLE", "MORNING", "AFTERNOON"}
+                            for row in rows
+                        )
+                        else None
+                    )
+                except Exception:
+                    result[market] = None
+            return result
+        finally:
+            ctx.close()
 
     def previous_business_day(self, *, before: Optional[Any] = None) -> date:
         base_date = _parse_date(before) if before is not None else bj_today()
@@ -63,17 +104,29 @@ class BusinessCalendarService:
         return self.previous_business_day(before=base_date)
 
     def is_business_day(self, value: Any) -> bool:
-        d = _parse_date(value)
-        if d.weekday() >= 5:
-            return False
-        if d in self.holidays:
-            return False
-        return True
+        return self.explain(value)["business_day"]
 
     def explain(self, value: Any) -> dict:
         d = _parse_date(value)
         if d.weekday() >= 5:
             return {"business_day": False, "reason": "weekend", "date": d.isoformat()}
+        if self._market_days is not None:
+            markets = self._market_days(d)
+            if any(markets.get(market) is True for market in self.MARKETS):
+                return {
+                    "business_day": True,
+                    "reason": "market_open",
+                    "date": d.isoformat(),
+                    "markets": markets,
+                }
+            if any(markets.get(market) is not False for market in self.MARKETS):
+                raise RuntimeError(f"trading calendar unavailable for {d.isoformat()}")
+            return {
+                "business_day": False,
+                "reason": "all_markets_closed",
+                "date": d.isoformat(),
+                "markets": markets,
+            }
         if d in self.holidays:
             return {"business_day": False, "reason": "holiday", "date": d.isoformat()}
         return {"business_day": True, "reason": "business_day", "date": d.isoformat()}

@@ -26,10 +26,6 @@ quality:
   # official NAV writes fail closed on current local evidence.
   onboarded: false
 
-calendar:
-  # Beijing-date non-trading days. Weekends are skipped automatically.
-  holidays: []
-
 report:
   account_label: lx
   reports_dir: reports

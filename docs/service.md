@@ -192,10 +192,11 @@ Request:
 
 Behavior:
 
-1. Resolve `nav_date`. `auto` means the most recent business day before
+1. Resolve `nav_date`. `auto` means the most recent CN/HK/US trading day before
    `run_date`.
-2. Skip NAV dates that are weekends or configured `calendar.holidays` unless
-   `force_non_business_day=true`.
+2. Query Futu OpenD's CN, HK, and US trading calendars. Any open market makes
+   the NAV date eligible; skip only when all three are closed, unless
+   `force_non_business_day=true`. An unavailable calendar blocks the job.
 3. Resolve accounts from the request or current holdings.
 4. Block duplicate `nav_history` account/date records.
 5. For one existing row, return `recovery_required` when snapshot recovery is unresolved; return `skipped_existing_nav` only for a supported, explicit finality contract matching the NAV date; otherwise block with `existing_nav_not_final`.

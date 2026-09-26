@@ -353,8 +353,8 @@ canonical Agent/Listener 字段。
 
 核心保护：
 
-- 排除周六、周日和 `calendar.holidays` 中配置的 NAV 日期。
-- 未显式传 `--nav-date` 时，默认记录运行日前最近业务日。
+- 通过 Futu OpenD 查询 CN、HK、US 交易日；仅三者都休市时跳过 NAV 日期，查询不可用时阻止写入。旧的 `calendar.holidays` 配置不再参与 NAV 判断。
+- 未显式传 `--nav-date` 时，默认记录运行日前最近一个 CN/HK/US 任一市场交易的日期。
 - 写入前阻断 `nav_history` 同账户同日期重复。
 - 写入前阻断待补齐的 `cash_flow` 人工录入行。
 - 默认不覆盖已有同日 NAV。
