@@ -1,5 +1,6 @@
 from datetime import date
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -7,12 +8,14 @@ from src import config
 from src.app.cash_flow_summary_service import CashFlowSummaryService
 from src.app.cash_flow_effect_receipt_service import CashFlowEffectReceiptService
 from src.app.cash_flow_effect_service import CashFlowEffectService
+from src.app.business_calendar_service import BusinessCalendarService
 from src.app.cash_flow_effect_store import (
     HASH_CONTRACT_VERSION,
     CashFlowEffectStore,
     sha256_json,
 )
 from src.app.futu_balance_sync_service import FutuBalanceSnapshot
+from src.app.nav_finality import NavWriteContext
 from src.domain.cash_flow_contracts import CompletedCashFlowFacts
 from src.domain.holding_mutations import HoldingTarget
 from src.models import AssetClass, AssetType, Holding
@@ -190,7 +193,7 @@ def _refresh_flow_contract(flow):
     return flow
 
 
-def _service(tmp_path, monkeypatch, storage, *, futu_provider=None):
+def _service(tmp_path, monkeypatch, storage, *, futu_provider=None, calendar=None):
     monkeypatch.setattr(config, "get_data_dir", lambda: tmp_path)
     original_get = config.get
 
@@ -207,6 +210,7 @@ def _service(tmp_path, monkeypatch, storage, *, futu_provider=None):
     return CashFlowEffectService(
         storage=storage,
         store=store,
+        calendar=calendar,
         futu_provider_factory=(
             (lambda _account: futu_provider)
             if futu_provider is not None
@@ -290,6 +294,83 @@ def test_non_futu_effect_requires_preview_hash_and_writes_absolute_target(
     assert result["success"] is True
     assert storage.holdings[("CNY-CASH", "lx", "某券商")].quantity == 120.0
     assert service.store.get_effect(effect["effect_id"])["state"] == "applied"
+
+
+def test_cash_flow_confirm_rechecks_previous_trading_nav(tmp_path, monkeypatch):
+    previous = date(2026, 9, 24)
+    storage = FakeStorage(
+        flows=[_flow(flow_date=date(2026, 9, 25))],
+        holdings=[_cash()],
+        navs=[SimpleNamespace(
+            account="lx",
+            nav_date=previous,
+            details={"finality": NavWriteContext(
+                status="final",
+                writer="daily-nav-job",
+                write_reason="test",
+                nav_date=previous,
+            ).to_details()},
+        )],
+    )
+    market_days = {
+        "2026-09-24": {"CN": True, "HK": False, "US": False},
+        "2026-09-23": {"CN": False, "HK": True, "US": False},
+    }
+    calendar = BusinessCalendarService(
+        market_days=lambda day: market_days[day.isoformat()],
+    )
+    service = _service(tmp_path, monkeypatch, storage, calendar=calendar)
+    service.initialize_fingerprints()
+    effect = next(item for item in service.review(account="lx")["effects"]
+                  if item["effect_kind"] == "cash_flow")
+    preview = service.preview(effect["effect_id"], external_action="apply_delta")
+
+    market_days["2026-09-24"] = {"CN": False, "HK": False, "US": False}
+    with pytest.raises(ValueError, match="preceding final NAV"):
+        service.confirm(
+            effect["effect_id"],
+            preview_hash=preview["preview_hash"],
+            external_action="apply_delta",
+            confirm=True,
+        )
+    assert storage.replacements == []
+    assert service.store.get_effect(effect["effect_id"])["state"] == "previewed"
+
+    market_days["2026-09-24"] = {"CN": True, "HK": False, "US": False}
+    assert service.confirm(
+        effect["effect_id"],
+        preview_hash=preview["preview_hash"],
+        external_action="apply_delta",
+        confirm=True,
+    )["success"] is True
+
+
+def test_cash_flow_confirm_rechecks_history_and_calendar_failure(tmp_path, monkeypatch):
+    storage = FakeStorage(
+        flows=[_flow(flow_date=date(2026, 9, 25))],
+        holdings=[_cash()],
+    )
+    market_days = {"CN": True, "HK": False, "US": False}
+    calendar = BusinessCalendarService(market_days=lambda _day: market_days)
+    service = _service(tmp_path, monkeypatch, storage, calendar=calendar)
+    service.initialize_fingerprints()
+    effect = next(item for item in service.review(account="lx")["effects"]
+                  if item["effect_kind"] == "cash_flow")
+    preview = service.preview(effect["effect_id"], external_action="apply_delta")
+
+    # A newly appeared historical NAV ends the scan-time bootstrap exception.
+    storage.navs.append(SimpleNamespace(
+        account="lx", nav_date=date(2026, 9, 23), details={},
+    ))
+    market_days["CN"] = None
+    with pytest.raises(RuntimeError, match="trading calendar unavailable"):
+        service.confirm(
+            effect["effect_id"],
+            preview_hash=preview["preview_hash"],
+            external_action="apply_delta",
+            confirm=True,
+        )
+    assert storage.replacements == []
 
 
 def test_initialize_snapshot_commits_baselines_and_first_full_scan(

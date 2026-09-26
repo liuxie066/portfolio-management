@@ -1917,6 +1917,13 @@ class CashFlowEffectService:
             )
             raise ValueError("preview hash is stale; review and confirm again")
 
+        if effect["effect_kind"] == "cash_flow" and recomputed["mode"] == "apply":
+            account = effect["account"]
+            self._nav_history_cache.pop(account, None)
+            flow_date = date.fromisoformat(effect["source"]["flow_date"])
+            if not self._previous_nav_is_final(account, flow_date):
+                raise ValueError("preceding final NAV is required before cash-flow application")
+
         confirmation = self._operator_context(run_id)
         account = effect["account"]
         if recomputed["mode"] == "record_only":

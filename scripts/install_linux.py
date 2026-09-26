@@ -162,7 +162,6 @@ def render_config_yaml(paths: InstallPaths) -> str:
             "accounts": ["lx", "sy"],
             "onboarded": False,
         },
-        "calendar": {"holidays": []},
         "report": {
             "account_label": "lx",
             "reports_dir": str(paths.reports_dir),

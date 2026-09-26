@@ -89,10 +89,10 @@ Manual date:
 
 Rules:
 
-- If `--nav-date` is omitted, the job records the most recent business day
+- If `--nav-date` is omitted, the job records the most recent CN/HK/US trading day
   before the run date.
-- Weekends and `calendar.holidays` are skipped as NAV dates, not as timer run
-  dates.
+- A NAV date is skipped only when all three Futu OpenD market calendars are
+  closed. Calendar query failures block the job; timer dates are independent.
 - Duplicate `nav_history` account/date records block writes.
 - Pending generated fields in manual `cash_flow` rows block writes.
 - An existing row is skipped only when `details.finality` is supported, explicitly final, and matches the NAV date. Legacy, manual, malformed, or date-mismatched rows block with `existing_nav_not_final`; snapshot recovery state returns `recovery_required`.

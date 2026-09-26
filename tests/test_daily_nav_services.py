@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from types import SimpleNamespace
+import sys
 
 import pytest
 
@@ -106,6 +107,96 @@ def test_business_calendar_weekend_timer_run_records_friday():
     assert calendar.default_nav_date(run_date="2026-05-30").isoformat() == "2026-05-29"
     assert calendar.default_nav_date(run_date="2026-05-31").isoformat() == "2026-05-29"
     assert calendar.default_nav_date(run_date="2026-06-01").isoformat() == "2026-05-29"
+
+
+def test_nav_calendar_uses_any_open_market_and_fails_closed_on_unknown():
+    days = {
+        "2026-09-24": {"CN": True, "HK": True, "US": True},
+        "2026-09-25": {"CN": False, "HK": True, "US": True},
+        "2026-10-01": {"CN": False, "HK": False, "US": True},
+        "2026-10-02": {"CN": False, "HK": False, "US": False},
+        "2026-10-05": {"CN": False, "HK": None, "US": False},
+    }
+    calendar = BusinessCalendarService(
+        holidays=["2026-09-25"],
+        market_days=lambda day: days[day.isoformat()],
+    )
+
+    assert calendar.default_nav_date(run_date="2026-09-26").isoformat() == "2026-09-25"
+    assert calendar.explain("2026-09-25")["markets"] == days["2026-09-25"]
+    assert calendar.is_business_day("2026-10-01") is True
+    assert calendar.is_business_day("2026-10-02") is False
+    assert calendar.is_business_day("2026-09-26") is False  # US Friday is still Friday's date label
+    with pytest.raises(RuntimeError, match="trading calendar unavailable"):
+        calendar.is_business_day("2026-10-05")
+
+
+def test_force_non_business_day_cannot_override_unknown_calendar():
+    calendar = BusinessCalendarService(
+        market_days=lambda _day: {"CN": False, "HK": None, "US": False},
+    )
+    job = DailyNavJobService(storage=object(), portfolio=object(), calendar=calendar)
+
+    with pytest.raises(RuntimeError, match="trading calendar unavailable"):
+        job.run(nav_date="2026-10-05", force_non_business_day=True,
+                dry_run=False, confirm=True)
+
+
+def test_nav_calendar_reads_futu_market_days_and_closes_context(monkeypatch):
+    calls = []
+
+    class FakeContext:
+        def request_trading_days(self, *, market, start, end):
+            calls.append((market, start, end))
+            return (-1, "unavailable") if market == "CN" else (
+                0,
+                [{"time": start, "trade_date_type": "WHOLE"}] if market == "HK" else [],
+            )
+
+        def close(self):
+            calls.append("closed")
+
+    fake_sdk = SimpleNamespace(
+        OpenQuoteContext=lambda **_kwargs: FakeContext(),
+        TradeDateMarket=SimpleNamespace(CN="CN", HK="HK", US="US"),
+        RET_OK=0,
+    )
+    monkeypatch.setitem(sys.modules, "futu", fake_sdk)
+    calendar = BusinessCalendarService.from_config()
+
+    assert calendar.explain("2026-09-25")["markets"] == {
+        "CN": None,
+        "HK": True,
+        "US": False,
+    }
+    assert calendar.is_business_day("2026-09-25") is True
+    assert len(calls) == 8  # fresh evidence on each check, including context close
+
+
+@pytest.mark.parametrize(
+    "bad_row",
+    [
+        {"time": "2026-09-24", "trade_date_type": "WHOLE"},
+        {"time": "2026-09-25"},
+        {"time": "2026-09-25", "trade_date_type": "UNKNOWN"},
+    ],
+)
+def test_nav_calendar_rejects_malformed_futu_days(monkeypatch, bad_row):
+    class FakeContext:
+        def request_trading_days(self, *, market, start, end):
+            return (0, [bad_row] if market == "HK" else [])
+
+        def close(self):
+            pass
+
+    monkeypatch.setitem(sys.modules, "futu", SimpleNamespace(
+        OpenQuoteContext=lambda **_kwargs: FakeContext(),
+        TradeDateMarket=SimpleNamespace(CN="CN", HK="HK", US="US"),
+        RET_OK=0,
+    ))
+
+    with pytest.raises(RuntimeError, match="trading calendar unavailable"):
+        BusinessCalendarService.from_config().is_business_day("2026-09-25")
 
 
 def test_daily_account_nav_service_reuses_one_snapshot_and_respects_nav_date():
@@ -828,7 +919,10 @@ def test_daily_nav_job_auto_date_uses_previous_business_day():
     result = DailyNavJobService(
         storage=FakeStorage(),
         portfolio=SimpleNamespace(reporting_service=object()),
-        calendar=BusinessCalendarService(),
+        calendar=BusinessCalendarService(
+            holidays=["2026-05-22"],
+            market_days=lambda _day: {"CN": False, "HK": True, "US": True},
+        ),
         account_runner_factory=FakeRunner,
         holdings_preflight=_PassingGlobalHoldingsPreflight(),
     ).run(
@@ -843,8 +937,9 @@ def test_daily_nav_job_auto_date_uses_previous_business_day():
     assert result["date"] == "2026-05-22"
     assert result["calendar"] == {
         "business_day": True,
-        "reason": "business_day",
+        "reason": "market_open",
         "date": "2026-05-22",
+        "markets": {"CN": False, "HK": True, "US": True},
     }
     assert calls[0]["nav_date"] == date(2026, 5, 22)
     context = calls[0]["nav_write_context"]
