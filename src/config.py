@@ -15,7 +15,10 @@ import yaml
 from src.configuration.feishu_credentials import (
     AGENT_APP_SECRET_CREDENTIAL,
     LISTENER_APP_SECRET_CREDENTIAL,
+    QUALITY_READ_TOKEN_CREDENTIAL,
     FeishuCredentialConfigError,
+    keychain_backend_enabled,
+    read_keychain_credential,
     read_systemd_credential,
     secure_feishu_credentials_required,
 )
@@ -231,6 +234,7 @@ NON_DISCLOSABLE_KEYS = {
     "feishu.receipt.app_id",
     "feishu.receipt.app_secret",
     "feishu.receipt.open_id",
+    "quality.read_token",
 }
 
 OPERATOR_DEFAULTS: Dict[str, Any] = {
@@ -431,6 +435,11 @@ def _resolve_canonical_secret(
     secure_override: Optional[bool] = None,
 ) -> tuple[Any, str]:
     credential_name = FEISHU_SECRET_CREDENTIALS[key]
+    if keychain_backend_enabled():
+        if _plaintext_shadow_sources(key):
+            raise FeishuCredentialConfigError("insecure_secret_source", key)
+        credential = read_keychain_credential(key=key, credential_name=credential_name)
+        return credential, f"credential:keychain:{credential_name}"
     secure_required = (
         secure_feishu_credentials_required()
         if secure_override is None
@@ -486,6 +495,14 @@ def _resolve_with_source(
             default,
             secure_override=secure_override,
         )
+    if canonical_key == "quality.read_token" and keychain_backend_enabled():
+        if _plaintext_shadow_sources(canonical_key):
+            raise FeishuCredentialConfigError("insecure_secret_source", canonical_key)
+        credential = read_keychain_credential(
+            key=canonical_key,
+            credential_name=QUALITY_READ_TOKEN_CREDENTIAL,
+        )
+        return credential, f"credential:keychain:{QUALITY_READ_TOKEN_CREDENTIAL}"
     if canonical_key in CANONICAL_CONFIG_ALIASES:
         return _resolve_canonical_non_secret(canonical_key, default)
 
@@ -675,8 +692,13 @@ def inspect_config(*, keys: Optional[Iterable[str]] = None, redact: bool = True)
             continue
         warnings.extend(_source_warnings(key, source))
         must_redact = redact or key in NON_DISCLOSABLE_KEYS
+        displayed = (
+            "***" if value else value
+        ) if source.startswith("credential:keychain:") else (
+            _redact_value(key, value) if must_redact else value
+        )
         values[key] = {
-            "value": _redact_value(key, value) if must_redact else value,
+            "value": displayed,
             "source": source,
             "env": ENV_MAP.get(key),
             "env_fallbacks": list(ENV_FALLBACKS.get(key, ())),

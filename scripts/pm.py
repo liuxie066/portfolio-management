@@ -1512,6 +1512,85 @@ def cmd_config_doctor(args):
     return res
 
 
+def cmd_config_quality_preflight(args):
+    from src import config
+
+    issues = []
+    try:
+        token = config.get("quality.read_token")
+    except config.FeishuCredentialConfigError as exc:
+        issues.append(exc.as_issue())
+        token = None
+    if not token and not issues:
+        issues.append({"key": "quality.read_token", "error": "missing quality read token"})
+    if not config.get("quality.accounts"):
+        issues.append({"key": "quality.accounts", "error": "at least one quality account is required"})
+    result = {"success": not issues, "issues": issues}
+    _dump(result, args.json)
+    return result
+
+
+def cmd_config_futu_preflight(args):
+    """Read-only launchd-context gate for the two scheduled Futu accounts."""
+    from src import config
+
+    issues = []
+    try:
+        import futu as sdk
+    except Exception:
+        try:
+            import moomoo as sdk
+        except Exception:
+            sdk = None
+            issues.append({"key": "futu.sdk", "error": "SDK is not importable in this interpreter"})
+
+    profiles = {}
+    for account in ("lx", "sy"):
+        try:
+            profiles[account] = config.get_futu_account_settings(account)
+        except (TypeError, ValueError):
+            issues.append({"key": f"futu.profiles.{account}", "error": "invalid account mapping"})
+    if len(profiles) == 2 and profiles["lx"]["acc_id"] == profiles["sy"]["acc_id"]:
+        issues.append({"key": "futu.profiles", "error": "duplicate broker account"})
+
+    opend = []
+    if sdk is not None and not issues:
+        for host, port in sorted({(item["host"], item["port"]) for item in profiles.values()}):
+            context = None
+            try:
+                context = sdk.OpenQuoteContext(host=host, port=port)
+                code, state = context.get_global_state()
+                ready = (
+                    code == sdk.RET_OK
+                    and isinstance(state, dict)
+                    and state.get("program_status_type") == "READY"
+                    and state.get("qot_logined") in (True, 1, "1")
+                    and state.get("trd_logined") in (True, 1, "1")
+                )
+            except Exception:
+                ready = False
+            finally:
+                if context is not None:
+                    try:
+                        context.close()
+                    except Exception:
+                        ready = False
+            opend.append({"host": host, "port": port, "ready": ready})
+            if not ready:
+                issues.append({"key": "futu.opend", "error": "OpenD is not login-ready"})
+
+    result = {
+        "success": not issues,
+        "read_only": True,
+        "sdk_version": str(getattr(sdk, "__version__", "unknown")) if sdk else None,
+        "accounts": sorted(profiles),
+        "opend": opend,
+        "issues": issues,
+    }
+    _dump(result, args.json)
+    return result
+
+
 def cmd_quality_status(args):
     def via_service(client):
         return client.quality_status()
@@ -1737,6 +1816,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_config_doctor.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
     p_config_doctor.set_defaults(func=cmd_config_doctor)
+    p_config_quality = config_sub.add_parser("quality-preflight", help="check quality token and account scope only")
+    p_config_quality.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
+    p_config_quality.set_defaults(func=cmd_config_quality_preflight)
+    p_config_futu = config_sub.add_parser("futu-preflight", help="check same-interpreter Futu SDK, lx/sy profiles, and OpenD login readiness")
+    p_config_futu.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
+    p_config_futu.set_defaults(func=cmd_config_futu_preflight)
 
     p_quality = sp.add_parser("quality", help="read the last published data-quality status")
     quality_sub = p_quality.add_subparsers(dest="quality_cmd", required=True)

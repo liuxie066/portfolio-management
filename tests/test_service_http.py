@@ -305,6 +305,26 @@ def test_quality_status_missing_artifact_is_safe_503(monkeypatch):
     assert "path" not in response.text.lower()
 
 
+def test_quality_status_keychain_lookup_failure_is_redacted_503(monkeypatch):
+    from src import config
+
+    def unavailable(key, default=None):
+        if key == "quality.read_token":
+            raise config.FeishuCredentialConfigError("keychain_unavailable", key)
+        return default
+
+    monkeypatch.setattr(config, "get", unavailable)
+    service = FakePortfolioService()
+
+    response = _client(create_app(service=service)).get("/quality/status")
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "QUALITY_AUTH_UNAVAILABLE"
+    assert response.headers["cache-control"] == "no-store"
+    assert "keychain" not in response.text.lower()
+    assert service.calls == []
+
+
 def test_http_capital_facts_validates_period_and_month():
     client = _client(create_app(service=FakePortfolioService()))
 

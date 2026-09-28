@@ -1,9 +1,11 @@
-"""Strict systemd credential-file access for Feishu App Secrets."""
+"""Strict systemd and macOS Keychain credential access."""
 
 from __future__ import annotations
 
 import os
 import stat
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -15,6 +17,12 @@ MAX_FEISHU_APP_SECRET_BYTES = 4096
 
 AGENT_APP_SECRET_CREDENTIAL = "pm-feishu-agent-app-secret"
 LISTENER_APP_SECRET_CREDENTIAL = "pm-feishu-listener-app-secret"
+QUALITY_READ_TOKEN_CREDENTIAL = "pm-quality-read-token"
+KEYCHAIN_SERVICE = "com.liuxie.portfolio-management"
+KEYCHAIN_BACKEND_ENV = "PM_CREDENTIAL_BACKEND"
+KEYCHAIN_FILE_ENV = "PM_KEYCHAIN_FILE"
+SECURITY_TOOL = "/usr/bin/security"
+KEYCHAIN_TIMEOUT_SECONDS = 3
 
 _TRUE_VALUES = {"1", "true", "yes", "y", "on"}
 _FALSE_VALUES = {"0", "false", "no", "n", "off"}
@@ -47,6 +55,55 @@ def secure_feishu_credentials_required() -> bool:
         "invalid_secure_mode",
         "feishu.credentials.secure_mode",
     )
+
+
+def keychain_backend_enabled() -> bool:
+    backend = str(os.environ.get(KEYCHAIN_BACKEND_ENV) or "").strip()
+    if not backend:
+        return False
+    if backend != "keychain" or sys.platform != "darwin":
+        raise FeishuCredentialConfigError("invalid_credential_backend", "feishu.credentials.backend")
+    return True
+
+
+def read_keychain_credential(*, key: str, credential_name: str) -> str:
+    """Read one pinned Keychain item without exposing command output in errors."""
+    if CREDENTIALS_DIRECTORY_ENV in os.environ:
+        raise FeishuCredentialConfigError("conflicting_credential_backend", key)
+    configured = str(os.environ.get(KEYCHAIN_FILE_ENV) or "")
+    path = Path(configured)
+    if not path.is_absolute():
+        raise FeishuCredentialConfigError("invalid_keychain_file", key)
+    try:
+        metadata = path.lstat()
+    except OSError:
+        raise FeishuCredentialConfigError("invalid_keychain_file", key) from None
+    if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid()):
+        raise FeishuCredentialConfigError("invalid_keychain_file", key)
+
+    try:
+        result = subprocess.run(
+            [SECURITY_TOOL, "find-generic-password", "-s", KEYCHAIN_SERVICE,
+             "-a", credential_name, "-w", str(path)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=KEYCHAIN_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise FeishuCredentialConfigError("keychain_unavailable", key) from None
+    if result.returncode != 0:
+        raise FeishuCredentialConfigError("keychain_unavailable", key)
+    payload = result.stdout
+    if payload.endswith(b"\n"):
+        payload = payload[:-1]
+    if not payload or len(payload) > MAX_FEISHU_APP_SECRET_BYTES or b"\x00" in payload or b"\n" in payload or b"\r" in payload:
+        raise FeishuCredentialConfigError("invalid_keychain_credential", key)
+    try:
+        return payload.decode("utf-8")
+    except UnicodeDecodeError:
+        raise FeishuCredentialConfigError("invalid_keychain_credential", key) from None
 
 
 def read_systemd_credential(
