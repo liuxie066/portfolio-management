@@ -463,7 +463,9 @@ class PortfolioService:
         from src.app.nav_payload import format_nav_history_item, format_nav_payload
 
         try:
-            navs = self.storage.get_nav_history(self._resolve_account(account), days=days)
+            navs = self.storage.get_nav_history(
+                self._resolve_account(account), days=days, fresh=True
+            )
             if not navs:
                 return {"success": False, "message": "无净值记录"}
             return {

@@ -12,6 +12,7 @@ from src.app.daily_account_nav_service import DailyAccountNavService
 from src.app.daily_nav_job_service import DailyNavJobService
 from src.app.daily_report_payload_service import DailyReportPayloadService
 from src.app.nav_initialization_service import NavInitializationService
+from src.app.nav_finality import NavWriteContext
 from src.domain.cash_flow_contracts import (
     CashFlowDatasetBlocker,
     CashFlowDatasetRefusal,
@@ -140,6 +141,52 @@ def test_force_non_business_day_cannot_override_unknown_calendar():
     with pytest.raises(RuntimeError, match="trading calendar unavailable"):
         job.run(nav_date="2026-10-05", force_non_business_day=True,
                 dry_run=False, confirm=True)
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_final_daily_nav_blocks_current_only_snapshot_before_nav_write(dry_run):
+    snapshot = {
+        "valuation": SimpleNamespace(warnings=[]),
+        "normalized_valuation": _normalized("alice"),
+        "snapshot_time": "2026-09-28T08:00:00+08:00",
+    }
+
+    class Read:
+        def build_snapshot(self, **_kwargs):
+            return snapshot
+
+    class Portfolio:
+        def build_cash_flow_dataset(self, **_kwargs):
+            return _CashFlowDatasetStub("fingerprint")
+
+        def record_nav(self, *_args, **_kwargs):
+            raise AssertionError("unproved target-date NAV reached the writer")
+
+    result = AccountNavRecorderService(
+        account="alice",
+        storage=SimpleNamespace(get_nav_history=lambda *_args, **_kwargs: [
+            SimpleNamespace(
+                date=date(2026, 9, 24),
+                details={"finality": _finality(nav_date="2026-09-24")},
+            ),
+        ]),
+        portfolio=Portfolio(),
+        read_service=Read(),
+    ).record(
+        nav_date="2026-09-25",
+        dry_run=dry_run,
+        confirm=not dry_run,
+        nav_write_context=NavWriteContext(
+            status="final",
+            writer="daily-nav-job",
+            write_reason="canonical_daily_nav_job",
+            nav_date=date(2026, 9, 25),
+        ),
+    )
+
+    assert result["status"] == "target_nav_evidence_unavailable"
+    assert "target_period_evidence" in result["missing_components"]
+    assert result["last_successful_nav_date"] == "2026-09-24"
 
 
 def test_nav_calendar_reads_futu_market_days_and_closes_context(monkeypatch):

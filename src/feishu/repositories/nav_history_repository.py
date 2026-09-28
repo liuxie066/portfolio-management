@@ -304,13 +304,16 @@ class NavHistoryRepository:
         suffix = "" if len(duplicates) <= len(sample) else f"; ... +{len(duplicates) - len(sample)} more"
         return "nav_history duplicate account/date records exist; repair before NAV write: " + "; ".join(parts) + suffix
 
-    def _store_nav_index_payload(self, account: str, payload: Dict[str, Any]) -> None:
+    def _store_nav_index_payload(
+        self, account: str, payload: Dict[str, Any], *, persist_local: bool = True
+    ) -> None:
         """Publish one freshly built NAV index to memory and the local cache."""
         self._nav_index_mem_cache[account] = payload
         self._nav_index_loaded_accounts.add(account)
-        persist_payload = dict(payload)
-        persist_payload.pop('_nav_objects', None)
-        self._local_nav_index_cache.set_account(account, persist_payload)
+        if persist_local:
+            persist_payload = dict(payload)
+            persist_payload.pop('_nav_objects', None)
+            self._local_nav_index_cache.set_account(account, persist_payload)
 
     def audit_nav_history_duplicates(self, account: Optional[str] = None) -> Dict[str, Any]:
         """Read-only audit for duplicate nav_history rows by business key."""
@@ -353,7 +356,13 @@ class NavHistoryRepository:
             'duplicates': duplicates,
         }
 
-    def preload_nav_index(self, account: str, force_refresh: bool = False) -> Dict[str, any]:
+    def preload_nav_index(
+        self,
+        account: str,
+        force_refresh: bool = False,
+        *,
+        persist_local: bool = True,
+    ) -> Dict[str, any]:
         """预加载并缓存 nav_history 索引（含 month/year/inception bases）。"""
         if (not force_refresh) and (account in self._nav_index_loaded_accounts):
             cached = self._nav_index_mem_cache.get(account) or {}
@@ -401,7 +410,7 @@ class NavHistoryRepository:
                 if old_fp != new_fp:
                     invalidated = True
 
-        self._store_nav_index_payload(account, payload)
+        self._store_nav_index_payload(account, payload, persist_local=persist_local)
 
         return {
             'account': account,
@@ -1130,15 +1139,19 @@ class NavHistoryRepository:
                 result.pop('dry_run', None)
             return result
 
-    def get_nav_history(self, account: str, days: int = 365) -> List[NAVHistory]:
+    def get_nav_history(
+        self, account: str, days: int = 365, *, fresh: bool = False
+    ) -> List[NAVHistory]:
         """获取净值历史（优先本地预加载索引）。"""
         from datetime import timedelta
         from ...time_utils import bj_today
         start_date = bj_today() - timedelta(days=days)
 
+        if fresh:
+            self.preload_nav_index(account, force_refresh=True, persist_local=False)
         idx = self.get_nav_index(account)
         navs: List[NAVHistory] = list(idx.get('_nav_objects') or [])
-        if not navs:
+        if not navs and not fresh:
             self.preload_nav_index(account, force_refresh=True)
             idx = self.get_nav_index(account)
             navs = list(idx.get('_nav_objects') or [])

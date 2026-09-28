@@ -14,6 +14,7 @@ from src.app.holdings_reconciliation_service import (
 )
 from src.app.holdings_validation import HoldingsValidator
 from src.app.nav_finality import NavWriteContext
+from src.app.nav_target_evidence import missing_target_period_evidence
 from src.app.nav_valuation_evidence_service import NavValuationEvidenceStore
 from src.app.nav_valuation_evidence_service import (
     HistoricalNavValuationEvidenceService,
@@ -81,7 +82,165 @@ def _official(
     )
 
 
-def _prepared(store: NavValuationEvidenceStore) -> dict:
+def _proved_cash_bundle(holdings_digest: str) -> dict:
+    cutoff = "2026-08-14T04:00:00+08:00"  # US Thursday close, Beijing Friday
+    body = {
+        "account": "lx",
+        "nav_date": "2026-08-13",
+        "source_id": "test-audited-receipt",
+        "cutoff_at": cutoff,
+        "markets": {
+            "CN": {"open": True, "local_date": "2026-08-13", "close_at": "2026-08-13T15:00:00+08:00"},
+            "HK": {"open": True, "local_date": "2026-08-13", "close_at": "2026-08-13T16:00:00+08:00"},
+            "US": {"open": True, "local_date": "2026-08-13", "close_at": cutoff},
+        },
+        "holdings": {
+            "digest": holdings_digest,
+            "receipt_id": "test-holdings-receipt",
+            "effective_as_of": cutoff,
+            "complete_through": cutoff,
+        },
+        "price_facts": [{
+            "asset_id": "CNY-CASH", "broker": "平安证券", "currency": "CNY",
+            "value": "1", "source": "test-cash-receipt", "kind": "continuous",
+            "effective_at": cutoff, "valid_through": cutoff, "policy": "receipt at cutoff",
+        }],
+        "fx_facts": [],
+    }
+    return {**body, "bundle_digest": digest_payload(body)}
+
+
+_OPEN_CALENDAR = {"markets": {"CN": True, "HK": True, "US": True}}
+
+
+def _admission(bundle: dict, normalized: NormalizedValuationSnapshot | None = None,
+               calendar: dict | None = None, prior_calendar=None) -> list[str]:
+    return missing_target_period_evidence(
+        account="lx",
+        nav_date=date(2026, 8, 13),
+        normalized_valuation=normalized or _official(),
+        artifact={
+            "holdings_digest": bundle["holdings"]["digest"],
+            "target_period_evidence": bundle,
+            "captured_at": "2026-08-14T08:11:45+08:00",
+        },
+        calendar_info=calendar or _OPEN_CALENDAR,
+        calendar=prior_calendar,
+    )
+
+
+def test_target_period_gate_checks_us_close_after_beijing_midnight_and_closed_cn():
+    bundle = _proved_cash_bundle(HOLDINGS_DIGEST)
+    assert _admission(bundle) == []
+
+    bundle["markets"]["CN"] = {"open": False, "local_date": "2026-08-13"}
+    bundle["bundle_digest"] = digest_payload({key: value for key, value in bundle.items() if key != "bundle_digest"})
+    assert _admission(bundle, calendar={"markets": {"CN": False, "HK": True, "US": True}}) == []
+
+    bundle["markets"]["US"]["close_at"] = "2026-08-13T16:00:00+08:00"
+    bundle["bundle_digest"] = digest_payload({key: value for key, value in bundle.items() if key != "bundle_digest"})
+    assert "market_cutoff" in _admission(bundle, calendar={"markets": {"CN": False, "HK": True, "US": True}})
+
+
+def test_target_period_gate_rejects_legacy_current_holdings_and_unbound_prices():
+    assert "target_period_evidence" in missing_target_period_evidence(
+        account="lx", nav_date=date(2026, 8, 13), normalized_valuation=_official(),
+        artifact=_prepared(NavValuationEvidenceStore())["artifact"],
+        calendar_info=_OPEN_CALENDAR,
+    )
+    bundle = _proved_cash_bundle(HOLDINGS_DIGEST)
+    bundle["holdings"]["complete_through"] = "2026-08-13T16:00:00+08:00"
+    bundle["price_facts"][0].pop("valid_through")
+    bundle["bundle_digest"] = digest_payload({key: value for key, value in bundle.items() if key != "bundle_digest"})
+    assert {"holdings_as_of", "price_facts"} <= set(_admission(bundle))
+
+
+def test_target_period_gate_rejects_forced_all_closed_date():
+    bundle = _proved_cash_bundle(HOLDINGS_DIGEST)
+    for market in bundle["markets"]:
+        bundle["markets"][market] = {"open": False, "local_date": "2026-08-13"}
+    bundle["bundle_digest"] = digest_payload({key: value for key, value in bundle.items() if key != "bundle_digest"})
+    assert "market_cutoff" in _admission(bundle, calendar={"markets": {"CN": False, "HK": False, "US": False}})
+
+
+def test_target_period_gate_requires_fx_for_foreign_cash():
+    holding = Holding(
+        record_id="rec_usd", asset_id="USD-CASH", asset_name="美元现金",
+        asset_type=AssetType.CASH, account="lx", broker="平安证券",
+        quantity=100, currency="USD", asset_class=AssetClass.CASH,
+    )
+    normalized = NormalizedValuationSnapshot._from_valuation_service(
+        account="lx",
+        rows=(NormalizedValuationRow.from_holding(
+            holding, account="lx", normalized_type="cash", price=1, cny_price=7,
+            source="fixed",
+        ),),
+        shares=100,
+        holdings_provenance={"normalized_holdings_digest": HOLDINGS_DIGEST},
+    )
+    bundle = _proved_cash_bundle(HOLDINGS_DIGEST)
+    bundle["price_facts"][0]["asset_id"] = "USD-CASH"
+    bundle["price_facts"][0]["currency"] = "USD"
+    bundle["bundle_digest"] = digest_payload({key: value for key, value in bundle.items() if key != "bundle_digest"})
+    assert _admission(bundle, normalized=normalized) == ["fx_facts"]
+
+
+def test_target_period_gate_accepts_confirmed_prior_close_when_cn_closed():
+    holding = Holding(
+        record_id="rec_stock", asset_id="600000", asset_name="测试股票",
+        asset_type=AssetType.A_STOCK, account="lx", broker="平安证券",
+        quantity=10, currency="CNY", asset_class=AssetClass.CN_ASSET,
+    )
+    normalized = NormalizedValuationSnapshot._from_valuation_service(
+        account="lx",
+        rows=(NormalizedValuationRow.from_holding(
+            holding, account="lx", normalized_type="equity", price=10,
+            cny_price=10, source="opend",
+        ),),
+        shares=100,
+        price_evidence={"600000": {
+            "price": 10, "cny_price": 10, "currency": "CNY", "fact_date": "2026-08-12",
+            "source": "futu_opend_history",
+        }},
+        holdings_provenance={"normalized_holdings_digest": HOLDINGS_DIGEST},
+    )
+    bundle = _proved_cash_bundle(HOLDINGS_DIGEST)
+    bundle["markets"]["CN"] = {"open": False, "local_date": "2026-08-13"}
+    bundle["price_facts"] = [{
+        "asset_id": "600000", "broker": "平安证券", "currency": "CNY",
+        "value": "10", "source": "futu_opend_history", "kind": "market", "market": "CN",
+        "fact_date": "2026-08-12", "market_close_at": "2026-08-12T15:00:00+08:00",
+        "published_at": "2026-08-12T15:01:00+08:00",
+    }]
+    bundle["bundle_digest"] = digest_payload({key: value for key, value in bundle.items() if key != "bundle_digest"})
+    calendar = SimpleNamespace(explain=lambda day: {
+        "markets": {"CN": day.isoformat() == "2026-08-12", "HK": True, "US": True}
+    })
+    assert _admission(
+        bundle, normalized=normalized,
+        calendar={"markets": {"CN": False, "HK": True, "US": True}},
+        prior_calendar=calendar,
+    ) == []
+    assert "price_facts" in _admission(
+        bundle, normalized=normalized,
+        calendar={"markets": {"CN": False, "HK": True, "US": True}},
+    )
+    conflicting = NormalizedValuationSnapshot._from_valuation_service(
+        account="lx", rows=normalized.rows, shares=100,
+        price_evidence={"600000": {
+            "price": 10, "cny_price": 10, "currency": "CNY", "fact_date": "2026-08-11",
+            "source": "futu_opend_history",
+        }},
+        holdings_provenance={"normalized_holdings_digest": HOLDINGS_DIGEST},
+    )
+    assert "price_facts" in _admission(
+        bundle, normalized=conflicting,
+        calendar={"markets": {"CN": False, "HK": True, "US": True}},
+        prior_calendar=calendar,
+    )
+
+
+def _prepared(store: NavValuationEvidenceStore, *, proved: bool = False) -> dict:
     return store.prepare(
         account="lx",
         nav_date="2026-08-13",
@@ -92,6 +251,7 @@ def _prepared(store: NavValuationEvidenceStore) -> dict:
         source_effect_store_revision="cfs_source",
         normalized_valuation=_official(),
         preparation="cash_flow_gate_failure",
+        target_period_evidence=_proved_cash_bundle(HOLDINGS_DIGEST) if proved else None,
     )
 
 
@@ -359,7 +519,7 @@ def _blocked_refusal(reason_code: str = "CASH_FLOW_DATASET_BLOCKED"):
     )
 
 
-def test_daily_gate_failure_captures_evidence_but_scope_failure_does_not(tmp_path):
+def test_daily_target_gate_blocks_before_legacy_cash_flow_capture(tmp_path):
     snapshot = {
         "valuation": _official().to_portfolio_valuation(),
         "normalized_valuation": _official(),
@@ -403,10 +563,8 @@ def test_daily_gate_failure_captures_evidence_but_scope_failure_does_not(tmp_pat
         nav_write_context=context,
     )
 
-    assert result["valuation_ref"].startswith("nav-valuation-evidence:v1:")
-    assert store.load(result["valuation_ref"])["artifact"]["source_run_id"] == (
-        "daily-nav-job-source:lx"
-    )
+    assert result["status"] == "target_nav_evidence_unavailable"
+    assert "valuation_ref" not in result
 
     preview_store = NavValuationEvidenceStore(tmp_path / "preview")
     preview = AccountNavRecorderService(
@@ -448,9 +606,9 @@ def test_daily_gate_failure_captures_evidence_but_scope_failure_does_not(tmp_pat
     assert "valuation_ref" not in rejected
 
 
-def test_replay_uses_evidence_without_price_fetch_and_audits_revisions(tmp_path):
+def test_replay_uses_proved_evidence_without_price_fetch_and_audits_revisions(tmp_path):
     store = NavValuationEvidenceStore(tmp_path)
-    saved = store.save(_prepared(store))
+    saved = store.save(_prepared(store, proved=True))
     calls = []
 
     class Read:
@@ -521,6 +679,7 @@ def test_replay_uses_evidence_without_price_fetch_and_audits_revisions(tmp_path)
         run_id="daily-nav-job-replay:lx",
         nav_write_context=context,
         valuation_ref=saved["valuation_ref"],
+        calendar_info=_OPEN_CALENDAR,
     )
 
     assert result["success"] is True
@@ -554,8 +713,9 @@ def test_historical_receipt_replay_allows_audited_current_holdings_drift(tmp_pat
             normalized_valuation=_official(
                 holdings_provenance=historical.provenance()
             ),
-            preparation="historical_receipt_recovery",
-            source_receipt_key="nav:daily-nav-job-source",
+                preparation="historical_receipt_recovery",
+                source_receipt_key="nav:daily-nav-job-source",
+                target_period_evidence=_proved_cash_bundle(historical.normalized_holdings_digest),
         )
     )
     calls = []
@@ -642,6 +802,7 @@ def test_historical_receipt_replay_allows_audited_current_holdings_drift(tmp_pat
             run_id="daily-nav-job-replay:lx",
         ),
         valuation_ref=saved["valuation_ref"],
+        calendar_info=_OPEN_CALENDAR,
     )
 
     assert result["success"] is True
