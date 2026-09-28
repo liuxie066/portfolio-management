@@ -8,6 +8,8 @@ historical Skill/Python API remains available only as a compatibility adapter.
 - Quick start and product overview: `README.md`
 - Daily operations: `docs/runbook.md`
 - Linux install and systemd timer: `docs/deploy-linux.md`
+- macOS launchd and Keychain design: `docs/deploy-macos.md`
+- macOS LaunchAgent operations: `docs/deploy-macos-operations.md`
 - Service API: `docs/service.md`
 - Architecture map: `docs/architecture.md`
 - Dependency graph: `docs/dependency-graph.md`

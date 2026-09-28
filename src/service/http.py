@@ -458,7 +458,15 @@ def create_app(service: Optional[PortfolioService] = None, allow_remote: Optiona
     @app.get("/quality/status", tags=["quality"])
     def quality_status(request: Request):
         request_id = f"req-{uuid4().hex}"
-        expected = str(config.get("quality.read_token") or "")
+        try:
+            expected = str(config.get("quality.read_token") or "")
+        except config.FeishuCredentialConfigError:
+            return _quality_error(
+                503,
+                "QUALITY_AUTH_UNAVAILABLE",
+                "quality authentication is unavailable",
+                request_id,
+            )
         authorization = request.headers.get("authorization", "")
         supplied = authorization[7:] if authorization.startswith("Bearer ") else ""
         if not expected or not supplied or not hmac.compare_digest(expected, supplied):
