@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0 - 2026-09-28
+
+- Block final daily NAV writes unless holdings, prices, and FX are proven for
+  the target trading date; keep the last confirmed NAV when evidence is missing.
+- Refresh public NAV history from canonical Feishu data so API reads see
+  successful writes made by the separate scheduled process.
+
 ## 0.1.49 - 2026-09-26
 
 - Use Futu CN, HK, and US trading calendars to update daily NAV when any
