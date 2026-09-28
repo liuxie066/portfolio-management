@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import io
+import stat
 from contextlib import redirect_stdout
 from datetime import date
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 
 from pytest import MonkeyPatch
 
@@ -1523,6 +1525,102 @@ feishu:
     assert out["values"]["account"]["value"] == "lx"
     assert out["values"]["feishu.app_secret"]["value"] == "sec...456"
     assert out["values"]["feishu.app_secret"]["source"] == f"legacy-file:{config_file}"
+
+
+def test_pm_ls_shows_configured_accounts_without_broker_account_ids():
+    from src import config
+
+    with TemporaryDirectory() as tmp:
+        config_file = Path(tmp) / "config.yaml"
+        config_file.write_text(
+            "account: lx\nquality:\n  accounts: [lx, sy]\nfutu:\n"
+            "  profiles:\n    lx:\n      acc_id: 123456789\n",
+            encoding="utf-8",
+        )
+        patch = MonkeyPatch()
+        stdout = io.StringIO()
+        try:
+            patch.setenv(config.CONFIG_FILE_ENV, str(config_file))
+            patch.setattr(pm, "_futu_sdk", lambda: SimpleNamespace(__name__="futu", __version__="test"))
+            config.reload_config()
+            with redirect_stdout(stdout):
+                assert pm.main(["ls", "--json"]) == 0
+            result = json.loads(stdout.getvalue())
+            assert result["account"]["value"] == "lx"
+            assert result["quality_accounts"]["values"] == ["lx", "sy"]
+            assert result["futu_accounts"]["values"] == ["lx"]
+            assert result["futu_sdk"] == {"importable": True, "module": "futu", "version": "test"}
+            assert "pm config futu-preflight" in result["next_steps"]
+            assert "123456789" not in stdout.getvalue()
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                assert pm.main(["config", "inspect", "--keys", "futu.profiles", "--show-secrets", "--json"]) == 0
+            assert json.loads(stdout.getvalue())["values"]["futu.profiles"]["value"] == ["lx"]
+            assert "123456789" not in stdout.getvalue()
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                assert pm.main(["--json"]) == 0
+            assert json.loads(stdout.getvalue())["futu_accounts"]["values"] == ["lx"]
+        finally:
+            patch.undo()
+            config.reload_config()
+
+
+def test_pm_ls_rejects_invalid_config_without_echoing_yaml(caplog):
+    from src import config
+
+    with TemporaryDirectory() as tmp:
+        config_file = Path(tmp) / "config.yaml"
+        config_file.write_text("secret: [private-value\n", encoding="utf-8")
+        patch = MonkeyPatch()
+        stdout = io.StringIO()
+        try:
+            patch.setenv(config.CONFIG_FILE_ENV, str(config_file))
+            config.reload_config()
+            with redirect_stdout(stdout):
+                assert pm.main(["ls", "--json"]) == 1
+            assert json.loads(stdout.getvalue())["error"] == "config file is unreadable or invalid"
+            assert "private-value" not in stdout.getvalue()
+            assert "private-value" not in caplog.text
+        finally:
+            patch.undo()
+            config.reload_config()
+
+
+def test_pm_config_init_previews_creates_once_and_reads_back():
+    from src import config
+
+    with TemporaryDirectory() as tmp:
+        config_file = Path(tmp) / "config.yaml"
+        patch = MonkeyPatch()
+        try:
+            patch.setenv(config.CONFIG_FILE_ENV, str(config_file))
+            config.reload_config()
+            for argv, expected_status, expected_code in (
+                (["config", "init"], "preview", 0),
+                (["config", "init", "--apply"], "confirmation_required", 1),
+                (["config", "init", "--apply", "--confirm"], "created", 0),
+            ):
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    assert pm.main([*argv, "--json"]) == expected_code
+                assert json.loads(stdout.getvalue())["status"] == expected_status
+                if expected_status != "created":
+                    assert not config_file.exists()
+            assert config_file.read_bytes() == (pm.REPO_ROOT / "config.example.yaml").read_bytes()
+            assert stat.S_IMODE(config_file.stat().st_mode) == 0o600
+            assert config.get("account") == "lx"
+            config_file.write_text("account: custom\n", encoding="utf-8")
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                assert pm.main(["config", "init", "--apply", "--confirm", "--json"]) == 0
+            assert json.loads(stdout.getvalue())["status"] == "unchanged"
+            assert config_file.read_text(encoding="utf-8") == "account: custom\n"
+        finally:
+            patch.undo()
+            config.reload_config()
 
 
 def test_pm_config_inspect_never_discloses_feishu_secret_with_show_secrets():

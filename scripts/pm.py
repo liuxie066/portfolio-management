@@ -40,6 +40,7 @@ import logging
 import os
 import json
 import sys
+import tempfile
 import threading
 from datetime import date
 from pathlib import Path
@@ -1500,6 +1501,121 @@ def cmd_config_inspect(args):
     return res
 
 
+def _futu_sdk():
+    for module in ("futu", "moomoo"):
+        try:
+            return __import__(module)
+        except Exception:
+            pass
+    return None
+
+
+def cmd_ls(args):
+    from src import config
+    import yaml
+
+    config_file = config.get_config_file()
+    if config_file.exists():
+        try:
+            config._load_structured_config(config_file)
+        except (OSError, ValueError, json.JSONDecodeError, yaml.YAMLError):
+            result = {
+                "success": False,
+                "config_file": str(config_file),
+                "error": "config file is unreadable or invalid",
+            }
+            _dump(result, args.json)
+            return result
+    account, account_source = config.get_with_source("account", "default")
+    quality_accounts, quality_source = config.get_with_source("quality.accounts", [])
+    profiles, profiles_source = config.get_with_source("futu.profiles", {})
+    if isinstance(quality_accounts, str):
+        quality_accounts = quality_accounts.split(",")
+    if not isinstance(quality_accounts, (list, tuple)):
+        quality_accounts = []
+    quality_names = [str(item).strip() for item in quality_accounts if str(item).strip()]
+    futu_names = sorted(str(item) for item in profiles) if isinstance(profiles, dict) else []
+    sdk = _call_backend(args, _futu_sdk) if futu_names else None
+    next_steps = ["pm config doctor"]
+    if not config_file.exists():
+        next_steps.insert(0, "pm config init")
+    if quality_names:
+        next_steps.append("pm config quality-preflight")
+    if futu_names:
+        next_steps.append("pm config futu-preflight")
+    result = {
+        "success": True,
+        "config_file": str(config_file),
+        "config_file_exists": config_file.exists(),
+        "account": {"value": account, "source": account_source},
+        "quality_accounts": {"values": quality_names, "source": quality_source},
+        "futu_accounts": {"values": futu_names, "source": profiles_source},
+        "futu_sdk": {
+            "importable": sdk is not None if futu_names else None,
+            "module": sdk.__name__ if sdk else None,
+            "version": str(getattr(sdk, "__version__", "unknown")) if sdk else None,
+        },
+        "next_steps": next_steps,
+    }
+    if args.json:
+        _dump(result, True)
+    else:
+        print(f"Config: {config_file} ({'present' if config_file.exists() else 'missing'})")
+        print(f"Account: {account} ({account_source})")
+        print(f"Quality accounts: {', '.join(quality_names) or 'none'} ({quality_source})")
+        print(f"Futu accounts: {', '.join(futu_names) or 'none'} ({profiles_source})")
+        if futu_names:
+            print(f"Futu SDK: {sdk.__name__} {getattr(sdk, '__version__', 'unknown')}" if sdk else "Futu SDK: unavailable in this Python")
+        print("Next: " + " → ".join(next_steps))
+    return result
+
+
+def cmd_config_init(args):
+    from src import config
+
+    target = config.get_config_file()
+    template = REPO_ROOT / "config.example.yaml"
+    if target.exists() or target.is_symlink():
+        result = {"success": True, "status": "unchanged", "config_file": str(target)}
+    elif not args.apply:
+        result = {
+            "success": True,
+            "status": "preview",
+            "config_file": str(target),
+            "template": str(template),
+            "next_step": "pm config init --apply --confirm",
+        }
+    elif not args.confirm:
+        result = {"success": False, "status": "confirmation_required", "config_file": str(target)}
+    else:
+        temporary = None
+        try:
+            contents = template.read_bytes()
+            descriptor, temporary = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+            with os.fdopen(descriptor, "wb") as stream:
+                os.fchmod(stream.fileno(), 0o600)
+                stream.write(contents)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.link(temporary, target)
+            config.reload_config()
+            result = {
+                "success": target.read_bytes() == contents,
+                "status": "created",
+                "config_file": str(target),
+                "next_step": "pm config doctor",
+            }
+        except FileExistsError:
+            result = {"success": False, "status": "already_exists", "config_file": str(target)}
+        except OSError as exc:
+            result = {"success": False, "status": "write_failed", "config_file": str(target), "error": exc.strerror}
+        finally:
+            if temporary is not None:
+                Path(temporary).unlink(missing_ok=True)
+    _dump(result, args.json)
+    return result
+
+
 def cmd_config_doctor(args):
     from src import config
 
@@ -1535,14 +1651,9 @@ def cmd_config_futu_preflight(args):
     from src import config
 
     issues = []
-    try:
-        import futu as sdk
-    except Exception:
-        try:
-            import moomoo as sdk
-        except Exception:
-            sdk = None
-            issues.append({"key": "futu.sdk", "error": "SDK is not importable in this interpreter"})
+    sdk = _futu_sdk()
+    if sdk is None:
+        issues.append({"key": "futu.sdk", "error": "SDK is not importable in this interpreter"})
 
     profiles = {}
     for account in ("lx", "sy"):
@@ -1723,6 +1834,7 @@ def cmd_receipts_resolve(args):
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="pm", description="portfolio-management CLI")
+    p.set_defaults(func=cmd_ls)
     p.add_argument("--json", action="store_true", help="output JSON")
     p.add_argument("--account", default=None, help="account to operate on; defaults to config/PORTFOLIO_ACCOUNT")
     p.add_argument("--service-url", default=None, help="local service URL; defaults to config/PORTFOLIO_SERVICE_URL")
@@ -1731,7 +1843,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--require-service", action="store_true", help="fail instead of falling back when local service is unavailable")
     p.add_argument("--debug-internal", action="store_true", help="Do not suppress internal stdout prints (debug only).")
 
-    sp = p.add_subparsers(dest="cmd", required=True)
+    sp = p.add_subparsers(dest="cmd")
 
     # Allow putting global flags after the subcommand (e.g. `pm cash --json`).
     # argparse doesn't support this natively; we implement it by also adding --json
@@ -1799,8 +1911,17 @@ def build_parser() -> argparse.ArgumentParser:
     add_service_args(p_daily_job)
     p_daily_job.set_defaults(func=cmd_daily_job)
 
-    p_config = sp.add_parser("config", help="inspect and validate deployment config")
+    p_ls = sp.add_parser("ls", help="show local configuration and next checks")
+    p_ls.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
+    p_ls.set_defaults(func=cmd_ls)
+
+    p_config = sp.add_parser("config", help="initialize, inspect and validate deployment config")
     config_sub = p_config.add_subparsers(dest="config_cmd", required=True)
+    p_config_init = config_sub.add_parser("init", help="preview or create config.yaml from the example without overwriting")
+    p_config_init.add_argument("--apply", action="store_true", help="create the config file only if absent")
+    p_config_init.add_argument("--confirm", action="store_true", help="required with --apply")
+    p_config_init.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
+    p_config_init.set_defaults(func=cmd_config_init)
     p_config_inspect = config_sub.add_parser("inspect", help="show effective config values and sources")
     p_config_inspect.add_argument("--keys", default=None, help="comma-separated config keys to inspect")
     p_config_inspect.add_argument("--show-secrets", action="store_true", help="show unredacted secret values")

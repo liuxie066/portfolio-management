@@ -61,9 +61,18 @@ credential `pm-feishu-agent-app-secret` 和
 检查配置：
 
 ```bash
+./pm ls                 # 配置、账户映射、当前 Python 的 Futu SDK 和下一步；不连接外部服务
+./pm config init        # 配置不存在时预览从 config.example.yaml 创建
+./pm config init --apply --confirm  # 仅首次创建；不会覆盖已有配置
 ./pm config inspect --json
 ./pm config doctor --json
 ```
+
+`pm` 不带参数等同于 `pm ls`。`config init` 只创建非密钥模板，使用权限
+`0600`；填写实际账户和非密钥配置后，再运行 `config doctor`。Agent/Listener
+Secret 仍按部署环境的 systemd credential 或 macOS Keychain 流程交付，不能放进
+命令参数或 YAML。`config inspect` 只显示 Futu 映射中的 PM 账户名，不输出
+broker `acc_id`。
 
 ## 日常命令
 
