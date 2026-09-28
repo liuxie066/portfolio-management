@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1 - 2026-09-28
+
+- Add macOS LaunchAgent installation, preflight, and Keychain delivery for
+  Feishu credentials.
+- Add PM CLI status discovery and preview-first config initialization, including
+  a Futu SDK import check in the active Python interpreter.
+
 ## 0.2.0 - 2026-09-28
 
 - Block final daily NAV writes unless holdings, prices, and FX are proven for
