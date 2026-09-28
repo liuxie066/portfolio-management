@@ -484,7 +484,7 @@ def test_portfolio_service_get_nav_uses_direct_storage_path():
         {"date": "2026-05-22", "nav": 1.1, "share_change": 0.0},
         {"date": "2026-05-23", "nav": 1.2, "share_change": 8.0},
     ]
-    storage.get_nav_history.assert_called_once_with("alice", days=7)
+    storage.get_nav_history.assert_called_once_with("alice", days=7, fresh=True)
 
 
 def test_portfolio_service_get_holdings_uses_direct_read_service():

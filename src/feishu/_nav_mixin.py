@@ -55,8 +55,10 @@ class NavMixin:
             dry_run=dry_run,
         )
 
-    def get_nav_history(self, account: str, days: int = 365) -> List[NAVHistory]:
-        return self.nav_history.get_nav_history(account, days=days)
+    def get_nav_history(
+        self, account: str, days: int = 365, *, fresh: bool = False
+    ) -> List[NAVHistory]:
+        return self.nav_history.get_nav_history(account, days=days, fresh=fresh)
 
     def get_latest_nav(self, account: str) -> Optional[NAVHistory]:
         return self.nav_history.get_latest_nav(account)

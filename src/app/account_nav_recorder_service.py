@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, Dict, Optional
 
-from src.app.nav_finality import NavWriteContext
+from src.app.nav_finality import NavWriteContext, evaluate_nav_finality
 from src.app.nav_payload import format_nav_payload
 from src.domain.cash_flow_contracts import CashFlowDatasetRefusal
 from src.time_utils import bj_today
@@ -83,6 +83,25 @@ def _cash_flow_refusal_result(
     }
 
 
+def _last_successful_nav_date(storage: Any, account: str, before: date) -> Optional[str]:
+    get_history = getattr(storage, "get_nav_history", None)
+    if not callable(get_history):
+        return None
+    try:
+        rows = get_history(account, days=3660, fresh=True)
+        dates = [
+            item.date.isoformat()
+            for item in rows
+            if item.date < before
+            and (item.details or {}).get("snapshot_persisted") is not False
+            and (item.details or {}).get("snapshot_status") != "failed"
+            and evaluate_nav_finality(item.details, target_date=item.date).eligible
+        ]
+    except Exception:
+        return None
+    return max(dates, default=None)
+
+
 class AccountNavRecorderService:
     """Sync account cash inputs, build one valuation snapshot, and record NAV."""
 
@@ -128,6 +147,8 @@ class AccountNavRecorderService:
         nav_write_context: Optional[NavWriteContext] = None,
         run_quote_pool: Any = None,
         valuation_ref: Optional[str] = None,
+        calendar_info: Optional[Dict[str, Any]] = None,
+        calendar: Any = None,
     ) -> Dict[str, Any]:
         from src.app import FutuBalanceSyncService
         from src.run_id import new_run_id
@@ -352,6 +373,36 @@ class AccountNavRecorderService:
                 raise ValueError(
                     "official NAV recording requires normalized_valuation"
                 )
+            if resolved_context.status == "final" and resolved_context.writer == "daily-nav-job":
+                from src.app.nav_target_evidence import missing_target_period_evidence
+
+                missing = missing_target_period_evidence(
+                    account=self.account,
+                    nav_date=today,
+                    normalized_valuation=normalized_valuation,
+                    artifact=(loaded_evidence or {}).get("artifact"),
+                    calendar_info=calendar_info,
+                    calendar=calendar,
+                )
+                if missing:
+                    return {
+                        "success": False,
+                        "status": "target_nav_evidence_unavailable",
+                        "account": self.account,
+                        "date": today.isoformat(),
+                        "run_id": resolved_run_id,
+                        "dry_run": dry_run,
+                        "confirm": confirm,
+                        "missing_components": missing,
+                        "last_successful_nav_date": _last_successful_nav_date(
+                            self.storage, self.account, today
+                        ),
+                        "holdings_preflight": _public_holdings_preflight(
+                            holdings_preflight_result
+                        ),
+                        "futu_sync_result": futu_sync_result,
+                        "error": "target-period NAV evidence is unavailable",
+                    }
             snapshot_write_authority = SnapshotWriteAuthority(
                 account=self.account,
                 as_of=today.isoformat(),

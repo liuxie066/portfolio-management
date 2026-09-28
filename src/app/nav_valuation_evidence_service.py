@@ -105,6 +105,7 @@ class NavValuationEvidenceStore:
         preparation: str,
         captured_at: Optional[str] = None,
         source_receipt_key: Optional[str] = None,
+        target_period_evidence: Optional[Mapping[str, Any]] = None,
     ) -> dict[str, Any]:
         account = str(account or "").strip()
         nav_date_text = _date_text(nav_date)
@@ -176,6 +177,8 @@ class NavValuationEvidenceStore:
             raise ValueError("NAV valuation evidence preparation is required")
         if source_receipt_key is not None:
             body["source_receipt_key"] = source_receipt_key
+        if target_period_evidence is not None:
+            body["target_period_evidence"] = dict(target_period_evidence)
         artifact_digest = digest_payload(body)
         artifact = {**body, "artifact_digest": artifact_digest}
         return {
