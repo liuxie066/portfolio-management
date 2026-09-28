@@ -218,6 +218,7 @@ SECRET_KEYS = {
 }
 
 NON_DISCLOSABLE_KEYS = {
+    "futu.profiles",
     "feishu.agent.app_id",
     "feishu.agent.app_secret",
     "feishu.agent.open_id",
@@ -294,7 +295,7 @@ def _load_config_file() -> dict:
         try:
             _cached_config = _load_structured_config(config_file)
         except (json.JSONDecodeError, yaml.YAMLError, ValueError, IOError) as e:
-            logging.getLogger(__name__).warning(f"[配置] 加载 {config_file} 失败: {e}")
+            logging.getLogger(__name__).warning("[配置] 加载 %s 失败: %s", config_file, type(e).__name__)
             _cached_config = {}
     else:
         _cached_config = {}
@@ -583,6 +584,8 @@ def _futu_profile_fingerprint(profile: Dict[str, Any]) -> str:
 def _redact_value(key: str, value: Any) -> Any:
     if value in (None, ""):
         return value
+    if key == "futu.profiles":
+        return sorted(str(account) for account in value) if isinstance(value, dict) else "***"
     if key in SECRET_KEYS:
         text = str(value)
         if len(text) <= 6:
