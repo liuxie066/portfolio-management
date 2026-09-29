@@ -144,12 +144,13 @@ def test_force_non_business_day_cannot_override_unknown_calendar():
 
 
 @pytest.mark.parametrize("dry_run", [False, True])
-def test_final_daily_nav_blocks_current_only_snapshot_before_nav_write(dry_run):
+def test_final_daily_nav_accepts_current_snapshot_and_keeps_observation_time(dry_run):
     snapshot = {
         "valuation": SimpleNamespace(warnings=[]),
         "normalized_valuation": _normalized("alice"),
-        "snapshot_time": "2026-09-28T08:00:00+08:00",
+        "snapshot_time": "2026-09-29T08:12:00+08:00",
     }
+    writes = []
 
     class Read:
         def build_snapshot(self, **_kwargs):
@@ -159,34 +160,36 @@ def test_final_daily_nav_blocks_current_only_snapshot_before_nav_write(dry_run):
         def build_cash_flow_dataset(self, **_kwargs):
             return _CashFlowDatasetStub("fingerprint")
 
-        def record_nav(self, *_args, **_kwargs):
-            raise AssertionError("unproved target-date NAV reached the writer")
+        def record_nav(self, *_args, **kwargs):
+            writes.append(kwargs)
+            return _nav_record(nav_date=date(2026, 9, 28))
 
     result = AccountNavRecorderService(
         account="alice",
-        storage=SimpleNamespace(get_nav_history=lambda *_args, **_kwargs: [
-            SimpleNamespace(
-                date=date(2026, 9, 24),
-                details={"finality": _finality(nav_date="2026-09-24")},
-            ),
-        ]),
+        storage=SimpleNamespace(),
         portfolio=Portfolio(),
         read_service=Read(),
     ).record(
-        nav_date="2026-09-25",
+        nav_date="2026-09-28",
         dry_run=dry_run,
         confirm=not dry_run,
         nav_write_context=NavWriteContext(
             status="final",
             writer="daily-nav-job",
             write_reason="canonical_daily_nav_job",
-            nav_date=date(2026, 9, 25),
+            nav_date=date(2026, 9, 28),
         ),
     )
 
-    assert result["status"] == "target_nav_evidence_unavailable"
-    assert "target_period_evidence" in result["missing_components"]
-    assert result["last_successful_nav_date"] == "2026-09-24"
+    assert result["success"] is True
+    assert result["status"] == ("dry_run" if dry_run else "recorded")
+    assert result["date"] == "2026-09-28"
+    assert result["nav_result"]["snapshot_time"] == "2026-09-29T08:12:00+08:00"
+    assert len(writes) == 1
+    assert writes[0]["dry_run"] is dry_run
+    assert writes[0]["nav_write_context"].status == "final"
+    assert writes[0]["nav_write_context"].valuation_as_of == "2026-09-29T08:12:00+08:00"
+    assert writes[0]["snapshot_write_authority"].as_of == "2026-09-28"
 
 
 def test_nav_calendar_reads_futu_market_days_and_closes_context(monkeypatch):
