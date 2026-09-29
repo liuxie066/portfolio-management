@@ -207,8 +207,6 @@ class DailyNavJobService:
         resolved_run_id: str,
         run_quote_pool: RunQuotePool,
         valuation_ref: Optional[str],
-        calendar_info: Dict[str, Any],
-        calendar: BusinessCalendarService,
     ) -> Dict[str, Any]:
         stage = "account_nav"
         try:
@@ -237,8 +235,6 @@ class DailyNavJobService:
                 nav_write_context=write_context,
                 run_quote_pool=run_quote_pool,
                 valuation_ref=valuation_ref,
-                calendar_info=calendar_info,
-                calendar=calendar,
             )
             result.setdefault("account", target_account)
             result.setdefault("date", resolved_nav_date.isoformat())
@@ -497,8 +493,6 @@ class DailyNavJobService:
                         resolved_run_id=resolved_run_id,
                         run_quote_pool=run_quote_pool,
                         valuation_ref=valuation_ref,
-                        calendar_info=calendar_info,
-                        calendar=self.calendar,
                     )
 
         items = [items_by_account[target_account] for target_account in target_accounts]

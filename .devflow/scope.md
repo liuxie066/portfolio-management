@@ -142,3 +142,89 @@ residual_risks:
     classification: assigned-to-later-work-unit
     owner: macOS deployment operator
     destination: docs/deploy-macos-operations.md preparation and activation checks
+
+# New task revision. Earlier macOS workflow fields above remain unchanged.
+nav_daily_recovery_20260929:
+  goal: Restore routine NAV recording using the existing daily portfolio snapshot after the target-period gate blocked all three accounts.
+  non_goals:
+    - Change CN/HK/US any-open calendar eligibility or default date.
+    - Reconstruct audited target-close holdings, prices, or FX.
+    - Backfill or mutate production NAV rows, timers, services, or releases.
+    - Commit, push, PR, merge, release, or upgrade.
+  scope: Remove mandatory target-period admission and gate-only plumbing while preserving existing daily and replay checks.
+  success_signals:
+    - Eligible normal daily run without target_period_evidence can persist NAV and linked holdings snapshot with actual observation time.
+    - Calendar any-open, all-closed with force override, and unknown behavior remain intact.
+    - Holdings, cash-flow, valuation quality, duplicate/finality, confirmation, and replay integrity checks remain effective.
+  authorized_slices:
+    - slice: Restore daily recording admission
+      design_doc_ref: docs/nav-daily-consistency.md@db57eb7c605eeab7213d6c01f6c71fa8c6f93414c71027d9548274d8192df849
+      success_signal: [eligible-write-and-snapshot, calendar-unchanged, existing-checks-unchanged]
+      depends_on: []
+  slice_checkpoints:
+    - slice: Restore daily recording admission
+      diff_fingerprint: db57eb7c605eeab7213d6c01f6c71fa8c6f93414c71027d9548274d8192df849
+      validation: Red regression failed twice on ae03810; focused 61 passed; full pytest 1548 passed; compileall, Ruff, diff check passed; deepreview found no material findings.
+      done: true
+  user_confirmation:
+    - 'User: $devflow 修复这个问题'
+    - 'User: full'
+    - 'User: 授权'
+    - 'User: 调整：恢复原有每日记录口径，保留观察时间和原有检查'
+  authorization_diffs:
+    - when: 2026-09-29
+      what: Supersedes the prior NAV target-period-evidence blocking policy for routine daily recording; preserve observed time and all preexisting checks.
+      ref: 'User: 调整：恢复原有每日记录口径，保留观察时间和原有检查'
+  prior_nav_policy_ref: 'commit 0e2824b and original docs/nav-daily-consistency.md; prior user confirmation recorded in v0.2.0 .devflow/scope.md'
+  prd_doc: not-applicable
+  prd_doc_ref: not-applicable
+  design_doc: docs/nav-daily-consistency.md
+  design_ref: docs/nav-daily-consistency.md@db57eb7c605eeab7213d6c01f6c71fa8c6f93414c71027d9548274d8192df849
+  implementation_workspace: /Users/liuxie/.codex/worktrees/restore-daily-nav/portfolio-management
+  review_base: ae03810c2e9c7a5ddcf6e0a41c2dd35fff977f6b
+  workflow_version: 2
+  mode: workflow
+  workflow_path: full
+  node_sequence: [Brainstorm, Save Design, Improve Design, Impl, Review]
+  current_node: null
+  internal_step: null
+  status: completed
+  next_action: null
+  approved_scope_ref: 'User: 调整：恢复原有每日记录口径，保留观察时间和原有检查'
+  path_approval_ref: 'User: full'
+  implementation_baseline:
+    design_doc: docs/nav-daily-consistency.md@db57eb7c605eeab7213d6c01f6c71fa8c6f93414c71027d9548274d8192df849
+    implementation_workspace: /Users/liuxie/.codex/worktrees/restore-daily-nav/portfolio-management
+    review_base: ae03810c2e9c7a5ddcf6e0a41c2dd35fff977f6b
+    head: ae03810c2e9c7a5ddcf6e0a41c2dd35fff977f6b
+    git_status: ' M .devflow/design-panel.md;  M docs/nav-daily-consistency.md'
+    staged: []
+    unstaged:
+      - {path: .devflow/design-panel.md, hash: 25747938787cd66e4180a28ca2acf75c72d99c36b11d972abf0db942ac1ab0d9, size: 5241}
+      - {path: docs/nav-daily-consistency.md, hash: db57eb7c605eeab7213d6c01f6c71fa8c6f93414c71027d9548274d8192df849, size: 7589}
+    untracked: []
+    ignored_design_artifacts:
+      - {path: docs/reviews/plan-review-20260929-094220.md, hash: ed62246e489691cac313dd550894961d6d66ff835c42c5bd63b77ec710424d98, size: 3811}
+  inventory:
+    - .devflow/design-panel.md
+    - .devflow/scope.md
+    - docs/nav-daily-consistency.md
+    - src/app/account_nav_recorder_service.py
+    - src/app/daily_account_nav_service.py
+    - src/app/daily_nav_job_service.py
+    - src/app/nav_target_evidence.py (deleted)
+    - tests/test_daily_nav_services.py
+    - tests/test_nav_valuation_evidence_service.py
+  content_revision: db57eb7c605eeab7213d6c01f6c71fa8c6f93414c71027d9548274d8192df849
+  planreview_round: 1
+  deepreview_round: 1
+  in_flight: []
+  evidence_paths:
+    - docs/nav-daily-consistency.md
+    - .devflow/design-panel.md
+    - docs/reviews/plan-review-20260929-094220.md
+    - docs/reviews/code-review-20260929-095323.md
+  blocking_findings: []
+  residual_risks:
+    - {item: Daily record can differ from reconstructed target-close state, classification: assigned-to-later-work-unit, owner: portfolio operations, destination: future exact-close product decision}
+    - {item: Missing 2026-09-28 production rows are not automatically backfilled, classification: assigned-to-later-work-unit, owner: portfolio operations, destination: separately authorized account/date audit and replay}

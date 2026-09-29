@@ -44,8 +44,6 @@ class DailyAccountNavService:
         nav_write_context: Optional[NavWriteContext] = None,
         run_quote_pool: Any = None,
         valuation_ref: Optional[str] = None,
-        calendar_info: Optional[Dict[str, Any]] = None,
-        calendar: Any = None,
     ) -> Dict[str, Any]:
         resolved_date = _coerce_date(nav_date) if nav_date is not None else bj_today()
         resolved_context = nav_write_context or NavWriteContext(
@@ -75,8 +73,6 @@ class DailyAccountNavService:
             nav_write_context=resolved_context,
             run_quote_pool=run_quote_pool,
             valuation_ref=valuation_ref,
-            calendar_info=calendar_info,
-            calendar=calendar,
         )
         if not record_result.get("success"):
             nav_result = record_result.get("nav_result")
