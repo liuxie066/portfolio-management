@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.2 - 2026-09-29
+
+- Restore routine daily NAV recording when target-period evidence is unavailable,
+  while retaining valuation observation time and existing safety checks.
+
 ## 0.2.1 - 2026-09-28
 
 - Add macOS LaunchAgent installation, preflight, and Keychain delivery for
