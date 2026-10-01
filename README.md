@@ -197,6 +197,7 @@ curl -X POST http://127.0.0.1:8765/analysis/valuation-evidence \
 
 HTTP 服务默认只绑定 `127.0.0.1` / `localhost` / `::1`，且当前不带鉴权。非 loopback 绑定必须显式 `--allow-remote`，并放在已有鉴权的网络边界后面。
 `/analysis/valuation-evidence` 虽使用 POST 承载有界查询体，但不写持仓、NAV 或其他 portfolio 事实；它为同机 options-monitor 返回多账户非期权持仓、补充标的报价和显式 FX 证据。所有账户共享一个绝对 `price_timeout` deadline 和同一批去重行情/FX 快照；截止时返回 `success=true/status=partial` 及已完成证据，不会继续启动后续行情请求。行情层仍沿用既有 cache 行为。
+`holdings_scope=non_futu` 只返回非富途 Holdings 估值，并附完整原始 broker 清单供 OM 预检；默认 `all` 保持原有调用口径。
 
 ## 日报与发布
 

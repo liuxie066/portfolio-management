@@ -95,6 +95,7 @@ class ValuationEvidenceRequest(BaseModel):
     accounts: list[str] = Field(min_length=1, max_length=20)
     supplemental_codes: list[str] = Field(default_factory=list, max_length=500)
     price_timeout: int = Field(default=30, ge=1, le=300)
+    holdings_scope: Literal["all", "non_futu"] = "all"
 
 
 class FreshnessEvidence(BaseModel):
@@ -650,14 +651,17 @@ def create_app(service: Optional[PortfolioService] = None, allow_remote: Optiona
         request: Request,
         payload: ValuationEvidenceRequest,
     ):
-        result = _service(request).get_valuation_evidence(**_payload_dict(payload))
+        params = _payload_dict(payload)
+        if payload.holdings_scope == "all":
+            params.pop("holdings_scope")
+        result = _service(request).get_valuation_evidence(**params)
         if not _is_v1(request) and result.get("success") is False and result.get("error_code") == "INPUT_ERROR":
             return JSONResponse(status_code=400, content=result)
         return _public_result(
             request,
             result,
             input_error_status=400,
-            dataset_ids=("pm.holdings_quantity", "pm.prices", "pm.fx"),
+            dataset_ids=("pm.holdings_quantity", "pm.prices", "pm.fx") if payload.holdings_scope == "all" else (),
             accounts=tuple(payload.accounts),
         )
 

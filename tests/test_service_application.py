@@ -4,7 +4,8 @@ import logging
 import threading
 import time
 from contextlib import contextmanager
-from datetime import date
+from dataclasses import replace
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -13,6 +14,7 @@ from src.domain.snapshot_contracts import (
     NormalizedValuationSnapshot,
     SnapshotWriteAuthority,
 )
+from src.domain.holdings import RawHoldingRecord
 from src.models import AssetClass, AssetType, Holding
 from src.portfolio import PortfolioManager
 from src.service import PortfolioService
@@ -423,6 +425,302 @@ def test_portfolio_service_rejects_unknown_valuation_evidence_account():
         "error_code": "INPUT_ERROR",
         "error": "unknown accounts: sy",
     }
+
+
+def _raw_holding(holding, record_id):
+    return RawHoldingRecord(record_id=record_id, raw_fields=holding.model_dump(mode="json", exclude_none=True), fetched_at=datetime.now(timezone.utc))
+
+
+def _scoped_storage(records):
+    if records:
+        records = [replace(record, fetched_at=records[0].fetched_at) for record in records]
+    def convert(selected):
+        return [Holding(**{**record.raw_fields, "record_id": record.record_id}) for record in selected]
+    return SimpleNamespace(get_raw_holdings=Mock(return_value=records), _convert_raw_holdings=Mock(side_effect=convert))
+
+
+def test_non_futu_valuation_filters_before_quote_and_preserves_scope():
+    futu = Holding(asset_id="NVDA", asset_name="Nvidia", asset_type=AssetType.US_STOCK,
+                   account="lx", broker="富途证券有限公司", quantity=1, currency="USD", asset_class=AssetClass.US_ASSET)
+    external = Holding(asset_id="BANK", asset_name="Bank", asset_type=AssetType.US_STOCK,
+                       account="lx", broker="IBKR", quantity=2, currency="USD", asset_class=AssetClass.US_ASSET)
+    storage = _scoped_storage([_raw_holding(futu, "futu"), _raw_holding(external, "external")])
+    quote = {"code": "BANK", "currency": "USD", "price_native": 10, "price_cny": 72,
+             "exchange_rate_to_cny": 7.2, "source": "sina_us", "observed_at": datetime.now(timezone.utc).isoformat(),
+             "is_stale": False}
+    price = {"code": "BANK", "price": 10, "currency": "USD", "source": "sina_us",
+             "fetched_at": datetime.now(timezone.utc).isoformat()}
+    fx_service = SimpleNamespace(fetch_exchange_rates_with_evidence=Mock(return_value=(
+        {"USDCNY": 7.2}, {"sources": {"USDCNY": "open_er_api"},
+                          "observed_at_utc": datetime.now(timezone.utc).isoformat(),
+                          "cache_status": "provider", "is_stale": False})))
+    portfolio = SimpleNamespace(reporting_service=object(), fetch_price_snapshot=Mock(return_value=({"BANK": price}, [])),
+                                price_fetcher=SimpleNamespace(fx_service=fx_service))
+    read_service = SimpleNamespace(build_valuation_evidence=Mock(return_value={
+        "account": "lx", "status": "complete", "holdings": [{
+            "account": "lx", "broker": "IBKR", "code": "BANK", "asset_type": "us_stock",
+            "quantity": 2, "currency": "USD", "market_value_cny": 144,
+        }], "quotes": [quote], "warnings": [],
+    }))
+    service = PortfolioService(storage=storage, portfolio=portfolio,
+                               read_service_factory=lambda **_kwargs: read_service)
+    service.list_accounts = Mock(return_value={"success": True, "accounts": ["lx"]})
+
+    result = service.get_valuation_evidence(accounts=["lx"], holdings_scope="non_futu")
+
+    assert result["status"] == "complete"
+    assert result["freshness"]["trust_status"] == "trusted"
+    assert result["freshness"]["dataset_ids"] == ["pm.holdings_feishu", "pm.prices", "pm.fx"]
+    assert result["scope"]["holdings_scope"] == "non_futu"
+    assert result["scope"]["holding_counts"]["lx"] == {
+        "source_rows": 2, "included": 1, "zero_quantity": 0,
+        "excluded_futu": 1, "excluded_unknown_broker": 0, "unsupported": 0,
+    }
+    assert result["scope"]["broker_inventory"]["lx"]["brokers"] == [
+        {"broker": "IBKR", "classification": "non_futu", "row_count": 1},
+        {"broker": "富途证券有限公司", "classification": "futu", "row_count": 1},
+    ]
+    assert [holding.asset_id for holding in portfolio.fetch_price_snapshot.call_args.kwargs["holdings"]] == ["BANK"]
+    storage.get_raw_holdings.assert_called_once_with(account="lx")
+    assert [holding.asset_id for holding in read_service.build_valuation_evidence.call_args.kwargs["holdings"]] == ["BANK"]
+    assert {row["code"] for row in result["holdings"]} == {"BANK"}
+    assert {row["code"] for row in result["quotes"]} == {"BANK"}
+
+    quote["is_stale"] = True
+    stale = service.get_valuation_evidence(accounts=["lx"], holdings_scope="non_futu")
+    assert stale["status"] == "partial"
+    assert "INCLUDED_QUOTE_INVALID" in stale["freshness"]["reason_codes"]
+
+
+def test_non_futu_zero_eligible_rows_are_complete_without_price_or_fx_quality():
+    futu = Holding(asset_id="NVDA", asset_name="Nvidia", asset_type=AssetType.US_STOCK,
+                   account="lx", broker="moomoo", quantity=1, currency="USD", asset_class=AssetClass.US_ASSET)
+    storage = _scoped_storage([_raw_holding(futu, "futu")])
+    portfolio = SimpleNamespace(reporting_service=object(), fetch_price_snapshot=Mock())
+    read_service = SimpleNamespace(build_valuation_evidence=Mock(return_value={
+        "account": "lx", "status": "complete", "holdings": [], "quotes": [], "warnings": [],
+    }))
+    service = PortfolioService(storage=storage, portfolio=portfolio,
+                               read_service_factory=lambda **_kwargs: read_service)
+    service.list_accounts = Mock(return_value={"success": True, "accounts": ["lx"]})
+
+    result = service.get_valuation_evidence(accounts=["lx"], holdings_scope="non_futu")
+
+    assert result["status"] == "complete"
+    assert result["freshness"]["status"] == "fresh"
+    assert result["freshness"]["trust_status"] == "trusted"
+    assert result["freshness"]["dataset_ids"] == ["pm.holdings_feishu"]
+    assert result["freshness"]["reason_codes"] == []
+    assert result["scope"]["holding_counts"]["lx"]["included"] == 0
+    portfolio.fetch_price_snapshot.assert_not_called()
+
+
+def test_non_futu_unknown_broker_is_partial():
+    unknown = Holding(asset_id="CNY-CASH", asset_name="Cash", asset_type=AssetType.CASH,
+                      account="lx", broker="unknown", quantity=100, currency="CNY", asset_class=AssetClass.CASH)
+    storage = _scoped_storage([_raw_holding(unknown, "unknown")])
+    portfolio = SimpleNamespace(reporting_service=object(), fetch_price_snapshot=Mock())
+    read_service = SimpleNamespace(build_valuation_evidence=Mock(return_value={
+        "account": "lx", "status": "complete", "holdings": [], "quotes": [], "warnings": [],
+    }))
+    service = PortfolioService(storage=storage, portfolio=portfolio,
+                               read_service_factory=lambda **_kwargs: read_service)
+    service.list_accounts = Mock(return_value={"success": True, "accounts": ["lx"]})
+
+    result = service.get_valuation_evidence(accounts=["lx"], holdings_scope="non_futu")
+
+    assert result["status"] == "partial"
+    assert result["holdings"] == []
+    assert result["scope"]["holding_counts"]["lx"]["excluded_unknown_broker"] == 1
+    assert result["scope"]["broker_inventory"]["lx"]["brokers"][0]["classification"] == "unknown"
+    assert "SCOPED_ACCOUNT_PARTIAL" in result["freshness"]["reason_codes"]
+    portfolio.fetch_price_snapshot.assert_not_called()
+
+
+def test_non_futu_fresh_source_read_failure_cannot_be_complete():
+    storage = SimpleNamespace(get_raw_holdings=Mock(side_effect=RuntimeError("Feishu unavailable")))
+    portfolio = SimpleNamespace(reporting_service=object(), fetch_price_snapshot=Mock())
+    service = PortfolioService(storage=storage, portfolio=portfolio)
+    service.list_accounts = Mock(return_value={"success": True, "accounts": ["lx"]})
+
+    result = service.get_valuation_evidence(accounts=["lx"], holdings_scope="non_futu")
+
+    assert result["status"] == "unavailable"
+    assert result["holdings"] == []
+    assert result["freshness"]["trust_status"] == "partial"
+    assert "HOLDINGS_FRESH_READ_UNAVAILABLE" in result["freshness"]["reason_codes"]
+    portfolio.fetch_price_snapshot.assert_not_called()
+
+
+def test_non_futu_raw_slice_excludes_broken_futu_and_keeps_zero_rows():
+    now = datetime.now(timezone.utc)
+    broken_futu = RawHoldingRecord(
+        record_id="futu", source="feishu", fetched_at=now,
+        raw_fields={"account": "lx", "broker": "Moomoo US", "asset_id": "NVDA", "quantity": "broken"},
+    )
+    cash = Holding(asset_id="CNY-CASH", asset_name="Cash", asset_type=AssetType.CASH,
+                   account="lx", broker="IBKR", quantity=100, currency="CNY", asset_class=AssetClass.CASH)
+    zero = Holding(asset_id="ZERO", asset_name="Zero", asset_type=AssetType.US_STOCK,
+                   account="lx", broker="IBKR", quantity=0, currency="USD", asset_class=AssetClass.US_ASSET)
+    storage = _scoped_storage([broken_futu, _raw_holding(cash, "cash"), _raw_holding(zero, "zero")])
+    portfolio = SimpleNamespace(reporting_service=object(), fetch_price_snapshot=Mock(return_value=({}, [])))
+    read_service = SimpleNamespace(build_valuation_evidence=Mock(return_value={
+        "account": "lx", "status": "complete", "holdings": [{
+            "account": "lx", "broker": "IBKR", "code": "CNY-CASH", "asset_type": "cash",
+            "quantity": 100, "currency": "CNY", "market_value_cny": 100,
+        }], "quotes": [{"code": "CNY-CASH", "currency": "CNY", "price_native": 1,
+                       "price_cny": 1, "source": "fixed_identity"}], "warnings": [],
+    }))
+    service = PortfolioService(storage=storage, portfolio=portfolio,
+                               read_service_factory=lambda **_kwargs: read_service)
+    service.list_accounts = Mock(return_value={"success": True, "accounts": ["lx"]})
+
+    result = service.get_valuation_evidence(accounts=["lx"], holdings_scope="non_futu")
+
+    assert result["status"] == "complete"
+    assert result["freshness"]["dataset_ids"] == ["pm.holdings_feishu"]
+    assert result["scope"]["holding_counts"]["lx"] == {
+        "source_rows": 3, "included": 1, "zero_quantity": 1,
+        "excluded_futu": 1, "excluded_unknown_broker": 0, "unsupported": 0,
+    }
+    assert [row["broker"] for row in result["scope"]["broker_inventory"]["lx"]["brokers"]] == ["IBKR", "Moomoo US"]
+    portfolio.fetch_price_snapshot.assert_not_called()
+    assert result["holdings"][0]["record_updated_at"] == "unknown"
+    assert len(result["account_status"][0]["source_rows"]) == 3
+
+
+def test_non_futu_cross_account_raw_row_is_unavailable():
+    wrong = Holding(asset_id="BANK", asset_name="Bank", asset_type=AssetType.US_STOCK,
+                    account="sy", broker="IBKR", quantity=1, currency="USD", asset_class=AssetClass.US_ASSET)
+    storage = _scoped_storage([_raw_holding(wrong, "wrong")])
+    portfolio = SimpleNamespace(reporting_service=object(), fetch_price_snapshot=Mock())
+    service = PortfolioService(storage=storage, portfolio=portfolio)
+    service.list_accounts = Mock(return_value={"success": True, "accounts": ["lx"]})
+
+    result = service.get_valuation_evidence(accounts=["lx"], holdings_scope="non_futu")
+
+    assert result["status"] == "unavailable"
+    storage._convert_raw_holdings.assert_not_called()
+    portfolio.fetch_price_snapshot.assert_not_called()
+
+
+def test_non_futu_negative_holding_and_cache_market_time_quality():
+    short = Holding(asset_id="BANK", asset_name="Bank", asset_type=AssetType.US_STOCK,
+                    account="lx", broker="IBKR", quantity=-2, currency="CNY", asset_class=AssetClass.US_ASSET)
+    storage = _scoped_storage([_raw_holding(short, "short")])
+    price = {"code": "BANK", "price": 10, "cny_price": 10, "currency": "CNY",
+             "source": "tencent_batch", "is_from_cache": True,
+             "expires_at": datetime.now(timezone.utc).isoformat()}
+    portfolio = SimpleNamespace(reporting_service=object(), fetch_price_snapshot=Mock(return_value=({"BANK": price}, [])))
+    quote = {"code": "BANK", "currency": "CNY", "price_native": 10, "price_cny": 10,
+             "source": "tencent_batch", "is_from_cache": True}
+    read_service = SimpleNamespace(build_valuation_evidence=Mock(return_value={
+        "account": "lx", "status": "complete", "holdings": [{
+            "account": "lx", "broker": "IBKR", "code": "BANK", "asset_type": "us_stock",
+            "quantity": -2, "currency": "CNY", "market_value_cny": -20,
+        }], "quotes": [quote], "warnings": [],
+    }))
+    service = PortfolioService(storage=storage, portfolio=portfolio,
+                               read_service_factory=lambda **_kwargs: read_service)
+    service.list_accounts = Mock(return_value={"success": True, "accounts": ["lx"]})
+
+    from datetime import timedelta
+    price["expires_at"] = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+    result = service.get_valuation_evidence(accounts=["lx"], holdings_scope="non_futu")
+    assert result["status"] == "complete"
+    assert result["quotes"][0]["market_as_of"] == "unknown"
+    assert portfolio.fetch_price_snapshot.call_args.kwargs["holdings"][0].quantity == -2
+
+    price["is_from_cache"] = False
+    price["fetched_at"] = datetime.now(timezone.utc).isoformat()
+    quote["is_from_cache"] = False
+    price["time"] = (datetime.now(timezone.utc) - timedelta(days=9)).isoformat()
+    stale_market = service.get_valuation_evidence(accounts=["lx"], holdings_scope="non_futu")
+    assert stale_market["status"] == "partial"
+    assert "INCLUDED_MARKET_TIME_INVALID" in stale_market["freshness"]["reason_codes"]
+
+    price.pop("time")
+    price["is_from_cache"] = True
+    price["expires_at"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    quote["is_from_cache"] = True
+    expired_cache = service.get_valuation_evidence(accounts=["lx"], holdings_scope="non_futu")
+    assert "INCLUDED_QUOTE_CACHE_INVALID" in expired_cache["freshness"]["reason_codes"]
+
+
+def test_non_futu_foreign_fx_fallback_cannot_value_holding():
+    foreign = Holding(asset_id="BANK", asset_name="Bank", asset_type=AssetType.US_STOCK,
+                      account="lx", broker="IBKR", quantity=2, currency="USD", asset_class=AssetClass.US_ASSET)
+    storage = _scoped_storage([_raw_holding(foreign, "foreign")])
+    price = {"code": "BANK", "price": 10, "cny_price": 72, "currency": "USD",
+             "source": "sina_us", "fetched_at": datetime.now(timezone.utc).isoformat()}
+    fx = SimpleNamespace(fetch_exchange_rates_with_evidence=Mock(return_value=(
+        {"USDCNY": 7.2}, {"sources": {"USDCNY": "open_er_api"},
+                          "observed_at_utc": datetime.now(timezone.utc).isoformat(),
+                          "cache_status": "stale_fallback", "is_stale": True})))
+    portfolio = SimpleNamespace(reporting_service=object(), fetch_price_snapshot=Mock(return_value=({"BANK": price}, [])),
+                                price_fetcher=SimpleNamespace(fx_service=fx))
+    read_service = SimpleNamespace(build_valuation_evidence=Mock(return_value={
+        "account": "lx", "status": "complete", "holdings": [{
+            "account": "lx", "broker": "IBKR", "code": "BANK", "asset_type": "us_stock",
+            "quantity": 2, "currency": "USD", "market_value_cny": None,
+        }], "quotes": [{"code": "BANK", "currency": "USD", "price_native": 10,
+                       "price_cny": None, "source": "sina_us"}], "warnings": [],
+    }))
+    service = PortfolioService(storage=storage, portfolio=portfolio,
+                               read_service_factory=lambda **_kwargs: read_service)
+    service.list_accounts = Mock(return_value={"success": True, "accounts": ["lx"]})
+
+    result = service.get_valuation_evidence(accounts=["lx"], holdings_scope="non_futu")
+
+    assert result["status"] == "partial"
+    assert "INCLUDED_FX_MISSING" in result["freshness"]["reason_codes"]
+    assert any(issue == {
+        "account": "lx", "broker": "IBKR", "code": "BANK",
+        "reason_code": "INCLUDED_FX_MISSING",
+    } for issue in result["quality_issues"])
+    assert portfolio.fetch_price_snapshot.call_args.kwargs["holdings"][0].asset_id == "BANK"
+    assert read_service.build_valuation_evidence.call_args.kwargs["price_snapshot"]["BANK"]["cny_price"] is None
+
+
+def test_non_futu_real_valuation_keeps_signed_cash_and_fx_provenance():
+    cash = Holding(asset_id="USD-CASH", asset_name="USD cash", asset_type=AssetType.CASH,
+                   account="lx", broker="IBKR", quantity=-10, currency="USD", asset_class=AssetClass.CASH)
+    storage = _scoped_storage([_raw_holding(cash, "usd-cash")])
+    quote = {"code": "USD-CASH", "price": 1, "cny_price": 6.9, "exchange_rate": 6.9,
+             "currency": "USD", "source": "fixed", "fetched_at": datetime.now(timezone.utc).isoformat()}
+    fx = SimpleNamespace(fetch_exchange_rates_with_evidence=Mock(return_value=(
+        {"USDCNY": 7.2}, {"sources": {"USDCNY": "_fetch_from_open_er_api"},
+                          "observed_at_utc": datetime.now(timezone.utc).isoformat(),
+                          "cache_status": "provider", "is_stale": False})))
+    fetcher = SimpleNamespace(fetch_batch=Mock(return_value={"USD-CASH": quote}), fx_service=fx)
+    service = PortfolioService(storage=storage, portfolio=PortfolioManager(storage, price_fetcher=fetcher))
+    service.list_accounts = Mock(return_value={"success": True, "accounts": ["lx"]})
+
+    result = service.get_valuation_evidence(accounts=["lx"], holdings_scope="non_futu")
+
+    assert result["status"] == "complete"
+    assert result["holdings"][0]["quantity"] == -10
+    assert result["holdings"][0]["market_value_cny"] == -72
+    assert result["quotes"][0]["exchange_rate_to_cny"] == 7.2
+    assert result["quotes"][0]["fx_evidence"]["source"] == "_fetch_from_open_er_api"
+    assert quote["cny_price"] == 6.9  # quoted fixture is not the scoped valuation copy
+
+
+def test_non_futu_real_cny_cash_uses_identity_without_quote_service():
+    cash = Holding(asset_id="CNY-CASH", asset_name="CNY cash", asset_type=AssetType.CASH,
+                   account="lx", broker="IBKR", quantity=100, currency="CNY", asset_class=AssetClass.CASH)
+    storage = _scoped_storage([_raw_holding(cash, "cny-cash")])
+    fetcher = SimpleNamespace(fetch_batch=Mock(side_effect=AssertionError("unneeded quote")))
+    service = PortfolioService(storage=storage, portfolio=PortfolioManager(storage, price_fetcher=fetcher))
+    service.list_accounts = Mock(return_value={"success": True, "accounts": ["lx"]})
+
+    result = service.get_valuation_evidence(accounts=["lx"], holdings_scope="non_futu")
+
+    assert result["status"] == "complete"
+    assert result["holdings"][0]["market_value_cny"] == 100
+    assert result["quotes"][0]["source"] == "fixed_identity"
+    assert result["quotes"][0]["market_as_of"] == "unknown"
+    fetcher.fetch_batch.assert_not_called()
 
 
 def test_portfolio_service_get_nav_uses_direct_storage_path():
