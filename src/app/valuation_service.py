@@ -292,6 +292,7 @@ class ValuationService:
         price_market_closed_ttl_multiplier: float = 1.0,
         run_quote_pool: Any = None,
         deadline: float | None = None,
+        price_fetcher: Any = None,
     ) -> tuple[dict[str, Any], list[str]]:
         """Fetch one deadline-bound quote snapshot for one or more accounts."""
         supplemental = list(
@@ -304,7 +305,8 @@ class ValuationService:
         snapshot_holdings = list(holdings)
         if not snapshot_holdings and not supplemental:
             return {}, []
-        if not self.price_fetcher:
+        active_fetcher = price_fetcher if price_fetcher is not None else self.price_fetcher
+        if not active_fetcher:
             return {}, ["价格获取不可用：未配置行情服务"]
 
         name_map = {holding.asset_id: holding.asset_name for holding in snapshot_holdings}
@@ -366,11 +368,11 @@ class ValuationService:
         )
         try:
             if run_quote_pool is None:
-                prices = self.price_fetcher.fetch_batch(codes, **fetch_kwargs)
+                prices = active_fetcher.fetch_batch(codes, **fetch_kwargs)
             else:
                 prices = run_quote_pool.fetch_batch(
                     codes,
-                    fetch_batch=self.price_fetcher.fetch_batch,
+                    fetch_batch=active_fetcher.fetch_batch,
                     **fetch_kwargs,
                 )
         except TimeoutError:

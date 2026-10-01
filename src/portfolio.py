@@ -227,15 +227,18 @@ class PortfolioManager:
         price_timeout_seconds: int = 25,
         run_quote_pool: Any = None,
         deadline: float | None = None,
+        price_fetcher: Optional[PriceFetcher] = None,
     ) -> tuple[Dict[str, Any], list[str]]:
         """Fetch one shared quote snapshot for multi-account valuation."""
-        self.valuation_service.price_fetcher = self.price_fetcher
+        if price_fetcher is None:
+            self.valuation_service.price_fetcher = self.price_fetcher
         return self.valuation_service.fetch_price_snapshot(
             holdings=holdings,
             supplemental_codes=supplemental_codes,
             price_timeout_seconds=price_timeout_seconds,
             run_quote_pool=run_quote_pool,
             deadline=deadline,
+            price_fetcher=price_fetcher,
         )
 
     # ========== 净值记录 ==========

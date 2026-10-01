@@ -100,6 +100,7 @@ class PriceService:
         cache_policy = PriceCachePolicy(
             getattr(self.fetcher_context, "storage", None),
             enabled=bool(getattr(self.fetcher_context, "use_cache", False)),
+            writable=bool(getattr(self.fetcher_context, "cache_writes", True)),
         )
         stale_quote: PriceQuote | None = None
 

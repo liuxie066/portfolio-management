@@ -1,9 +1,13 @@
 """Tests for PriceCachePolicy semantic stale acceptance (market-session based)."""
 from datetime import timedelta
+from unittest.mock import Mock
 
+from src.feishu_storage import FeishuStorage
+from src.local_cache import LocalPriceCache
 from src.market_time import MarketTimeUtil
 from src.models import AssetType, PriceCache
 from src.pricing.cache import PriceCachePolicy, STALE_RETRIEVAL_WINDOW_SEC
+from src.pricing.result import PriceQuote
 from src.time_utils import bj_now_naive
 
 
@@ -45,6 +49,34 @@ def test_semantic_stale_accepted_when_market_has_not_traded(monkeypatch):
     assert payload["is_stale"] is True
     # retrieval uses the scan window, not the zero default
     assert storage.calls[0]["max_stale_after_expiry_sec"] == STALE_RETRIEVAL_WINDOW_SEC
+
+
+def test_read_only_cache_policy_keeps_reads_but_skips_writes():
+    from unittest.mock import Mock
+
+    storage = Mock()
+    storage.get_price.return_value = _expired_cache(hours=-1)
+    policy = PriceCachePolicy(storage, enabled=True, writable=False)
+
+    assert policy.get("FUTU") is not None
+    quote = PriceQuote.from_payload({"price": 100, "currency": "USD", "source": "test"}, code="FUTU")
+    assert policy.save("FUTU", quote) is None
+    storage.save_price.assert_not_called()
+
+
+def test_read_only_cache_lookup_does_not_delete_expired_local_entry(tmp_path):
+    cache_file = tmp_path / "price_cache.json"
+    cache = LocalPriceCache(cache_file=cache_file)
+    cache.save(_expired_cache("AAPL", hours=1), _flush=True)
+    storage = FeishuStorage(client=Mock(), local_price_cache=cache)
+    before = cache_file.read_bytes()
+
+    assert PriceCachePolicy(storage, enabled=True, writable=False).get("AAPL") is None
+    assert cache_file.read_bytes() == before
+    assert cache.get("AAPL", allow_expired=True, max_stale_after_expiry_sec=7200) is not None
+
+    assert PriceCachePolicy(storage, enabled=True).get("AAPL") is None
+    assert cache_file.read_bytes() != before
 
 
 def test_semantic_stale_rejected_when_market_has_traded(monkeypatch):

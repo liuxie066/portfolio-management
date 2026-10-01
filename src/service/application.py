@@ -276,19 +276,20 @@ class PortfolioService:
         if holdings_scope == "non_futu" and normalized_codes:
             return {"success": False, "error_code": "INPUT_ERROR", "error": "non_futu scope does not accept supplemental_codes"}
 
-        account_result = self.list_accounts(include_default=True)
-        available_accounts = {
-            str(item or "").strip().lower()
-            for item in (account_result.get("accounts") or [])
-            if str(item or "").strip()
-        }
-        unknown = [account for account in normalized_accounts if account not in available_accounts]
-        if unknown:
-            return {
-                "success": False,
-                "error_code": "INPUT_ERROR",
-                "error": f"unknown accounts: {', '.join(unknown)}",
+        if holdings_scope == "all":
+            account_result = self.list_accounts(include_default=True)
+            available_accounts = {
+                str(item or "").strip().lower()
+                for item in (account_result.get("accounts") or [])
+                if str(item or "").strip()
             }
+            unknown = [account for account in normalized_accounts if account not in available_accounts]
+            if unknown:
+                return {
+                    "success": False,
+                    "error_code": "INPUT_ERROR",
+                    "error": f"unknown accounts: {', '.join(unknown)}",
+                }
 
         from src.app.run_quote_pool import RunQuotePool
 
@@ -421,6 +422,11 @@ class PortfolioService:
 
         shared_prices: Dict[str, Any] = {}
         shared_price_warnings: list[str] = []
+        scoped_fetcher = None
+        if holdings_scope == "non_futu" and pending_accounts and any(holdings_by_account.values()):
+            from src.price_fetcher import PriceFetcher
+
+            scoped_fetcher = PriceFetcher(storage=self.storage, cache_writes=False)
         if pending_accounts and time.monotonic() < request_deadline and (
             holdings_scope == "all" or normalized_codes or any(holdings_by_account.values())
         ):
@@ -443,12 +449,16 @@ class PortfolioService:
                     else:
                         price_holdings.append(holding)
             if price_holdings or holdings_scope == "all":
+                fetch_kwargs = {}
+                if scoped_fetcher is not None:
+                    fetch_kwargs["price_fetcher"] = scoped_fetcher
                 fetched_prices, shared_price_warnings = self.portfolio.fetch_price_snapshot(
                     holdings=price_holdings,
                     supplemental_codes=normalized_codes,
                     price_timeout_seconds=price_timeout,
                     run_quote_pool=pool,
                     deadline=request_deadline,
+                    **fetch_kwargs,
                 )
                 shared_prices.update(fetched_prices)
         elif pending_accounts and time.monotonic() >= request_deadline:
@@ -467,7 +477,7 @@ class PortfolioService:
             fx_evidence: Dict[str, Any] = {}
             if foreign_currencies:
                 try:
-                    fx_service = self.portfolio.price_fetcher.fx_service
+                    fx_service = scoped_fetcher.fx_service
                     rates, fx_evidence = fx_service.fetch_exchange_rates_with_evidence(
                         deadline=request_deadline
                     )

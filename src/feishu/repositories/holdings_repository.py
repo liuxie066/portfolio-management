@@ -80,8 +80,7 @@ class HoldingsRepository:
         entries = self._local_holdings_index_cache.load_all()
         if not entries:
             return
-        migrated = False
-        for bk, fields in entries.items():
+        for fields in entries.values():
             if not fields or not fields.get('record_id'):
                 continue
             if fields.get('validation_policy_version') != 'holdings-validation.v1':
@@ -100,15 +99,6 @@ class HoldingsRepository:
             canonical_snapshot = self._snapshot_for_persistent_cache(holding)
             self._holding_id_cache[cache_key] = holding.record_id
             self._holding_fields_cache[cache_key] = dict(canonical_snapshot)
-            if bk != cache_key or fields != canonical_snapshot:
-                self._local_holdings_index_cache.delete(bk)
-                self._local_holdings_index_cache.upsert(
-                    cache_key,
-                    canonical_snapshot,
-                )
-                migrated = True
-        if migrated:
-            self._flush_persistent_holdings_index()
 
     def _flush_persistent_holdings_index(self):
         """将内存持仓索引刷写到本地缓存。"""
