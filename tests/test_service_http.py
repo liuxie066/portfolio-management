@@ -570,6 +570,39 @@ def test_v1_freshness_propagates_stale_partial_owner_evidence():
     assert payload["freshness"]["reason_codes"] == ["SOURCE_STALE"]
 
 
+def test_v1_non_futu_valuation_preserves_scoped_freshness():
+    service = FakePortfolioService()
+    service.quality_status = lambda: {"datasets": []}
+    scoped = FakePortfolioService.get_valuation_evidence
+
+    def get_valuation_evidence(**kwargs):
+        result = scoped(service, **kwargs)
+        result["scope"]["holdings_scope"] = "non_futu"
+        result["freshness"] = {
+            "status": "fresh", "trust_status": "trusted",
+            "observed_at_utc": "2026-07-26T00:00:00Z",
+            "dataset_ids": ["pm.holdings_feishu"], "reason_codes": [],
+        }
+        result["retrieved_at_utc"] = "2026-07-26T00:00:01Z"
+        result["quality_issues"] = [{"account": "alice", "broker": "IBKR", "code": "BANK", "reason_code": "INCLUDED_FX_MISSING"}]
+        return result
+
+    service.get_valuation_evidence = get_valuation_evidence
+    response = _client(create_app(service=service)).post(
+        "/api/v1/analysis/valuation-evidence",
+        json={"accounts": ["alice"], "holdings_scope": "non_futu"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["freshness"]["dataset_ids"] == ["pm.holdings_feishu"]
+    assert response.json()["freshness"]["trust_status"] == "trusted"
+    assert response.json()["quality_issues"][0]["reason_code"] == "INCLUDED_FX_MISSING"
+    assert service.calls == [("valuation_evidence", {
+        "accounts": ["alice"], "supplemental_codes": [], "price_timeout": 30,
+        "holdings_scope": "non_futu",
+    })]
+
+
 def test_openapi_contract_contains_only_real_om_v1_capabilities():
     schema = create_app(service=FakePortfolioService()).openapi()
     required = {

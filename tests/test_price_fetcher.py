@@ -421,3 +421,52 @@ def test_fx_retry_backoff_stops_at_deadline(tmp_path, monkeypatch):
 
     assert time.monotonic() - started < 0.1
     assert calls == ["USD"]
+
+
+def test_fx_scoped_evidence_tracks_provider_cache_and_stale_fallback(tmp_path, monkeypatch):
+    from datetime import timedelta
+
+    from src.pricing.fx import FxRateService
+    from src.time_utils import bj_now_naive
+
+    cache_file = tmp_path / "rates.json"
+    service = FxRateService(Mock(), cache_file=cache_file)
+
+    def provider(currency, *, deadline=None):
+        return 7.2 if currency == "USD" else 0.9
+
+    monkeypatch.setattr(service, "_fetch_from_open_er_api", provider)
+    rates, evidence = service.fetch_exchange_rates_with_evidence(max_retries=1)
+    assert rates == {"USDCNY": 7.2, "HKDCNY": 0.9}
+    assert evidence["sources"] == {"USDCNY": "provider", "HKDCNY": "provider"}
+    assert evidence["cache_status"] == "provider"
+    assert evidence["is_stale"] is False
+
+    from_file = FxRateService(Mock(), cache_file=cache_file)
+    cached_rates, cached_evidence = from_file.fetch_exchange_rates_with_evidence(max_retries=1)
+    assert cached_rates == rates
+    assert cached_evidence["sources"] == evidence["sources"]
+    assert cached_evidence["cache_status"] == "file"
+
+    import json
+    cache_file.write_text(json.dumps({
+        "rates": rates, "timestamp": bj_now_naive().isoformat(),
+    }), encoding="utf-8")
+    old_cache = FxRateService(Mock(), cache_file=cache_file)
+    monkeypatch.setattr(old_cache, "_fetch_from_open_er_api", provider)
+    _rates, refreshed_evidence = old_cache.fetch_exchange_rates_with_evidence(max_retries=1)
+    assert refreshed_evidence["cache_status"] == "provider"
+
+    from_file._rate_cache_time = bj_now_naive() - timedelta(days=2)
+    cache_file.unlink()
+
+    def offline(_currency, *, deadline=None):
+        raise RuntimeError("offline")
+
+    for name in ("_fetch_from_open_er_api", "_fetch_from_exchangerate_api",
+                 "_fetch_from_chinamoney", "_fetch_from_exchangerate_host"):
+        monkeypatch.setattr(from_file, name, offline)
+    stale_rates, stale_evidence = from_file.fetch_exchange_rates_with_evidence(max_retries=1)
+    assert stale_rates == rates
+    assert stale_evidence["cache_status"] == "stale_fallback"
+    assert stale_evidence["is_stale"] is True

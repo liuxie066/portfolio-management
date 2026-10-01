@@ -714,6 +714,15 @@
             "title": "Accounts",
             "type": "array"
           },
+          "holdings_scope": {
+            "default": "all",
+            "enum": [
+              "all",
+              "non_futu"
+            ],
+            "title": "Holdings Scope",
+            "type": "string"
+          },
           "price_timeout": {
             "default": 30,
             "maximum": 300.0,

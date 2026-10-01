@@ -11,6 +11,7 @@ from src.app.holdings_validation import (
     HoldingsEvidenceBundle,
     HoldingsValidator,
     canonical_record_payload,
+    holding_broker_scope,
 )
 from src.domain.holdings import (
     RawHoldingRecord,
@@ -53,6 +54,18 @@ def _futu_bundle(*positions):
             )
         }
     )
+
+
+@pytest.mark.parametrize(
+    ("broker", "expected"),
+    [("富途证券有限公司", "futu"), ("Futu Securities", "futu"),
+     ("moomoo", "futu"), ("Moomoo US", "futu"), ("IBKR", "non_futu"),
+     ("", "unknown"), ("unknown", "unknown"), ("manual", "unknown"), ("其他券商", "unknown"),
+     (None, "unknown"),
+     (["IBKR"], "unknown")],
+)
+def test_holding_broker_scope(broker, expected):
+    assert holding_broker_scope(broker) == expected
 
 
 def test_blank_us_currency_is_proposed_from_asset_type_never_defaulted():

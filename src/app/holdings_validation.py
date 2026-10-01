@@ -428,9 +428,27 @@ class HoldingsValidationReport:
         }
 
 
+def holding_broker_scope(value: Optional[str]) -> str:
+    if not isinstance(value, str):
+        return "unknown"
+    compact = (
+        value.strip().replace("（", "(").replace("）", ")")
+        .replace(" ", "").replace("\u3000", "").lower()
+    )
+    if (
+        not compact
+        or compact in {"n/a", "na", "none", "null"}
+        or compact.startswith(("unknown", "未知", "其他", "其它", "other", "manual", "手动", "未指定", "待确认"))
+        or not any(char.isalnum() for char in compact)
+    ):
+        return "unknown"
+    if compact.startswith(("moomoo", "富途", "futu")):
+        return "futu"
+    return "non_futu"
+
+
 def _is_futu_broker(value: Optional[str]) -> bool:
-    normalized = str(value or "").strip().lower()
-    return normalized in {"futu", "moomoo", "富途"}
+    return holding_broker_scope(value) == "futu"
 
 
 class HoldingsValidator:

@@ -3,9 +3,10 @@ from __future__ import annotations
 import logging
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional
+from zoneinfo import ZoneInfo
 
 from src import config
 from src.time_utils import bj_now_naive
@@ -25,6 +26,19 @@ class FxRateService:
         self.cache_file = cache_file or (config.get_data_dir() / "rate_cache.json")
         self._rate_cache: Dict[str, float] = {}
         self._rate_cache_time: Optional[datetime] = None
+        self._rate_cache_sources: Dict[str, str] = {}
+
+    @staticmethod
+    def _evidence(sources: Dict[str, str], moment: Optional[datetime], status: str) -> Dict:
+        observed = (
+            (moment.replace(tzinfo=ZoneInfo("Asia/Shanghai")) if moment.tzinfo is None else moment)
+            .astimezone(timezone.utc).isoformat()
+            if moment else None
+        )
+        return {
+            "sources": dict(sources), "observed_at_utc": observed,
+            "cache_status": status, "is_stale": status == "stale_fallback",
+        }
 
     @staticmethod
     def _validated_rates(rates) -> Optional[Dict[str, float]]:
@@ -46,12 +60,13 @@ class FxRateService:
                 return {
                     "rates": data.get("rates", {}),
                     "timestamp": data.get("timestamp"),
+                    "sources": data.get("sources", {}),
                 }
         except (json.JSONDecodeError, IOError) as e:
             logging.getLogger(__name__).warning(f"[警告] 加载汇率缓存文件失败: {e}")
         return None
 
-    def save_cache_to_file(self, rates: Dict[str, float]) -> None:
+    def save_cache_to_file(self, rates: Dict[str, float], sources: Optional[Dict[str, str]] = None) -> None:
         validated = self._validated_rates(rates)
         if validated is None:
             raise ValueError("cannot persist invalid FX rates")
@@ -62,6 +77,7 @@ class FxRateService:
                 "rates": validated,
                 "timestamp": now.isoformat(),
                 "cached_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+                "sources": sources or {},
             }
             with open(self.cache_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
@@ -69,34 +85,55 @@ class FxRateService:
             logging.getLogger(__name__).warning(f"[警告] 保存汇率缓存文件失败: {e}")
 
     def fetch_exchange_rates(self, max_retries: int = 3, *, deadline: float | None = None) -> Dict[str, float]:
+        rates, _evidence = self.fetch_exchange_rates_with_evidence(max_retries=max_retries, deadline=deadline, require_source=False)
+        return rates
+
+    def fetch_exchange_rates_with_evidence(self, max_retries: int = 3, *, deadline: float | None = None, require_source: bool = True) -> tuple[Dict[str, float], Dict]:
         now = bj_now_naive()
         memory_rates = self._validated_rates(self._rate_cache)
         if self._rate_cache_time and memory_rates is not None:
-            if (now - self._rate_cache_time).total_seconds() < 86400:
+            if (now - self._rate_cache_time).total_seconds() < 86400 and (
+                not require_source or all(
+                    isinstance(self._rate_cache_sources.get(key), str)
+                    and self._rate_cache_sources[key].strip()
+                    for key in _REQUIRED_RATES
+                )
+            ):
                 self._rate_cache = memory_rates
-                return dict(memory_rates)
+                return dict(memory_rates), self._evidence(self._rate_cache_sources, self._rate_cache_time, "memory")
         elif self._rate_cache_time:
             self._rate_cache_time = None
 
         file_cache = self.load_cache_from_file() if not self._rate_cache_time else None
         file_rates = self._validated_rates(file_cache.get("rates")) if file_cache else None
+        file_sources = file_cache.get("sources", {}) if file_cache else {}
+        if not isinstance(file_sources, dict):
+            file_sources = {}
         file_cache_time = None
         if file_cache and file_cache.get("timestamp"):
             try:
                 file_cache_time = datetime.fromisoformat(file_cache["timestamp"])
+                if file_cache_time.tzinfo is not None:
+                    file_cache_time = file_cache_time.astimezone(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
             except (ValueError, TypeError):
                 file_cache_time = None
         if file_rates is not None and file_cache_time is not None:
-            if (now - file_cache_time).total_seconds() < 86400:
+            if (now - file_cache_time).total_seconds() < 86400 and (
+                not require_source or all(
+                    isinstance(file_sources.get(key), str) and file_sources[key].strip()
+                    for key in _REQUIRED_RATES
+                )
+            ):
                 self._rate_cache = file_rates
                 self._rate_cache_time = file_cache_time
+                self._rate_cache_sources = file_sources
                 logging.getLogger(__name__).info(
                     f"[汇率] 从文件加载缓存: USD/CNY={file_rates['USDCNY']}, "
                     f"HKD/CNY={file_rates['HKDCNY']}"
                 )
-                return dict(file_rates)
+                return dict(file_rates), self._evidence(file_sources, file_cache_time, "file")
 
-        def fetch_single_rate(currency: str) -> float:
+        def fetch_single_rate(currency: str) -> tuple[float, str]:
             sources = (
                 self._fetch_from_open_er_api,
                 self._fetch_from_exchangerate_api,
@@ -108,7 +145,7 @@ class FxRateService:
                 for attempt in range(max_retries):
                     try:
                         rate = source(currency, deadline=deadline)
-                        return float(positive_finite_decimal(rate, f"{currency}CNY"))
+                        return float(positive_finite_decimal(rate, f"{currency}CNY")), source.__name__
                     except Exception as exc:
                         last_error = exc
                         if attempt < max_retries - 1:
@@ -116,21 +153,25 @@ class FxRateService:
             raise RuntimeError(f"all FX sources failed: {last_error}")
 
         try:
+            usd, usd_source = fetch_single_rate("USD")
+            hkd, hkd_source = fetch_single_rate("HKD")
             rates = {
-                "USDCNY": round(fetch_single_rate("USD"), 4),
-                "HKDCNY": round(fetch_single_rate("HKD"), 4),
+                "USDCNY": round(usd, 4),
+                "HKDCNY": round(hkd, 4),
             }
             validated = self._validated_rates(rates)
             if validated is None:
                 raise RuntimeError("FX providers returned invalid rates")
             self._rate_cache = validated
             self._rate_cache_time = now
-            self.save_cache_to_file(validated)
+            self._rate_cache_sources = {"USDCNY": usd_source, "HKDCNY": hkd_source}
+            self.save_cache_to_file(validated, self._rate_cache_sources)
             logging.getLogger(__name__).info(f"[汇率] 已更新缓存: USD/CNY={validated['USDCNY']}, HKD/CNY={validated['HKDCNY']}")
-            return dict(validated)
+            return dict(validated), self._evidence(self._rate_cache_sources, now, "provider")
         except Exception as exc:
             fallback_rates = memory_rates or file_rates
             fallback_time = self._rate_cache_time if memory_rates is not None else file_cache_time
+            fallback_sources = self._rate_cache_sources if memory_rates is not None else file_sources
             if fallback_rates is not None:
                 age_str = "未知"
                 if fallback_time is not None:
@@ -142,7 +183,8 @@ class FxRateService:
                 )
                 self._rate_cache = fallback_rates
                 self._rate_cache_time = fallback_time
-                return dict(fallback_rates)
+                self._rate_cache_sources = fallback_sources
+                return dict(fallback_rates), self._evidence(fallback_sources, fallback_time, "stale_fallback")
             self._rate_cache_time = None
             raise RuntimeError(f"获取汇率失败且没有可用缓存: {exc}") from exc
 
