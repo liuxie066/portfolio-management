@@ -21,9 +21,10 @@ _REQUIRED_RATES = ("USDCNY", "HKDCNY")
 class FxRateService:
     """Fetch USD/HKD to CNY rates with a 24-hour cache and stale fallback."""
 
-    def __init__(self, session, cache_file: Optional[Path] = None):
+    def __init__(self, session, cache_file: Optional[Path] = None, *, cache_writes: bool = True):
         self.session = session
         self.cache_file = cache_file or (config.get_data_dir() / "rate_cache.json")
+        self.cache_writes = cache_writes
         self._rate_cache: Dict[str, float] = {}
         self._rate_cache_time: Optional[datetime] = None
         self._rate_cache_sources: Dict[str, str] = {}
@@ -165,7 +166,8 @@ class FxRateService:
             self._rate_cache = validated
             self._rate_cache_time = now
             self._rate_cache_sources = {"USDCNY": usd_source, "HKDCNY": hkd_source}
-            self.save_cache_to_file(validated, self._rate_cache_sources)
+            if self.cache_writes:
+                self.save_cache_to_file(validated, self._rate_cache_sources)
             logging.getLogger(__name__).info(f"[汇率] 已更新缓存: USD/CNY={validated['USDCNY']}, HKD/CNY={validated['HKDCNY']}")
             return dict(validated), self._evidence(self._rate_cache_sources, now, "provider")
         except Exception as exc:

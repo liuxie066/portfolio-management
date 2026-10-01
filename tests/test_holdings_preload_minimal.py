@@ -120,7 +120,7 @@ def _cached_holding_fields(**overrides) -> Dict[str, Any]:
     return fields
 
 
-def test_persistent_index_migrates_legacy_key_and_values_to_canonical_form():
+def test_persistent_index_loads_legacy_key_without_writing_until_fresh_preload():
     local_cache = StubLocalHoldingsIndexCache({
         " AAPL : lx : IBKR ": _cached_holding_fields(
             asset_id=" AAPL ",
@@ -130,11 +130,19 @@ def test_persistent_index_migrates_legacy_key_and_values_to_canonical_form():
         )
     })
     storage = FeishuStorage(
-        client=StubHoldingsClient(),
+        client=StubHoldingsClient(initial_records=[{
+            "record_id": "rec_cached",
+            "fields": _cached_holding_fields(),
+        }]),
         local_holdings_index_cache=local_cache,
     )
 
     canonical_key = storage._get_holding_cache_key("AAPL", "lx", "IBKR")
+    assert set(local_cache.items) == {" AAPL : lx : IBKR "}
+    assert local_cache.flush_calls == 0
+    assert storage._holding_fields_cache[canonical_key]["currency"] == "USD"
+
+    storage.preload_holdings_index(account="lx")
     assert set(local_cache.items) == {canonical_key}
     assert local_cache.items[canonical_key]["asset_id"] == "AAPL"
     assert local_cache.items[canonical_key]["account"] == "lx"

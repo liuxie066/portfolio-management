@@ -341,6 +341,24 @@ class TestPriceFetcher:
         fetcher._fetch_realtime.assert_not_called()
 
 
+def test_price_fetcher_read_only_mode_reads_cache_without_persisting_new_quote():
+    storage = Mock()
+    storage.get_price.return_value = PriceCache(
+        asset_id="000001", asset_name="cached", asset_type=AssetType.A_STOCK,
+        price=10.5, cny_price=10.5, currency="CNY", data_source="cache",
+        expires_at=datetime.now() + timedelta(minutes=5),
+    )
+    fetcher = PriceFetcher(storage=storage, cache_writes=False)
+    fetcher._fetch_realtime = Mock(return_value={"price": 11, "currency": "CNY", "source": "test"})
+
+    assert fetcher.fetch("000001")["price"] == 10.5
+    assert fetcher.fetch("000001", force_refresh=True)["price"] == 11
+    storage.get_price.return_value = None
+    with patch("src.pricing.batch.fetch_tencent_quotes_batch", return_value=({}, ["000001"])):
+        assert fetcher.fetch_batch(["000001"], asset_type_map={"000001": AssetType.A_STOCK})["000001"]["price"] == 11
+    storage.save_price.assert_not_called()
+
+
 def test_us_market_uses_new_york_local_weekday_across_beijing_date_boundary():
     beijing = ZoneInfo("Asia/Shanghai")
 
@@ -421,6 +439,24 @@ def test_fx_retry_backoff_stops_at_deadline(tmp_path, monkeypatch):
 
     assert time.monotonic() - started < 0.1
     assert calls == ["USD"]
+
+
+def test_fx_read_only_fetch_keeps_provider_evidence_without_file_write(tmp_path, monkeypatch):
+    from src.pricing.fx import FxRateService
+
+    cache_file = tmp_path / "rates.json"
+    service = FxRateService(Mock(), cache_file=cache_file, cache_writes=False)
+    monkeypatch.setattr(
+        service,
+        "_fetch_from_open_er_api",
+        lambda currency, *, deadline=None: 7.2 if currency == "USD" else 0.9,
+    )
+
+    rates, evidence = service.fetch_exchange_rates_with_evidence(max_retries=1)
+
+    assert rates == {"USDCNY": 7.2, "HKDCNY": 0.9}
+    assert evidence["cache_status"] == "provider"
+    assert not cache_file.exists()
 
 
 def test_fx_scoped_evidence_tracks_provider_cache_and_stale_fallback(tmp_path, monkeypatch):

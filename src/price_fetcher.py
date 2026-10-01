@@ -81,7 +81,7 @@ class PriceFetcher:
         """
         return normalize_price_payload(payload)
 
-    def __init__(self, storage=None, use_cache: bool = True):
+    def __init__(self, storage=None, use_cache: bool = True, *, cache_writes: bool = True):
         """
         Args:
             storage: FeishuStorage 实例（可选，用于价格缓存）
@@ -93,7 +93,8 @@ class PriceFetcher:
         })
         self.storage = storage
         self.use_cache = use_cache and storage is not None
-        self.fx_service = FxRateService(self.session)
+        self.cache_writes = cache_writes
+        self.fx_service = FxRateService(self.session, cache_writes=cache_writes)
         # last-batch meta for observability
         self._last_tencent_batch_meta = None
         self.price_service = PriceService.for_price_fetcher(self)

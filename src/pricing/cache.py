@@ -79,9 +79,10 @@ def price_cache_to_payload(cached: PriceCache, *, is_stale: bool | None = None) 
 class PriceCachePolicy:
     """Own cache lookup, stale fallback, and cache writes for quote payloads."""
 
-    def __init__(self, storage: Any = None, *, enabled: bool = False):
+    def __init__(self, storage: Any = None, *, enabled: bool = False, writable: bool = True):
         self.storage = storage
         self.enabled = bool(enabled and storage is not None)
+        self.writable = writable
 
     def get(
         self,
@@ -107,7 +108,7 @@ class PriceCachePolicy:
         storage_window = STALE_RETRIEVAL_WINDOW_SEC if semantic_stale else max_stale_after_expiry_sec
         cached = self.storage.get_price(
             code,
-            allow_expired=accept_stale,
+            allow_expired=accept_stale or not self.writable,
             max_stale_after_expiry_sec=storage_window,
         )
         if not cached:
@@ -153,7 +154,7 @@ class PriceCachePolicy:
         asset_type: Any = None,
         market_closed_ttl_multiplier: float = 1.0,
     ) -> Optional[str]:
-        if not self.enabled:
+        if not self.enabled or not self.writable:
             return None
 
         payload = quote.to_payload()

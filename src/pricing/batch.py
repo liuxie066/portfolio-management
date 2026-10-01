@@ -64,7 +64,11 @@ class BatchPricePlanner:
         results: Dict[str, Dict] = {}
         stale_cache: Dict[str, Dict] = {}
         to_fetch: List[str] = []
-        cache_policy = PriceCachePolicy(self.fetcher.storage, enabled=bool(self.fetcher.use_cache))
+        cache_policy = PriceCachePolicy(
+            self.fetcher.storage,
+            enabled=bool(self.fetcher.use_cache),
+            writable=bool(getattr(self.fetcher, "cache_writes", True)),
+        )
 
         for canonical, originals in original_by_canonical.items():
             primary = primary_by_canonical[canonical]

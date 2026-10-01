@@ -91,6 +91,9 @@ class HoldingsMixin:
     ) -> List[RawHoldingRecord]:
         return self.holdings.get_raw_holdings(account=account, record_id=record_id)
 
+    def _convert_raw_holdings(self, records: List[RawHoldingRecord]) -> List[Holding]:
+        return self.holdings._convert_raw_holdings(records)
+
     def patch_holding_record(
         self,
         patch: HoldingRepairPatch,
