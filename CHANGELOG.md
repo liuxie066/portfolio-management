@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.3 - 2026-10-01
+
+- Add a non-Futu Holdings valuation scope for options-monitor assignment scenarios,
+  with a complete broker inventory and source provenance; keep the existing
+  all-holdings scope as the default.
+- Validate included asset quotes and FX provenance, marking incomplete evidence
+  partial instead of accepting stale fallback valuations.
+
 ## 0.2.2 - 2026-09-29
 
 - Restore routine daily NAV recording when target-period evidence is unavailable,
