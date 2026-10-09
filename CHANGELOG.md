@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.4 - 2026-10-09
+
+- Restore non-Futu Holdings valuation through the storage conversion facade.
+- Keep scoped valuation reads free of price, FX, and holdings cache writes.
+
 ## 0.2.3 - 2026-10-01
 
 - Add a non-Futu Holdings valuation scope for options-monitor assignment scenarios,
