@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.5 - 2026-10-14
+
+- Distinguish Cash Flow and Holdings cash-change receipts and avoid pending-action warnings for already processed observations.
+- Complete empty domestic fund names from exact-code evidence on Holdings events, preserving user-entered names and preventing repeated uncertain writes.
+- Include manual table-edit instructions in Holdings repair receipts.
+
 ## 0.2.4 - 2026-10-09
 
 - Restore non-Futu Holdings valuation through the storage conversion facade.
