@@ -102,13 +102,13 @@ class HoldingsWorkflowService:
         payload.update({"read_only": False, "workflow": workflow})
         return payload
 
-    def plan_event_notification(
+    def process_event_notification(
         self,
         *,
         record_id: str,
         trigger: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Fresh-read one record and build a transaction-ready event outcome."""
+        """Complete an eligible empty fund name, then plan durable notifications."""
 
         resolved_record_id = str(record_id or "").strip()
         if not resolved_record_id:
@@ -139,7 +139,25 @@ class HoldingsWorkflowService:
                 "record_status": "stale_record_missing",
             }
         validation = self._single_validation(evaluation, resolved_record_id)
-        cases = self._cases_for_record(validation, evaluation)
+        uncertain = self._uncertain_name_cases(resolved_record_id)
+        if not uncertain and self.reconciliation.is_fund_name_candidate(validation.raw.raw_fields):
+            evaluation = self._complete_event_fund_name(
+                evaluation=evaluation, trigger=trigger,
+            )
+            if not evaluation.report.records:
+                return {
+                    "record_id": resolved_record_id, "cases": [], "discovery_receipts": [],
+                    "active_case_keys": [], "record_digest": "", "current_identity": {},
+                    "prove_external": False, "trigger": dict(trigger),
+                    "validation": self.reconciliation.reconcile_payload(evaluation),
+                    "record_status": "stale_record_missing",
+                }
+            validation = self._single_validation(evaluation, resolved_record_id)
+            uncertain = self._uncertain_name_cases(resolved_record_id)
+        cases = [
+            case for case in self._cases_for_record(validation, evaluation)
+            if not (uncertain and case["field"] == "asset_name")
+        ]
         account = str(validation.raw.raw_fields.get("account") or "").strip()
         evidence_complete = not evaluation.report.evidence_errors or (
             account not in evaluation.report.evidence_errors
@@ -150,7 +168,7 @@ class HoldingsWorkflowService:
             "discovery_receipts": [
                 self._discovery_receipt(item, trigger=trigger) for item in cases
             ],
-            "active_case_keys": [item["case_key"] for item in cases],
+            "active_case_keys": [item["case_key"] for item in cases + uncertain],
             "record_digest": validation.record_digest,
             "current_identity": self._raw_identity(validation.raw.raw_fields),
             "prove_external": evidence_complete,
@@ -158,6 +176,59 @@ class HoldingsWorkflowService:
             "validation": self.reconciliation.reconcile_payload(evaluation),
             "record_status": "validated",
         }
+
+    def _uncertain_name_cases(self, record_id: str) -> list[Dict[str, Any]]:
+        return [
+            case for case in self.store.list_holding_cases(record_id=record_id, limit=None)
+            if case["field"] == "asset_name"
+            and case["state"] in {"applying", "apply_outcome_unknown"}
+        ]
+
+    def _complete_event_fund_name(
+        self, *, evaluation: HoldingsReconciliationEvaluation, trigger: Dict[str, Any],
+    ) -> HoldingsReconciliationEvaluation:
+        initial = evaluation.report.records[0].raw
+        account = initial.raw_fields["account"].strip()
+        with self._locked(account, initial.record_id):
+            if self._uncertain_name_cases(initial.record_id):
+                return evaluation
+            fresh = self.reconciliation.evaluate(record_id=initial.record_id, include_fund_name=True)
+            if not fresh.report.records or fresh.report.evidence_errors:
+                return fresh
+            validation = self._single_validation(fresh, initial.record_id)
+            if (
+                self._raw_identity(validation.raw.raw_fields) != self._raw_identity(initial.raw_fields)
+                or not self.reconciliation.is_fund_name_candidate(validation.raw.raw_fields)
+            ):
+                return fresh
+            cases = self._cases_for_record(validation, fresh)
+            targets = [
+                case for case in cases if case["field"] == "asset_name"
+                and case["kind"] == "missing_completable" and case["authority"] == "fund_quote"
+            ]
+            if not targets:
+                return fresh
+            self.store.materialize_holding_cases(
+                cases=targets,
+                discovery_receipts=[self._discovery_receipt(case) for case in targets],
+                trigger={**trigger, "mode": "event_fund_name_completion"},
+                enqueue_receipts=False,
+            )
+            self._execute_patch(
+                validation=validation,
+                cases=targets,
+                field_targets={"asset_name": targets[0]["proposed"]},
+                allowed_states=("pending_apply", "failed_retryable"),
+                decision="accept-proposed",
+                reason="automatic empty fund-name completion",
+                confirmed_operator={
+                    "method": "automatic_policy", "policy": "empty_fund_name.v1",
+                    "event_id": trigger.get("event_id"), "trusted_identity": False,
+                },
+                observed_cases=cases,
+                discovery_receipts=[self._discovery_receipt(case) for case in cases],
+            )
+            return self.reconciliation.evaluate(record_id=initial.record_id)
 
     def plan_evaluation(
         self,
@@ -702,6 +773,10 @@ class HoldingsWorkflowService:
                 state = "superseded"
             resolution = {
                 "decision": "recover",
+                "apply_operator_context": (
+                    (case.get("resolution") or {}).get("apply_operator_context")
+                    or (case.get("resolution") or {}).get("operator_context")
+                ),
                 "already_applied": state == "resolved_accept",
                 "observed": observed,
                 "readback_digest": readback_digest,
@@ -788,7 +863,11 @@ class HoldingsWorkflowService:
                 apply_cases=prepared,
                 apply_attempt_id=attempt_id,
                 operator_context=confirmed_operator,
-                trigger={"mode": "manual_apply", "operator": confirmed_operator},
+                trigger={
+                    "mode": "event_fund_name_completion"
+                    if confirmed_operator.get("method") == "automatic_policy" else "manual_apply",
+                    "operator": confirmed_operator,
+                },
             )
         else:
             self.store.prepare_holding_apply(

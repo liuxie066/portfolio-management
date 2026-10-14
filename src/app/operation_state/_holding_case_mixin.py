@@ -210,6 +210,16 @@ class HoldingCaseMixin:
                 """.format(",".join("?" for _ in _SUPERSEDEABLE_HOLDING_CASE_STATES)),
                 (record_id, field, case_key, *_SUPERSEDEABLE_HOLDING_CASE_STATES),
             ).fetchall()
+            # Observation cannot release an automatic write whose result is still unknown.
+            if any(
+                old["state"] in {"applying", "apply_outcome_unknown"}
+                and (
+                    json.loads(old["resolution_json"] or "{}").get("apply_operator_context")
+                    or json.loads(old["resolution_json"] or "{}").get("operator_context", {})
+                ).get("method") == "automatic_policy"
+                for old in old_rows
+            ):
+                continue
             for old in old_rows:
                 resolution = {
                     "reason": "semantic_case_changed",
@@ -535,7 +545,8 @@ class HoldingCaseMixin:
         *,
         account: Optional[str] = None,
         state: Optional[str] = None,
-        limit: int = 500,
+        record_id: Optional[str] = None,
+        limit: Optional[int] = 500,
     ) -> list[Dict[str, Any]]:
         query = "SELECT * FROM holding_reconciliation_cases WHERE 1 = 1"
         params: list[Any] = []
@@ -545,8 +556,13 @@ class HoldingCaseMixin:
         if state is not None:
             query += " AND state = ?"
             params.append(state)
-        query += " ORDER BY created_at DESC, case_key LIMIT ?"
-        params.append(int(limit))
+        if record_id is not None:
+            query += " AND record_id = ?"
+            params.append(record_id)
+        query += " ORDER BY created_at DESC, case_key"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(int(limit))
         with self._connect() as conn:
             rows = conn.execute(query, params).fetchall()
         return [self._decode_case_row(row) for row in rows]

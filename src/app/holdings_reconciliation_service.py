@@ -5,12 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
+from .asset_name_service import AssetNameService
+
 from .holdings_validation import (
     FutuAccountEvidence,
     FutuPositionEvidence,
     HoldingsEvidenceBundle,
     HoldingsValidationReport,
     HoldingsValidator,
+    holding_broker_scope,
 )
 
 
@@ -31,10 +34,12 @@ class HoldingsReconciliationService:
         storage: Any,
         validator: Optional[HoldingsValidator] = None,
         futu_observer: Optional[Callable[[str], Any]] = None,
+        fund_name_lookup: Optional[Callable[[str], Any]] = None,
     ) -> None:
         self.storage = storage
         self.validator = validator or HoldingsValidator()
         self.futu_observer = futu_observer or self._observe_futu
+        self.fund_name_lookup = fund_name_lookup or AssetNameService.lookup_fund_name
 
     def reconcile(
         self,
@@ -67,6 +72,7 @@ class HoldingsReconciliationService:
         *,
         account: Optional[str] = None,
         record_id: Optional[str] = None,
+        include_fund_name: bool = False,
     ) -> HoldingsReconciliationEvaluation:
         if account and record_id:
             raise ValueError("account and record_id are mutually exclusive")
@@ -75,6 +81,7 @@ class HoldingsReconciliationService:
             records,
             account=account,
             record_id=record_id,
+            include_fund_name=include_fund_name,
         )
 
     def evaluate_records(
@@ -83,6 +90,7 @@ class HoldingsReconciliationService:
         *,
         account: Optional[str] = None,
         record_id: Optional[str] = None,
+        include_fund_name: bool = False,
     ) -> HoldingsReconciliationEvaluation:
         """Validate an already frozen complete source slice."""
 
@@ -106,11 +114,31 @@ class HoldingsReconciliationService:
             except Exception as exc:
                 evidence_errors[target_account] = str(exc)
 
+        fund_names = {}
+        if include_fund_name and record_id and len(records) == 1:
+            raw = records[0]
+            if raw.record_id == record_id and self.is_fund_name_candidate(raw.raw_fields):
+                code = raw.raw_fields["asset_id"].strip()
+                try:
+                    name = self.fund_name_lookup(code)
+                except Exception:
+                    name = None
+                if (
+                    isinstance(name, dict)
+                    and name.get("code") == code
+                    and name.get("source") == "tencent_jj"
+                    and isinstance(name.get("name"), str)
+                    and name["name"].strip()
+                    and name["name"].strip() != code
+                    and name.get("source_as_of")
+                ):
+                    fund_names[code] = {**name, "name": name["name"].strip()}
         report = self.validator.validate(
             records,
             evidence=HoldingsEvidenceBundle(
                 futu_by_account=evidence_by_account,
                 source_errors=evidence_errors,
+                fund_names=fund_names,
             ),
         )
         return HoldingsReconciliationEvaluation(
@@ -118,6 +146,20 @@ class HoldingsReconciliationService:
             account=account,
             record_id=record_id,
             evidence_by_account=evidence_by_account,
+        )
+
+    @staticmethod
+    def is_fund_name_candidate(fields: Any) -> bool:
+        code = fields.get("asset_id")
+        name = fields.get("asset_name")
+        return (
+            isinstance(code, str) and code.strip().isascii()
+            and code.strip().isdigit() and len(code.strip()) == 6
+            and (name is None or isinstance(name, str) and not name.strip())
+            and isinstance(fields.get("asset_type"), str)
+            and fields["asset_type"] in {"cn_fund", "otc_fund"}
+            and isinstance(fields.get("account"), str) and bool(fields["account"].strip())
+            and holding_broker_scope(fields.get("broker")) == "non_futu"
         )
 
     def _observe_futu(self, account: str) -> Any:

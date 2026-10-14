@@ -1,4 +1,5 @@
 import time
+import pytest
 from unittest.mock import Mock
 
 from src.app.asset_name_service import AssetNameService
@@ -54,3 +55,46 @@ def test_portfolio_get_asset_name_delegates_to_service():
         user_provided_name="平安",
         timeout=1.0,
     )
+
+
+def test_fund_name_lookup_reuses_exact_tencent_parser_and_closes_session(monkeypatch):
+    from types import SimpleNamespace
+
+    calls = []
+    response = SimpleNamespace(text='v_jj011609="1~测试基金~011609~0~0~1.234~0~0~2026-10-14";', encoding=None)
+    def get(self, url, **kwargs):
+        calls.append((url, kwargs))
+        return response
+    import requests
+    monkeypatch.setattr(requests.Session, "get", get)
+    closed = []
+    monkeypatch.setattr(requests.Session, "close", lambda self: closed.append(True))
+    result = AssetNameService.lookup_fund_name("011609")
+    assert result["name"] == "测试基金"
+    assert result["code"] == "011609"
+    assert result["source"] == "tencent_jj"
+    assert result["source_as_of"]
+    assert calls[0][0] == "https://qt.gtimg.cn/q=jj011609"
+    assert 0 < calls[0][1]["timeout"] <= 5
+    assert closed == [True]
+
+
+@pytest.mark.parametrize("updates", [
+    {"code": "011610"}, {"source": "eastmoney"}, {"name": "011609"},
+    {"name": " "}, {"is_stale": True}, {"is_from_cache": True},
+])
+def test_fund_name_lookup_rejects_unproven_payload(monkeypatch, updates):
+    from src.price_fetcher import PriceFetcher
+    monkeypatch.setattr(PriceFetcher, "fetch", lambda *args, **kwargs: {
+        "code": "011609", "source": "tencent_jj", "name": "测试基金", **updates,
+    })
+    assert AssetNameService.lookup_fund_name("011609") is None
+
+
+def test_fund_name_lookup_rejects_foreign_tencent_response(monkeypatch):
+    import requests
+    from types import SimpleNamespace
+    monkeypatch.setattr(requests.Session, "get", lambda *args, **kwargs: SimpleNamespace(
+        text='v_jj011610="1~其他基金~011610~0~0~1.234~0~0~2026-10-14";', encoding=None,
+    ))
+    assert AssetNameService.lookup_fund_name("011609") is None

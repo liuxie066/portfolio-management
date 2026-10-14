@@ -165,10 +165,40 @@ class CashFlowEffectReceiptService:
         payload = dict(row.get("payload") or {})
         effect_id = payload.get("effect_id") or row.get("effect_id")
         if receipt_type == "discovery":
+            kinds = set(payload.get("effect_kinds") or ())
+            pending = payload.get("pending_count")
+            discovery_type = (
+                "Holdings 现金变动"
+                if kinds == {"cash_holding_external_change"}
+                else "Cash Flow / Holdings 发现"
+                if "cash_holding_external_change" in kinds
+                else "Cash Flow 发现"
+            )
+            status = (
+                "✅ 已处理，无需操作" if pending == 0
+                else "⚠️ 待逐条处理" if pending is not None
+                else "ℹ️ 发现变化，处理状态请查询"
+            )
+            details = []
+            for item in (payload.get("effects") or [])[:10]:
+                amount = str(item.get("signed_amount"))
+                if item.get("effect_kind") == "cash_holding_external_change":
+                    before = item.get("last_confirmed_amount")
+                    amount = f"余额 {before if before is not None else '未建立基线'} → {item.get('observed_amount')}"
+                origin = (
+                    "现金持仓" if item.get("effect_kind") == "cash_holding_external_change"
+                    else "现金流" if item.get("effect_kind") == "cash_flow"
+                    else "来源未记录"
+                )
+                details.append(
+                    f"{item.get('effect_id')} · {origin} · {item.get('account')} · "
+                    f"{item.get('flow_date')} · {item.get('broker')} · "
+                    f"{item.get('currency')} {amount} · {item.get('state')}"
+                )
             return render_receipt(
                 title=str(payload.get("scope") or "all"),
-                receipt_type="Cash Flow 发现",
-                status="⚠️ 待逐条处理",
+                receipt_type=discovery_type,
+                status=status,
                 fields=[
                     (
                         "扫描",
@@ -181,20 +211,12 @@ class CashFlowEffectReceiptService:
                         f"删除 {payload.get('deleted', 0)}，"
                         f"阻断 {payload.get('blocked', 0)}",
                     ),
-                    ("处理", "pm cash-flow review"),
+                    ("处理", "无需操作" if pending == 0 else "pm cash-flow review"),
                 ],
                 sections=[
                     (
                         "变化明细",
-                        [
-                            (
-                                f"{item.get('effect_id')} · {item.get('account')} · "
-                                f"{item.get('flow_date')} · {item.get('broker')} · "
-                                f"{item.get('currency')} {item.get('signed_amount')} · "
-                                f"{item.get('state')}"
-                            )
-                            for item in (payload.get("effects") or [])[:10]
-                        ],
+                        details,
                     )
                 ],
             )

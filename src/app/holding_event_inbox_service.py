@@ -127,7 +127,7 @@ class HoldingEventInboxService:
                 "actions": sorted(actions_by_record[record_id]),
                 "revision": event.get("revision"),
             }
-            planned = self.workflow.plan_event_notification(
+            planned = self.workflow.process_event_notification(
                 record_id=record_id,
                 trigger=trigger,
             )

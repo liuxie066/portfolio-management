@@ -164,6 +164,13 @@ Cash Flow 主要入口是飞书多维表手工录入。系统只接受带 broker
 Holdings 变化仍由人工维护，scanner 将当前值视为权威 baseline；Futu
 仍以 OpenD 绝对现金观测为准。
 
+发现回执区分 Cash Flow 与 Holdings 现金变动；已自动接受的现金基线显示
+“已处理，无需操作”，真实待处理项仍提示 review。Holdings 事件监听可为明确
+标记为境内基金、具有六位代码的非富途记录补齐空名称，仅接受代码匹配的腾讯
+基金名称证据。已有名称保留，查询失败转人工修复，其他字段仍需确认；普通
+NAV/校验读取不触发补全。激活与验证见
+[`docs/holdings-event-listener-runbook.md`](docs/holdings-event-listener-runbook.md)。
+
 确认 hash 绑定当前 Feishu fact、fresh holding 和全部目标；任一变化都要求重新
 预览确认。正式 NAV 同时要求 generated FX fields 与 holding effects 完成。
 完整操作和激活步骤见 `docs/cash-flow-effects-runbook.md`。

@@ -1565,3 +1565,52 @@ def test_futu_profile_fingerprint_change_invalidates_preview(
         )
 
     assert storage.replacements == []
+
+
+def test_cash_holding_discovery_does_not_request_processing_of_accepted_baseline(tmp_path, monkeypatch):
+    storage = FakeStorage(holdings=[_cash(100, account="hb", broker="支付宝")])
+    service = _service(tmp_path, monkeypatch, storage)
+    service.initialize_fingerprints()
+    storage.holdings[("CNY-CASH", "hb", "支付宝")].quantity = 130
+
+    scan = service.scan(enqueue_receipts=True)
+    receipt = service.store.list_pending_receipts()[0]
+    message = CashFlowEffectReceiptService.build_message(receipt)
+
+    assert scan["changed"] == 1
+    assert receipt["payload"]["pending_count"] == 0
+    assert "类型｜Holdings 现金变动" in message
+    assert "已处理，无需操作" in message
+    assert "CNY 余额 100.00 → 130.00" in message
+    assert "pm cash-flow review" not in message
+    assert service.scan(enqueue_receipts=True)["changed"] == 0
+
+
+def test_discovery_counts_pending_effects_beyond_display_limit(tmp_path, monkeypatch):
+    holdings = [_cash(100, broker=f"manual-{i}") for i in range(11)]
+    holdings.append(_cash(100, broker="富途"))
+    storage = FakeStorage(holdings=holdings)
+    service = _service(tmp_path, monkeypatch, storage)
+    service.initialize_fingerprints()
+    for holding in storage.holdings.values():
+        holding.quantity = 130
+
+    service.scan(enqueue_receipts=True)
+    receipt = service.store.list_pending_receipts()[0]
+    assert len(receipt["payload"]["effects"]) == 10
+    assert all(item["state"] == "record_only" for item in receipt["payload"]["effects"])
+    assert receipt["payload"]["pending_count"] == 1
+    assert "待逐条处理" in CashFlowEffectReceiptService.build_message(receipt)
+
+
+def test_cash_flow_and_holding_discovery_exposes_both_origins(tmp_path, monkeypatch):
+    storage = FakeStorage(flows=[_flow()], holdings=[_cash(100, broker="支付宝")])
+    service = _service(tmp_path, monkeypatch, storage)
+    service.scan(enqueue_receipts=True)
+    receipt = service.store.list_pending_receipts()[0]
+    assert receipt["payload"]["pending_count"] == 1
+    message = CashFlowEffectReceiptService.build_message(receipt)
+    assert "Cash Flow / Holdings 发现" in message
+    assert " · 现金流 · " in message
+    assert " · 现金持仓 · " in message
+    assert "待逐条处理" in message

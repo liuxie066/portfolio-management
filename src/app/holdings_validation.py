@@ -184,6 +184,7 @@ class FutuAccountEvidence:
 class HoldingsEvidenceBundle:
     futu_by_account: Mapping[str, FutuAccountEvidence] = field(default_factory=dict)
     source_errors: Mapping[str, str] = field(default_factory=dict)
+    fund_names: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
     def futu_position(
         self,
@@ -490,7 +491,10 @@ class HoldingsValidator:
         type_outcome, effective_type = self._asset_type(fields.get("asset_type"), asset_id, position, futu_evidence)
         outcomes.append(type_outcome)
         outcomes.append(
-            self._asset_name(fields.get("asset_name"), position, futu_evidence)
+            self._asset_name(
+                fields.get("asset_name"), position, futu_evidence,
+                fund_name=evidence.fund_names.get(asset_id or ""),
+            )
         )
         outcomes.append(
             self._currency(
@@ -693,6 +697,8 @@ class HoldingsValidator:
         raw_value: Any,
         position: Optional[FutuPositionEvidence],
         futu_evidence: Optional[FutuAccountEvidence],
+        *,
+        fund_name: Optional[Mapping[str, Any]] = None,
     ) -> FieldOutcome:
         current = _text(raw_value)
         proposed = _text(position.asset_name) if position is not None else None
@@ -718,6 +724,18 @@ class HoldingsValidator:
                 reason_code="ASSET_NAME_COMPLETION_AVAILABLE",
                 blocks_official_nav=True,
                 evidence=evidence_payload,
+            )
+        if current is None and fund_name:
+            return FieldOutcome(
+                field="asset_name",
+                status="missing_completable",
+                current=raw_value,
+                proposed=fund_name["name"],
+                authority="fund_quote",
+                authority_id=f"{fund_name['source']}:{fund_name['code']}:name",
+                reason_code="ASSET_NAME_COMPLETION_AVAILABLE",
+                blocks_official_nav=True,
+                evidence=fund_name,
             )
         if current is None:
             return FieldOutcome(
