@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.6 - 2026-10-14
+
+- Keep Cash Flow scans independent of incomplete non-cash Holdings while preserving strict cash and NAV validation.
+- Dispatch failed scan receipts immediately, retry them through the receipt timer, and show their original occurrence time and current recovery status.
+- Serialize Cash Flow receipt delivery for the same database on one host, including callers with different data directories.
+
 ## 0.2.5 - 2026-10-14
 
 - Distinguish Cash Flow and Holdings cash-change receipts and avoid pending-action warnings for already processed observations.
