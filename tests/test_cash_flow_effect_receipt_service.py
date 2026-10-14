@@ -218,3 +218,165 @@ def test_legacy_discovery_does_not_invent_pending_state_or_origin():
     assert "处理状态请查询" in message
     assert "来源未记录" in message
     assert "pm cash-flow review" in message
+
+
+@pytest.mark.parametrize("receipt_type", ["runtime_error", "runtime_recovered"])
+@pytest.mark.parametrize("latest_scope, latest_status", [("hb", "completed"), ("hb", "failed"), ("lx", "completed")])
+def test_delayed_runtime_receipts_show_occurrence_and_current_same_scope_state(
+    tmp_path, monkeypatch, receipt_type, latest_scope, latest_status,
+):
+    from src import config
+
+    monkeypatch.setattr(config, "get_data_dir", lambda: tmp_path)
+    store = CashFlowEffectStore.initialize(db_path=tmp_path / "effects.sqlite3", cutover_date="2026-10-01")
+    original_id = store.begin_scan(scope="hb")
+    original = store.finish_scan(original_id, status="failed" if receipt_type == "runtime_error" else "completed")
+    payload = {"scope": "hb", "scan_run_id": original_id, "error": "original failure",
+               "occurred_at": original["completed_at"]}
+    store.enqueue_receipt(receipt_key="runtime", receipt_type=receipt_type, payload=payload, scan_run_id=original_id)
+    latest_id = store.begin_scan(scope=latest_scope)
+    latest = store.finish_scan(latest_id, status=latest_status)
+    calls = []
+    service = CashFlowEffectReceiptService(store=store, app_id="app", app_secret="secret", open_id="user",
+                                          client_factory=lambda **kwargs: FakeClient(**kwargs, calls=calls))
+    assert service.dispatch_pending()["sent"] == 1
+    message = calls[-1][-1]
+    assert original["completed_at"] in message
+    assert "发生时间（北京时间）" in message
+    if latest_scope == "hb" and latest_status == "completed":
+        assert "当前状态｜已恢复" in message
+        assert latest["completed_at"] in message and latest_id in message
+        if receipt_type == "runtime_error":
+            assert "历史异常，当前已恢复" in message
+    elif latest_scope == "hb":
+        assert "当前状态｜运行异常" in message
+        assert "恢复时间（北京时间）" not in message
+        if receipt_type == "runtime_recovered":
+            assert "历史恢复，当前再次异常" in message
+    elif receipt_type == "runtime_error":
+        assert "当前状态｜运行异常" in message
+        assert latest_id not in message
+    # Delivery context is derived, not written back over the original incident.
+    with store._connect() as conn:
+        import json
+        stored = conn.execute("SELECT payload_json FROM cash_flow_effect_receipts WHERE receipt_key = 'runtime'").fetchone()
+        assert json.loads(stored[0]) == payload
+
+
+@pytest.mark.parametrize("receipt_type", ["runtime_error", "runtime_recovered"])
+def test_legacy_runtime_receipt_uses_original_queue_time(tmp_path, monkeypatch, receipt_type):
+    from src import config
+
+    monkeypatch.setattr(config, "get_data_dir", lambda: tmp_path)
+    store = CashFlowEffectStore.initialize(db_path=tmp_path / "effects.sqlite3", cutover_date="2026-10-01")
+    original_id = store.begin_scan(scope="hb")
+    store.finish_scan(original_id, status="failed" if receipt_type == "runtime_error" else "completed")
+    store.enqueue_receipt(receipt_key="old", receipt_type=receipt_type, scan_run_id=original_id,
+                          payload={"scope": "hb", "error": "old error", "scan_run_id": original_id})
+    created_at = store.list_pending_receipts()[0]["created_at"]
+    if receipt_type == "runtime_error":
+        latest = store.begin_scan(scope="hb")
+        store.finish_scan(latest, status="completed")
+    calls = []
+    service = CashFlowEffectReceiptService(store=store, app_id="app", app_secret="secret", open_id="user",
+                                          client_factory=lambda **kwargs: FakeClient(**kwargs, calls=calls))
+    assert service.dispatch_pending()["sent"] == 1
+    assert created_at in calls[-1][-1]
+    assert "当前状态｜已恢复" in calls[-1][-1]
+    if receipt_type == "runtime_error":
+        assert "历史异常，当前已恢复" in calls[-1][-1]
+
+
+def test_cash_receipt_concurrent_drains_send_once(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from src import config
+
+    monkeypatch.setattr(config, "get_data_dir", lambda: tmp_path)
+    path = tmp_path / "effects.sqlite3"
+    store = CashFlowEffectStore.initialize(db_path=path, cutover_date="2026-10-01")
+    store.enqueue_receipt(receipt_key="error", receipt_type="runtime_error", payload={"scope": "hb", "error": "error"})
+    sending, second_started, release = Event(), Event(), Event()
+    calls = []
+
+    class BlockingClient(FakeClient):
+        def send_post_message(self, **kwargs):
+            sending.set()
+            assert release.wait(5)
+            return super().send_post_message(**kwargs)
+
+    def service():
+        return CashFlowEffectReceiptService(store=CashFlowEffectStore(path), app_id="app", app_secret="secret", open_id="user",
+                                            client_factory=lambda **kwargs: BlockingClient(**kwargs, calls=calls))
+
+    def second_drain():
+        second_started.set()
+        return service().dispatch_pending()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(service().dispatch_pending)
+        assert sending.wait(5)
+        second = executor.submit(second_drain)
+        try:
+            assert second_started.wait(5)
+            assert not second.done()
+        finally:
+            release.set()
+        results = [first.result(5), second.result(5)]
+    assert sum(item["sent"] for item in results) == 1
+    assert sum(item["attempted"] for item in results) == 1
+    assert len([item for item in calls if item[0] == "send_post"]) == 1
+
+
+def _cash_receipt_process(db_path, data_dir, started, release, send_queue, result_queue):
+    from pathlib import Path
+    from src import config
+
+    config.get_data_dir = lambda: Path(data_dir)
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        def send_post_message(self, **kwargs):
+            send_queue.put("send")
+            assert release.wait(10)
+            return {"message_id": "sent"}
+
+    service = CashFlowEffectReceiptService(store=CashFlowEffectStore(db_path), app_id="app", app_secret="secret",
+                                          open_id="user", client_factory=Client)
+    started.wait(timeout=10)
+    result_queue.put(service.dispatch_pending())
+
+
+def test_cash_receipt_same_database_locks_across_different_data_dirs(tmp_path):
+    from multiprocessing import get_context
+    from queue import Empty
+
+    path = tmp_path / "effects.sqlite3"
+    store = CashFlowEffectStore.initialize(db_path=path, cutover_date="2026-10-01")
+    store.enqueue_receipt(receipt_key="error", receipt_type="runtime_error", payload={"scope": "hb"})
+    ctx = get_context("spawn")
+    started, release, sends, results = ctx.Barrier(2), ctx.Event(), ctx.Queue(), ctx.Queue()
+    processes = [ctx.Process(target=_cash_receipt_process,
+                             args=(path, tmp_path / f"data{i}", started, release, sends, results)) for i in range(2)]
+    for process in processes:
+        process.start()
+    try:
+        assert sends.get(timeout=10) == "send"
+        try:
+            sends.get(timeout=1)
+            duplicate = True
+        except Empty:
+            duplicate = False
+    finally:
+        release.set()
+        for process in processes:
+            process.join(timeout=10)
+            if process.is_alive():
+                process.terminate()
+                process.join()
+    assert [process.exitcode for process in processes] == [0, 0]
+    assert not duplicate
+    assert sum(results.get(timeout=5)["sent"] for _ in processes) == 1
+    assert store.list_pending_receipts() == []

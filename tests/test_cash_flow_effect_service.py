@@ -50,6 +50,9 @@ class FakeStorage:
             ]
         return list(rows)
 
+    def get_cash_holdings_fresh(self, *, account=None):
+        return self.get_holdings_fresh(account=account, asset_type="cash")
+
     def get_holding_fresh(self, asset_id, account, broker):
         return self.holdings.get((asset_id, account, broker))
 
@@ -1614,3 +1617,33 @@ def test_cash_flow_and_holding_discovery_exposes_both_origins(tmp_path, monkeypa
     assert " · 现金流 · " in message
     assert " · 现金持仓 · " in message
     assert "待逐条处理" in message
+
+
+def test_cash_scan_with_real_repository_skips_noncash_name_and_blocks_bad_cash(tmp_path, monkeypatch):
+    from src.feishu_storage import FeishuStorage
+    from src.feishu.repositories.holdings_repository import HoldingsIntegrityError
+    from tests.test_holdings_preload_minimal import StubHoldingsClient, StubLocalHoldingsIndexCache, _cash_record
+
+    client = StubHoldingsClient([
+        _cash_record(quantity=100),
+        _cash_record("reczz28N5tHtiBgY", asset_id="011609", asset_type="fund", asset_name=None),
+    ])
+    storage = FeishuStorage(client=client, local_holdings_index_cache=StubLocalHoldingsIndexCache())
+    monkeypatch.setattr(storage, "get_cash_flows", lambda: [])
+    service = _service(tmp_path, monkeypatch, storage)
+    service.initialize_fingerprints(account="lx")
+    assert service.scan(account="lx", enqueue_receipts=True)["changed"] == 0
+    fingerprint = service.store.list_fingerprints()[0]
+    assert fingerprint["last_confirmed_amount"] == "100.00"
+    for overrides in [{"quantity": "NaN"}, {"asset_type": "fund"}, {"asset_type": None}, {"broker": None}]:
+        client._records[0] = _cash_record(quantity=100, **overrides) if "quantity" not in overrides else _cash_record(**overrides)
+        with pytest.raises(HoldingsIntegrityError):
+            service.scan(account="lx", enqueue_receipts=True)
+        assert service.store.list_fingerprints()[0] == fingerprint
+        assert service.store.list_effects() == []
+        assert service.store.latest_scan(scope="lx")["status"] == "failed"
+    client._records[0] = _cash_record(quantity=100)
+    recovered = service.scan(account="lx", enqueue_receipts=True)
+    assert recovered["changed"] == 0
+    receipt = next(row for row in service.store.list_pending_receipts() if row["receipt_type"] == "runtime_recovered")
+    assert receipt["payload"]["occurred_at"] == recovered["scan_run"]["completed_at"]

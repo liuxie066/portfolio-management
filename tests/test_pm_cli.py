@@ -9,6 +9,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
+import pytest
 from pytest import MonkeyPatch
 
 from scripts import pm
@@ -672,9 +673,12 @@ def test_pm_combined_listener_fans_out_and_joins_both_workers():
     assert len(stores) == 2 and stores[0] is stores[1]
 
 
-def test_pm_receipts_dispatch_attempts_typed_branch_when_nav_branch_raises():
+def test_pm_receipts_dispatch_attempts_typed_branch_when_nav_branch_raises(tmp_path, monkeypatch):
     import src.app.nav_receipt_outbox_service as nav_module
     import src.app.operation_receipt_outbox_service as operation_module
+
+    from src.app.cash_flow_effect_store import CashFlowEffectStore
+    monkeypatch.setattr(CashFlowEffectStore, "resolve_db_path", staticmethod(lambda *args: tmp_path / "unactivated.sqlite3"))
 
     calls = []
 
@@ -704,6 +708,7 @@ def test_pm_receipts_dispatch_attempts_typed_branch_when_nav_branch_raises():
     assert result["branches"]["nav"]["success"] is False
     assert result["branches"]["operations"]["sent"] == 1
     assert [item[0] for item in calls] == ["nav", "operations"]
+    assert result["branches"]["cash_flow_effects"]["status"] == "not_activated"
 
 
 def test_pm_quality_status_uses_same_published_application_payload():
@@ -722,6 +727,108 @@ def test_pm_quality_status_uses_same_published_application_payload():
         assert pm.main(["quality", "status", "--no-service", "--json"]) == 0
 
     assert json.loads(stdout.getvalue()) == expected
+
+
+@pytest.mark.parametrize("dispatch_raises", [False, True])
+def test_failed_cash_scan_attempts_receipt_without_masking_scan_error(tmp_path, monkeypatch, dispatch_raises):
+    from src import config
+    from src.app.cash_flow_effect_service import CashFlowEffectService
+    from src.app.cash_flow_effect_store import CashFlowEffectStore
+
+    monkeypatch.setattr(config, "get_data_dir", lambda: tmp_path)
+    store = CashFlowEffectStore.initialize(db_path=tmp_path / "effects.sqlite3", cutover_date="2026-10-01")
+
+    def broken_read(**kwargs):
+        raise ValueError("invalid cash amount")
+
+    storage = SimpleNamespace(get_cash_flows=lambda: [], get_cash_holdings_fresh=broken_read)
+    service = CashFlowEffectService(storage=storage, store=store)
+    monkeypatch.setattr(pm, "_cash_flow_effect_components", lambda: (storage, store, service))
+    calls = []
+
+    def dispatch(receipt_store):
+        rows = receipt_store.list_pending_receipts()
+        calls.append(rows)
+        if dispatch_raises:
+            raise RuntimeError("receipt transport unavailable")
+        return {"success": False, "failed": 1}
+
+    monkeypatch.setattr(pm, "_dispatch_effect_receipts", dispatch)
+    for _ in range(2):
+        with pytest.raises(ValueError, match="invalid cash amount"):
+            pm.main(["cash-flow", "effects", "scan", "--json"])
+    assert len(calls) == 2
+    assert len(store.list_pending_receipts()) == 1
+    assert store.latest_scan()["status"] == "failed"
+    payload = calls[0][0]["payload"]
+    assert payload["occurred_at"] and payload["error"] == "invalid cash amount"
+    assert store.list_effects() == []
+
+
+def test_receipt_timer_retries_cash_errors_without_successful_scan(tmp_path, monkeypatch):
+    from src import config
+    from src.app.cash_flow_effect_store import CashFlowEffectStore
+    import src.app.cash_flow_effect_receipt_service as cash_module
+    import src.app.nav_receipt_outbox_service as nav_module
+    import src.app.operation_receipt_outbox_service as operation_module
+
+    monkeypatch.setattr(config, "get_data_dir", lambda: tmp_path)
+    store = CashFlowEffectStore.initialize(cutover_date="2026-10-01")
+    run_id = store.begin_scan(scope="hb")
+    failed = store.finish_scan(run_id, status="failed", error="invalid cash amount")
+    store.enqueue_receipt(receipt_key="error:1", receipt_type="runtime_error", scan_run_id=run_id,
+                          payload={"scope": "hb", "scan_run_id": run_id, "error": "invalid cash amount",
+                                   "occurred_at": failed["completed_at"]})
+    monkeypatch.setattr(nav_module.NavReceiptOutboxService, "dispatch_pending",
+                        lambda self, **kwargs: (_ for _ in ()).throw(RuntimeError("NAV unavailable")))
+    monkeypatch.setattr(operation_module.OperationReceiptOutboxService, "dispatch_pending",
+                        lambda self, **kwargs: {"success": True})
+    messages = []
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        def send_post_message(self, **kwargs):
+            messages.append(kwargs["markdown"])
+            if len(messages) == 1:
+                raise RuntimeError("temporary transport error")
+            return {"message_id": "sent"}
+
+    real_service = cash_module.CashFlowEffectReceiptService
+
+    class ConfiguredReceiptService(real_service):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs, app_id="app", app_secret="secret", open_id="user", client_factory=Client)
+
+    monkeypatch.setattr(cash_module, "CashFlowEffectReceiptService", ConfiguredReceiptService)
+    for expected_sent in [0, 1]:
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            assert pm.main(["receipts", "dispatch", "--confirm", "--limit", "1", "--json"]) == 1
+        result = json.loads(stdout.getvalue())
+        assert result["branches"]["cash_flow_effects"]["sent"] == expected_sent
+    assert store.list_pending_receipts() == []
+    assert store.latest_scan()["status"] == "failed"
+    assert "当前状态｜运行异常" in messages[1]
+    assert failed["completed_at"] in messages[1]
+
+
+def test_cash_receipt_dispatch_rejects_corrupt_existing_database(tmp_path, monkeypatch):
+    from src.app.cash_flow_effect_store import CashFlowEffectStore
+    import src.app.nav_receipt_outbox_service as nav_module
+    import src.app.operation_receipt_outbox_service as operation_module
+
+    path = tmp_path / "corrupt.sqlite3"
+    path.write_bytes(b"invalid sqlite")
+    monkeypatch.setattr(CashFlowEffectStore, "resolve_db_path", staticmethod(lambda *args: path))
+    for module, name in [(nav_module, "NavReceiptOutboxService"), (operation_module, "OperationReceiptOutboxService")]:
+        monkeypatch.setattr(getattr(module, name), "dispatch_pending", lambda self, **kwargs: {"success": True})
+    stdout = io.StringIO()
+    with redirect_stdout(stdout):
+        assert pm.main(["receipts", "dispatch", "--confirm", "--json"]) == 1
+    branch = json.loads(stdout.getvalue())["branches"]["cash_flow_effects"]
+    assert branch["success"] is False and branch["error"]
 
 
 def test_pm_quality_refresh_publishes_for_explicit_accounts():
@@ -2152,3 +2259,32 @@ def test_pm_manual_fx_confirmation_binds_observed_generated_fingerprint():
     assert result["fx_confirmation_id"] == "confirmation-1"
     assert confirmation_calls[0]["record_id"] == "cf_usd"
     assert confirmation_calls[0]["source_hash"] == "generated-fingerprint-1"
+
+@pytest.mark.parametrize("invalid_cash", [False, True])
+def test_cash_baseline_init_uses_narrow_read_before_database_creation(tmp_path, monkeypatch, invalid_cash):
+    from src import config
+    import src.feishu_storage as storage_module
+    from src.app.cash_flow_effect_store import CashFlowEffectStore
+    from src.feishu.repositories.holdings_repository import HoldingsIntegrityError
+    from tests.test_holdings_preload_minimal import StubHoldingsClient, StubLocalHoldingsIndexCache, _cash_record
+
+    monkeypatch.setattr(config, "get_data_dir", lambda: tmp_path)
+    original_get = config.get
+    monkeypatch.setattr(config, "get", lambda key, default=None: "2026-10-01" if key == "cash_flow.effects.cutover_date" else original_get(key, default))
+    client = StubHoldingsClient([
+        _cash_record(quantity="NaN" if invalid_cash else 100),
+        _cash_record("rec_fund", asset_id="011609", asset_type="fund", asset_name=None),
+    ])
+    storage = storage_module.FeishuStorage(client=client, local_holdings_index_cache=StubLocalHoldingsIndexCache())
+    monkeypatch.setattr(storage, "get_cash_flows", lambda: [])
+    monkeypatch.setattr(storage_module, "FeishuStorage", lambda: storage)
+    path = CashFlowEffectStore.resolve_db_path()
+    command = ["cash-flow", "effects", "init", "--cutover-date", "2026-10-01", "--confirm", "--json"]
+    if invalid_cash:
+        with pytest.raises(HoldingsIntegrityError):
+            pm.main(command)
+        assert not path.exists()
+    else:
+        with redirect_stdout(io.StringIO()):
+            assert pm.main(command) == 0
+        assert CashFlowEffectStore(path).list_fingerprints()[0]["last_confirmed_amount"] == "100.00"

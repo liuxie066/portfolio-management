@@ -97,8 +97,24 @@ preview/confirmation workflow below. The manual exact-record reconcile command
 remains the recovery path named in attention receipts.
 
 The 15-minute timer, manual review, and NAV preflight all perform complete
-Feishu scans. Only the timer drains discovery/runtime receipts. Review displays
+Feishu scans. The scan command attempts discovery/runtime receipt delivery on
+both success and failure; `portfolio-receipt-dispatch.timer` independently retries
+pending or failed cash-effect receipts every five minutes. Review displays
 results locally, and NAV uses its existing summary receipt.
+
+Cash-effect scans and baseline initialization read a complete raw holdings scope
+and validate CASH rows strictly. A known noncash holding missing its name does
+not block the cash scan; unknown type/code, cash identity/type/currency conflicts,
+invalid amounts and duplicate cash identities still block. This narrow read does
+not populate full holdings caches. NAV retains full holdings validation.
+
+Runtime receipts show the original occurrence time in Beijing time. At delivery,
+the latest scan of the same scope determines current recovery state; an old error
+sent after recovery is labelled historical and includes recovery time/scan.
+A later failure also prevents an old recovery receipt from claiming current health.
+Legacy receipts use their original outbox creation time when occurrence metadata
+is absent. Receipt sends are serialized per database on the same host; a crash
+after remote send but before local marking can still duplicate a retry.
 
 Futu CASH is observe-only in `pm futu sync`. Its original-currency values remain
 source evidence only: they are not compared with PM's CNY-denominated aggregate

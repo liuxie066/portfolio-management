@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, Optional
 from src import config
 from src.app.notification_shells import render_receipt
 from src.feishu_client import FeishuClient
+from src.process_lock import process_lock
 
 from .cash_flow_effect_store import CashFlowEffectStore
 
@@ -56,52 +57,75 @@ class CashFlowEffectReceiptService:
         self.client_factory = client_factory
 
     def dispatch_pending(self, *, limit: int = 100) -> Dict[str, Any]:
-        rows = self.store.list_pending_receipts(limit=limit)
-        sent = failed = invalid = 0
-        results: list[Dict[str, Any]] = []
-        for row in rows:
-            result = self._send(row)
-            success = bool(result.get("success"))
-            retryable = bool(result.get("retryable", True))
-            self.store.mark_receipt(
-                row["receipt_key"],
-                success=success,
-                retryable=retryable,
-                message_id=result.get("message_id"),
-                error=result.get("error"),
-            )
-            if row.get("effect_id"):
-                event_type = (
-                    "receipt_sent"
-                    if success
-                    else "receipt_failed"
-                    if retryable
-                    else "receipt_invalid"
+        db_path = self.store.db_path.resolve()
+        with process_lock(f"cash-flow-effect-receipts:{db_path}", data_dir=db_path.parent):
+            rows = self.store.list_pending_receipts(limit=limit)
+            sent = failed = invalid = 0
+            results: list[Dict[str, Any]] = []
+            for row in rows:
+                result = self._send(row)
+                success = bool(result.get("success"))
+                retryable = bool(result.get("retryable", True))
+                self.store.mark_receipt(
+                    row["receipt_key"],
+                    success=success,
+                    retryable=retryable,
+                    message_id=result.get("message_id"),
+                    error=result.get("error"),
                 )
-                self.store.append_event(
-                    row["effect_id"],
-                    event_type,
-                    {
-                        "receipt_key": row["receipt_key"],
-                        "message_id": result.get("message_id"),
-                        "error": result.get("error"),
-                        "retryable": retryable,
-                    },
-                )
-            sent += int(success)
-            failed += int(not success)
-            invalid += int(not success and not retryable)
-            results.append({"receipt_key": row["receipt_key"], **result})
-        return {
-            "success": failed == 0,
-            "attempted": len(rows),
-            "sent": sent,
-            "failed": failed,
-            "invalid": invalid,
-            "results": results,
-        }
+                if row.get("effect_id"):
+                    event_type = (
+                        "receipt_sent"
+                        if success
+                        else "receipt_failed"
+                        if retryable
+                        else "receipt_invalid"
+                    )
+                    self.store.append_event(
+                        row["effect_id"],
+                        event_type,
+                        {
+                            "receipt_key": row["receipt_key"],
+                            "message_id": result.get("message_id"),
+                            "error": result.get("error"),
+                            "retryable": retryable,
+                        },
+                    )
+                sent += int(success)
+                failed += int(not success)
+                invalid += int(not success and not retryable)
+                results.append({"receipt_key": row["receipt_key"], **result})
+            return {
+                "success": failed == 0,
+                "attempted": len(rows),
+                "sent": sent,
+                "failed": failed,
+                "invalid": invalid,
+                "results": results,
+            }
 
     def _send(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        if row.get("receipt_type") in {"runtime_error", "runtime_recovered"}:
+            payload = dict(row.get("payload") or {})
+            payload["occurred_at"] = payload.get("occurred_at") or row.get("created_at")
+            latest = self.store.latest_scan(scope=str(payload.get("scope") or "all"))
+            payload["current_status"] = latest["status"] if latest else "unknown"
+            if (
+                latest
+                and latest["status"] == "completed"
+                and latest.get("completed_at")
+                and payload.get("occurred_at")
+                and (
+                    latest["completed_at"] >= payload["occurred_at"]
+                    or (
+                        row["receipt_type"] == "runtime_recovered"
+                        and latest["scan_run_id"] == (payload.get("scan_run_id") or row.get("scan_run_id"))
+                    )
+                )
+            ):
+                payload["recovered_at"] = latest["completed_at"]
+                payload["recovery_scan_run_id"] = latest["scan_run_id"]
+            row = {**row, "payload": payload}
         try:
             markdown = self.build_message(row)
         except CashFlowEffectReceiptContractError as exc:
@@ -222,14 +246,30 @@ class CashFlowEffectReceiptService:
             )
         if receipt_type in {"runtime_error", "runtime_recovered"}:
             recovered = receipt_type == "runtime_recovered"
+            current_recovered = bool(payload.get("recovered_at"))
+            status = (
+                "⚠️ 历史异常，当前已恢复" if not recovered and current_recovered
+                else "⚠️ 历史恢复，当前再次异常"
+                if recovered and payload.get("current_status") == "failed"
+                else "✅ 已恢复" if recovered else "❌ 运行异常"
+            )
+            fields = [
+                ("扫描", payload.get("scan_run_id") or row.get("scan_run_id") or "-"),
+                ("发生时间（北京时间）", payload.get("occurred_at") or row.get("created_at") or "未记录"),
+                ("当前状态", "已恢复" if current_recovered else "运行异常"
+                 if payload.get("current_status") == "failed" else "未核实"),
+                ("错误", payload.get("error") or "-"),
+            ]
+            if current_recovered:
+                fields.extend([
+                    ("恢复时间（北京时间）", payload["recovered_at"]),
+                    ("恢复扫描", payload["recovery_scan_run_id"]),
+                ])
             return render_receipt(
                 title=str(payload.get("scope") or "all"),
                 receipt_type="Cash Flow 扫描",
-                status="✅ 已恢复" if recovered else "❌ 运行异常",
-                fields=[
-                    ("扫描", payload.get("scan_run_id") or "-"),
-                    ("错误", payload.get("error") or "-"),
-                ],
+                status=status,
+                fields=fields,
             )
         if receipt_type == "stale":
             correction_effect_id = payload.get("correction_effect_id")
