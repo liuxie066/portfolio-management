@@ -26,6 +26,7 @@ from ...domain.holdings import RawHoldingRecord
 from ..contracts import get_table_contract
 from ...models import (
     Holding, AssetType, AssetClass, Industry,
+    CASH_ASSET_ID, USD_CASH_ASSET_ID, HKD_CASH_ASSET_ID,
 )
 
 
@@ -630,6 +631,47 @@ class HoldingsRepository:
         holding = self._find_holding_identity(fresh, identity)
         self._publish_holding_account_slice(identity.account, fresh)
         return canonical_holding(holding) if holding is not None else None
+
+    def get_cash_holdings_fresh(
+        self,
+        account: Optional[str] = None,
+    ) -> List[Holding]:
+        """Validate cash from a complete raw scope without publishing caches."""
+        cash_currencies = {
+            CASH_ASSET_ID: 'CNY',
+            USD_CASH_ASSET_ID: 'USD',
+            HKD_CASH_ASSET_ID: 'HKD',
+        }
+        selected: List[RawHoldingRecord] = []
+        errors: List[Dict[str, str]] = []
+        for record in self.get_raw_holdings(account=account):
+            fields = record.raw_fields
+            try:
+                asset_type = AssetType(str(fields.get('asset_type') or '').strip().lower())
+                asset_id = fields.get('asset_id')
+                if not isinstance(asset_id, str) or not asset_id.strip():
+                    raise ValueError('missing or invalid asset_id')
+                asset_id = asset_id.strip()
+                if asset_type != AssetType.CASH:
+                    if asset_id.upper() in cash_currencies:
+                        raise ValueError('reserved cash asset_id requires cash asset_type')
+                    continue
+                if asset_id not in cash_currencies:
+                    raise ValueError('unsupported cash asset_id')
+                if str(fields.get('currency') or '').strip().upper() != cash_currencies[asset_id]:
+                    raise ValueError('cash asset_id and currency mismatch')
+                selected.append(record)
+            except ValueError as exc:
+                errors.append({'record_id': record.record_id, 'error': str(exc)})
+        try:
+            holdings = self._convert_raw_holdings(selected)
+        except HoldingsIntegrityError as exc:
+            errors.extend(exc.errors)
+            holdings = []
+        if errors:
+            raise HoldingsIntegrityError(errors)
+        holdings.sort(key=lambda item: (item.account, item.broker, item.asset_id))
+        return holdings
 
     def get_holdings_fresh(
         self,

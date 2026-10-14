@@ -247,7 +247,7 @@ systemctl list-timers portfolio-quality-refresh.timer
 - `portfolio-futu-evening.timer`：周一至周五 `17:10`，只同步 lx/sy holdings。
 - `portfolio-cash-flow-scan.timer`：每 15 分钟完整读取 Feishu cash flow 和
   CASH holdings，只发现 effect、更新 SQLite 并发送回执。
-- `portfolio-receipt-dispatch.timer`：每 5 分钟重试到期的 NAV 回执 outbox。
+- `portfolio-receipt-dispatch.timer`：每 5 分钟分别重试 NAV、操作和 Cash Flow effect 回执 outbox；某个分支失败不影响其它分支尝试。未激活 Cash Flow effect 数据库时跳过该分支，不会自动初始化。
 
 ```bash
 sudo systemctl daemon-reload

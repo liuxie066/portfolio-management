@@ -253,10 +253,7 @@ class CashFlowEffectService:
 
     def initialize_fingerprints(self, *, account: Optional[str] = None) -> Dict[str, Any]:
         """Explicit init-time acknowledgement of current CASH baselines."""
-        holdings = self.storage.get_holdings_fresh(
-            account=account,
-            include_empty=True,
-        )
+        holdings = self.storage.get_cash_holdings_fresh(account=account)
         return self.initialize_fingerprints_from_holdings(
             holdings,
             account=account,
@@ -368,10 +365,7 @@ class CashFlowEffectService:
                     for flow in flows
                     if flow.record_id
                 }
-                holdings = self.storage.get_holdings_fresh(
-                    account=account,
-                    include_empty=True,
-                )
+                holdings = self.storage.get_cash_holdings_fresh(account=account)
                 with self.store.transaction():
                     run_id = self.store.begin_scan(scope=scope)
                     result = self._commit_scan(
@@ -390,13 +384,17 @@ class CashFlowEffectService:
                             receipt_key=f"scan-recovered:{run_id}",
                             receipt_type="runtime_recovered",
                             scan_run_id=run_id,
-                            payload={"scope": scope, "scan_run_id": run_id},
+                            payload={
+                                "scope": scope,
+                                "scan_run_id": run_id,
+                                "occurred_at": result["scan_run"]["completed_at"],
+                            },
                         )
                 return result
             except Exception as exc:
                 with self.store.transaction():
                     failed_run_id = self.store.begin_scan(scope=scope)
-                    self.store.finish_scan(
+                    failed_scan = self.store.finish_scan(
                         failed_run_id,
                         status="failed",
                         error=str(exc),
@@ -416,6 +414,7 @@ class CashFlowEffectService:
                                 "scope": scope,
                                 "scan_run_id": failed_run_id,
                                 "error": str(exc),
+                                "occurred_at": failed_scan["completed_at"],
                             },
                         )
                 raise

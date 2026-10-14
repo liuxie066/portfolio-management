@@ -1,9 +1,12 @@
-"""Minimal (no pytest) tests for holdings preload/index cache behavior."""
+"""Tests for holdings preload/index cache and fresh read boundaries."""
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+
+import pytest
 
 from src.app.cash_service import CashService
 from src.domain.holding_mutations import (
@@ -13,7 +16,10 @@ from src.domain.holding_mutations import (
 )
 from src.feishu.repositories.holdings_repository import HoldingsIntegrityError
 from src.feishu_storage import FeishuStorage
-from src.models import Holding, AssetType
+from src.models import (
+    Holding, AssetType, CASH_ASSET_ID, USD_CASH_ASSET_ID, HKD_CASH_ASSET_ID,
+    MMF_ASSET_ID,
+)
 
 
 def _assert_canonical_holding_date(value: Any) -> None:
@@ -118,6 +124,170 @@ def _cached_holding_fields(**overrides) -> Dict[str, Any]:
     }
     fields.update(overrides)
     return fields
+
+
+def _cash_record(record_id="rec_cash", **overrides):
+    fields = {
+        "asset_id": CASH_ASSET_ID,
+        "asset_name": "人民币现金",
+        "asset_type": "cash",
+        "account": "lx",
+        "broker": "manual",
+        "quantity": 100,
+        "currency": "CNY",
+    }
+    fields.update(overrides)
+    return {"record_id": record_id, "fields": fields}
+
+
+def test_cash_fresh_skips_nameless_noncash_but_full_read_still_fails():
+    client = StubHoldingsClient([
+        _cash_record(),
+        _cash_record("rec_fund", asset_id="FUND-1", asset_type="fund", asset_name=None),
+        _cash_record("rec_mmf", asset_id=MMF_ASSET_ID, asset_type="mmf", asset_name=None),
+    ])
+    storage = FeishuStorage(client=client, local_holdings_index_cache=StubLocalHoldingsIndexCache())
+
+    assert [row.record_id for row in storage.get_cash_holdings_fresh()] == ["rec_cash"]
+    assert client.list_records_calls[-1]["filter_str"] is None
+    assert client.list_records_calls[-1]["field_names"] == storage.holdings.HOLDING_PROJECTION_FIELDS
+    with pytest.raises(HoldingsIntegrityError) as caught:
+        storage.get_holdings_fresh()
+    assert {error["record_id"] for error in caught.value.errors} == {"rec_fund", "rec_mmf"}
+
+
+@pytest.mark.parametrize("overrides", [
+    {"asset_type": None},
+    {"asset_type": ""},
+    {"asset_type": "unknown", "asset_id": "FUND-1"},
+    {"asset_type": ["fund"], "asset_id": "FUND-1"},
+    {"asset_type": "fund", "asset_id": None},
+    {"asset_type": "fund", "asset_id": "   "},
+    {"asset_type": "fund", "asset_id": ["FUND-1"]},
+    {"asset_id": None},
+    {"asset_id": ""},
+    {"asset_id": 123},
+    {"asset_type": "fund"},
+    {"asset_type": "fund", "asset_id": "cny-cash"},
+    {"asset_type": "mmf", "asset_id": USD_CASH_ASSET_ID},
+    {"asset_type": "other", "asset_id": HKD_CASH_ASSET_ID},
+    {"asset_id": "EUR-CASH", "currency": "EUR"},
+    {"asset_id": MMF_ASSET_ID},
+    {"currency": "USD"},
+    {"currency": None},
+    {"asset_name": None},
+    {"quantity": None},
+    {"quantity": True},
+    {"quantity": "NaN"},
+    {"quantity": "Infinity"},
+    {"quantity": "1e999"},
+    {"quantity": "broken"},
+    {"avg_cost": "NaN"},
+    {"account": " "},
+    {"broker": None},
+])
+def test_cash_fresh_rejects_ambiguous_classification_and_corrupt_cash(overrides):
+    storage = FeishuStorage(
+        client=StubHoldingsClient([
+            _cash_record(),
+            _cash_record("rec_bad", **{"broker": "IBKR", **overrides}),
+        ]),
+        local_holdings_index_cache=StubLocalHoldingsIndexCache(),
+    )
+
+    with pytest.raises(HoldingsIntegrityError) as caught:
+        storage.get_cash_holdings_fresh()
+    assert {error["record_id"] for error in caught.value.errors} == {"rec_bad"}
+
+
+def test_cash_fresh_reuses_canonical_duplicate_identity_validation():
+    storage = FeishuStorage(
+        client=StubHoldingsClient([
+            _cash_record(),
+            _cash_record("rec_duplicate", asset_id=" CNY-CASH ", broker=" manual "),
+        ]),
+        local_holdings_index_cache=StubLocalHoldingsIndexCache(),
+    )
+
+    with pytest.raises(HoldingsIntegrityError) as caught:
+        storage.get_cash_holdings_fresh()
+    assert {error["record_id"] for error in caught.value.errors} == {"rec_cash", "rec_duplicate"}
+    assert all("duplicate holding identity" in error["error"] for error in caught.value.errors)
+
+
+def test_cash_fresh_empty_selection_does_not_mark_generic_cache_loaded():
+    local_cache = StubLocalHoldingsIndexCache()
+    storage = FeishuStorage(
+        client=StubHoldingsClient([
+            _cash_record("rec_mmf", asset_id=MMF_ASSET_ID, asset_type="mmf", asset_name=None),
+        ]),
+        local_holdings_index_cache=local_cache,
+    )
+
+    assert storage.get_cash_holdings_fresh(account="lx") == []
+    assert storage._holding_id_cache == {}
+    assert storage._holding_fields_cache == {}
+    assert storage._holdings_index_loaded_accounts == set()
+    assert storage._holdings_index_loaded_all is False
+    assert local_cache.items == {}
+    assert local_cache.flush_calls == 0
+
+
+def test_cash_fresh_scopes_raw_read_and_retains_zero_negative_and_distinct_identities():
+    client = StubHoldingsClient([
+        _cash_record("rec_usd", asset_id=USD_CASH_ASSET_ID, currency=" usd ", quantity="-1,234.5"),
+        _cash_record("rec_hkd", asset_id=HKD_CASH_ASSET_ID, currency="HKD", quantity=0),
+        _cash_record("rec_cny_other_broker", broker="IBKR"),
+        _cash_record(),
+        _cash_record("rec_sy", account="sy"),
+        _cash_record("rec_sy_bad", account="sy", asset_type="unknown"),
+    ])
+    storage = FeishuStorage(client=client, local_holdings_index_cache=StubLocalHoldingsIndexCache())
+
+    rows = storage.get_cash_holdings_fresh(account=" lx ")
+    assert [row.record_id for row in rows] == [
+        "rec_cny_other_broker", "rec_cash", "rec_hkd", "rec_usd",
+    ]
+    assert rows[-1].quantity == -1234.5
+    assert rows[-1].currency == "USD"
+    assert rows[-2].quantity == 0
+    assert client.list_records_calls[-1]["filter_str"] == 'CurrentValue.[account] = "lx"'
+    with pytest.raises(HoldingsIntegrityError):
+        storage.get_cash_holdings_fresh()
+    client._records.pop()
+    assert len(storage.get_cash_holdings_fresh()) == 5
+    with pytest.raises(ValueError, match="account must not be blank"):
+        storage.get_cash_holdings_fresh(account=" ")
+
+
+@pytest.mark.parametrize("account", [None, "lx"])
+@pytest.mark.parametrize("invalid", [False, True])
+def test_cash_fresh_preserves_all_cache_layers_on_success_and_failure(account, invalid):
+    client = StubHoldingsClient([
+        _cash_record(),
+        {"record_id": "rec_stock", "fields": _cached_holding_fields()},
+        {"record_id": "rec_sy", "fields": _cached_holding_fields(account="sy")},
+    ])
+    local_cache = StubLocalHoldingsIndexCache()
+    storage = FeishuStorage(client=client, local_holdings_index_cache=local_cache)
+    storage.preload_holdings_index(account=account)
+    before = deepcopy((
+        storage._holding_id_cache, storage._holding_fields_cache,
+        storage._holdings_index_loaded_accounts, storage._holdings_index_loaded_all,
+        local_cache.items, local_cache.flush_calls,
+    ))
+    client._records[0]["fields"]["quantity"] = "NaN" if invalid else 200
+    if invalid:
+        with pytest.raises(HoldingsIntegrityError):
+            storage.get_cash_holdings_fresh(account=account)
+    else:
+        rows = storage.get_cash_holdings_fresh(account=account)
+        assert rows[0].quantity == 200
+    assert (
+        storage._holding_id_cache, storage._holding_fields_cache,
+        storage._holdings_index_loaded_accounts, storage._holdings_index_loaded_all,
+        local_cache.items, local_cache.flush_calls,
+    ) == before
 
 
 def test_persistent_index_loads_legacy_key_without_writing_until_fresh_preload():

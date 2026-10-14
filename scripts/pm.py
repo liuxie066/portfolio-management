@@ -1005,7 +1005,7 @@ def cmd_cash_flow_effects_init(args):
             )
         storage = FeishuStorage()
         flows = storage.get_cash_flows()
-        holdings = storage.get_holdings_fresh(include_empty=True)
+        holdings = storage.get_cash_holdings_fresh()
         store = CashFlowEffectStore.initialize(
             cutover_date=args.cutover_date,
             db_path=path,
@@ -1038,19 +1038,20 @@ def cmd_cash_flow_review(args):
 
 def cmd_cash_flow_effects_scan(args):
     def direct():
-        from src.app.cash_flow_effect_receipt_service import (
-            CashFlowEffectReceiptService,
-        )
-
         _, store, service = _cash_flow_effect_components()
-        result = service.scan(
-            account=getattr(args, "account", None),
-            enqueue_receipts=True,
-        )
+        try:
+            result = service.scan(
+                account=getattr(args, "account", None),
+                enqueue_receipts=True,
+            )
+        except Exception:
+            try:
+                _dispatch_effect_receipts(store)
+            except Exception:
+                logging.getLogger(__name__).exception("Cash Flow error receipt dispatch failed")
+            raise
         result = dict(result)
-        result["receipts"] = CashFlowEffectReceiptService(
-            store=store
-        ).dispatch_pending()
+        result["receipts"] = _dispatch_effect_receipts(store)
         return result
 
     result = _call_backend(args, direct)
@@ -1793,6 +1794,16 @@ def cmd_receipts_dispatch(args):
         raise SystemExit("receipts dispatch requires --confirm")
     from src.app.nav_receipt_outbox_service import NavReceiptOutboxService
     from src.app.operation_receipt_outbox_service import OperationReceiptOutboxService
+    from src.app.cash_flow_effect_receipt_service import CashFlowEffectReceiptService
+    from src.app.cash_flow_effect_store import CashFlowEffectStore
+
+    def dispatch_cash_effects():
+        path = CashFlowEffectStore.resolve_db_path()
+        if not path.exists():
+            return {"success": True, "status": "not_activated", "attempted": 0}
+        return CashFlowEffectReceiptService(store=CashFlowEffectStore(path)).dispatch_pending(
+            limit=int(args.limit),
+        )
 
     branches = {}
     for name, dispatch in (
@@ -1801,6 +1812,7 @@ def cmd_receipts_dispatch(args):
             "operations",
             lambda: OperationReceiptOutboxService().dispatch_pending(limit=int(args.limit)),
         ),
+        ("cash_flow_effects", dispatch_cash_effects),
     ):
         try:
             branches[name] = dispatch()
