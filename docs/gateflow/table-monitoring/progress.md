@@ -1,6 +1,7 @@
 # Gate state
 
-Plan eaa971d; S1 2eed0d2; S2 f1430a0; aggregate d704e4a. Pre-push passed; remote base unchanged e611684; source checks reused.
-Draft PR #74: https://github.com/liuxie066/portfolio-management/pull/74
-PR review passed: ../../reviews/pr-74-review-20261014-093657.md. Quality Contract 38496553219 passed on d704e4a. No new finding; original P1 fixed.
-Current gate / next entry point: accepted PR review commit, then push. Draft-PR-pass awaits that push.
+Accepted plan eaa971d; S1 2eed0d2; S2 f1430a0; aggregate d704e4a; PR review f5cde08.
+PR review push completed and remote ref matched. Draft-PR-pass reached; final closeout artifact: final-closeout.md.
+Work unit completed; final closeout pass. Source checks and first PR CI passed; final artifact-only head check readback follows this commit.
+Draft PR: https://github.com/liuxie066/portfolio-management/pull/74
+Next entry point: user review/merge decision. No automatic merge, release, upgrade or production repair.
