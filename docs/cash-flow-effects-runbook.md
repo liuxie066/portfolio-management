@@ -187,3 +187,10 @@ Recovery is forward-only:
 
 Deleting the database, changing the cutover date, re-baselining through `init`,
 restoring a Futu direct-CASH writer, or bypassing the NAV gate are prohibited.
+
+Discovery receipts identify Cash Flow facts, Holdings cash observations, or both.
+Automatically accepted non-Futu cash baselines are shown as processed, with the
+observed balance change; they do not request manual processing. Unresolved
+effects still require review even when they fall beyond the ten displayed rows.
+Older queued receipts without source/count metadata show an informational
+status and an inspection command, rather than asserting that processing is pending.

@@ -207,3 +207,14 @@ def test_unknown_receipt_becomes_terminal_without_starving_valid_rows(tmp_path):
         for event in store.list_events(effect["effect_id"])
     ]
     assert event_types.count("receipt_invalid") == 1
+
+
+def test_legacy_discovery_does_not_invent_pending_state_or_origin():
+    message = CashFlowEffectReceiptService.build_message({
+        "receipt_type": "discovery",
+        "payload": {"changed": 1, "effects": [{"effect_id": "old", "state": "record_only"}]},
+    })
+    assert "待逐条处理" not in message
+    assert "处理状态请查询" in message
+    assert "来源未记录" in message
+    assert "pm cash-flow review" in message

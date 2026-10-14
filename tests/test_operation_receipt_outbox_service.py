@@ -279,3 +279,17 @@ def test_send_success_then_local_mark_failure_ages_to_unknown(tmp_path):
     restarted = OperationStateStore(path, now_factory=lambda: clock[0])
     assert restarted.claim_due_operation_receipts() == []
     assert restarted.get_operation_receipt("receipt-mark-failed")["status"] == "unknown"
+
+
+def test_holdings_manual_repair_receipt_explains_before_revalidation():
+    from src.app.holdings_receipt_service import HoldingsReceiptService
+
+    message = HoldingsReceiptService.build_message("holding_case_discovered", {
+        "state": "pending_manual_edit",
+        "action": {
+            "description": "请在 holdings 表人工修复后重新证明",
+            "command": "pm holdings reconcile --record-id rec-fund --notify --confirm",
+        },
+    })
+    assert "操作说明｜请在 holdings 表人工修复后重新证明" in message
+    assert message.index("操作说明") < message.index("处理｜pm holdings")

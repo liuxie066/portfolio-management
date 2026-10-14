@@ -581,17 +581,20 @@ class CashFlowEffectService:
         )
         if enqueue_receipts and (added or changed or deleted or blocked):
             effect_summaries = []
-            for effect_id in list(dict.fromkeys(changed_effect_ids))[:10]:
+            for effect_id in dict.fromkeys(changed_effect_ids):
                 effect = self.store.get_effect(effect_id)
                 if effect:
                     effect_summaries.append({
                         "effect_id": effect["effect_id"],
+                        "effect_kind": effect["effect_kind"],
                         "account": effect["account"],
                         "flow_date": effect["flow_date"],
                         "broker": effect["broker"],
                         "currency": effect["currency"],
                         "signed_amount": effect["signed_amount"],
                         "state": effect["state"],
+                        "observed_amount": effect["source"].get("observed_amount"),
+                        "last_confirmed_amount": effect["source"].get("last_confirmed_amount"),
                     })
             self.store.enqueue_receipt(
                 receipt_key=f"scan:{digest}",
@@ -604,7 +607,11 @@ class CashFlowEffectService:
                     "deleted": deleted,
                     "blocked": blocked,
                     "scan_digest": digest,
-                    "effects": effect_summaries,
+                    "pending_count": max(blocked, sum(
+                        item["state"] in UNRESOLVED_STATES for item in effect_summaries
+                    )),
+                    "effect_kinds": sorted({item["effect_kind"] for item in effect_summaries}),
+                    "effects": effect_summaries[:10],
                 },
             )
         return {

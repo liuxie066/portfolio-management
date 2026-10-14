@@ -122,6 +122,7 @@ class HoldingsReceiptService:
                     ("依据", payload.get("authority") or payload.get("reason_code") or "-"),
                     ("证据时间", payload.get("evidence_as_of") or "-"),
                     ("阻断 NAV", "是" if payload.get("blocks_official_nav") else "否"),
+                    ("操作说明", action.get("description") or "-"),
                     ("处理", action.get("command") or "-"),
                 ],
             )
