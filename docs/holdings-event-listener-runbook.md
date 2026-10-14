@@ -2,8 +2,9 @@
 
 This runbook activates the Feishu Base record-change event as an additional
 trigger for holdings validation and cash-flow generated-field completion. It
-does not make event payload fields authoritative, grant automatic holdings
-write permission, guess FX, or confirm CASH holding effects.
+does not make event payload fields authoritative, guess FX, or confirm CASH
+holding effects. Its only automatic Holdings repair is the empty fund-name
+policy described below.
 
 ## Boundaries
 
@@ -17,7 +18,20 @@ write permission, guess FX, or confirm CASH holding effects.
 - The callback validates and durably inserts trigger metadata, then returns. A
   worker fresh-reads the exact record before validation.
 - Added and edited records may create validation cases and receipt outbox rows.
-  They never patch holdings without a later exact-record manual confirmation.
+  For a known non-Futu broker, an explicit `cn_fund`/`otc_fund` type, an account
+  and a six-digit code, the worker can fill an empty `asset_name` from an exact
+  Tencent `jj` fund response. It uses the existing quote provider with a
+  five-second request budget and no cache writes. Unavailable or unproven
+  evidence leaves a manual-repair case; a code fallback is never a name.
+  Other missing fields and conflicts still require manual confirmation.
+- The name patch owns only `asset_name`, uses account/record locks, rechecks
+  the raw row before writing and reads it back. Durable attempts precede remote
+  writes; unknown outcomes require operator recovery and are never auto-retried.
+  A successful completion emits a closure receipt; the self-event does not
+  repeat the patch. Existing user names are preserved. Ordinary NAV/reconcile
+  reads do not query fund names or write them. Feishu has no atomic compare-and-set
+  here, so a concurrent human edit between the final read and PATCH remains a
+  limitation of the existing storage API.
 - Valid CNY cash-flow rows may have only their repository-owned generated fields
   completed automatically. Foreign rows require an exact existing local FX
   confirmation; missing/stale evidence produces a receipt and no write.
@@ -135,6 +149,13 @@ integrity failure.
    guessed rate is written and one semantic attention receipt names the exact
    manual reconcile command. Separately confirm that no CASH holding effect was
    applied.
+8. In an authorized canary, add a non-Futu fund record with a supported type,
+   exact six-digit code and blank name. Confirm the worker writes only the name
+   (plus repository-owned update time), retains provider evidence in its Case,
+   and reaches `resolved_accept`. A repeated/self event must not write again.
+   If evidence is unavailable, confirm the manual-repair receipt says to edit
+   the table first, then run its revalidation command. The command alone does
+   not fill a missing name.
 
 Do not treat receipt delivery alone as listener health. Retain the inbox row,
 case/outbox state, exact record fresh-read result, and message delivery evidence

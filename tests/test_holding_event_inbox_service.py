@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 import threading
+
+import pytest
 from types import SimpleNamespace
 
 from src.app.holding_event_inbox_service import HoldingEventInboxService
@@ -307,7 +309,7 @@ def test_event_closes_repaired_field_while_silently_migrating_legacy_case(tmp_pa
     service.accept(_payload("evt-1"))
     assert service.process_due()["success"] is True
     cases = {case["field"]: case for case in service.store.list_holding_cases()}
-    planned = service.workflow.plan_event_notification(
+    planned = service.workflow.process_event_notification(
         record_id="rec-1",
         trigger={"mode": "test_legacy_fixture"},
     )
@@ -390,7 +392,7 @@ def test_worker_loop_logs_cycle_failure_and_keeps_running(tmp_path, capsys):
 
 
 class _InvalidWorkflow:
-    def plan_event_notification(self, *, record_id, trigger):
+    def process_event_notification(self, *, record_id, trigger):
         case = {
             "case_key": "case-atomic",
             "record_id": record_id,
@@ -441,3 +443,269 @@ def test_worker_rolls_back_cases_and_receipts_before_retrying_event(tmp_path):
         "holdings:case:discovered:case-atomic"
     ) is None
     assert store.get_holding_event("evt-1")["state"] == "failed_retryable"
+
+
+class _FundStorage:
+    def __init__(self):
+        self.fields = {
+            "asset_id": "011609", "asset_name": "", "asset_type": "cn_fund",
+            "account": "hb", "broker": "支付宝", "quantity": 10, "currency": "CNY",
+        }
+        self.patch_calls = []
+        self.exists = True
+        self.before_patch = None
+        self.fail_write = False
+
+    def get_raw_holdings(self, *, account=None, record_id=None):
+        if not self.exists:
+            return []
+        return [RawHoldingRecord(
+            record_id="rec-1", raw_fields=dict(self.fields), fetched_at=datetime.now(),
+        )]
+
+    def patch_holding_record(self, patch):
+        from src.domain.holding_mutations import raw_holding_state_digest, HoldingMutationConflictError
+
+        if self.before_patch:
+            self.before_patch()
+        if patch.base_digest != raw_holding_state_digest("rec-1", self.fields):
+            raise HoldingMutationConflictError("raw row changed before patch")
+        self.patch_calls.append(patch)
+        if self.fail_write:
+            raise TimeoutError("remote result unknown")
+        self.fields.update(patch.values)
+        return self.get_raw_holdings(record_id="rec-1")[0]
+
+
+def _fund_evidence(code="011609", **overrides):
+    return {
+        "code": code, "name": "测试基金", "source": "tencent_jj",
+        "source_as_of": "2026-10-14T08:00:00", **overrides,
+    }
+
+
+def _fund_service(tmp_path, storage, lookup=None):
+    service = _service(tmp_path, storage)
+    service.workflow.reconciliation.fund_name_lookup = lookup or (lambda code: _fund_evidence(code))
+    return service
+
+
+def test_fund_event_completes_only_empty_name_and_self_event_is_noop(tmp_path):
+    storage = _FundStorage()
+    original = dict(storage.fields)
+    service = _fund_service(tmp_path, storage)
+    service.accept(_payload())
+    assert service.process_due()["success"]
+    assert len(storage.patch_calls) == 1
+    assert dict(storage.patch_calls[0].values) == {"asset_name": "测试基金"}
+    assert storage.fields == {**original, "asset_name": "测试基金"}
+    case = next(c for c in service.store.list_holding_cases() if c["field"] == "asset_name")
+    assert case["state"] == "resolved_accept"
+    assert case["resolution"]["operator_context"]["method"] == "automatic_policy"
+    assert case["resolution"]["operator_context"]["event_id"] == "evt-1"
+    assert service.store.get_operation_receipt(f"holdings:case:discovered:{case['case_key']}") is None
+    service.accept(_payload("evt-self"))
+    assert service.process_due()["success"]
+    assert len(storage.patch_calls) == 1
+
+
+def test_fund_name_lookup_failure_leaves_manual_case(tmp_path):
+    storage = _FundStorage()
+    def fail(code):
+        raise TimeoutError("provider unavailable")
+    service = _fund_service(tmp_path, storage, fail)
+    service.accept(_payload())
+    assert service.process_due()["success"]
+    assert not storage.patch_calls
+    case = next(c for c in service.store.list_holding_cases() if c["field"] == "asset_name")
+    assert case["state"] == "pending_manual_edit"
+    assert service.store.get_operation_receipt(f"holdings:case:discovered:{case['case_key']}")["payload"]["reason_code"] == "ASSET_NAME_MISSING"
+
+
+def test_fund_unknown_attempt_survives_new_event_and_provider_name_change(tmp_path):
+    storage = _FundStorage()
+    storage.fail_write = True
+    service = _fund_service(tmp_path, storage)
+    service.accept(_payload())
+    assert service.process_due()["success"]
+    case = next(c for c in service.store.list_holding_cases() if c["field"] == "asset_name")
+    assert case["state"] == "apply_outcome_unknown"
+    service.workflow.reconciliation.fund_name_lookup = lambda code: _fund_evidence(code, name="另一名称")
+    service.accept(_payload("evt-again"))
+    assert service.process_due()["success"]
+    assert len(storage.patch_calls) == 1
+    assert service.store.get_holding_case(case["case_key"])["state"] == "apply_outcome_unknown"
+    assert len([c for c in service.store.list_holding_cases() if c["field"] == "asset_name"]) == 1
+
+
+def test_fund_completion_preserves_user_edit_during_lookup(tmp_path):
+    storage = _FundStorage()
+    def lookup(code):
+        storage.fields["asset_name"] = "人工名称"
+        return _fund_evidence(code)
+    service = _fund_service(tmp_path, storage, lookup)
+    service.accept(_payload())
+    assert service.process_due()["success"]
+    assert storage.fields["asset_name"] == "人工名称"
+    assert not storage.patch_calls
+
+
+def test_fund_completion_durable_when_inbox_commit_fails(tmp_path, monkeypatch):
+    storage = _FundStorage()
+    service = _fund_service(tmp_path, storage)
+    service.accept(_payload())
+    original = service.store.complete_holding_event
+    def fail(**kwargs):
+        raise RuntimeError("inbox transaction failed")
+    monkeypatch.setattr(service.store, "complete_holding_event", fail)
+    assert not service.process_due()["success"]
+    assert len(storage.patch_calls) == 1
+    assert next(c for c in service.store.list_holding_cases() if c["field"] == "asset_name")["state"] == "resolved_accept"
+    monkeypatch.setattr(service.store, "complete_holding_event", original)
+    service.accept(_payload("evt-after-crash"))
+    assert service.process_due()["success"]
+    assert len(storage.patch_calls) == 1
+
+
+def test_ordinary_reconcile_never_queries_or_completes_fund_name(tmp_path):
+    storage = _FundStorage()
+    def unexpected(code):
+        raise AssertionError("ordinary reconcile must not query fund names")
+    service = _fund_service(tmp_path, storage, unexpected)
+    result = service.workflow.reconciliation.reconcile(record_id="rec-1")
+    assert result["blocking_record_count"] > 0
+    assert not storage.patch_calls
+
+
+@pytest.mark.parametrize("updates", [
+    {"code": "999999"}, {"source": "eastmoney"}, {"source_as_of": None},
+    {"name": ""}, {"name": "011609"}, {"name": None}, {"name": ["name"]},
+])
+def test_untrusted_fund_name_evidence_never_writes(tmp_path, updates):
+    storage = _FundStorage()
+    service = _fund_service(tmp_path, storage, lambda code: _fund_evidence(**updates))
+    service.accept(_payload())
+    assert service.process_due()["success"]
+    assert not storage.patch_calls
+    assert next(c for c in service.store.list_holding_cases() if c["field"] == "asset_name")["state"] == "pending_manual_edit"
+
+
+@pytest.mark.parametrize("updates", [
+    {"asset_name": "已有名称"}, {"asset_type": "us_stock"},
+    {"account": ""}, {"broker": "unknown"}, {"asset_id": "bad-code"},
+    {"asset_name": 123}, {"asset_type": ["cn_fund"]},
+])
+def test_non_candidates_never_query_fund_name(tmp_path, updates):
+    storage = _FundStorage()
+    storage.fields.update(updates)
+    calls = []
+    service = _fund_service(tmp_path, storage, lambda code: calls.append(code))
+    service.accept(_payload())
+    assert service.process_due()["success"]
+    assert not calls
+    assert not storage.patch_calls
+
+
+@pytest.mark.parametrize("updates", [
+    {"account": "sy"}, {"asset_id": "011610"}, {"asset_type": "us_stock"},
+])
+def test_fund_completion_rechecks_raw_row_after_evidence_fetch(tmp_path, updates):
+    storage = _FundStorage()
+    def lookup(code):
+        storage.fields.update(updates)
+        return _fund_evidence(code)
+    service = _fund_service(tmp_path, storage, lookup)
+    service.accept(_payload())
+    assert service.process_due()["success"]
+    assert not storage.patch_calls
+    assert all(storage.fields[key] == value for key, value in updates.items())
+
+
+def test_fund_record_deleted_before_locked_read_is_noop(tmp_path):
+    from contextlib import contextmanager
+    storage = _FundStorage()
+    service = _fund_service(tmp_path, storage)
+    @contextmanager
+    def lock(key):
+        storage.exists = False
+        yield
+    service.workflow.lock_factory = lock
+    service.accept(_payload())
+    assert service.process_due()["success"]
+    assert not storage.patch_calls
+    assert service.store.get_holding_event("evt-1")["outcome"]["record_statuses"] == {"rec-1": "stale_record_missing"}
+
+
+def test_name_completion_does_not_silence_other_missing_fields(tmp_path):
+    storage = _FundStorage()
+    storage.fields["currency"] = ""
+    service = _fund_service(tmp_path, storage)
+    service.accept(_payload())
+    assert service.process_due()["success"]
+    assert dict(storage.patch_calls[0].values) == {"asset_name": "测试基金"}
+    currency = next(c for c in service.store.list_holding_cases() if c["field"] == "currency")
+    assert currency["state"] == "pending_apply"
+    assert service.store.get_operation_receipt(f"holdings:case:discovered:{currency['case_key']}") is not None
+    assert storage.fields["currency"] == ""
+
+
+@pytest.mark.parametrize("consumer", ["notify", "nav"])
+def test_normal_validation_cannot_release_unknown_automatic_name_attempt(tmp_path, consumer):
+    storage = _FundStorage()
+    storage.fail_write = True
+    service = _fund_service(tmp_path, storage)
+    service.accept(_payload())
+    assert service.process_due()["success"]
+    case = next(c for c in service.store.list_holding_cases() if c["field"] == "asset_name")
+    assert case["state"] == "apply_outcome_unknown"
+
+    if consumer == "notify":
+        service.workflow.notify(record_id="rec-1")
+    else:
+        evaluation = service.workflow.reconciliation.evaluate(account="hb")
+        plan = service.workflow.plan_evaluation(evaluation, trigger={"mode": "nav_preflight"})
+        service.workflow.materialize_preflight_plan(plan, evaluation)
+    assert service.store.get_holding_case(case["case_key"])["state"] == "apply_outcome_unknown"
+    service.accept(_payload("evt-after-validation"))
+    assert service.process_due()["success"]
+    assert len(storage.patch_calls) == 1
+
+
+def test_prepared_automatic_attempt_survives_finalize_failure_and_validation(tmp_path, monkeypatch):
+    storage = _FundStorage()
+    storage.fail_write = True
+    service = _fund_service(tmp_path, storage)
+    original = service.store.finalize_holding_cases
+    def fail(**kwargs):
+        raise RuntimeError("finalization interrupted")
+    monkeypatch.setattr(service.store, "finalize_holding_cases", fail)
+    service.accept(_payload())
+    assert not service.process_due()["success"]
+    case = next(c for c in service.store.list_holding_cases() if c["field"] == "asset_name")
+    assert case["state"] == "applying"
+    assert case["remote_attempt_started_at"]
+    monkeypatch.setattr(service.store, "finalize_holding_cases", original)
+    service.workflow.notify(record_id="rec-1")
+    assert service.store.get_holding_case(case["case_key"])["state"] == "applying"
+    service.accept(_payload("evt-retry"))
+    assert service.process_due()["success"]
+    assert len(storage.patch_calls) == 1
+
+
+def test_unknown_automatic_origin_survives_manual_recovery(tmp_path):
+    storage = _FundStorage()
+    storage.fail_write = True
+    service = _fund_service(tmp_path, storage)
+    service.accept(_payload())
+    assert service.process_due()["success"]
+    case = next(c for c in service.store.list_holding_cases() if c["field"] == "asset_name")
+    for _ in range(2):
+        result = service.workflow.recover(
+            case_key=case["case_key"], confirmed_operator={"method": "manual_cli"},
+        )
+        assert result["status"] == "apply_outcome_unknown"
+    service.workflow.notify(record_id="rec-1")
+    assert service.store.get_holding_case(case["case_key"])["state"] == "apply_outcome_unknown"
+    service.accept(_payload("evt-after-recover"))
+    assert service.process_due()["success"]
+    assert len(storage.patch_calls) == 1
