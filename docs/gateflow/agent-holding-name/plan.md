@@ -40,3 +40,5 @@ Notification integration acceptance: after Agent execute, feed a synthetic natur
 
 ## Implementation-boundary clarification: published OM contract
 scripts/export_om_openapi currently selects every /api/v1 path. Agent endpoints are a separately authenticated capability, not an OM contract change. Permit the minimal exporter selection exclusion of /api/v1/agent/ and a regression proving live Agent schema remains available while the immutable published OM export/manifest stays byte-identical. Do not regenerate/release the OM contract. This is required adapter ownership work for the approved API, not a new contract version.
+
+Accepted implementation clarification: expired/unclaimed requests use409; postclaim stale/evidence failures are durable rejected operation outcomes returned200 and replayed identically. HTTP200 means result retrieval, not business write success; clients must inspect state/reason. This preserves the required stale-no-write/idempotency contract and is documented/tested, without broadening behavior.

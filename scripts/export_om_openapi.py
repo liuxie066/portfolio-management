@@ -18,7 +18,7 @@ def build_contract() -> dict:
     document["paths"] = {
         path: value
         for path, value in document["paths"].items()
-        if path.startswith("/api/v1/")
+        if path.startswith("/api/v1/") and not path.startswith("/api/v1/agent/")
     }
     schemas = (document.get("components") or {}).get("schemas") or {}
     required = _schema_references(document["paths"])

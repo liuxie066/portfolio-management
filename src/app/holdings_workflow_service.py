@@ -561,6 +561,74 @@ class HoldingsWorkflowService:
             "events": self.store.list_holding_case_events(case_key),
         }
 
+    def complete_name_from_preview(
+        self, *, record_id: str, identity: Dict[str, str], expected_digest: str,
+        proposed_name: str, evidence_identity: Dict[str, str], principal_id: str,
+        preview_id: str,
+    ) -> Dict[str, Any]:
+        """Confirm one HK name preview through the existing protected patch lifecycle.
+
+        The caller owns authentication and a durable one-use operation claim.
+        Every business precondition is checked again under the normal record lock.
+        This entry never queues notifications or writes another field.
+        """
+        with self._locked(identity["account"], record_id):
+            rows = self.storage.get_raw_holdings(record_id=record_id)
+            if len(rows) != 1 or rows[0].record_id != record_id:
+                return {"state": "rejected", "reason": "SOURCE_UNAVAILABLE"}
+            raw = rows[0]
+            if (self._raw_identity(raw.raw_fields) != identity
+                    or record_digest(raw.raw_fields) != expected_digest):
+                return {"state": "rejected", "reason": "PREVIEW_STALE"}
+            if self._uncertain_name_cases(record_id):
+                return {"state": "unknown", "reason": "PRIOR_WRITE_UNCERTAIN"}
+            if not self.reconciliation.is_hk_stock_name_candidate(raw.raw_fields):
+                return {"state": "rejected", "reason": "NAME_NOT_ELIGIBLE"}
+            fresh = self.reconciliation.evaluate_records(
+                [raw], record_id=record_id, include_hk_stock_name=True,
+            )
+            if len(fresh.report.records) != 1 or fresh.report.evidence_errors:
+                return {"state": "rejected", "reason": "SOURCE_UNAVAILABLE"}
+            validation = self._single_validation(fresh, record_id)
+            if (self._raw_identity(validation.raw.raw_fields) != identity
+                    or validation.record_digest != expected_digest):
+                return {"state": "rejected", "reason": "PREVIEW_STALE"}
+            name = next(item for item in validation.outcomes if item.field == "asset_name")
+            if (name.status != "missing_completable" or name.proposed != proposed_name
+                    or name.authority != "hk_stock_quote"
+                    or {key: (name.evidence or {}).get(key) for key in ("source", "code", "market")}
+                    != evidence_identity):
+                return {"state": "rejected", "reason": "EVIDENCE_CHANGED"}
+            cases = self._cases_for_record(validation, fresh)
+            targets = [case for case in cases if case["field"] == "asset_name"]
+            result = self._execute_patch(
+                validation=validation, cases=targets, field_targets={"asset_name": proposed_name},
+                allowed_states=("pending_apply", "failed_retryable"), decision="accept-proposed",
+                reason="confirmed Agent name preview",
+                confirmed_operator={"method": "agent_preview", "principal_id": principal_id,
+                                    "preview_id": preview_id, "trusted_identity": False},
+                observed_cases=cases,
+                discovery_receipts=[self._discovery_receipt(case) for case in cases],
+                enqueue_receipts=False,
+                redact_errors=True,
+            )
+            if not result["success"]:
+                return {"state": "unknown", "reason": "WRITE_OUTCOME_UNCERTAIN"}
+            rows = self.storage.get_raw_holdings(record_id=record_id)
+            if len(rows) != 1 or rows[0].record_id != record_id:
+                return {"state": "unknown", "reason": "READBACK_UNAVAILABLE"}
+            raw_after = rows[0]
+            if (self._raw_identity(raw_after.raw_fields) != identity
+                    or raw_after.raw_fields.get("asset_name") != proposed_name):
+                return {"state": "unknown", "reason": "READBACK_CHANGED"}
+            after = self.reconciliation.evaluate_records([raw_after], record_id=record_id)
+            observed = self._single_validation(after, record_id)
+            plan = self.plan_evaluation(after, trigger={"mode": "agent_name_readback",
+                                                       "principal_id": principal_id,
+                                                       "preview_id": preview_id})
+            self.materialize_preflight_plan(plan, after, enqueue_receipts=False)
+            return {"state": "succeeded", "reason": "NAME_COMPLETED", "validation": observed}
+
     def apply_missing(
         self,
         *,
@@ -843,6 +911,8 @@ class HoldingsWorkflowService:
         confirmed_operator: Dict[str, Any],
         observed_cases: Optional[list[Dict[str, Any]]] = None,
         discovery_receipts: Optional[list[Dict[str, Any]]] = None,
+        enqueue_receipts: bool = True,
+        redact_errors: bool = False,
     ) -> Dict[str, Any]:
         attempt_id = f"holdapply_{uuid4().hex}"
         prepared = []
@@ -868,6 +938,7 @@ class HoldingsWorkflowService:
         workflow = None
         if observed_cases is not None:
             workflow = self.store.materialize_and_prepare_holding_apply(
+                enqueue_receipts=enqueue_receipts,
                 observed_cases=observed_cases,
                 discovery_receipts=list(discovery_receipts or ()),
                 apply_cases=prepared,
@@ -904,7 +975,7 @@ class HoldingsWorkflowService:
                 )
             )
         except Exception as exc:
-            patch_error = str(exc) or exc.__class__.__name__
+            patch_error = type(exc).__name__ if redact_errors else (str(exc) or exc.__class__.__name__)
             try:
                 records = self.storage.get_raw_holdings(
                     record_id=validation.raw.record_id
@@ -972,7 +1043,7 @@ class HoldingsWorkflowService:
                     )
                 )
             states.append(state)
-        self.store.finalize_holding_cases(outcomes=outcomes, receipts=receipts)
+        self.store.finalize_holding_cases(outcomes=outcomes, receipts=receipts if enqueue_receipts else [])
         success = all(state == "resolved_accept" for state in states)
         return {
             "success": success,
