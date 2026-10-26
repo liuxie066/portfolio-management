@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.8 - 2026-10-26
+
+- Add a default-disabled Agent interface for previewing and explicitly confirming missing Hong Kong holding names with exact record grants, expiring previews, and durable result readback.
+- Keep Agent name completion scoped to one record without account-wide refreshes or notification enqueue, preserving existing names and other field blockers.
+
 ## 0.2.7 - 2026-10-26
 
 - Complete empty non-Futu Hong Kong stock names from matching public market evidence while preserving existing names and write safeguards.
