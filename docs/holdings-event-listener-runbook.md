@@ -3,8 +3,8 @@
 This runbook activates the Feishu Base record-change event as an additional
 trigger for holdings validation and cash-flow generated-field completion. It
 does not make event payload fields authoritative, guess FX, or confirm CASH
-holding effects. Its only automatic Holdings repair is the empty fund-name
-policy described below.
+holding effects. Its automatic Holdings repairs are the empty fund-name and explicitly typed
+Hong Kong stock-name policies described below.
 
 ## Boundaries
 
@@ -23,13 +23,25 @@ policy described below.
   Tencent `jj` fund response. It uses the existing quote provider with a
   five-second request budget and no cache writes. Unavailable or unproven
   evidence leaves a manual-repair case; a code fallback is never a name.
-  Other missing fields and conflicts still require manual confirmation.
+  An explicitly typed `hk_stock` row with an account, known non-Futu broker
+  and empty name may similarly receive only its name from an exact Tencent HK
+  response. Accepted aliases are 1–5 nonzero ASCII digits, `HK`/`HK.` prefixes,
+  and `.HK` suffixes; the holding's stored asset code is not rewritten. Both the
+  response assignment and inner code must match the canonical five-digit HK
+  code. Duplicate assignments, code-only names, foreign-market identities,
+  unavailable responses and missing evidence remain manual-repair cases.
+  The HTTPS lookup uses a five-second I/O timeout (not a hard wall-clock
+  deadline), no FX/trading query and no cache. Evidence records source, market,
+  canonical code and UTC retrieval time; that time is not an exchange timestamp.
+  Existing names and names with unknown write outcomes are not overwritten or
+  automatically retried. Other missing fields and conflicts still require
+  manual confirmation.
 - The name patch owns only `asset_name`, uses account/record locks, rechecks
   the raw row before writing and reads it back. Durable attempts precede remote
   writes; unknown outcomes require operator recovery and are never auto-retried.
   A successful completion emits a closure receipt; the self-event does not
   repeat the patch. Existing user names are preserved. Ordinary NAV/reconcile
-  reads do not query fund names or write them. Feishu has no atomic compare-and-set
+  reads do not query fund or HK stock names or write them. Feishu has no atomic compare-and-set
   here, so a concurrent human edit between the final read and PATCH remains a
   limitation of the existing storage API.
 - Valid CNY cash-flow rows may have only their repository-owned generated fields
@@ -175,3 +187,23 @@ retryable rows in either inbox remain durable and can be processed after the
 service is re-enabled. Do not delete the SQLite database, fabricate a processed
 outcome, guess FX, auto-confirm a CASH effect, or manually patch a conflicted
 holdings field as a recovery shortcut.
+
+## Holdings currency validation
+
+Holdings currency policy v2 validates both existing codes and proposed codes
+against the offline accepted-code set in `src/domain/holding_currencies.py`.
+The checked-in Foundation/ICU 78 snapshot (exported 2026-10-26) preserves known
+historical denominations and CNH; it is not a current legal-tender or supported
+FX-rate catalog. XTS (test) and XXX (no currency) are excluded. Unknown codes
+produce blocking validation cases instead of completion suggestions. The
+policy never automatically writes a currency or infers HKD from a Hong Kong
+listing. The reviewed `currency-typo.v1` rule can propose `HDK -> HKD` as a
+blocking confirmation case. It is a static spelling-policy proposal, not a
+market observation: no observation time is invented. If valid authoritative
+currency evidence disagrees, the row remains invalid with no suggestion.
+Only explicit exact-case `accept-proposed` may apply the correction through the
+existing locked/re-read/guarded write/readback path. `apply_missing` and event
+name completion do not apply it; `keep-current` cannot waive an invalid
+currency for NAV. Other unknown codes remain manual, with no fuzzy guessing.
+Updating the catalog requires a reviewed code change; validation makes no
+network request for currencies.

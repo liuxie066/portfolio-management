@@ -1,6 +1,10 @@
 """Asset display-name lookup service."""
 from __future__ import annotations
 import logging
+import re
+from datetime import datetime, timezone
+
+from src.domain.holding_names import normalize_hk_stock_code, verified_hk_name
 
 import threading
 import time
@@ -46,6 +50,40 @@ class AssetNameService:
             "source": "tencent_jj",
             "source_as_of": result.get("fetched_at"),
         }
+
+    @staticmethod
+    def lookup_hk_stock_name(asset_id: str) -> dict | None:
+        """Fetch exact public HK identity evidence without prices, FX or cache writes.
+
+        The five-second requests timeout is an I/O budget, not a hard wall-clock
+        deadline. Duplicate target assignments are ambiguous and fail closed.
+        """
+        import requests
+        from src.tencent_batch import parse_multi_payload
+
+        code = normalize_hk_stock_code(asset_id)
+        if code is None:
+            return None
+        query = f"hk{code}"
+        try:
+            with requests.Session() as session:
+                response = session.get(f"https://qt.gtimg.cn/q={query}", timeout=5)
+                response.raise_for_status()
+                response.encoding = "gb2312"
+                text = response.text
+            assignments = re.findall(rf'\bv_{query}\s*=', text, re.IGNORECASE)
+            if len(assignments) != 1:
+                return None
+            parts = parse_multi_payload(text).get(query)
+            if not parts or len(parts) < 3 or parts[2] != code:
+                return None
+            return verified_hk_name({
+                "code": code, "market": "HK", "name": parts[1],
+                "source": "tencent_hk",
+                "source_as_of": datetime.now(timezone.utc).isoformat(),
+            }, code)
+        except (requests.RequestException, ValueError, TypeError):
+            return None
 
     def get_asset_name(self, asset_id: str, user_provided_name: str = None, timeout: float = 5.0) -> str:
         """Resolve asset name via price lookup with timeout fallback."""

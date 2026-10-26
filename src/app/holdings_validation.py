@@ -10,6 +10,12 @@ from ._json import canonical_json as _canonical_json
 import re
 from typing import Any, Iterable, Mapping, Optional
 
+from src.domain.holding_currencies import (
+    HOLDING_CURRENCIES, CURRENCY_TYPO_CORRECTIONS, CURRENCY_TYPO_POLICY_VERSION,
+    is_known_holding_currency,
+)
+from src.domain.holding_names import normalize_hk_stock_code, verified_hk_name
+
 from src.models import AssetClass, AssetType, Holding, Industry
 from src.domain.holdings import (
     RawHoldingRecord,
@@ -20,7 +26,7 @@ from src.feishu.contracts import get_table_contract
 
 
 VALIDATION_POLICY_VERSION = "holdings-validation.v1"
-CURRENCY_POLICY_VERSION = "holdings-currency.v1"
+CURRENCY_POLICY_VERSION = "holdings-currency.v2"
 ASSET_CLASS_POLICY_VERSION = "holdings-asset-class.v2"
 
 _HOLDINGS_TABLE_CONTRACT = get_table_contract("holdings")
@@ -185,6 +191,7 @@ class HoldingsEvidenceBundle:
     futu_by_account: Mapping[str, FutuAccountEvidence] = field(default_factory=dict)
     source_errors: Mapping[str, str] = field(default_factory=dict)
     fund_names: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    hk_stock_names: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
     def futu_position(
         self,
@@ -301,7 +308,7 @@ class RecordValidation:
             )
             for name in REQUIRED_FIELDS
         )
-        if self.issues or not required_valid:
+        if self.issues or not required_valid or not is_known_holding_currency(self.raw.raw_fields.get("currency")):
             raise ValueError(f"holding record is not fully valid: {self.raw.record_id}")
         fields = self.raw.canonical_fields()
         outcome_by_field = by_field
@@ -494,6 +501,10 @@ class HoldingsValidator:
             self._asset_name(
                 fields.get("asset_name"), position, futu_evidence,
                 fund_name=evidence.fund_names.get(asset_id or ""),
+                hk_stock_name=(verified_hk_name(
+                    evidence.hk_stock_names.get(normalize_hk_stock_code(asset_id) or ""), asset_id,
+                ) if fields.get("asset_type") == "hk_stock"
+                    and account and holding_broker_scope(broker) == "non_futu" else None),
             )
         )
         outcomes.append(
@@ -699,6 +710,7 @@ class HoldingsValidator:
         futu_evidence: Optional[FutuAccountEvidence],
         *,
         fund_name: Optional[Mapping[str, Any]] = None,
+        hk_stock_name: Optional[Mapping[str, Any]] = None,
     ) -> FieldOutcome:
         current = _text(raw_value)
         proposed = _text(position.asset_name) if position is not None else None
@@ -736,6 +748,14 @@ class HoldingsValidator:
                 reason_code="ASSET_NAME_COMPLETION_AVAILABLE",
                 blocks_official_nav=True,
                 evidence=fund_name,
+            )
+        if current is None and hk_stock_name:
+            return FieldOutcome(
+                field="asset_name", status="missing_completable", current=raw_value,
+                proposed=hk_stock_name["name"], authority="hk_stock_quote",
+                authority_id=f"tencent_hk:HK:{hk_stock_name['code']}:name",
+                reason_code="ASSET_NAME_COMPLETION_AVAILABLE", blocks_official_nav=True,
+                evidence=hk_stock_name,
             )
         if current is None:
             return FieldOutcome(
@@ -782,14 +802,9 @@ class HoldingsValidator:
     ) -> FieldOutcome:
         raw_text = _text(raw_value)
         current = raw_text.upper() if raw_text else None
-        if current is not None and not _CURRENCY_RE.fullmatch(current):
-            return FieldOutcome(
-                field="currency",
-                status="invalid",
-                current=raw_value,
-                reason_code="CURRENCY_INVALID",
-                blocks_official_nav=True,
-            )
+        invalid_current = current is not None and (
+            not _CURRENCY_RE.fullmatch(current) or current not in HOLDING_CURRENCIES
+        )
 
         proposed: Optional[str] = None
         authority: Optional[str] = None
@@ -834,6 +849,47 @@ class HoldingsValidator:
                 if proposed:
                     authority = "asset_id_explicit"
                     authority_id = f"asset_id:{str(asset_id).upper()}:market"
+
+        if proposed is not None and proposed not in HOLDING_CURRENCIES:
+            return FieldOutcome(
+                field="currency", status="invalid", current=raw_value,
+                reason_code="CURRENCY_AUTHORITY_INVALID", blocks_official_nav=True,
+            )
+
+        if invalid_current:
+            correction = CURRENCY_TYPO_CORRECTIONS.get(current)
+            if correction and correction in HOLDING_CURRENCIES:
+                candidates = {correction}
+                if proposed is not None:
+                    candidates.add(proposed)
+                correction_evidence = {
+                    "source": "currency_typo_policy", "policy_version": CURRENCY_TYPO_POLICY_VERSION,
+                    "observed_code": current, "candidates": sorted(candidates),
+                }
+                if authority_id:
+                    correction_evidence["corroborating_authority_id"] = authority_id
+                if evidence_payload:
+                    correction_evidence["authority_evidence"] = evidence_payload
+                    if evidence_payload.get("source_as_of"):
+                        correction_evidence["source_as_of"] = evidence_payload["source_as_of"]
+                if len(candidates) == 1:
+                    return FieldOutcome(
+                        field="currency", status="conflict", current=current, proposed=correction,
+                        authority="currency_typo_policy",
+                        authority_id=(f"{CURRENCY_TYPO_POLICY_VERSION}:{current}:{correction}"
+                                      + (f":{authority_id}" if authority_id else "")),
+                        reason_code="CURRENCY_CORRECTION_AVAILABLE", blocks_official_nav=True,
+                        evidence=correction_evidence,
+                    )
+                return FieldOutcome(
+                    field="currency", status="invalid", current=raw_value,
+                    reason_code="CURRENCY_CORRECTION_AMBIGUOUS", blocks_official_nav=True,
+                    evidence=correction_evidence,
+                )
+            return FieldOutcome(
+                field="currency", status="invalid", current=raw_value,
+                reason_code="CURRENCY_INVALID", blocks_official_nav=True,
+            )
 
         if current is None:
             if proposed is not None:

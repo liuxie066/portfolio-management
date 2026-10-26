@@ -553,3 +553,69 @@ def test_record_digest_normalizes_negative_zero():
     zero = HoldingsValidator().validate([_record(quantity=0)]).records[0]
 
     assert negative_zero.record_digest == zero.record_digest
+
+
+@pytest.mark.parametrize("currency", ["CNY", "USD", "HKD", "EUR", "JPY", "CNH", "XAU", "CHF", "CLF"])
+def test_known_manual_currency_preserved(currency):
+    result = HoldingsValidator().validate([_record(asset_type="hk_stock", currency=currency)])
+    outcome = _outcome(result, "currency")
+    assert outcome.status == "valid"
+    assert outcome.current == currency
+    assert outcome.proposed is None
+
+
+@pytest.mark.parametrize("currency", ["ZZZ", "XTS", "XXX", "ABCDE"])
+def test_unknown_currency_is_blocking_without_autocorrection(currency):
+    result = HoldingsValidator().validate([_record(asset_type="hk_stock", currency=currency)])
+    outcome = _outcome(result, "currency")
+    assert outcome.status == "invalid" and outcome.blocks_official_nav
+    assert outcome.proposed is None
+
+
+def test_unknown_currency_from_cash_identity_cannot_be_proposed():
+    result = HoldingsValidator().validate([_record(asset_type="cash", asset_id="HDK-CASH", currency="")])
+    outcome = _outcome(result, "currency")
+    assert outcome.status == "invalid" and outcome.proposed is None
+
+
+def test_unknown_futu_currency_cannot_be_proposed():
+    position = FutuPositionEvidence("00001", "HK.00001", "Test", "STOCK", "HK", "HDK", True)
+    result = HoldingsValidator().validate(
+        [_record(asset_type="hk_stock", asset_id="00001", broker="富途", currency="")],
+        evidence=_futu_bundle(position),
+    )
+    outcome = _outcome(result, "currency")
+    assert outcome.status == "invalid" and outcome.proposed is None
+
+
+@pytest.mark.parametrize("raw", ["HDK", "hdk", " HDK "])
+def test_known_currency_typo_is_confirmation_only_with_static_evidence(raw):
+    result = HoldingsValidator().validate([_record(asset_type="hk_stock", currency=raw)])
+    outcome = _outcome(result, "currency")
+    assert outcome.status == "conflict" and outcome.blocks_official_nav
+    assert outcome.current == "HDK" and outcome.proposed == "HKD"
+    assert outcome.authority == "currency_typo_policy"
+    assert outcome.evidence["policy_version"] == "currency-typo.v1"
+    assert "source_as_of" not in outcome.evidence
+    with pytest.raises(ValueError, match="not fully valid"):
+        result.records[0].to_holding(confirmed_conflict_fields={"currency"})
+
+
+def test_currency_typo_disagreement_never_guesses():
+    result = HoldingsValidator().validate([_record(asset_type="us_stock", currency="HDK")])
+    outcome = _outcome(result, "currency")
+    assert outcome.status == "invalid" and outcome.proposed is None
+    assert outcome.reason_code == "CURRENCY_CORRECTION_AMBIGUOUS"
+    assert outcome.evidence["candidates"] == ["HKD", "USD"]
+
+
+def test_currency_correction_preserves_real_corroborating_evidence():
+    position = FutuPositionEvidence("00001", "HK.00001", "Test", "STOCK", "HK", "HKD", True)
+    result = HoldingsValidator().validate(
+        [_record(asset_type="hk_stock", asset_id="00001", broker="富途", currency="HDK")],
+        evidence=_futu_bundle(position),
+    )
+    outcome = _outcome(result, "currency")
+    assert outcome.status == "conflict" and outcome.proposed == "HKD"
+    assert outcome.evidence["source_as_of"] == "2026-07-31T12:00:00Z"
+    assert outcome.evidence["corroborating_authority_id"] in outcome.authority_id
