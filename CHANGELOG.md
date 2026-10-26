@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.7 - 2026-10-26
+
+- Complete empty non-Futu Hong Kong stock names from matching public market evidence while preserving existing names and write safeguards.
+- Reject unknown holding currency codes and offer evidence-labelled HDK-to-HKD corrections through explicit confirmation, preserving NAV blocking until resolved.
+
 ## 0.2.6 - 2026-10-14
 
 - Keep Cash Flow scans independent of incomplete non-cash Holdings while preserving strict cash and NAV validation.
