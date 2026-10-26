@@ -97,8 +97,9 @@ def test_notify_materializes_one_case_without_remote_holding_write(tmp_path):
     assert [(item["field"], item["state"]) for item in cases] == [
         ("currency", "pending_apply")
     ]
+    # Currency policy v2 deliberately changes case identity.
     assert cases[0]["case_key"] == (
-        "bb54e18113db476fe42491aa1a489a3cc2a85590c0214a4a3b978330f6f0b64f"
+        "40d05d72ae2bb4dede1b7fca6b9455411686ece4925bf528cc833d0f72e51967"
     )
     assert cases[0]["case_precondition_digest"] == (
         "holdings-precondition.v2:"

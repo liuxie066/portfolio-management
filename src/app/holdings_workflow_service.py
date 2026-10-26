@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable, Optional
 from uuid import uuid4
 
 from src.domain.holding_mutations import HoldingRepairPatch
+from src.domain.holding_currencies import is_known_holding_currency
 from src.process_lock import account_lock_key, holding_record_lock_key, process_lock
 
 from .holding_case_contract import (
@@ -108,7 +109,7 @@ class HoldingsWorkflowService:
         record_id: str,
         trigger: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Complete an eligible empty fund name, then plan durable notifications."""
+        """Complete an eligible empty name, then plan durable notifications."""
 
         resolved_record_id = str(record_id or "").strip()
         if not resolved_record_id:
@@ -140,8 +141,8 @@ class HoldingsWorkflowService:
             }
         validation = self._single_validation(evaluation, resolved_record_id)
         uncertain = self._uncertain_name_cases(resolved_record_id)
-        if not uncertain and self.reconciliation.is_fund_name_candidate(validation.raw.raw_fields):
-            evaluation = self._complete_event_fund_name(
+        if not uncertain and self.reconciliation.is_automatic_name_candidate(validation.raw.raw_fields):
+            evaluation = self._complete_event_name(
                 evaluation=evaluation, trigger=trigger,
             )
             if not evaluation.report.records:
@@ -184,34 +185,41 @@ class HoldingsWorkflowService:
             and case["state"] in {"applying", "apply_outcome_unknown"}
         ]
 
-    def _complete_event_fund_name(
+    def _complete_event_name(
         self, *, evaluation: HoldingsReconciliationEvaluation, trigger: Dict[str, Any],
     ) -> HoldingsReconciliationEvaluation:
         initial = evaluation.report.records[0].raw
         account = initial.raw_fields["account"].strip()
+        is_hk = self.reconciliation.is_hk_stock_name_candidate(initial.raw_fields)
+        authority = "hk_stock_quote" if is_hk else "fund_quote"
+        policy = "empty_hk_stock_name.v1" if is_hk else "empty_fund_name.v1"
+        mode = "event_hk_stock_name_completion" if is_hk else "event_fund_name_completion"
         with self._locked(account, initial.record_id):
             if self._uncertain_name_cases(initial.record_id):
                 return evaluation
-            fresh = self.reconciliation.evaluate(record_id=initial.record_id, include_fund_name=True)
+            fresh = self.reconciliation.evaluate(
+                record_id=initial.record_id, include_fund_name=not is_hk,
+                include_hk_stock_name=is_hk,
+            )
             if not fresh.report.records or fresh.report.evidence_errors:
                 return fresh
             validation = self._single_validation(fresh, initial.record_id)
             if (
                 self._raw_identity(validation.raw.raw_fields) != self._raw_identity(initial.raw_fields)
-                or not self.reconciliation.is_fund_name_candidate(validation.raw.raw_fields)
+                or not self.reconciliation.is_automatic_name_candidate(validation.raw.raw_fields)
             ):
                 return fresh
             cases = self._cases_for_record(validation, fresh)
             targets = [
                 case for case in cases if case["field"] == "asset_name"
-                and case["kind"] == "missing_completable" and case["authority"] == "fund_quote"
+                and case["kind"] == "missing_completable" and case["authority"] == authority
             ]
             if not targets:
                 return fresh
             self.store.materialize_holding_cases(
                 cases=targets,
                 discovery_receipts=[self._discovery_receipt(case) for case in targets],
-                trigger={**trigger, "mode": "event_fund_name_completion"},
+                trigger={**trigger, "mode": mode},
                 enqueue_receipts=False,
             )
             self._execute_patch(
@@ -220,9 +228,9 @@ class HoldingsWorkflowService:
                 field_targets={"asset_name": targets[0]["proposed"]},
                 allowed_states=("pending_apply", "failed_retryable"),
                 decision="accept-proposed",
-                reason="automatic empty fund-name completion",
+                reason="automatic empty HK stock-name completion" if is_hk else "automatic empty fund-name completion",
                 confirmed_operator={
-                    "method": "automatic_policy", "policy": "empty_fund_name.v1",
+                    "method": "automatic_policy", "policy": policy,
                     "event_id": trigger.get("event_id"), "trusted_identity": False,
                 },
                 observed_cases=cases,
@@ -634,6 +642,8 @@ class HoldingsWorkflowService:
                 raise ValueError("holding confirmation scope changed; reconcile again")
             self._require_same_scope(stored, current)
             confirmation_scope = self._confirmation_scope(current)
+            if decision == "keep-current" and self._invalid_currency_case(current):
+                raise ValueError("invalid currency cannot be kept; accept the correction or edit the source")
             if stored["state"] == "resolved_keep" and decision == "keep-current":
                 return {
                     "success": True,
@@ -864,8 +874,11 @@ class HoldingsWorkflowService:
                 apply_attempt_id=attempt_id,
                 operator_context=confirmed_operator,
                 trigger={
-                    "mode": "event_fund_name_completion"
-                    if confirmed_operator.get("method") == "automatic_policy" else "manual_apply",
+                    "mode": (
+                        "event_hk_stock_name_completion"
+                        if confirmed_operator.get("policy") == "empty_hk_stock_name.v1"
+                        else "event_fund_name_completion"
+                    ) if confirmed_operator.get("method") == "automatic_policy" else "manual_apply",
                     "operator": confirmed_operator,
                 },
             )
@@ -1160,13 +1173,18 @@ class HoldingsWorkflowService:
                 ),
             }
         elif case["state"] == "pending_confirmation":
+            invalid_currency = self._invalid_currency_case(case)
+            decisions = ["accept-proposed"] if invalid_currency else ["accept-proposed", "keep-current"]
             action = {
-                "description": "冲突需要人工选择并填写理由",
+                "description": (
+                    "币种无效；确认纠正建议或先在表中人工修正，不可保留无效值"
+                    if invalid_currency else "冲突需要人工选择并填写理由"
+                ),
                 "command": (
                     f"pm holdings resolve --case-key {case['case_key']} "
-                    "--decision accept-proposed|keep-current --reason REASON --confirm"
+                    f"--decision {'|'.join(decisions)} --reason REASON --confirm"
                 ),
-                "allowed_decisions": ["accept-proposed", "keep-current"],
+                "allowed_decisions": decisions,
             }
         else:
             action = {
@@ -1322,10 +1340,14 @@ class HoldingsWorkflowService:
             raise ValueError("holding confirmation scope changed; reconcile again")
 
     @staticmethod
+    def _invalid_currency_case(case: Dict[str, Any]) -> bool:
+        return case.get("field") == "currency" and not is_known_holding_currency(case.get("current"))
+
+    @staticmethod
     def _durable_keep_matches(
         stored: Dict[str, Any], current: Dict[str, Any]
     ) -> bool:
-        if stored.get("state") != "resolved_keep":
+        if stored.get("state") != "resolved_keep" or HoldingsWorkflowService._invalid_currency_case(current):
             return False
         transition = classify_precondition_transition(stored, current)
         if transition == PRECONDITION_LEGACY_MIGRATABLE:

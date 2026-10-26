@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from .asset_name_service import AssetNameService
+from src.domain.holding_names import normalize_hk_stock_code, verified_hk_name
 
 from .holdings_validation import (
     FutuAccountEvidence,
@@ -35,11 +36,13 @@ class HoldingsReconciliationService:
         validator: Optional[HoldingsValidator] = None,
         futu_observer: Optional[Callable[[str], Any]] = None,
         fund_name_lookup: Optional[Callable[[str], Any]] = None,
+        hk_stock_name_lookup: Optional[Callable[[str], Any]] = None,
     ) -> None:
         self.storage = storage
         self.validator = validator or HoldingsValidator()
         self.futu_observer = futu_observer or self._observe_futu
         self.fund_name_lookup = fund_name_lookup or AssetNameService.lookup_fund_name
+        self.hk_stock_name_lookup = hk_stock_name_lookup or AssetNameService.lookup_hk_stock_name
 
     def reconcile(
         self,
@@ -73,6 +76,7 @@ class HoldingsReconciliationService:
         account: Optional[str] = None,
         record_id: Optional[str] = None,
         include_fund_name: bool = False,
+        include_hk_stock_name: bool = False,
     ) -> HoldingsReconciliationEvaluation:
         if account and record_id:
             raise ValueError("account and record_id are mutually exclusive")
@@ -82,6 +86,7 @@ class HoldingsReconciliationService:
             account=account,
             record_id=record_id,
             include_fund_name=include_fund_name,
+            include_hk_stock_name=include_hk_stock_name,
         )
 
     def evaluate_records(
@@ -91,6 +96,7 @@ class HoldingsReconciliationService:
         account: Optional[str] = None,
         record_id: Optional[str] = None,
         include_fund_name: bool = False,
+        include_hk_stock_name: bool = False,
     ) -> HoldingsReconciliationEvaluation:
         """Validate an already frozen complete source slice."""
 
@@ -133,12 +139,24 @@ class HoldingsReconciliationService:
                     and name.get("source_as_of")
                 ):
                     fund_names[code] = {**name, "name": name["name"].strip()}
+        hk_stock_names = {}
+        if include_hk_stock_name and record_id and len(records) == 1:
+            raw = records[0]
+            if raw.record_id == record_id and self.is_hk_stock_name_candidate(raw.raw_fields):
+                code = normalize_hk_stock_code(raw.raw_fields["asset_id"])
+                try:
+                    name = verified_hk_name(self.hk_stock_name_lookup(code), code)
+                except Exception:
+                    name = None
+                if name:
+                    hk_stock_names[code] = name
         report = self.validator.validate(
             records,
             evidence=HoldingsEvidenceBundle(
                 futu_by_account=evidence_by_account,
                 source_errors=evidence_errors,
                 fund_names=fund_names,
+                hk_stock_names=hk_stock_names,
             ),
         )
         return HoldingsReconciliationEvaluation(
@@ -161,6 +179,20 @@ class HoldingsReconciliationService:
             and isinstance(fields.get("account"), str) and bool(fields["account"].strip())
             and holding_broker_scope(fields.get("broker")) == "non_futu"
         )
+
+    @staticmethod
+    def is_hk_stock_name_candidate(fields: Any) -> bool:
+        name = fields.get("asset_name")
+        return (
+            normalize_hk_stock_code(fields.get("asset_id")) is not None
+            and fields.get("asset_type") == "hk_stock"
+            and (name is None or isinstance(name, str) and not name.strip())
+            and isinstance(fields.get("account"), str) and bool(fields["account"].strip())
+            and holding_broker_scope(fields.get("broker")) == "non_futu"
+        )
+
+    def is_automatic_name_candidate(self, fields: Any) -> bool:
+        return self.is_fund_name_candidate(fields) or self.is_hk_stock_name_candidate(fields)
 
     def _observe_futu(self, account: str) -> Any:
         from .futu_balance_sync_service import FutuBalanceSyncService

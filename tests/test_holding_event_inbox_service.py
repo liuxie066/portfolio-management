@@ -709,3 +709,210 @@ def test_unknown_automatic_origin_survives_manual_recovery(tmp_path):
     service.accept(_payload("evt-after-recover"))
     assert service.process_due()["success"]
     assert len(storage.patch_calls) == 1
+
+
+def _hk_service(tmp_path, *, updates=None, lookup=None):
+    storage = _FundStorage()
+    storage.fields.update({"asset_id": "00001", "asset_type": "hk_stock", "account": "test-account",
+                           "broker": "test-broker", "currency": "HKD", **(updates or {})})
+    service = _service(tmp_path, storage)
+    service.workflow.reconciliation.hk_stock_name_lookup = lookup or _hk_evidence
+    return storage, service
+
+
+def _hk_evidence(asset_code, **updates):
+    return {"code": asset_code, "name": "测试证券", "source": "tencent_hk", "market": "HK",
+            "source_as_of": "2026-01-01T00:00:00+00:00", **updates}
+
+
+def test_hk_name_completion_only_name_with_evidence_and_reentry(tmp_path):
+    storage, service = _hk_service(tmp_path, updates={"asset_id": "1.HK"})
+    original = dict(storage.fields)
+    service.accept(_payload())
+    assert service.process_due()["success"]
+    assert storage.fields == {**original, "asset_name": "测试证券"}
+    assert dict(storage.patch_calls[0].values) == {"asset_name": "测试证券"}
+    case = next(c for c in service.store.list_holding_cases() if c["field"] == "asset_name")
+    assert case["state"] == "resolved_accept"
+    assert case["evidence"]["source"] == "tencent_hk"
+    assert case["evidence"]["source_as_of"]
+    assert case["resolution"]["operator_context"]["policy"] == "empty_hk_stock_name.v1"
+    service.accept(_payload())
+    service.accept(_payload("evt-self"))
+    assert service.process_due()["success"]
+    assert len(storage.patch_calls) == 1
+
+
+@pytest.mark.parametrize("updates", [{"code": "00002"}, {"market": "US"}, {"source": "other"},
+                                    {"name": "1.HK"}, {"name": ""}, {"source_as_of": None},
+                                    {"source_as_of": "not-a-time"}, {"source_as_of": "2026-01-01"},
+                                    {"is_stale": True}, {"is_from_cache": True}])
+def test_hk_unproven_name_remains_manual(tmp_path, updates):
+    storage, service = _hk_service(tmp_path, lookup=lambda code: _hk_evidence(code, **updates))
+    service.accept(_payload())
+    assert service.process_due()["success"]
+    assert not storage.patch_calls
+    case = next(c for c in service.store.list_holding_cases() if c["field"] == "asset_name")
+    assert case["state"] == "pending_manual_edit"
+
+
+def test_hk_provider_failure_and_ordinary_reads_do_not_write(tmp_path):
+    calls = []
+    def fail(code):
+        calls.append(code)
+        raise TimeoutError("synthetic")
+    storage, service = _hk_service(tmp_path, lookup=fail)
+    service.workflow.reconciliation.reconcile(record_id="rec-1")
+    assert calls == []
+    service.accept(_payload())
+    assert service.process_due()["success"]
+    assert calls == ["00001"] and not storage.patch_calls
+
+
+@pytest.mark.parametrize("updates", [{"asset_name": "已有名称"}, {"broker": "unknown"},
+                                    {"account": ""}, {"asset_id": "1.US"}])
+def test_hk_non_candidates_never_lookup(tmp_path, updates):
+    calls = []
+    storage, service = _hk_service(tmp_path, updates=updates, lookup=lambda code: calls.append(code))
+    service.accept(_payload())
+    assert service.process_due()["success"]
+    assert calls == [] and not storage.patch_calls
+
+
+@pytest.mark.parametrize("updates", [{"asset_name": "人工名称"}, {"account": "other-account"},
+                                    {"broker": "other-broker"}, {"asset_type": "us_stock"}])
+def test_hk_completion_preserves_concurrent_edit(tmp_path, updates):
+    storage, service = _hk_service(tmp_path)
+    def lookup(code):
+        storage.fields.update(updates)
+        return _hk_evidence(code)
+    service.workflow.reconciliation.hk_stock_name_lookup = lookup
+    service.accept(_payload())
+    assert service.process_due()["success"]
+    assert not storage.patch_calls
+    assert all(storage.fields[k] == v for k, v in updates.items())
+
+
+def test_hk_unknown_write_does_not_retry_on_new_event(tmp_path):
+    storage, service = _hk_service(tmp_path)
+    storage.fail_write = True
+    service.accept(_payload())
+    assert service.process_due()["success"]
+    case = next(c for c in service.store.list_holding_cases() if c["field"] == "asset_name")
+    assert case["state"] == "apply_outcome_unknown"
+    service.accept(_payload("evt-again"))
+    assert service.process_due()["success"]
+    assert len(storage.patch_calls) == 1
+
+
+def test_hk_name_completion_keeps_invalid_currency_nav_blocker(tmp_path):
+    storage, service = _hk_service(tmp_path, updates={"currency": "HDK"})
+    service.accept(_payload())
+    assert service.process_due()["success"]
+    assert storage.fields["asset_name"] == "测试证券"
+    assert storage.fields["currency"] == "HDK"
+    report = service.workflow.reconciliation.reconcile(record_id="rec-1")
+    assert report["blocking_record_count"] == 1
+    case = next(c for c in service.store.list_holding_cases() if c["field"] == "currency")
+    assert case["kind"] == "conflict" and case["blocks_official_nav"]
+
+
+def test_hk_completion_preserves_edit_at_final_patch_recheck(tmp_path):
+    storage, service = _hk_service(tmp_path)
+    storage.before_patch = lambda: storage.fields.update(asset_name="人工最终名称")
+    service.accept(_payload())
+    assert service.process_due()["success"]
+    assert storage.fields["asset_name"] == "人工最终名称"
+    assert not storage.patch_calls
+    case = next(c for c in service.store.list_holding_cases() if c["field"] == "asset_name")
+    assert case["state"] == "superseded"
+
+
+def test_hk_futu_record_does_not_borrow_public_name_evidence(tmp_path):
+    calls = []
+    storage, service = _hk_service(tmp_path, updates={"broker": "富途"},
+                                  lookup=lambda code: calls.append(code))
+    # Synthetic absent account evidence; do not construct a trading provider.
+    service.workflow.reconciliation.futu_observer = lambda account: (_ for _ in ()).throw(
+        RuntimeError("synthetic unavailable"))
+    service.accept(_payload())
+    assert not service.process_due()["success"]
+    assert calls == [] and not storage.patch_calls
+
+
+
+def _hk_currency_case(service):
+    return next(c for c in service.store.list_holding_cases() if c["field"] == "currency")
+
+
+def test_currency_correction_requires_explicit_exact_case_confirmation(tmp_path):
+    storage, service = _hk_service(tmp_path, updates={"asset_name": "已有名称", "currency": "HDK"})
+    service.accept(_payload())
+    assert service.process_due()["success"]
+    case = _hk_currency_case(service)
+    assert case["state"] == "pending_confirmation" and case["proposed"] == "HKD"
+    receipt = service.store.get_operation_receipt(f"holdings:case:discovered:{case['case_key']}")
+    assert receipt["payload"]["action"]["allowed_decisions"] == ["accept-proposed"]
+    assert not storage.patch_calls
+    result = service.workflow.apply_missing(record_id="rec-1", confirmed_operator={"test": True})
+    assert result["status"] == "no_eligible_missing_fields" and not storage.patch_calls
+    with pytest.raises(ValueError, match="invalid currency cannot be kept"):
+        service.workflow.resolve(case_key=case["case_key"], decision="keep-current",
+                                 reason="test", confirmed_operator={"test": True})
+    result = service.workflow.resolve(case_key=case["case_key"], decision="accept-proposed",
+                                      reason="confirm reviewed typo", confirmed_operator={"test": True})
+    assert result["success"]
+    assert dict(storage.patch_calls[0].values) == {"currency": "HKD"}
+    assert storage.fields["currency"] == "HKD"
+    assert service.workflow.reconciliation.reconcile(record_id="rec-1")["blocking_record_count"] == 0
+    with pytest.raises(ValueError, match="scope changed"):
+        service.workflow.resolve(case_key=case["case_key"], decision="accept-proposed",
+                                 reason="repeat", confirmed_operator={"test": True})
+    assert len(storage.patch_calls) == 1
+
+
+@pytest.mark.parametrize("updates", [{"currency": "EUR"}, {"account": "other"}, {"broker": "other"},
+                                    {"asset_type": "us_stock"}])
+def test_currency_correction_rejects_stale_confirmation(tmp_path, updates):
+    storage, service = _hk_service(tmp_path, updates={"asset_name": "已有名称", "currency": "HDK"})
+    service.accept(_payload())
+    assert service.process_due()["success"]
+    case = _hk_currency_case(service)
+    storage.fields.update(updates)
+    with pytest.raises(ValueError, match="scope changed"):
+        service.workflow.resolve(case_key=case["case_key"], decision="accept-proposed",
+                                 reason="test", confirmed_operator={"test": True})
+    assert not storage.patch_calls
+
+
+def test_currency_correction_unknown_result_never_replays_automatically(tmp_path):
+    storage, service = _hk_service(tmp_path, updates={"asset_name": "已有名称", "currency": "HDK"})
+    service.accept(_payload())
+    assert service.process_due()["success"]
+    case = _hk_currency_case(service)
+    storage.fail_write = True
+    service.workflow.resolve(case_key=case["case_key"], decision="accept-proposed",
+                             reason="test", confirmed_operator={"test": True})
+    assert service.store.get_holding_case(case["case_key"])["state"] == "apply_outcome_unknown"
+    service.accept(_payload("evt-retry"))
+    assert service.process_due()["success"]
+    assert len(storage.patch_calls) == 1
+
+
+def test_invalid_currency_cannot_reuse_stored_keep_waiver(tmp_path):
+    from src.app.holding_case_contract import confirmation_scope
+    storage, service = _hk_service(tmp_path, updates={"asset_name": "已有名称", "currency": "HDK"})
+    service.accept(_payload())
+    assert service.process_due()["success"]
+    case = _hk_currency_case(service)
+    service.store.finalize_holding_cases(outcomes=[{
+        "case_key": case["case_key"], "state": "resolved_keep", "event_type": "test_prior_keep",
+        "resolution": {"confirmation_scope": confirmation_scope(case)},
+    }], receipts=[])
+    evaluation = service.workflow.reconciliation.evaluate(record_id="rec-1")
+    plan = service.workflow.plan_evaluation(evaluation, trigger={"test": True})
+    assert case["case_key"] in plan["blocking_case_keys"]
+    with pytest.raises(ValueError, match="invalid currency cannot be kept"):
+        service.workflow.resolve(case_key=case["case_key"], decision="keep-current",
+                                 reason="repeat prior keep", confirmed_operator={"test": True})
+    assert not storage.patch_calls
