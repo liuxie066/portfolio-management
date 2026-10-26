@@ -44,3 +44,27 @@ status and the local handoff; product source remains at reviewed e4c892e.
 ## Remaining risks / ownership
 
 Inherited non-atomic Feishu compare-and-set window: assigned to later work unit. Live source and production acceptance, remote CI, and public delivery: require later explicit authorization. Static currency snapshot updates: future maintenance; no automatic catalog updater in scope. No private diagnosis data belongs in public fixtures/docs.
+
+## Delivery continuation (2026-10-26)
+
+The user subsequently authorized this branch push, PR creation, Ready transition
+and normal merge into main. Earlier local-only entries above are historical;
+release, deployment, production actions and branch/worktree deletion remain excluded.
+Remote main remains b8e75ea; author liuxie066; no pre-existing open PR or concurrent
+active PM work owner was found. Remote automatic branch deletion is disabled.
+Public commit-content review found no private diagnostic record/case/account data.
+
+Branch 9ea2df1 was pushed and draft PR #76 created:
+https://github.com/liuxie066/portfolio-management/pull/76
+Initial exact-head Quality Contract run 40263345471 passed. This workflow covers
+contract checks only; it does not replace the documented full local suite results.
+README capability description was updated to match the implemented runbook.
+Current gate: PR review. Next: accepted PR review checkpoint, final push, exact-head
+CI, draft-PR-pass/final closeout, then separately authorized Ready and merge.
+
+PR review accepted: independent pass-with-risks, no new findings; public artifact
+pr-review.md and local timestamped deepreview report. Reviewed source at 9ea2df1
+plus README/status documentation diff. Existing baseline date failures remain
+classified, not silently skipped or represented as native green. This checkpoint
+accepts the PR review and documentation; next unexecuted gate is final push and
+exact-head CI. Final closeout evidence will be recorded after those complete.
