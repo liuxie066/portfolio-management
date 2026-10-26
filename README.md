@@ -173,6 +173,10 @@ NAV/校验读取不触发补全。币种按有来源的离线代码目录校验�
 一起修改。无效币种不能通过保留当前值解除 NAV 阻断。激活与验证见
 [`docs/holdings-event-listener-runbook.md`](docs/holdings-event-listener-runbook.md)。
 
+另有默认关闭的 Agent 单记录补名接口：先预览、再显式确认，仅允许已授权记录的
+非富途港股空名称补全，不开放币种或任意字段改写，也不自动发送通知。启用、
+鉴权和结果状态边界见 [Agent 单记录入口](docs/agent-holding-name-interface.md)。
+
 确认 hash 绑定当前 Feishu fact、fresh holding 和全部目标；任一变化都要求重新
 预览确认。正式 NAV 同时要求 generated FX fields 与 holding effects 完成。
 完整操作和激活步骤见 `docs/cash-flow-effects-runbook.md`。

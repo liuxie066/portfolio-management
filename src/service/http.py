@@ -404,7 +404,8 @@ def _unavailable_freshness(dataset_ids: tuple[str, ...], reason_code: str) -> di
     }
 
 
-def create_app(service: Optional[PortfolioService] = None, allow_remote: Optional[bool] = None) -> FastAPI:
+def create_app(service: Optional[PortfolioService] = None, allow_remote: Optional[bool] = None,
+               agent_name_service=None) -> FastAPI:
     app = FastAPI(
         title="Portfolio Management Service",
         version="0.1.1",
@@ -412,6 +413,12 @@ def create_app(service: Optional[PortfolioService] = None, allow_remote: Optiona
     )
     app.state.portfolio_service = service or PortfolioService()
     app.state.allow_remote = allow_remote_from_env() if allow_remote is None else bool(allow_remote)
+    from .agent_holdings import router, error_response
+    from src.app.agent_holding_name_service import AgentNameError
+    app.state.agent_name_service = agent_name_service
+    app.include_router(router)
+    app.add_exception_handler(AgentNameError, error_response)
+
 
     @app.middleware("http")
     async def enforce_loopback_client(request: Request, call_next):
@@ -423,6 +430,8 @@ def create_app(service: Optional[PortfolioService] = None, allow_remote: Optiona
             )
         response = await call_next(request)
         path = request.url.path
+        if path.startswith("/api/v1/agent/"):
+            response.headers["Cache-Control"] = "no-store"
         if path.startswith("/api/v1/"):
             response.headers["X-PM-API-Version"] = PM_API_VERSION
         elif path in LEGACY_SUCCESSORS:

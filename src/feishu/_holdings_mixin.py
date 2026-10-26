@@ -97,8 +97,12 @@ class HoldingsMixin:
     def patch_holding_record(
         self,
         patch: HoldingRepairPatch,
+        *,
+        refresh_account_cache: bool = True,
     ) -> RawHoldingRecord:
-        return self.holdings.patch_holding_record(patch)
+        return self.holdings.patch_holding_record(
+            patch, refresh_account_cache=refresh_account_cache,
+        )
 
     def get_holding(
         self,

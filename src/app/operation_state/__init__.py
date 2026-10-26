@@ -1,5 +1,6 @@
 """OperationStateStore facade: one SQLite DB, six focused mixins."""
 from ._base import OperationStateBase
+from ._agent_name_mixin import AgentNameMixin
 from ._fx_confirmation_mixin import FxConfirmationMixin
 from ._nav_receipt_mixin import NavReceiptMixin
 from ._holding_case_mixin import HoldingCaseMixin
@@ -10,6 +11,7 @@ from ._operation_receipt_mixin import OperationReceiptMixin
 
 class OperationStateStore(
     OperationStateBase,
+    AgentNameMixin,
     FxConfirmationMixin,
     NavReceiptMixin,
     HoldingCaseMixin,

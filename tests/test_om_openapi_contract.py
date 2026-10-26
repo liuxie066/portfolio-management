@@ -49,3 +49,12 @@ def test_openapi_required_response_contracts_are_machine_readable() -> None:
     assert request_schema["additionalProperties"] is False
     assert "NavRecordRequest" not in document["components"]["schemas"]
     assert "DailyNavJobRequest" not in document["components"]["schemas"]
+
+
+def test_agent_routes_are_live_but_not_in_published_om_contract():
+    from types import SimpleNamespace
+    from src.service.http import create_app
+    from scripts.export_om_openapi import build_contract
+    live = create_app(service=SimpleNamespace()).openapi()
+    assert any(path.startswith('/api/v1/agent/') for path in live['paths'])
+    assert not any(path.startswith('/api/v1/agent/') for path in build_contract()['paths'])

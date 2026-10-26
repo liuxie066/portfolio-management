@@ -797,6 +797,7 @@ class HoldingCaseMixin:
         apply_attempt_id: str,
         operator_context: Dict[str, Any],
         trigger: Optional[Dict[str, Any]] = None,
+        enqueue_receipts: bool = True,
     ) -> Dict[str, list[str]]:
         """Create/refresh cases and commit the selected subset to applying atomically."""
 
@@ -813,6 +814,7 @@ class HoldingCaseMixin:
                 discovery_receipts=discovery_receipts,
                 trigger=trigger,
                 now=now,
+                enqueue_receipts=enqueue_receipts,
             )
             first_observed = observed_cases[0]
             record_ids = {str(item.get("record_id") or "") for item in observed_cases}
@@ -832,6 +834,7 @@ class HoldingCaseMixin:
                 current_identity=dict(first_observed.get("identity") or {}),
                 trigger=trigger,
                 now=now,
+                enqueue_receipts=enqueue_receipts,
             )
             self._prepare_holding_apply_tx(
                 conn,

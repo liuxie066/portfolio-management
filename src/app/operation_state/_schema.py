@@ -47,6 +47,16 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
         BEGIN IMMEDIATE;
+        CREATE TABLE IF NOT EXISTS agent_name_operations (
+            preview_id TEXT PRIMARY KEY,
+            principal_id TEXT NOT NULL,
+            record_id TEXT NOT NULL,
+            grant_digest TEXT NOT NULL,
+            state TEXT NOT NULL,
+            expires_at REAL NOT NULL,
+            snapshot_json TEXT NOT NULL,
+            result_json TEXT
+        );
         CREATE TABLE IF NOT EXISTS operation_meta (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
