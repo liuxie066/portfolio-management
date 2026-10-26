@@ -29,7 +29,7 @@ README/runbook align with implemented limits. Changed tests use synthetic data a
 
 Reused unchanged source/test evidence: 253 focused passes; 66 independent QA passes; compile/Ruff/diff passed. Native actual-date full suite is 1746 passed and 2 failed, not all green. Both unchanged NAV freshness fixtures contain September dates outside the current 30-day window and fail identically on the original baseline. Supplemental full suite with an external clock fixture scoped only to those two tests is 1748 passed. This conditional result does not erase native failures.
 
-Read-only GitHub metadata reports Quality Contract SUCCESS on reviewed PR head, run 40263345471, job 121380239253, completed 2026-10-26T03:18:02Z. This workflow runs contract checks only, not the full suite. 
+Read-only GitHub metadata reports Quality Contract SUCCESS on reviewed PR head, run 40263345471, job 121380239253, completed 2026-10-26T03:18:02Z. This workflow runs contract checks only, not the full suite.
 
 Independent merge assessment: these two proven baseline date failures do not establish a regression in this change. No fixture-only expansion is necessary while required CI succeeds; maintainers retain the existing separate follow-up. Do not call native full tests green. After documentation acceptance commit, controller must bind CI and merge to that final exact head and refresh base/required review state; this artifact itself is not GitHub approval or permission to bypass branch rules.
 
