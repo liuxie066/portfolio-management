@@ -472,6 +472,8 @@ class HoldingsRepository:
     def patch_holding_record(
         self,
         patch: HoldingRepairPatch,
+        *,
+        refresh_account_cache: bool = True,
     ) -> RawHoldingRecord:
         """Narrow absolute patch used only by confirmed reconciliation flows."""
 
@@ -551,8 +553,12 @@ class HoldingsRepository:
                     "holding patch readback disagrees with requested fields: "
                     f"{identity}"
                 )
-            fresh = self._read_fresh_holding_account_slice(identity.account)
-            self._publish_holding_account_slice(identity.account, fresh)
+            if refresh_account_cache:
+                fresh = self._read_fresh_holding_account_slice(identity.account)
+                self._publish_holding_account_slice(identity.account, fresh)
+            else:
+                # Record-scoped callers must not fetch other account holdings.
+                self._invalidate_holding_account_cache(identity.account, flush_persistent=True)
         except Exception:
             accounts = {identity.account}
             if readback_identity is not None:

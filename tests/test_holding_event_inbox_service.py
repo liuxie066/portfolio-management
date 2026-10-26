@@ -463,7 +463,7 @@ class _FundStorage:
             record_id="rec-1", raw_fields=dict(self.fields), fetched_at=datetime.now(),
         )]
 
-    def patch_holding_record(self, patch):
+    def patch_holding_record(self, patch, *, refresh_account_cache=True):
         from src.domain.holding_mutations import raw_holding_state_digest, HoldingMutationConflictError
 
         if self.before_patch:

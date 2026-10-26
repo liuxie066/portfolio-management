@@ -610,7 +610,7 @@ class HoldingsWorkflowService:
                 observed_cases=cases,
                 discovery_receipts=[self._discovery_receipt(case) for case in cases],
                 enqueue_receipts=False,
-                redact_errors=True,
+                redact_errors=True, refresh_account_cache=False,
             )
             if not result["success"]:
                 return {"state": "unknown", "reason": "WRITE_OUTCOME_UNCERTAIN"}
@@ -913,6 +913,7 @@ class HoldingsWorkflowService:
         discovery_receipts: Optional[list[Dict[str, Any]]] = None,
         enqueue_receipts: bool = True,
         redact_errors: bool = False,
+        refresh_account_cache: bool = True,
     ) -> Dict[str, Any]:
         attempt_id = f"holdapply_{uuid4().hex}"
         prepared = []
@@ -968,12 +969,11 @@ class HoldingsWorkflowService:
         patch_error: Optional[str] = None
         readback = None
         try:
-            readback = self.storage.patch_holding_record(
-                HoldingRepairPatch.from_raw(
-                    validation.raw,
-                    field_targets,
-                )
-            )
+            patch = HoldingRepairPatch.from_raw(validation.raw, field_targets)
+            if refresh_account_cache:
+                readback = self.storage.patch_holding_record(patch)
+            else:
+                readback = self.storage.patch_holding_record(patch, refresh_account_cache=False)
         except Exception as exc:
             patch_error = type(exc).__name__ if redact_errors else (str(exc) or exc.__class__.__name__)
             try:

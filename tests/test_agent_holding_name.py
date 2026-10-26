@@ -170,8 +170,8 @@ def test_readback_identity_race_never_observes_other_identity(tmp_path, monkeypa
     storage, inbox, _, client, _, _ = setup(tmp_path, monkeypatch)
     preview = client.post(url('name-preview'), json={}).json()
     original_patch = storage.patch_holding_record
-    def moved_after_patch(patch):
-        result = original_patch(patch)
+    def moved_after_patch(patch, **kwargs):
+        result = original_patch(patch, **kwargs)
         storage.fields.update(account='other-account', broker='富途')
         return result
     storage.patch_holding_record = moved_after_patch
@@ -195,3 +195,41 @@ def test_status_on_old_schema_is_read_only(tmp_path, monkeypatch):
         service.status(authenticate(POLICY, 'Bearer '+TOKEN, 'rec-1'), '0'*32)
     assert exc.value.status == 404
     assert path.read_bytes() == before
+
+
+def test_real_repository_agent_path_never_fetches_account_slice(tmp_path):
+    from tests.test_holdings_preload_minimal import StubHoldingsClient
+    from src.feishu_storage import FeishuStorage
+    from src.app.holdings_reconciliation_service import HoldingsReconciliationService
+    from tests.test_holding_event_inbox_service import _hk_evidence
+
+    fields = {'asset_id': '00001', 'asset_type': 'hk_stock', 'asset_name': '',
+              'account': 'test-account', 'broker': 'test-broker', 'currency': 'HKD',
+              'quantity': 7, 'avg_cost': 12}
+    class ExactRecordClient(StubHoldingsClient):
+        def list_records(self, *args, **kwargs):
+            self.list_records_calls.append({'args': args, 'kwargs': kwargs})
+            raise AssertionError('Agent must not list any account holdings')
+    client = ExactRecordClient(initial_records=[
+        {'record_id': 'rec-1', 'fields': dict(fields)},
+        {'record_id': 'rec-unrelated', 'fields': {**fields, 'asset_name': 'Unrelated'}},
+    ])
+    storage = FeishuStorage(client=client)
+    service = AgentHoldingNameService(storage=storage,
+        store=OperationStateStore(tmp_path/'real-adapter.sqlite3'),
+        reconciliation=HoldingsReconciliationService(storage=storage, hk_stock_name_lookup=_hk_evidence))
+    grant = authenticate(POLICY, 'Bearer '+TOKEN, 'rec-1')
+    preview = service.preview(grant)
+    result = service.confirm(grant, preview['preview_id'])
+    assert result['state'] == 'succeeded'
+    assert len(client.update_record_calls) == 1
+    patch = client.update_record_calls[0]
+    assert patch['record_id'] == 'rec-1'
+    assert set(patch['fields']) == {'asset_name', 'updated_at'}
+    assert patch['fields']['asset_name'] == '测试证券'
+    assert client._records[0]['fields']['currency'] == 'HKD'
+    assert client._records[0]['fields']['quantity'] == 7
+    assert client._records[0]['fields']['avg_cost'] == 12
+    assert client._records[1]['fields'] == {**fields, 'asset_name': 'Unrelated'}
+    assert client.list_records_calls == []
+    assert receipt_count(service.store) == 0

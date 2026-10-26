@@ -50,7 +50,9 @@ query parameters are rejected; responses have `Cache-Control: no-store`.
 3. `POST .../name-confirm` with `{"preview_id":"<nonce>"}` durably claims that
    principal/record-bound preview once, locks the record, rechecks identity and the full
    source digest, and verifies fresh source identity/name. Stale or changed evidence
-   rejects the operation. Only `asset_name` can be patched, through the existing
+   rejects the operation. Only the `asset_name` business field can be patched; the repository also updates its
+   existing `updated_at` transport metadata. The Agent path invalidates local account
+   cache entries without fetching any other account records. It uses the existing
    attempt-before-write, digest and readback workflow. Same-record validation cases
    may be materialized, including unrelated blockers, but other fields are not written.
    All receipt enqueue paths are disabled for this operation. An unchanged natural

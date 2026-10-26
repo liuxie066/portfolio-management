@@ -58,3 +58,19 @@ compile verification; independent QA owns separate adversarial tests/review.
 - Live provider and production acceptance: not run; mocks do not prove availability.
 - Existing date-dependent NAV fixture failures: controller retains baseline evidence;
   implementation did not alter unrelated tests or product dates.
+
+
+## Aggregate repair round 1 — AGG-01
+
+Accepted real-adapter finding: the existing repository patch's successful readback
+then refreshed a full remote account slice, exceeding Agent exact-record scope. Added
+explicit refresh_account_cache=False for the Agent path only, through the existing
+workflow/facade/repository; legacy True behavior is unchanged. Scoped success invalidates
+local account cache instead of remotely loading that slice, then returns exact readback.
+No alternate writer, field bypass or additional provider added. The new real-repository
+fake-client integration forbids list_records and checks name plus existing updated_at
+metadata, preserved currency/quantity/cost and untouched other row. Docs clarify that
+metadata update; full regression and independent re-review belong to controller/QA.
+
+AGG-01 affected focused suite: **174 passed in 2.11s**. Log:
+`/tmp/pm-agent-qa/aggregate-fix-focused.log`. Required source Ruff and diff check pass.
