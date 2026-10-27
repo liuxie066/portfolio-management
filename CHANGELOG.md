@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.9 - 2026-10-27
+
+- Persist Futu holdings refresh admission by `(account, request_id)` before returning HTTP 202, deduplicating retries even after completion.
+- Process fresh-state full syncs serially without user receipts, recovering pending work after restarts and temporary live storage or ownership-path failures.
+- Keep acceptance separate from sync completion; interrupted settlement can cause external effects to repeat.
+
 ## 0.2.8 - 2026-10-26
 
 - Add a default-disabled Agent interface for previewing and explicitly confirming missing Hong Kong holding names with exact record grants, expiring previews, and durable result readback.
