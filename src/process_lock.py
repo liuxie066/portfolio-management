@@ -38,13 +38,16 @@ def cash_flow_record_lock_key(record_id: str) -> str:
 
 
 @contextmanager
-def process_lock(key: str, *, data_dir: Path | None = None) -> Iterator[None]:
-    """Hold an exclusive same-host lock for a logical key."""
+def process_lock(
+    key: str, *, data_dir: Path | None = None, blocking: bool = True,
+) -> Iterator[None]:
+    """Hold an exclusive same-host lock; nonblocking contention raises BlockingIOError."""
     digest = hashlib.sha256(str(key).encode("utf-8")).hexdigest()
     lock_dir = (data_dir or config.get_data_dir()) / "locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
     with (lock_dir / f"{digest}.lock").open("a+") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        flags = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+        fcntl.flock(handle.fileno(), flags)
         try:
             yield
         finally:

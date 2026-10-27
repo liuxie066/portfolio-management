@@ -58,3 +58,15 @@ def test_cash_flow_record_lock_key_is_exact_and_rejects_empty_identity():
 def test_futu_full_sync_lock_key_is_account_scoped():
     assert futu_full_sync_lock_key("lx") == "futu-full-sync:lx"
     assert futu_full_sync_lock_key("sy") == "futu-full-sync:sy"
+
+
+def test_nonblocking_lock_contends_only_with_same_root_and_key(tmp_path):
+    with process_lock("worker", data_dir=tmp_path):
+        with pytest.raises(BlockingIOError), process_lock(
+            "worker", data_dir=tmp_path, blocking=False,
+        ):
+            pytest.fail("duplicate owner")
+        with process_lock("worker", data_dir=tmp_path / "other", blocking=False):
+            pass
+    with process_lock("worker", data_dir=tmp_path, blocking=False):
+        pass

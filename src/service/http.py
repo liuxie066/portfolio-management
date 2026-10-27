@@ -5,10 +5,13 @@ import hashlib
 import hmac
 import json
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from threading import Thread
 from typing import Any, Literal, Optional
 from uuid import uuid4
 
+import anyio
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
@@ -406,10 +409,27 @@ def _unavailable_freshness(dataset_ids: tuple[str, ...], reason_code: str) -> di
 
 def create_app(service: Optional[PortfolioService] = None, allow_remote: Optional[bool] = None,
                agent_name_service=None) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(app):
+        from src.app.futu_refresh_worker import FutuRefreshWorker
+
+        service = app.state.portfolio_service
+        worker = FutuRefreshWorker(service.operation_state_store, service.refresh_futu_holdings)
+        thread = Thread(target=worker.run, name="pm-futu-refresh")
+        thread.start()
+        try:
+            yield
+        finally:
+            worker.stop.set()
+            # Join without abandoning the synchronous sync or its lifetime lock.
+            with anyio.CancelScope(shield=True):
+                await anyio.to_thread.run_sync(thread.join)
+
     app = FastAPI(
         title="Portfolio Management Service",
         version="0.1.1",
         description="Service-first API for portfolio accounts, holdings, NAV, and reports.",
+        lifespan=lifespan,
     )
     app.state.portfolio_service = service or PortfolioService()
     app.state.allow_remote = allow_remote_from_env() if allow_remote is None else bool(allow_remote)
@@ -597,6 +617,8 @@ def create_app(service: Optional[PortfolioService] = None, allow_remote: Optiona
         status_code=202,
         response_model=FutuHoldingsRefreshAcceptedResponse,
         responses=FUTU_REFRESH_RESPONSES,
+        deprecated=True,
+        description="Legacy non-durable background hint. A 202 does not survive a PM restart; replayable handoffs must use durable-refresh-requests.",
     )
     def request_futu_holdings_refresh(
         request: Request,
@@ -614,6 +636,22 @@ def create_app(service: Optional[PortfolioService] = None, allow_remote: Optiona
             "account": payload.account,
             "request_id": payload.request_id,
         }
+
+
+    @app.post(
+        "/api/v1/futu/holdings/durable-refresh-requests",
+        tags=["holdings"],
+        status_code=202,
+        response_model=FutuHoldingsRefreshAcceptedResponse,
+        responses={**FUTU_REFRESH_RESPONSES,
+                   400: V1_RESPONSES[400], 503: V1_RESPONSES[503]},
+        description="Durably admit an account/request identity before 202; duplicates, including completed requests, are absorbed. Acceptance does not prove sync completion.",
+    )
+    def request_durable_futu_holdings_refresh(request: Request, payload: FutuHoldingsRefreshRequest):
+        return _public_result(
+            request, _service(request).accept_futu_holdings_refresh(**_payload_dict(payload)),
+            input_error_status=400,
+        )
 
 
     @app.get("/nav", tags=["nav"], include_in_schema=False)

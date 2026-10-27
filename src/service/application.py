@@ -822,8 +822,31 @@ class PortfolioService:
         result["receipt"] = receipt_service.send(result)
         return result
 
+    @property
+    def operation_state_store(self):
+        if self._operation_state_store is None:
+            from src.app.operation_state import OperationStateStore
+
+            self._operation_state_store = OperationStateStore()
+        return self._operation_state_store
+
+    def accept_futu_holdings_refresh(self, *, account: str, request_id: str) -> dict[str, Any]:
+        from src import config
+
+        try:
+            config.get_futu_profile(account)
+        except (ValueError, TypeError) as exc:
+            return {"success": False, "error_code": "INPUT_ERROR", "error": str(exc)}
+        try:
+            self.operation_state_store.accept_futu_refresh(account=account, request_id=request_id)
+        except Exception:
+            LOGGER.exception("pm_futu_refresh_admission_failed")
+            return {"success": False, "error_code": "PM_SERVICE_UNAVAILABLE",
+                    "error": "durable refresh admission unavailable"}
+        return {"success": True, "status": "accepted", "account": account, "request_id": request_id}
+
     def refresh_futu_holdings(self, *, account: str, request_id: str) -> Dict[str, Any]:
-        """Run the non-durable OM refresh hint without a user receipt."""
+        """Run a fresh-state full sync without a user receipt."""
         try:
             result = self._run_futu_holdings_sync(
                 account=account,
