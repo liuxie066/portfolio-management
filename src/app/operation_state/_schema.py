@@ -47,6 +47,20 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
         BEGIN IMMEDIATE;
+        CREATE TABLE IF NOT EXISTS futu_refresh_inbox (
+            account TEXT NOT NULL,
+            request_id TEXT NOT NULL,
+            state TEXT NOT NULL CHECK(state IN ('pending', 'running', 'completed')),
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at TEXT NOT NULL,
+            result_json TEXT,
+            last_error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(account, request_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_futu_refresh_due
+        ON futu_refresh_inbox(state, next_attempt_at);
         CREATE TABLE IF NOT EXISTS agent_name_operations (
             preview_id TEXT PRIMARY KEY,
             principal_id TEXT NOT NULL,

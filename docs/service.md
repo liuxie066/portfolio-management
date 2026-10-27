@@ -96,7 +96,8 @@ curl -X POST http://127.0.0.1:8765/analysis/valuation-evidence \
 ## Write Endpoints
 
 - `POST /futu/holdings/sync`
-- `POST /api/v1/futu/holdings/refresh-requests`
+- `POST /api/v1/futu/holdings/durable-refresh-requests`
+- `POST /api/v1/futu/holdings/refresh-requests` (legacy)
 - `POST /nav/record`
 - `POST /report/daily-bundle`
 - `POST /daily-nav-job`
@@ -106,10 +107,31 @@ Writes are dry-run by default. A real write requires `dry_run=false` and
 CLI does not automatically replay it through the direct backend. Inspect state before retrying;
 use `--no-service` only when intentionally bypassing the service.
 
-The versioned refresh-request endpoint is reserved for OM's post-trade hint. It
-accepts only lowercase `account` and an opaque `request_id`, returns 202, and
-runs the confirmed full sync as a non-durable background task. It sends no user
-receipt; the scheduled sync remains recovery if PM exits after acceptance.
+The durable refresh endpoint is reserved for OM's post-trade handoff. It accepts
+only an explicit lowercase `account` with a configured Futu profile and an opaque
+`request_id`; profile validation performs no provider I/O. SQLite admission in
+`OperationStateStore` commits before 202. The `(account, request_id)` key absorbs
+concurrent duplicates and completed requests without starting another sync.
+Input/profile errors return 400/422; admission storage failure returns 503.
+
+The HTTP lifespan runs one serial worker under a process lock bound to the
+operation DB directory. Pending and interrupted running requests recover without
+another POST. Each iteration recovers residual running state only while owning
+that lock and after the previous synchronous sync has ended. A fresh broker and
+Feishu full sync runs through `refresh_futu_holdings`, with no user receipt;
+only `success=True` is completed. False results/exceptions stay pending with
+1/5/15/60-minute bounded backoff. Settlement/reset storage failures are caught,
+retried with stop-aware polling, and recovered in the same live worker.
+Graceful shutdown stops new claims and waits for the actual sync to end before
+releasing ownership. Another HTTP process waits for ownership without overlap.
+
+A 202 proves durable admission, not sync completion or exactly-once external
+writes. If sync succeeds but local settlement fails, recovery may repeat a fresh
+full sync; it never replays saved deltas. The legacy `refresh-requests` endpoint
+retains its non-durable background-task behavior and must not receive replayable
+handoffs. Deploy the receiver first under separate deployment authorization;
+OM keeps requests pending on an older receiver's 404 with no legacy fallback.
+Historical OM attempted-only records remain uncertain and are not replayed.
 
 ## Futu Holdings Sync
 

@@ -15,8 +15,8 @@ def test_checked_in_openapi_matches_fastapi_and_manifest() -> None:
     assert CONTRACT.read_text(encoding="utf-8") == render_contract()
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     assert manifest["api_version"] == "portfolio.api.v1"
-    assert manifest["release_state"] == "published"
-    assert manifest["contract_release"] == "pm-api-v1.0.0"
+    assert manifest["release_state"] == "unreleased"
+    assert manifest["contract_release"] is None
     assert "source_commit" not in manifest
     assert manifest["sha256"] == hashlib.sha256(CONTRACT.read_bytes()).hexdigest()
 
@@ -47,6 +47,15 @@ def test_openapi_required_response_contracts_are_machine_readable() -> None:
         )
     request_schema = document["components"]["schemas"]["FutuHoldingsRefreshRequest"]
     assert request_schema["additionalProperties"] is False
+    durable = document["paths"]["/api/v1/futu/holdings/durable-refresh-requests"]["post"]
+    assert set(durable["responses"]) == {"202", "400", "422", "503"}
+    assert durable["requestBody"] == refresh["requestBody"]
+    for code, response in durable["responses"].items():
+        schema = response["content"]["application/json"]["schema"]
+        assert schema["$ref"].endswith(
+            "/FutuHoldingsRefreshAcceptedResponse" if code == "202" else "/PublicErrorResponse"
+        )
+        assert response["headers"]["X-PM-API-Version"]["schema"]["const"] == "portfolio.api.v1"
     assert "NavRecordRequest" not in document["components"]["schemas"]
     assert "DailyNavJobRequest" not in document["components"]["schemas"]
 
