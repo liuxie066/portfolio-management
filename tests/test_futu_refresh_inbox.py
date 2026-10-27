@@ -265,6 +265,37 @@ def test_contending_worker_can_stop_without_acquiring_lock(store):
         assert not thread.is_alive()
 
 
+@pytest.mark.parametrize("stop_during_outage", [False, True])
+def test_lock_permission_outage_retries_same_worker_or_stops(store, caplog, stop_during_outage):
+    lock_dir = store.db_path.parent / "locks"
+    lock_dir.mkdir()
+    lock_dir.chmod(0o000)
+    service = service_for(store)
+    try:
+        with running_worker(store, service.refresh_futu_holdings) as (worker, thread):
+            wait_for(lambda: any(record.getMessage() == "pm_futu_refresh_ownership_failed"
+                                 for record in caplog.records))
+            response = client_for(service).post(PATH, json=IDENTITY)
+            assert response.status_code == 202
+            assert state(store) == "pending"
+            service.refresh_futu_holdings.assert_not_called()
+            assert thread.is_alive()
+            assert any(isinstance(record.exc_info[1], PermissionError)
+                       for record in caplog.records if record.exc_info)
+            if stop_during_outage:
+                worker.stop.set()
+                thread.join(timeout=1)
+                assert not thread.is_alive()
+                assert state(store) == "pending"
+            else:
+                lock_dir.chmod(0o700)
+                wait_for(lambda: state(store) == "completed")
+                assert thread.is_alive()
+                service.refresh_futu_holdings.assert_called_once_with(**IDENTITY)
+    finally:
+        lock_dir.chmod(0o700)
+
+
 def test_db_locked_admission_is_503_not_accepted(store):
     service = service_for(store)
     with store._connect() as conn:

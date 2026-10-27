@@ -27,6 +27,9 @@ class FutuRefreshWorker:
                     self._run_owned()
             except BlockingIOError:
                 self.stop.wait(POLL_SECONDS)
+            except OSError:
+                LOGGER.exception("pm_futu_refresh_ownership_failed")
+                self.stop.wait(POLL_SECONDS)
 
     def _run_owned(self) -> None:
         while not self.stop.is_set():
