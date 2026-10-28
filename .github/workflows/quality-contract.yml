@@ -1,6 +1,7 @@
 name: Quality Contract
 
 on:
+  workflow_call:
   push:
     branches: [main]
   pull_request:
@@ -12,10 +13,12 @@ permissions:
 jobs:
   quality-contract:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v5
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Set up Python
@@ -35,4 +38,5 @@ jobs:
             tests/test_quality_status_contract_vendor.py \
             tests/test_quality_document_ownership.py \
             tests/test_om_openapi_contract.py \
-            tests/test_om_api_contract_release.py
+            tests/test_om_api_contract_release.py \
+            tests/test_release_workflow.py

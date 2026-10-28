@@ -372,3 +372,11 @@ canonical Agent/Listener 字段。
 ## 隔离实例边界
 
 如果部署到受限 SSH 隔离实例，先进入实例并阅读实例内 `~/AGENTS.md`。只在当前实例内操作；不要请求或使用宿主机 Docker/Incus socket、宿主机账号或宿主机 root 权限。长期运行任务使用 systemd timer，不依赖临时 shell。
+
+## 产品 Release 的同提交检查契约
+
+`vX.Y.Z` tag 发布先原生调用 `quality-contract.yml`，在同一 `github.sha` 上执行既有契约检查和发布边界测试；只有成功才进入 publisher。它是项目发布契约，不代表动态读取或替代 GitHub 管理员保护规则，也不等同全量业务回归。`pm-api-v*` 契约验证流程保持独立。
+
+publisher 核对 checkout HEAD、VERSION 和远端 tag 剥离后的 commit；创建或公开草稿前再次核对 tag。已有公开 Release 只有身份匹配才能复用。读取错误不会当作 Release 不存在；Release 按 tag 查询的 HTTP 404 后，还需使用既有写权限身份分页查询草稿（最多 10 页，每页 100 条）；仅完整列表确认没有同名 Release 才进入创建分支，重复匹配、列表错误或超出上限均拒绝。创建保留 `gh release create --verify-tag --generate-notes --fail-on-no-commits`，并显式指定相同 SHA；草稿继续使用 `gh release edit --draft=false`。
+
+同 tag 工作流串行且不自动取消。helper 最多调用一次变更 CLI，失败或超时后读回 Release 和 tag，无法证明已公开且身份匹配时报告结果未知，需人工核实后再决定重跑；不自动删除、重打 tag 或回滚公开内容。CLI 内部请求并非一次远端写入保证，外部强制移动 tag 也不受此串行约束。真实发布仍需单独授权；本轮验证只使用合成 API/CLI，未执行真实发布。
