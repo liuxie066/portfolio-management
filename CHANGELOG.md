@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.10 - 2026-10-28
+
+- Require the quality contract to pass on the exact release commit before publishing a GitHub Release, and verify tag identity and publication results.
+- Clarify delivery authorization boundaries, timing evidence, and early adapter boundary validation while preserving independent QA.
+
 ## 0.2.9 - 2026-10-27
 
 - Persist Futu holdings refresh admission by `(account, request_id)` before returning HTTP 202, deduplicating retries even after completion.
