@@ -66,7 +66,7 @@ def test_futu_sync_receipt_sends_write_summary_from_liukanshan():
     assert calls[0] == ("init", "cli_liukanshan", "secret")
     assert calls[1][0:2] == ("send_post", "ou_user")
     assert "# PM · 回执 · sy" in calls[1][2]
-    assert "类型｜持仓同步" in calls[1][2]
+    assert "类型｜富途持仓同步" in calls[1][2]
     assert "状态｜✅ 成功" in calls[1][2]
     assert "富途原币余额仅观测" in calls[1][2]
     assert "PM 使用 CNY-CASH 人民币汇总，不做金额对账" in calls[1][2]
@@ -164,7 +164,7 @@ def test_futu_sync_failure_receipt_uses_nested_error_and_exact_failed_stage():
     assert message == (
         "# PM · 回执 · lx\n"
         "\n"
-        "类型｜持仓同步\n"
+        "类型｜富途持仓同步\n"
         "状态｜❌ 失败\n"
         "失败阶段｜fund_mmf\n"
         "错误｜飞书 API 错误: TextFieldConvFail (code=1254060)\n"
