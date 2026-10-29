@@ -180,7 +180,7 @@ class FutuSyncReceiptService:
 
         return render_receipt(
             title=sync_result.get("account") or "-",
-            receipt_type="持仓同步",
+            receipt_type="富途持仓同步",
             status="✅ 成功" if success else "❌ 失败",
             fields=fields,
             sections=[

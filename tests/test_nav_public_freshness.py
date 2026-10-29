@@ -1,5 +1,7 @@
 """Public NAV reads must observe the canonical writer across processes."""
 
+from datetime import date
+
 from src.feishu_storage import FeishuStorage
 from src.local_cache import LocalNavIndexCache
 from src.service import PortfolioService
@@ -38,7 +40,8 @@ class _Client:
         return list(self.rows)
 
 
-def test_public_nav_sees_separate_writer_without_rewriting_disk_cache(tmp_path):
+def test_public_nav_sees_separate_writer_without_rewriting_disk_cache(tmp_path, monkeypatch):
+    monkeypatch.setattr("src.time_utils.bj_today", lambda: date(2026, 9, 25))
     cache_file = tmp_path / "nav.json"
     client = _Client([_row("2026-09-24", "old")])
     writer = FeishuStorage(client=client, local_nav_index_cache=LocalNavIndexCache(cache_file))
@@ -64,7 +67,8 @@ def test_public_nav_sees_separate_writer_without_rewriting_disk_cache(tmp_path):
     assert cache_file.read_bytes() == disk_after_writer
 
 
-def test_public_nav_empty_and_canonical_failure_each_read_once(tmp_path):
+def test_public_nav_empty_and_canonical_failure_each_read_once(tmp_path, monkeypatch):
+    monkeypatch.setattr("src.time_utils.bj_today", lambda: date(2026, 9, 25))
     client = _Client([])
     storage = FeishuStorage(
         client=client,
