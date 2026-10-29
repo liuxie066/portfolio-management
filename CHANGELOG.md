@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.11 - 2026-10-29
+
+- Label holdings synchronization receipts as Futu-specific so they are not mistaken for changes across all brokers.
+- Keep public NAV freshness regression tests independent of the current date.
+
 ## 0.2.10 - 2026-10-28
 
 - Require the quality contract to pass on the exact release commit before publishing a GitHub Release, and verify tag identity and publication results.
