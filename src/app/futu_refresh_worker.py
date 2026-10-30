@@ -5,6 +5,7 @@ import logging
 from threading import Event
 
 from src.process_lock import process_lock
+from .futu_quantity_receipt import quantity_change_payload
 
 LOGGER = logging.getLogger(__name__)
 POLL_SECONDS = 1.0
@@ -46,7 +47,18 @@ class FutuRefreshWorker:
                 except Exception as exc:
                     LOGGER.exception("pm_futu_refresh_sync_failed %s", identity)
                     result = {"success": False, "error": str(exc)}
-                self.store.settle_futu_refresh(**identity, result=result)
+                # Keep the original diff through a transient settlement outage.
+                while True:
+                    try:
+                        receipt_payload = quantity_change_payload(result)
+                        self.store.settle_futu_refresh(
+                            **identity, result=result, receipt_payload=receipt_payload,
+                        )
+                        break
+                    except Exception:
+                        LOGGER.exception("pm_futu_refresh_settlement_failed %s", identity)
+                        if self.stop.wait(POLL_SECONDS):
+                            return
             except Exception:
                 LOGGER.exception("pm_futu_refresh_iteration_failed")
                 self.stop.wait(POLL_SECONDS)

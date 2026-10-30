@@ -39,6 +39,24 @@ migration evidence only; production secure mode rejects plaintext Secret
 fallback.
 Run `systemctl start portfolio-feishu-preflight.service` before enabling jobs.
 
+Durable background Futu refreshes enqueue a compact receipt only for successful,
+trusted STOCK/ETF quantity changes, including new/zeroed positions:
+the shared PM receipt shell with type “富途持仓同步”, status “✅ 成功” and a
+single “持仓变化｜EXAMPLE：数量 50→51” field (synthetic example).
+Cost/MMF-only and unchanged refreshes remain silent. The existing operation receipt dispatcher sends through the same
+Agent destination. `(account, request_id)` is the deduplication identity; completed
+requests and old stored results are never scanned for historical notifications.
+The frozen outbox payload retains the sync run, source snapshot and observation
+time. A later timer reports its own fresh diff, not the earlier change again.
+
+Notification failure does not rerun holdings sync: known pre-send failures retry
+through the existing receipt timer; ambiguous sends remain `unknown` for explicit
+operator resolution. Live settlement retries retain the original change result.
+Process death or shutdown while settlement storage is unavailable can still lose
+an uncommitted change receipt after external holdings writes; restart uses fresh
+state rather than inventing a historical notification. Exactly-once external
+delivery is not guaranteed.
+
 ## Read-Only Checks
 
 ```bash

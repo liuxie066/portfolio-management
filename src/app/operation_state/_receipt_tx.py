@@ -22,6 +22,7 @@ def insert_operation_receipt_tx(
     now: str,
 ) -> bool:
     if receipt_type not in {
+        "futu_refresh_quantity_changed",
         "cash_flow_reconcile_attention_required",
         "holding_case_discovered",
         "holding_case_closed",

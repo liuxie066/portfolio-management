@@ -870,7 +870,7 @@ class PortfolioService:
         return {"success": True, "status": "accepted", "account": account, "request_id": request_id}
 
     def refresh_futu_holdings(self, *, account: str, request_id: str) -> Dict[str, Any]:
-        """Run a fresh-state full sync without a user receipt."""
+        """Run a fresh-state full sync; the durable worker settles change receipts."""
         try:
             result = self._run_futu_holdings_sync(
                 account=account,

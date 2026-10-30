@@ -125,6 +125,10 @@ artifact，不会触发 OpenD 刷新、飞书写入或重新计算；它使用�
 ./pm daily-job --accounts lx,alice --nav-date 2026-05-22 --write --confirm --json
 ```
 
+持久后台富途刷新在成功写入并核验可信的股票/ETF 数量变化后，通过同一 Agent
+发送简短回执；无变化、仅成本或 MMF 更新保持静默。回执复用 PM 的标题、类型、
+状态和“持仓变化”字段；去重、重试及恢复边界见 [Runbook](docs/runbook.md)。
+
 `pm futu sync` 真实写入完成后会通过飞书“刘看山”发送成功或失败回执；
 dry-run 不发消息。回执、Agent 对话和全部 Base 读写都使用
 `feishu.agent.app_id`、Agent systemd credential 和

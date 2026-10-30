@@ -76,7 +76,7 @@ def test_dispatch_routes_by_receipt_type_and_persists_success(tmp_path):
     ).dispatch_pending()
 
     assert result["success"] is True
-    assert result["sent"] == 3
+    assert result["sent"] == len(HoldingsReceiptService.SUPPORTED_TYPES)
     assert {item[0] for item in seen} == HoldingsReceiptService.SUPPORTED_TYPES
     assert all(
         store.get_operation_receipt(f"key-{receipt_type}")["status"] == "sent"
