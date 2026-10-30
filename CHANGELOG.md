@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.12 - 2026-10-30
+
+- Send compact PM receipts for verified background Futu stock and ETF quantity changes, while keeping unchanged, cost-only and MMF-only refreshes silent.
+- Persist quantity-change receipts with refresh completion and retain the original change during settlement retries.
+- Propagate valuation deadlines through Feishu token, holdings, pagination and retry reads, with explicit dependency-timeout results.
+
 ## 0.2.11 - 2026-10-29
 
 - Label holdings synchronization receipts as Futu-specific so they are not mistaken for changes across all brokers.
