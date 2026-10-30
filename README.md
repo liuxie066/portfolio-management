@@ -321,6 +321,7 @@ python3 -X pycache_prefix=/tmp/pm_pycache -m compileall src skill_api.py scripts
 
 ## 文档
 
+- 开发流程：[AGENTS.md](AGENTS.md)；产品约束：[docs/product.md](docs/product.md)；开发经验：[LESSONS.md](LESSONS.md)
 - `docs/INDEX.md`：项目地图
 - `docs/runbook.md`：日常运维和排障
 - `docs/service.md`：HTTP/service API

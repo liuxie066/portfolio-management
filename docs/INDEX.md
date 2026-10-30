@@ -6,6 +6,9 @@ historical Skill/Python API remains available only as a compatibility adapter.
 ## Start Here
 
 - Quick start and product overview: `README.md`
+- Codex development workflow and task reading guide: [AGENTS.md](../AGENTS.md)
+- Product scope, constraints, and open decisions: [product.md](product.md)
+- Reusable development lessons and regression evidence: [LESSONS.md](../LESSONS.md)
 - Daily operations: `docs/runbook.md`
 - Linux install and systemd timer: `docs/deploy-linux.md`
 - macOS launchd and Keychain design: `docs/deploy-macos.md`
