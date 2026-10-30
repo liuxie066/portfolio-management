@@ -169,11 +169,16 @@ date. The embedded daily-job option has the same observe-only CASH semantics.
   broker observation through evidence persistence. Its durable OM refresh endpoint
   commits `(account, request_id)` admission to `OperationStateStore` before 202.
   `FutuRefreshWorker` owns a DB-root lifetime process lock, serial fresh-state
-  sync, restart recovery and bounded retry without user receipts. Settlement or
-  reset DB failure recovers in the same worker after the prior sync ends;
+  sync, restart recovery and bounded retry. New verified quantity changes enqueue
+  compact Agent receipts atomically with inbox completion in the existing operation
+  outbox. Unchanged/cost/MMF-only refreshes stay silent. Settlement DB failure
+  retries the frozen result in the same worker without repeating the sync;
   shutdown joins that sync before releasing ownership. Completed duplicates are
   absorbing. The legacy refresh endpoint remains non-durable. Acceptance is
   neither synchronization proof nor an exactly-once external-write guarantee.
+  Process death (or shutdown during a DB outage) after external writes but before
+  settlement retains the existing cross-system gap: restart performs a fresh sync,
+  without reconstructing or backfilling an uncommitted old change receipt.
 - `CashFlowEffectService` owns durable CASH discovery, preview/confirmation,
   compensation, and the NAV gate.
 - `FutuSyncReceiptService` owns the best-effort Feishu receipt after a real Futu write; delivery failure is reported separately from sync success.

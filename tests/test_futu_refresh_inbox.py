@@ -173,7 +173,6 @@ def test_false_or_exception_result_stays_pending_with_bounded_backoff(store, fai
 def test_same_worker_survives_post_sync_settlement_and_reset_db_outage(store, monkeypatch, stop_during_outage):
     store.accept_futu_refresh(**IDENTITY)
     settlement_failed = Event()
-    reset_failed = Event()
     recovered = Event()
     settle = store.settle_futu_refresh
     reset = store.recover_futu_refreshes
@@ -186,7 +185,6 @@ def test_same_worker_survives_post_sync_settlement_and_reset_db_outage(store, mo
 
     def fail_reset():
         if settlement_failed.is_set() and not recovered.is_set():
-            reset_failed.set()
             raise sqlite3.OperationalError("reset unavailable too")
         reset()
 
@@ -194,7 +192,7 @@ def test_same_worker_survives_post_sync_settlement_and_reset_db_outage(store, mo
     monkeypatch.setattr(store, "recover_futu_refreshes", fail_reset)
     refresh = Mock(return_value={"success": True})
     with running_worker(store, refresh) as (worker, thread):
-        assert reset_failed.wait(5)
+        assert settlement_failed.wait(5)
         assert state(store) == "running"
         assert refresh.call_count == 1
         other = {**IDENTITY, "account": "bob"}
@@ -208,7 +206,7 @@ def test_same_worker_survives_post_sync_settlement_and_reset_db_outage(store, mo
             recovered.set()
             wait_for(lambda: state(store) == "completed" and state(store, **other) == "completed")
             assert thread.is_alive()
-            assert refresh.call_count == 3
+            assert refresh.call_count == 2
 
 
 def test_lifespan_stop_holds_ownership_until_sync_finishes_and_no_overlap(store):
@@ -306,6 +304,124 @@ def test_db_locked_admission_is_503_not_accepted(store):
     assert response.json()["error_code"] == "PM_SERVICE_UNAVAILABLE"
     assert store.get_futu_refresh(**IDENTITY) is None
     assert client_for(service).post(PATH, json=IDENTITY).status_code == 202
+
+
+def quantity_result():
+    return {
+        "success": True, "status": "written", "dry_run": False,
+        "source": "futu-openapi", "account": "alice",
+        "receipt_persisted": True, "sync_run_id": "new-sync",
+        "source_snapshot_id": "new-snapshot",
+        "source_metadata": {"observed_at_utc": "2026-10-30T01:00:00Z"},
+        "reconciliation": {"status": "trusted"},
+        "positions": [{"asset_id": "EXAMPLE", "security_type": "STOCK",
+                       "current_quantity": 50, "target_quantity": 51,
+                       "quantity_changed": True}],
+    }
+
+
+def receipts(store):
+    with store._connect() as conn:
+        return [dict(row) for row in conn.execute("SELECT * FROM operation_receipt_outbox")]
+
+
+def test_new_worker_change_is_atomically_queued_once_and_completed_duplicates_never_replay(store):
+    result = quantity_result()
+    refresh = Mock(return_value=result)
+    store.accept_futu_refresh(**IDENTITY)
+    with running_worker(store, refresh):
+        wait_for(lambda: state(store) == "completed")
+        store.accept_futu_refresh(**IDENTITY)
+    assert refresh.call_count == 1
+    rows = receipts(store)
+    assert len(rows) == 1 and rows[0]["status"] == "pending"
+    payload = json.loads(rows[0]["payload_json"])
+    assert payload["changes"] == [{"asset_id": "EXAMPLE", "before": 50, "after": 51}]
+    assert payload["sync_run_id"] == "new-sync"
+    # Retry after a lost commit acknowledgement is absorbing, not an enqueue replay.
+    store.settle_futu_refresh(**IDENTITY, result=result, receipt_payload=payload)
+    assert len(receipts(store)) == 1
+    restarted = OperationStateStore(store.db_path)
+    with running_worker(restarted, refresh):
+        restarted.accept_futu_refresh(**IDENTITY)
+    assert refresh.call_count == 1 and len(receipts(store)) == 1
+
+
+def test_completed_preexisting_result_is_never_backfilled(store):
+    result = quantity_result()
+    store.accept_futu_refresh(**IDENTITY)
+    store.claim_futu_refresh()
+    # Simulate the previous version: successful stored result, no receipt.
+    store.settle_futu_refresh(**IDENTITY, result=result)
+    refresh = Mock()
+    with running_worker(OperationStateStore(store.db_path), refresh):
+        store.accept_futu_refresh(**IDENTITY)
+    refresh.assert_not_called()
+    assert receipts(store) == []
+
+
+def test_settlement_and_enqueue_rollback_together(store, monkeypatch):
+    from src.app.futu_quantity_receipt import quantity_change_payload
+    from src.app.operation_state import _futu_refresh_mixin as module
+
+    result = quantity_result()
+    payload = quantity_change_payload(result)
+    store.accept_futu_refresh(**IDENTITY)
+    store.claim_futu_refresh()
+    insert = module.insert_operation_receipt_tx
+
+    def fail_after_insert(*args, **kwargs):
+        insert(*args, **kwargs)
+        raise sqlite3.OperationalError("fake commit outage")
+
+    monkeypatch.setattr(module, "insert_operation_receipt_tx", fail_after_insert)
+    with pytest.raises(sqlite3.OperationalError):
+        store.settle_futu_refresh(**IDENTITY, result=result, receipt_payload=payload)
+    assert state(store) == "running" and receipts(store) == []
+    monkeypatch.setattr(module, "insert_operation_receipt_tx", insert)
+    store.settle_futu_refresh(**IDENTITY, result=result, receipt_payload=payload)
+    assert state(store) == "completed" and len(receipts(store)) == 1
+
+
+def test_live_settlement_retry_preserves_original_change_and_never_resyncs(store, monkeypatch, caplog):
+    store.accept_futu_refresh(**IDENTITY)
+    failed, recovered = Event(), Event()
+    settle = store.settle_futu_refresh
+
+    def temporary_outage(**kwargs):
+        if not recovered.is_set():
+            failed.set()
+            raise sqlite3.OperationalError("fake settlement outage")
+        settle(**kwargs)
+
+    monkeypatch.setattr(store, "settle_futu_refresh", temporary_outage)
+    refresh = Mock(return_value=quantity_result())
+    with running_worker(store, refresh):
+        assert failed.wait(5)
+        assert state(store) == "running" and refresh.call_count == 1
+        recovered.set()
+        wait_for(lambda: state(store) == "completed")
+    assert refresh.call_count == 1
+    assert json.loads(receipts(store)[0]["payload_json"])["changes"][0]["before"] == 50
+    assert "pm_futu_refresh_settlement_failed" in caplog.text
+
+
+def test_receipt_identity_is_account_scoped_and_next_unchanged_request_is_silent(store):
+    def refresh(account, request_id):
+        result = quantity_result()
+        result["account"] = account
+        if request_id == "next":
+            result["positions"][0].update(current_quantity=51, quantity_changed=False)
+        return result
+
+    identities = [IDENTITY, {**IDENTITY, "account": "bob"}, {**IDENTITY, "request_id": "next"}]
+    for identity in identities:
+        store.accept_futu_refresh(**identity)
+    with running_worker(store, refresh):
+        wait_for(lambda: all(state(store, **identity) == "completed" for identity in identities))
+    rows = receipts(store)
+    assert len(rows) == 2 and len({row["receipt_key"] for row in rows}) == 2
+    assert {json.loads(row["payload_json"])["account"] for row in rows} == {"alice", "bob"}
 
 
 def test_remote_admission_rejected_before_store(store):

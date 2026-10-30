@@ -6,6 +6,7 @@ from datetime import timedelta
 from typing import Any
 
 from .._json import canonical_json
+from ._receipt_tx import insert_operation_receipt_tx
 
 
 class FutuRefreshMixin:
@@ -60,19 +61,36 @@ class FutuRefreshMixin:
 
     def settle_futu_refresh(
         self, *, account: str, request_id: str, result: dict[str, Any],
+        receipt_payload: dict[str, Any] | None = None,
     ) -> None:
         now = self.now_factory()
         success = result.get("success") is True
         with self._connect_inbox_accept() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 """
-                SELECT attempt_count FROM futu_refresh_inbox
-                WHERE account = ? AND request_id = ? AND state = 'running'
+                SELECT attempt_count, state, result_json FROM futu_refresh_inbox
+                WHERE account = ? AND request_id = ?
                 """,
                 (account, request_id),
             ).fetchone()
-            if row is None:
+            if row is not None and row["state"] == "completed":
+                # A committed settlement may have lost its acknowledgement.
+                if row["result_json"] == canonical_json(result):
+                    return
+                raise ValueError("completed Futu refresh has a different result")
+            if row is None or row["state"] != "running":
                 raise KeyError(f"running Futu refresh not found: {account}/{request_id}")
+            if success and receipt_payload is not None:
+                if receipt_payload["account"] != account:
+                    raise ValueError("Futu receipt account does not match refresh")
+                insert_operation_receipt_tx(
+                    conn,
+                    receipt_key=f"futu-refresh-quantity:{account}:{request_id}",
+                    receipt_type="futu_refresh_quantity_changed",
+                    payload=receipt_payload,
+                    now=now.isoformat(),
+                )
             delay = (1, 5, 15, 60)[min(int(row[0]) - 1, 3)]
             conn.execute(
                 """
