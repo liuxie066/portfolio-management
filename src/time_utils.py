@@ -12,11 +12,31 @@
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
 
 
 TZ_SHANGHAI = ZoneInfo("Asia/Shanghai")
+
+
+def remaining_timeout(deadline: float | None, default: float) -> float:
+    """Bound a blocking operation by the remaining monotonic budget."""
+    if deadline is None:
+        return float(default)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("request deadline exceeded")
+    return min(float(default), remaining)
+
+
+def sleep_with_deadline(delay: float, deadline: float | None) -> None:
+    """Do not start a backoff that cannot fit in the remaining budget."""
+    if delay <= 0:
+        return
+    if deadline is not None and delay >= remaining_timeout(deadline, float("inf")):
+        raise TimeoutError("insufficient deadline budget for retry backoff")
+    time.sleep(delay)
 
 
 def bj_now() -> datetime:

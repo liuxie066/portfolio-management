@@ -23,6 +23,7 @@ from ...domain.holding_mutations import (
     holding_values,
 )
 from ...domain.holdings import RawHoldingRecord
+from ...time_utils import remaining_timeout
 from ..contracts import get_table_contract
 from ...models import (
     Holding, AssetType, AssetClass, Industry,
@@ -358,10 +359,11 @@ class HoldingsRepository:
             raise
         self._publish_holding_account_slice(identity.account, fresh)
 
-    def preload_holdings_index(self, account: Optional[str] = None) -> Dict[str, any]:
+    def preload_holdings_index(self, account: Optional[str] = None, *, deadline: float | None = None) -> Dict[str, any]:
         """预加载持仓索引到内存和本地缓存。"""
-        records = self.get_raw_holdings(account=account)
+        records = self.get_raw_holdings(account=account, deadline=deadline)
         converted = self._convert_raw_holdings(records)
+        remaining_timeout(deadline, float('inf'))
 
         if account:
             self._publish_holding_account_slice(account, converted)
@@ -414,6 +416,7 @@ class HoldingsRepository:
         *,
         account: Optional[str] = None,
         record_id: Optional[str] = None,
+        deadline: float | None = None,
     ) -> List[RawHoldingRecord]:
         """Read complete untyped Feishu rows without applying query defaults."""
 
@@ -426,8 +429,10 @@ class HoldingsRepository:
         if requested_account is not None and requested_record_id is not None:
             raise ValueError("account and record_id are mutually exclusive")
         fetched_at = datetime.now(UTC)
+        remaining_timeout(deadline, float('inf'))
+        read_kwargs = {'deadline': deadline} if deadline is not None else {}
         if requested_record_id is not None:
-            record = self.client.get_record_strict('holdings', requested_record_id)
+            record = self.client.get_record_strict('holdings', requested_record_id, **read_kwargs)
             records = [record]
         else:
             filter_str = (
@@ -439,7 +444,9 @@ class HoldingsRepository:
                 'holdings',
                 filter_str=filter_str,
                 field_names=self.HOLDING_PROJECTION_FIELDS,
+                **read_kwargs,
             )
+        remaining_timeout(deadline, float('inf'))
         raw_records: List[RawHoldingRecord] = []
         for record in records:
             resolved_record_id = str((record or {}).get('record_id') or '').strip()
@@ -708,17 +715,18 @@ class HoldingsRepository:
         holdings.sort(key=lambda item: (item.account, item.broker, item.asset_id))
         return holdings
 
-    def get_holdings(self, account: Optional[str] = None, asset_type: Optional[str] = None, include_empty: bool = False) -> List[Holding]:
+    def get_holdings(self, account: Optional[str] = None, asset_type: Optional[str] = None, include_empty: bool = False, *, deadline: float | None = None) -> List[Holding]:
         """获取持仓列表（优先使用内存缓存索引）"""
         requested_account = str(account).strip() if account is not None else None
         if account is not None and not requested_account:
             raise ValueError("account must not be blank")
+        remaining_timeout(deadline, float('inf'))
         loaded = self._holdings_index_loaded_all or (
             requested_account is not None
             and requested_account in self._holdings_index_loaded_accounts
         )
         if not loaded:
-            self.preload_holdings_index(account=requested_account)
+            self.preload_holdings_index(account=requested_account, deadline=deadline)
         holdings = []
         for fields in self._holding_fields_cache.values():
             if requested_account is not None and fields.get('account') != requested_account:

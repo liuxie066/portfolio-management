@@ -79,10 +79,24 @@ The valuation-evidence endpoint uses POST only to avoid an unbounded query
 string when many supplemental underlyings are requested. It does not write
 holdings, NAV, or other portfolio facts, shares successful quotes within the
 request, and keeps missing or stale quotes explicit as `partial`. All requested
-accounts share one absolute `price_timeout` deadline and one deduplicated quote/FX
-snapshot. When the deadline is reached, PM stops starting further quote work and
+accounts share one absolute monotonic `price_timeout` deadline across account
+discovery, holdings reads, authentication, rate limiting, pagination, quotes and
+FX, with one deduplicated quote/FX snapshot. Deadline-bound Feishu reads disable
+transport retries; 429 backoffs run only when they fit in the remaining budget.
+Connect/read timeouts share that budget, including token refresh and lock waits.
+This is cooperative timeout control, not a hard cancellation guarantee for DNS
+or a continuously trickling response body.
+
+When the deadline is reached, PM stops starting further remote work and
 returns completed holdings and quotes with `success=true`, `status=partial`, and
-per-account status/warnings. The default `all` scope keeps normal pricing
+per-account status/warnings identifying the failed stage. Late or incomplete
+holdings pages are discarded and never replace complete caches. A network
+timeout before the deadline is a source failure, not proof that the total
+deadline elapsed. In `all` scope, failed account discovery returns
+`PM_SERVICE_UNAVAILABLE`; incomplete discovery cannot prove an account unknown.
+Only complete discovery can reject missing accounts as `INPUT_ERROR`.
+Calls without a deadline retain their existing retry behavior.
+The default `all` scope keeps normal pricing
 cache refresh behavior. `non_futu` includes only non-Futu Holdings, rejects
 supplemental codes, reads account-scoped Feishu rows, and does not write or
 clean local quote, FX, or holdings-index caches:

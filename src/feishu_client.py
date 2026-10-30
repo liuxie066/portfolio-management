@@ -8,7 +8,10 @@ import time
 import requests
 import requests.adapters
 import threading
+from contextlib import contextmanager
 from typing import Dict, List, Optional, Any
+from urllib3.exceptions import ReadTimeoutError
+from urllib3.util import Timeout
 
 from src import config
 from src.feishu.contracts import (
@@ -17,7 +20,8 @@ from src.feishu.contracts import (
     parse_table_ref,
     validate_write_fields,
 )
-from src.feishu.errors import FeishuRecordNotFoundError
+from src.feishu.errors import FeishuReadTimeout, FeishuRecordNotFoundError
+from src.time_utils import remaining_timeout, sleep_with_deadline
 
 
 class FeishuBatchWriteError(RuntimeError):
@@ -110,8 +114,33 @@ class FeishuClient:
         )
         self.session.mount('https://', adapter)
         self.session.mount('http://', adapter)
+        # Deadline reads must not retry inside an adapter without checking budget.
+        self._deadline_session = requests.Session()
+        deadline_adapter = requests.adapters.HTTPAdapter(
+            pool_connections=10, pool_maxsize=20, max_retries=0, pool_block=False,
+        )
+        self._deadline_session.mount('https://', deadline_adapter)
+        self._deadline_session.mount('http://', deadline_adapter)
 
-    def _get_headers(self) -> Dict[str, str]:
+    @staticmethod
+    def _remaining_budget(deadline: float, stage: str) -> float:
+        try:
+            return remaining_timeout(deadline, float('inf'))
+        except TimeoutError as exc:
+            raise FeishuReadTimeout(stage, str(exc)) from exc
+
+    @contextmanager
+    def _locked(self, lock, *, deadline: float | None, stage: str):
+        if deadline is None:
+            lock.acquire()
+        elif not lock.acquire(timeout=self._remaining_budget(deadline, stage)):
+            raise FeishuReadTimeout(stage, 'deadline exceeded waiting for lock')
+        try:
+            yield
+        finally:
+            lock.release()
+
+    def _get_headers(self, *, deadline: float | None = None) -> Dict[str, str]:
         """获取请求头"""
         if self.user_token:
             # 使用个人访问令牌
@@ -121,12 +150,13 @@ class FeishuClient:
             }
         else:
             # 使用应用级 token
+            token = self._get_tenant_token(**({'deadline': deadline} if deadline is not None else {}))
             return {
-                'Authorization': f'Bearer {self._get_tenant_token()}',
+                'Authorization': f'Bearer {token}',
                 'Content-Type': 'application/json'
             }
 
-    def _get_tenant_token(self) -> str:
+    def _get_tenant_token(self, *, deadline: float | None = None) -> str:
         """获取应用级 tenant access token（带缓存，线程安全 DCL）"""
         now = time.time()
 
@@ -135,7 +165,8 @@ class FeishuClient:
             return self._tenant_token
 
         # 获取锁进行第二重检查
-        with self._token_lock:
+        with self._locked(self._token_lock, deadline=deadline, stage='token_lock'):
+            now = time.time()
             # 第二重检查（有锁）- 防止多个线程同时通过第一重检查后重复请求
             if self._tenant_token and now < self._token_expire_time - 300:
                 return self._tenant_token
@@ -144,27 +175,48 @@ class FeishuClient:
                 raise ValueError("需要提供 app_id 和 app_secret，请在 config.yaml 或环境变量中配置")
 
             url = f"{self.BASE_URL}/auth/v3/tenant_access_token/internal"
-            response = requests.post(url, json={
-                'app_id': self.app_id,
-                'app_secret': self.app_secret
-            }, timeout=self.timeout)
+            try:
+                if deadline is None:
+                    response = requests.post(url, json={
+                        'app_id': self.app_id, 'app_secret': self.app_secret,
+                    }, timeout=self.timeout)
+                else:
+                    response = self._deadline_session.post(url, json={
+                        'app_id': self.app_id, 'app_secret': self.app_secret,
+                    }, timeout=self._bounded_timeout(None, deadline, 'token'), allow_redirects=False)
+                    self._remaining_budget(deadline, 'token')
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+                # Requests wraps response-body read timeouts in ConnectionError.
+                if deadline is None or not (
+                    isinstance(exc, requests.exceptions.Timeout)
+                    or any(isinstance(arg, ReadTimeoutError) for arg in exc.args)
+                ):
+                    raise
+                raise FeishuReadTimeout('token', str(exc)) from exc
             response.raise_for_status()
             data = response.json()
 
             if data.get('code') != 0:
                 raise Exception(f"获取 token 失败: {data.get('msg')}")
 
+            if deadline is not None:
+                self._remaining_budget(deadline, 'token')
             self._tenant_token = data['tenant_access_token']
             self._token_expire_time = now + data['expire']
             return self._tenant_token
 
-    def _rate_limit(self):
+    def _rate_limit(self, *, deadline: float | None = None):
         """限流控制（线程安全）"""
-        with self._rate_lock:
+        with self._locked(self._rate_lock, deadline=deadline, stage='rate_limit_lock'):
             now = time.time()
             elapsed = now - self._last_request_time
             if elapsed < self._min_interval:
-                time.sleep(self._min_interval - elapsed)
+                try:
+                    sleep_with_deadline(self._min_interval - elapsed, deadline)
+                except TimeoutError as exc:
+                    raise FeishuReadTimeout('rate_limit_wait', str(exc)) from exc
+            if deadline is not None:
+                self._remaining_budget(deadline, 'rate_limit_wait')
             self._last_request_time = time.time()
 
     def _effective_timeout(self, requested: Any = None) -> tuple[float, float]:
@@ -178,22 +230,48 @@ class FeishuClient:
             raise ValueError("timeout values must be positive")
         return min(connect, self.timeout[0]), min(read, self.timeout[1])
 
-    def _request(self, method: str, endpoint: str, _retry_count: int = 0, **kwargs) -> Dict:
+    def _bounded_timeout(self, requested: Any, deadline: float | None, stage: str):
+        connect, read = self._effective_timeout(requested)
+        if deadline is None:
+            return connect, read
+        # shortcut: socket budgets cannot cancel DNS/trickling bodies; hard cutoffs need execution isolation.
+        return Timeout(total=self._remaining_budget(deadline, stage), connect=connect, read=read)
+
+    def _request(self, method: str, endpoint: str, _retry_count: int = 0,
+                 *, deadline: float | None = None, _stage: str = 'request', **kwargs) -> Dict:
         """发送请求（带限流和错误处理）"""
-        self._rate_limit()
+        self._rate_limit(**({'deadline': deadline} if deadline is not None else {}))
 
         url = f"{self.BASE_URL}{endpoint}"
-        headers = self._get_headers()
+        headers = self._get_headers(**({'deadline': deadline} if deadline is not None else {}))
 
-        kwargs['timeout'] = self._effective_timeout(kwargs.get('timeout'))
-        response = self.session.request(method, url, headers=headers, **kwargs)
+        requested_timeout = kwargs.pop('timeout', None)
+        request_kwargs = dict(kwargs, timeout=self._bounded_timeout(requested_timeout, deadline, _stage))
+        session = self.session if deadline is None else self._deadline_session
+        if deadline is not None:
+            request_kwargs['allow_redirects'] = False
+        try:
+            response = session.request(method, url, headers=headers, **request_kwargs)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+            if deadline is None or not (
+                isinstance(exc, requests.exceptions.Timeout)
+                or any(isinstance(arg, ReadTimeoutError) for arg in exc.args)
+            ):
+                raise
+            raise FeishuReadTimeout(_stage, str(exc)) from exc
+        if deadline is not None:
+            self._remaining_budget(deadline, _stage)
 
         # 处理限流错误（最多重试3次）
         if response.status_code == 429:
             if _retry_count >= 3:
                 response.raise_for_status()
-            time.sleep(1 * (2 ** _retry_count))  # 指数退避
-            return self._request(method, endpoint, _retry_count=_retry_count + 1, **kwargs)
+            try:
+                sleep_with_deadline(1 * (2 ** _retry_count), deadline)
+            except TimeoutError as exc:
+                raise FeishuReadTimeout('retry_backoff', str(exc)) from exc
+            return self._request(method, endpoint, _retry_count=_retry_count + 1,
+                                 deadline=deadline, _stage=_stage, timeout=requested_timeout, **kwargs)
 
         try:
             data = response.json()
@@ -226,6 +304,8 @@ class FeishuClient:
 
         if 'data' not in data or not isinstance(data['data'], dict):
             raise RuntimeError(f"Feishu API success response has invalid data: {data.get('data')!r}")
+        if deadline is not None:
+            self._remaining_budget(deadline, _stage)
         return data['data']
 
     def _get_table_config(self, table_name: str) -> tuple:
@@ -334,7 +414,8 @@ class FeishuClient:
         }
 
     def list_records(self, table_name: str, filter_str: str = None,
-                     field_names: List[str] = None, page_size: int = 500) -> List[Dict]:
+                     field_names: List[str] = None, page_size: int = 500,
+                     *, deadline: float | None = None) -> List[Dict]:
         """
         查询记录列表
 
@@ -361,7 +442,9 @@ class FeishuClient:
                 # 飞书API使用field_names参数指定返回字段
                 params['field_names'] = json.dumps(field_names)
 
-            data = self._request('GET', endpoint, params=params)
+            data = self._request('GET', endpoint, params=params, **(
+                {'deadline': deadline, '_stage': f'{table_name}_read'} if deadline is not None else {}
+            ))
             items = data.get('items', [])
             if not isinstance(items, list):
                 raise RuntimeError(f"Feishu {table_name} records response items is invalid")
@@ -393,14 +476,19 @@ class FeishuClient:
             if has_more is False or not page_token:
                 break
 
+        if deadline is not None:
+            self._remaining_budget(deadline, f'{table_name}_read')
         return records
 
-    def get_record_strict(self, table_name: str, record_id: str) -> Dict:
+    def get_record_strict(self, table_name: str, record_id: str,
+                          *, deadline: float | None = None) -> Dict:
         """获取单条记录（严格模式）：任何错误直接抛出。"""
         app_token, table_id = self._get_table_config(table_name)
         endpoint = f"/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}"
 
-        data = self._request('GET', endpoint)
+        data = self._request('GET', endpoint, **(
+            {'deadline': deadline, '_stage': f'{table_name}_read'} if deadline is not None else {}
+        ))
         # API returns {'record': {...}} for get_record
         rec = data.get('record') if isinstance(data, dict) else None
         if rec and isinstance(rec, dict):

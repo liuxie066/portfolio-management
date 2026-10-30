@@ -14,6 +14,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from src.pricing.payload import quantize_money
+from src.time_utils import remaining_timeout
 
 
 LOGGER = logging.getLogger(__name__)
@@ -172,13 +173,15 @@ class PortfolioService:
         service = self._quality_service or PMQualityService(self.storage)
         return service.refresh(accounts=normalized)
 
-    def list_accounts(self, *, include_default: bool = True) -> Dict[str, Any]:
+    def list_accounts(self, *, include_default: bool = True, deadline: float | None = None) -> Dict[str, Any]:
         from src.app import AccountService
 
         return AccountService(
             storage=self.storage,
             default_account=self._resolve_account(None),
-        ).list_accounts(include_default=include_default)
+        ).list_accounts(include_default=include_default, **(
+            {'deadline': deadline} if deadline is not None else {}
+        ))
 
     def list_nav_accounts(self, *, include_default: bool = False) -> Dict[str, Any]:
         from src.app import AccountService
@@ -277,7 +280,14 @@ class PortfolioService:
             return {"success": False, "error_code": "INPUT_ERROR", "error": "non_futu scope does not accept supplemental_codes"}
 
         if holdings_scope == "all":
-            account_result = self.list_accounts(include_default=True)
+            try:
+                account_result = self.list_accounts(include_default=True, deadline=request_deadline)
+                remaining_timeout(request_deadline, float('inf'))
+            except Exception as exc:
+                return {
+                    "success": False, "error_code": "PM_SERVICE_UNAVAILABLE",
+                    "error": f"account discovery unavailable: {exc}",
+                }
             available_accounts = {
                 str(item or "").strip().lower()
                 for item in (account_result.get("accounts") or [])
@@ -285,6 +295,11 @@ class PortfolioService:
             }
             unknown = [account for account in normalized_accounts if account not in available_accounts]
             if unknown:
+                if account_result.get('warnings'):
+                    return {
+                        "success": False, "error_code": "PM_SERVICE_UNAVAILABLE",
+                        "error": f"account discovery incomplete: {account_result['warnings']}",
+                    }
                 return {
                     "success": False,
                     "error_code": "INPUT_ERROR",
@@ -324,7 +339,8 @@ class PortfolioService:
                 if holdings_scope == "non_futu":
                     from src.app.holdings_validation import holding_broker_scope
 
-                    raw_records = list(self.storage.get_raw_holdings(account=account))
+                    raw_records = list(self.storage.get_raw_holdings(account=account, deadline=request_deadline))
+                    remaining_timeout(request_deadline, float('inf'))
                     read_at = raw_records[0].fetched_at if raw_records else datetime.now(timezone.utc)
                     if _utc_time(read_at) is None or any(
                         record.fetched_at != read_at or record.source != "feishu"
@@ -405,17 +421,23 @@ class PortfolioService:
                             f"{account}: unknown broker on {counts['excluded_unknown_broker']} Holdings row(s)"
                         )
                 else:
-                    account_holdings = list(self.storage.get_holdings(account=account))
+                    account_holdings = list(self.storage.get_holdings(account=account, deadline=request_deadline))
+                remaining_timeout(request_deadline, float('inf'))
             except Exception as exc:
                 account_items.append(
                     {
                         "account": account,
-                        "status": "unavailable",
+                        "status": "deadline_exceeded" if isinstance(exc, TimeoutError) and time.monotonic() >= request_deadline else "unavailable",
                         "holdings": [],
                         "quotes": [],
-                        "warnings": [f"{account}: {exc}"],
+                        "warnings": [f"{account}: holdings read unavailable: {exc}"],
+                        "diagnostics": [{"stage": getattr(exc, 'stage', 'holdings_read'), "error": str(exc)}],
                     }
                 )
+                source_rows.pop(account, None)
+                source_read_times.pop(account, None)
+                filter_counts.pop(account, None)
+                broker_inventory.pop(account, None)
                 continue
             holdings_by_account[account] = account_holdings
             pending_accounts.append(account)
@@ -463,7 +485,7 @@ class PortfolioService:
                 shared_prices.update(fetched_prices)
         elif pending_accounts and time.monotonic() >= request_deadline:
             shared_price_warnings = [
-                f"价格获取达到全局 deadline（{price_timeout}秒）"
+                f"持仓读取后总预算耗尽（{price_timeout}秒）；未启动报价获取"
             ]
 
         if holdings_scope == "non_futu":
@@ -475,7 +497,9 @@ class PortfolioService:
             }
             rates: Dict[str, float] = {}
             fx_evidence: Dict[str, Any] = {}
-            if foreign_currencies:
+            if foreign_currencies and time.monotonic() >= request_deadline:
+                shared_price_warnings.append("FX evidence unavailable: request deadline exceeded before FX")
+            elif foreign_currencies:
                 try:
                     fx_service = scoped_fetcher.fx_service
                     rates, fx_evidence = fx_service.fetch_exchange_rates_with_evidence(

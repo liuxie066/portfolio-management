@@ -80,16 +80,17 @@ class HoldingsMixin:
     def _get_holding_from_cache_any_market(self, asset_id: str, account: str) -> Optional[Holding]:
         return self.holdings._get_holding_from_cache_any_market(asset_id, account)
 
-    def preload_holdings_index(self, account: Optional[str] = None) -> Dict[str, Any]:
-        return self.holdings.preload_holdings_index(account=account)
+    def preload_holdings_index(self, account: Optional[str] = None, *, deadline: float | None = None) -> Dict[str, Any]:
+        return self.holdings.preload_holdings_index(account=account, deadline=deadline)
 
     def get_raw_holdings(
         self,
         *,
         account: Optional[str] = None,
         record_id: Optional[str] = None,
+        deadline: float | None = None,
     ) -> List[RawHoldingRecord]:
-        return self.holdings.get_raw_holdings(account=account, record_id=record_id)
+        return self.holdings.get_raw_holdings(account=account, record_id=record_id, deadline=deadline)
 
     def _convert_raw_holdings(self, records: List[RawHoldingRecord]) -> List[Holding]:
         return self.holdings._convert_raw_holdings(records)
@@ -139,11 +140,14 @@ class HoldingsMixin:
         account: Optional[str] = None,
         asset_type: Optional[str] = None,
         include_empty: bool = False,
+        *,
+        deadline: float | None = None,
     ) -> List[Holding]:
         return self.holdings.get_holdings(
             account=account,
             asset_type=asset_type,
             include_empty=include_empty,
+            deadline=deadline,
         )
 
     def upsert_holding(self, holding: Holding) -> Holding:

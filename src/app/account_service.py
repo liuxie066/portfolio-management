@@ -4,7 +4,7 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
-from src.time_utils import bj_now_naive
+from src.time_utils import bj_now_naive, remaining_timeout
 
 
 def iter_account_values(value: Any) -> Iterable[str]:
@@ -106,10 +106,11 @@ class AccountService:
         self.default_account = default_account
         self.full_report_func = full_report_func
 
-    def list_accounts(self, *, include_default: bool = True) -> Dict[str, Any]:
+    def list_accounts(self, *, include_default: bool = True, deadline: float | None = None) -> Dict[str, Any]:
         accounts = set()
         sources: Dict[str, List[str]] = {}
         warnings = []
+        read_kwargs = {'deadline': deadline} if deadline is not None else {}
 
         def remember(source: str, account_values: Iterable[str]) -> None:
             source_accounts = set()
@@ -121,13 +122,20 @@ class AccountService:
             sources[source] = sorted(source_accounts)
 
         try:
+            remaining_timeout(deadline, float('inf'))
             get_holdings_fn = getattr(self.storage, "get_holdings")
-            try:
-                holdings = get_holdings_fn(account=None, include_empty=True)
-            except TypeError:
-                holdings = get_holdings_fn(account=None)
+            if deadline is not None:
+                holdings = get_holdings_fn(account=None, include_empty=True, deadline=deadline)
+            else:
+                try:
+                    holdings = get_holdings_fn(account=None, include_empty=True)
+                except TypeError:
+                    holdings = get_holdings_fn(account=None)
+            remaining_timeout(deadline, float('inf'))
             remember("holdings", (getattr(holding, "account", None) for holding in holdings or []))
         except Exception as e:
+            if deadline is not None and isinstance(e, TimeoutError):
+                raise
             warnings.append({"source": "holdings", "error": str(e)})
 
         client = getattr(self.storage, "client", None)
@@ -135,7 +143,9 @@ class AccountService:
         if callable(list_records):
             for table in ("transactions", "cash_flow", "nav_history"):
                 try:
-                    records = list_records(table, field_names=["account"])
+                    remaining_timeout(deadline, float('inf'))
+                    records = list_records(table, field_names=["account"], **read_kwargs)
+                    remaining_timeout(deadline, float('inf'))
                     values = []
                     for record in records or []:
                         raw_fields = record.get("fields") or {}
@@ -149,8 +159,11 @@ class AccountService:
                         values.extend(iter_account_values(fields.get("account")))
                     remember(table, values)
                 except Exception as e:
+                    if deadline is not None and isinstance(e, TimeoutError):
+                        raise
                     warnings.append({"source": table, "error": str(e)})
 
+        remaining_timeout(deadline, float('inf'))
         if include_default and self.default_account:
             accounts.add(self.default_account)
 
