@@ -2,6 +2,14 @@
 from __future__ import annotations
 
 
+class FeishuReadTimeout(TimeoutError):
+    """A bounded Feishu read failed at a specific blocking stage."""
+
+    def __init__(self, stage: str, message: str):
+        self.stage = stage
+        super().__init__(f"Feishu {stage}: {message}")
+
+
 class FeishuRecordNotFoundError(LookupError):
     """Feishu explicitly reported that a concrete record ID does not exist."""
 

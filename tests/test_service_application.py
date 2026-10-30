@@ -153,7 +153,7 @@ def test_portfolio_service_multi_account_overview_exposes_error_when_all_account
 def test_portfolio_service_builds_one_multi_account_valuation_evidence_snapshot():
     read_services = {}
     storage = SimpleNamespace(
-        get_holdings=Mock(side_effect=lambda *, account: []),
+        get_holdings=Mock(side_effect=lambda *, account, deadline: []),
     )
     portfolio = SimpleNamespace(
         reporting_service=object(),
@@ -218,6 +218,9 @@ def test_portfolio_service_builds_one_multi_account_valuation_evidence_snapshot(
     assert result["snapshot"]["deadline_exceeded"] is False
     portfolio.fetch_price_snapshot.assert_called_once()
     assert storage.get_holdings.call_count == 2
+    deadline = portfolio.fetch_price_snapshot.call_args.kwargs['deadline']
+    assert service.list_accounts.call_args.kwargs['deadline'] == deadline
+    assert all(call.kwargs['deadline'] == deadline for call in storage.get_holdings.call_args_list)
     for account in ("lx", "sy"):
         read_services[account].build_valuation_evidence.assert_called_once()
         assert (
@@ -259,7 +262,7 @@ def test_multi_account_valuation_fetches_one_shared_quote_snapshot():
     }
     storage = Mock()
     storage.get_holdings.side_effect = (
-        lambda *, account: holdings_by_account[account]
+        lambda *, account, deadline: holdings_by_account[account]
     )
     fetcher = Mock()
     fetcher.fetch_batch.return_value = {
@@ -331,7 +334,7 @@ def test_multi_account_valuation_returns_partial_at_shared_wall_clock_deadline()
     }
     storage = Mock()
     storage.get_holdings.side_effect = (
-        lambda *, account: holdings_by_account[account]
+        lambda *, account, deadline: holdings_by_account[account]
     )
     fetcher = Mock()
 
@@ -380,7 +383,7 @@ def test_multi_account_deadline_stops_loading_later_accounts_and_quote_work():
     )
     storage = Mock()
 
-    def slow_first_account(*, account):
+    def slow_first_account(*, account, deadline):
         assert account == "lx"
         time.sleep(0.03)
         return [first_holding]
@@ -403,10 +406,10 @@ def test_multi_account_deadline_stops_loading_later_accounts_and_quote_work():
     assert result["success"] is True
     assert result["status"] == "partial"
     assert [item["status"] for item in result["account_status"]] == [
-        "partial",
+        "deadline_exceeded",
         "deadline_exceeded",
     ]
-    assert result["holdings"][0]["code"] == "BABA"
+    assert result["holdings"] == []
     assert any(
         "全局 deadline 前未读取账户持仓" in warning
         for warning in result["account_status"][1]["warnings"]
@@ -554,7 +557,9 @@ def test_non_futu_empty_feishu_slice_is_valid_without_account_discovery():
 
     assert result["status"] == "complete"
     assert result["scope"]["holding_counts"]["lx"]["source_rows"] == 0
-    storage.get_raw_holdings.assert_called_once_with(account="lx")
+    storage.get_raw_holdings.assert_called_once_with(
+        account="lx", deadline=read_service.build_valuation_evidence.call_args.kwargs['deadline'],
+    )
     portfolio.fetch_price_snapshot.assert_not_called()
 
 
@@ -602,7 +607,10 @@ def test_non_futu_valuation_filters_before_quote_and_preserves_scope():
         {"broker": "富途证券有限公司", "classification": "futu", "row_count": 1},
     ]
     assert [holding.asset_id for holding in portfolio.fetch_price_snapshot.call_args.kwargs["holdings"]] == ["BANK"]
-    storage.get_raw_holdings.assert_called_once_with(account="lx")
+    storage.get_raw_holdings.assert_called_once_with(
+        account="lx", deadline=portfolio.fetch_price_snapshot.call_args.kwargs['deadline'],
+    )
+    assert fx_service.fetch_exchange_rates_with_evidence.call_args.kwargs['deadline'] == storage.get_raw_holdings.call_args.kwargs['deadline']
     assert [holding.asset_id for holding in read_service.build_valuation_evidence.call_args.kwargs["holdings"]] == ["BANK"]
     assert {row["code"] for row in result["holdings"]} == {"BANK"}
     assert {row["code"] for row in result["quotes"]} == {"BANK"}

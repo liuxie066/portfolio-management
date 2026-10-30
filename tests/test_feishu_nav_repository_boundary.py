@@ -55,8 +55,8 @@ def test_holdings_mixin_stays_thin_and_delegates_holdings_reads(monkeypatch):
     storage = FeishuStorage(client=Mock())
     calls = []
 
-    def fake_get_holdings(account=None, asset_type=None, include_empty=False):
-        calls.append((account, asset_type, include_empty))
+    def fake_get_holdings(account=None, asset_type=None, include_empty=False, *, deadline=None):
+        calls.append((account, asset_type, include_empty, deadline))
         return []
 
     monkeypatch.setattr(storage.holdings, "get_holdings", fake_get_holdings)
@@ -64,7 +64,9 @@ def test_holdings_mixin_stays_thin_and_delegates_holdings_reads(monkeypatch):
     result = storage.get_holdings(account="lx", asset_type="cash", include_empty=True)
 
     assert result == []
-    assert calls == [("lx", "cash", True)]
+    assert calls == [("lx", "cash", True, None)]
+    assert storage.get_holdings(account="lx", deadline=123) == []
+    assert calls[-1] == ("lx", None, False, 123)
 
     source = inspect.getsource(HoldingsMixin)
     assert "list_records(" not in source
