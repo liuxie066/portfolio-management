@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from datetime import UTC, date, datetime
 import json
 import sqlite3
@@ -405,6 +405,75 @@ def test_account_recorder_rejects_formal_futu_projection_before_sync(monkeypatch
     assert result["success"] is False
     assert result["status"] == "holdings_preflight_failed"
     assert result["error"] == "formal NAV cannot consume a Futu dry-run projection"
+
+
+def test_monitor_disabled_does_not_disable_nav_duplicate_blocker(tmp_path, monkeypatch):
+    from src import config
+    original_get = config.get
+    monkeypatch.setattr(config, "get", lambda key, default=None: (
+        False if key == "holdings_change_monitor.enabled" else original_get(key, default)
+    ))
+    storage = RawStorage([_raw("one"), _raw("two")])
+    store = OperationStateStore(tmp_path / "operations.sqlite3")
+    service = _service(storage, store=store)
+    blocked = service.prepare_account(
+        account="lx", dry_run=False, confirm=True, trigger={"mode": "nav"},
+    )
+    assert blocked["success"] is False
+    cases = store.list_holding_cases(account="lx")
+    assert len(cases) == 2
+    assert all(case["kind"] == "duplicate_identity" and case["blocks_official_nav"] for case in cases)
+    assert blocked["workflow"]["enqueued_receipt_keys"] == []
+    storage.records = [_raw("one"), _raw("two", asset_id="USD-CASH", currency="USD")]
+    repaired = service.prepare_account(
+        account="lx", dry_run=False, confirm=True, trigger={"mode": "nav"},
+    )
+    assert repaired["success"] is True
+    assert len(repaired["workflow"]["closed_case_keys"]) == 1
+    assert len(repaired["workflow"]["superseded_case_keys"]) == 1
+
+
+def test_nav_acquires_target_lock_before_account_and_complete_read(tmp_path):
+    order = []
+    @contextmanager
+    def lock(key):
+        order.append(("enter", key))
+        yield
+        order.append(("exit", key))
+    storage = RawStorage([_raw("one"), _raw("two")])
+    service = _service(storage, store=OperationStateStore(tmp_path / "operations.sqlite3"))
+    service.lock_factory = lock
+    original = storage.get_raw_holdings
+    def read(*, account=None, require_complete=False):
+        order.append(("read", require_complete))
+        return original(account=account)
+    storage.get_raw_holdings = read
+    result = service.prepare_account(account="lx", dry_run=False, confirm=True, trigger={})
+    assert result["success"] is False
+    assert order[0][0] == "enter" and order[0][1].startswith("holdings-observation:")
+    assert order[1] == ("enter", "account-write:lx")
+    assert order[2] == ("read", True)
+    assert order[-1] == ("exit", order[0][1])
+
+
+def test_nav_dry_run_projection_cannot_close_duplicate_cases(tmp_path):
+    storage = RawStorage([_raw("one"), _raw("two")])
+    store = OperationStateStore(tmp_path / "operations.sqlite3")
+    service = _service(storage, store=store)
+    blocked = service.prepare_account(account="lx", dry_run=False, confirm=True, trigger={})
+    keys = blocked["workflow"]["created_case_keys"]
+    storage.records = [_raw("one")]
+    result = service.prepare_account(
+        account="lx", dry_run=True, confirm=False, trigger={}, project_futu_dry_run=True,
+        futu_sync_result={
+            "success": True, "dry_run": True,
+            "stages": {"fund_mmf": {"status": "succeeded"}},
+            "source": "futu-openapi", "source_snapshot_id": "snapshot-lx",
+            "source_metadata": _futu_plan_metadata(), "items": [],
+        },
+    )
+    assert result["workflow"] is None
+    assert all(store.get_holding_case(key)["state"] == "pending_manual_edit" for key in keys)
 
 
 def test_formal_conflict_materializes_case_without_individual_receipt(tmp_path):

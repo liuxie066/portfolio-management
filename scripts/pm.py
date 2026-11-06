@@ -536,6 +536,39 @@ def cmd_holdings_events_subscribe(args):
     return result
 
 
+def cmd_holdings_changes(args):
+    from src.app.holding_change_monitor_service import HoldingChangeMonitorService
+    from src.service.application import PortfolioService
+
+    operation = args.changes_cmd
+    monitor = HoldingChangeMonitorService(
+        storage=None if operation == "status" else PortfolioService().storage,
+    )
+    if operation == "status":
+        result = monitor.status()
+    elif operation == "init":
+        result = monitor.initialize(apply=args.apply, confirm=args.confirm, rebuild=args.rebuild)
+    else:
+        result = monitor.scan(apply=args.apply, confirm=args.confirm)
+    _dump(result, bool(getattr(args, "json", False)))
+    return result
+
+
+def _holding_monitor_worker(storage, store, stop_event, *, target=None):
+    from src.app.holding_change_monitor_service import HoldingChangeMonitorService, MonitorSettings
+
+    settings = MonitorSettings.from_config()
+    if not settings.enabled:
+        return None
+    monitor = HoldingChangeMonitorService(storage=storage, store=store, settings=settings, target=target)
+    worker = threading.Thread(
+        target=monitor.run_worker_loop, kwargs={"stop_event": stop_event},
+        name="holdings-change-monitor", daemon=False,
+    )
+    worker.start()
+    return worker
+
+
 def cmd_holdings_events_listen(args):
     if not bool(args.confirm):
         raise SystemExit("holdings events listen requires --confirm")
@@ -557,11 +590,17 @@ def cmd_holdings_events_listen(args):
         daemon=True,
     )
     worker.start()
+    monitor_worker = _holding_monitor_worker(
+        inbox.storage, inbox.store, stop_event,
+        target=(inbox.target.file_token, inbox.target.table_id),
+    )
     try:
         adapter.start(inbox.accept)
     finally:
         stop_event.set()
         worker.join(timeout=10)
+        if monitor_worker is not None:
+            monitor_worker.join()
     return {"success": True, "status": "stopped"}
 
 
@@ -762,15 +801,21 @@ def cmd_events_listen(args):
         ),
     ]
     started_workers = []
+    monitor_worker = None
     try:
         for worker in workers:
             worker.start()
             started_workers.append(worker)
+        monitor_worker = _holding_monitor_worker(
+            storage, store, stop_event, target=(holdings_target.file_token, holdings_target.table_id),
+        )
         adapter.start(accept)
     finally:
         stop_event.set()
         for worker in started_workers:
             worker.join(timeout=10)
+        if monitor_worker is not None:
+            monitor_worker.join()
     result = {"success": True, "status": "stopped"}
     _dump(result, bool(getattr(args, "json", False)))
     return result
@@ -2042,6 +2087,17 @@ def build_parser() -> argparse.ArgumentParser:
     add_service_args(p_hold)
     p_hold.set_defaults(func=cmd_holdings)
     holdings_sub = p_hold.add_subparsers(dest="holdings_cmd")
+    changes = holdings_sub.add_parser("changes", help="observe non-Futu holding changes without writing Feishu")
+    changes_sub = changes.add_subparsers(dest="changes_cmd", required=True)
+    for operation in ("init", "scan", "status"):
+        command = changes_sub.add_parser(operation)
+        command.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+        if operation != "status":
+            command.add_argument("--apply", action="store_true")
+            command.add_argument("--confirm", action="store_true")
+        if operation == "init":
+            command.add_argument("--rebuild", action="store_true", help="explicitly replace a baseline; old outbox preserved")
+        command.set_defaults(func=cmd_holdings_changes)
     p_hold_reconcile = holdings_sub.add_parser(
         "reconcile",
         help="fresh-read and validate holdings without writes",

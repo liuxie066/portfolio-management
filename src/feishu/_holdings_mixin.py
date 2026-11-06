@@ -89,8 +89,12 @@ class HoldingsMixin:
         account: Optional[str] = None,
         record_id: Optional[str] = None,
         deadline: float | None = None,
+        require_complete: bool = False,
     ) -> List[RawHoldingRecord]:
-        return self.holdings.get_raw_holdings(account=account, record_id=record_id, deadline=deadline)
+        return self.holdings.get_raw_holdings(
+            account=account, record_id=record_id, deadline=deadline,
+            **({"require_complete": True} if require_complete else {}),
+        )
 
     def _convert_raw_holdings(self, records: List[RawHoldingRecord]) -> List[Holding]:
         return self.holdings._convert_raw_holdings(records)

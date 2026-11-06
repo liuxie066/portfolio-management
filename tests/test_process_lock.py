@@ -6,6 +6,8 @@ import pytest
 from src.process_lock import (
     cash_flow_record_lock_key,
     futu_full_sync_lock_key,
+    holdings_observation_lock,
+    holdings_observation_lock_key,
     process_lock,
 )
 
@@ -45,6 +47,34 @@ def test_process_lock_serializes_separate_processes(tmp_path):
     second.join(timeout=5)
     assert first.exitcode == 0
     assert second.exitcode == 0
+
+
+def test_holdings_observation_lock_is_target_scoped_and_config_only(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    from src import config
+    seen = []
+    monkeypatch.setattr(config, "get_feishu_table_ref", lambda name: ("base-one", "table-one"))
+    @contextmanager
+    def capture(key, **kwargs):
+        seen.append((key, kwargs))
+        yield
+    with holdings_observation_lock(data_dir=tmp_path, lock_factory=capture):
+        pass
+    assert seen == [(holdings_observation_lock_key("base-one", "table-one"), {"data_dir": tmp_path})]
+    assert holdings_observation_lock_key("base-one", "table-one") != holdings_observation_lock_key("base-two", "table-one")
+    with pytest.raises(ValueError, match="requires file_token and table_id"):
+        holdings_observation_lock_key("", "table-one")
+
+
+def test_invalid_configured_target_cannot_fall_back_to_local_lock(monkeypatch):
+    from src import config
+    def fail(name):
+        raise ValueError("bad table target")
+    monkeypatch.setattr(config, "get_feishu_table_ref", fail)
+    monkeypatch.setattr(config, "get", lambda key: "configured-bad-target")
+    with pytest.raises(ValueError, match="bad table target"):
+        with holdings_observation_lock():
+            raise AssertionError("invalid target lock must fail before entry")
 
 
 def test_cash_flow_record_lock_key_is_exact_and_rejects_empty_identity():

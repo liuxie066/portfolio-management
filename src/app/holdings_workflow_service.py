@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import ExitStack
 import getpass
 import hashlib
+from inspect import Parameter, signature
 from ._json import canonical_json as _canonical_json
 import socket
 from typing import Any, Dict, Iterable, Optional
@@ -12,7 +13,10 @@ from uuid import uuid4
 
 from src.domain.holding_mutations import HoldingRepairPatch
 from src.domain.holding_currencies import is_known_holding_currency
-from src.process_lock import account_lock_key, holding_record_lock_key, process_lock
+from src.models import AssetType
+from src.process_lock import (
+    account_lock_key, holding_record_lock_key, holdings_observation_lock, process_lock,
+)
 
 from .holding_case_contract import (
     PRECONDITION_EXACT,
@@ -28,9 +32,14 @@ from .holdings_reconciliation_service import (
 from .holdings_validation import (
     ASSET_CLASS_POLICY_VERSION,
     CURRENCY_POLICY_VERSION,
+    RecordIssue,
     RecordValidation,
+    HoldingsValidationReport,
     VALIDATION_POLICY_VERSION,
     canonical_record_payload,
+    duplicate_holding_groups,
+    holding_broker_scope,
+    _decimal,
     record_digest,
 )
 from .operation_state_store import OperationStateStore
@@ -90,18 +99,30 @@ class HoldingsWorkflowService:
         record_id: Optional[str] = None,
         trigger: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        evaluation = self.reconciliation.evaluate(
-            account=account,
-            record_id=record_id,
-        )
-        workflow = self._materialize_evaluation(
-            evaluation,
-            trigger=trigger or {"mode": "manual_notify"},
-            prove_external=True,
-        )
-        payload = self.reconciliation.reconcile_payload(evaluation)
-        payload.update({"read_only": False, "workflow": workflow})
-        return payload
+        with ExitStack() as locks:
+            if not record_id:
+                locks.enter_context(holdings_observation_lock(lock_factory=self.lock_factory))
+            evaluation = (
+                self.reconciliation.evaluate(record_id=record_id, account=account)
+                if record_id else self.reconciliation.evaluate_records(
+                    self._read_complete_holdings(account=account), account=account,
+                )
+            )
+            if not record_id:
+                for target_account in sorted({
+                    str(item.raw.raw_fields.get("account") or "").strip()
+                    for item in evaluation.report.records
+                } - {""}):
+                    locks.enter_context(self.lock_factory(account_lock_key(target_account)))
+            workflow = self._materialize_evaluation(
+                evaluation,
+                trigger=trigger or {"mode": "manual_notify"},
+                prove_external=True,
+                duplicate_proof=not record_id,
+            )
+            payload = self.reconciliation.reconcile_payload(evaluation)
+            payload.update({"read_only": False, "workflow": workflow})
+            return payload
 
     def process_event_notification(
         self,
@@ -296,13 +317,27 @@ class HoldingsWorkflowService:
         evaluation: HoldingsReconciliationEvaluation,
         *,
         enqueue_receipts: bool = True,
+        duplicate_proof: bool = False,
     ) -> Dict[str, Any]:
-        """Materialize current cases and prove repaired account cases closed."""
+        """Materialize cases; duplicate proof requires a locked complete read."""
 
-        combined = self.materialize_plan(
-            plan,
-            enqueue_receipts=enqueue_receipts,
-        )
+        field_plan = {
+            **plan, "cases": [
+                case for case in plan.get("cases", [])
+                if case["kind"] != "duplicate_identity"
+            ],
+        }
+        combined = self.materialize_plan(field_plan, enqueue_receipts=enqueue_receipts)
+        if duplicate_proof:
+            records = [item.raw for item in evaluation.report.records]
+            duplicates = self._reconcile_duplicate_plan(
+                self.plan_duplicate_observation(
+                    records, trigger=dict(plan.get("trigger") or {}),
+                    covered_record_ids=[record.record_id for record in records],
+                ), enqueue_receipts=enqueue_receipts,
+            )
+            for key, values in duplicates.items():
+                combined.setdefault(key, []).extend(values)
         active_by_record: Dict[str, list[str]] = {}
         for case in list(plan.get("cases") or []):
             active_by_record.setdefault(str(case["record_id"]), []).append(
@@ -463,6 +498,110 @@ class HoldingsWorkflowService:
                 if (stored := self._store.get_holding_case(case_key)) is not None
             }
         return OperationStateStore.get_holding_cases_read_only(case_keys)
+
+    def _read_complete_holdings(self, *, account: Optional[str] = None) -> list[Any]:
+        """Use strict repository pagination while supporting legacy local adapters."""
+        reader = self.storage.get_raw_holdings
+        parameters = signature(reader).parameters.values()
+        strict = any(
+            item.name == "require_complete" or item.kind == Parameter.VAR_KEYWORD
+            for item in parameters
+        )
+        kwargs = {"account": account} if account is not None else {}
+        if strict:
+            kwargs["require_complete"] = True
+        return list(reader(**kwargs))
+
+    def plan_duplicate_observation(
+        self,
+        raw_records: Iterable[Any],
+        *,
+        trigger: Dict[str, Any],
+        covered_record_ids: Iterable[str],
+        proven_deleted_ids: Iterable[str] = (),
+    ) -> Dict[str, Any]:
+        """Plan duplicate cases and explicit coverage without state/provider I/O.
+
+        Callers supply a fresh complete table/account slice and retain every raw
+        row for grouping. Coverage limits which monitor rows may acquire cases;
+        deletion proof is separate from a row merely absent from this read.
+        """
+        records = list(raw_records)
+        covered = {str(value) for value in covered_record_ids}
+        deleted = {str(value) for value in proven_deleted_ids}
+        validations = []
+        for identity, members in duplicate_holding_groups(records).items():
+            issue = RecordIssue(
+                kind="duplicate_identity",
+                reason_code="DUPLICATE_HOLDING_IDENTITY",
+                blocks_official_nav=True,
+                details={
+                    "identity": dict(zip(("asset_id", "account", "broker"), identity)),
+                    "record_ids": sorted(member.record_id for member in members),
+                },
+            )
+            validations.extend(
+                RecordValidation(raw=member, outcomes=[], issues=[issue])
+                for member in members if member.record_id in covered
+            )
+        evaluation = HoldingsReconciliationEvaluation(
+            report=HoldingsValidationReport(records=tuple(validations), evidence_errors={}),
+            account=None,
+            record_id=None,
+            evidence_by_account={},
+        )
+        facts = {}
+        for record in records:
+            canonical = canonical_record_payload(record.raw_fields)
+            identity = {key: canonical[key] for key in ("asset_id", "account", "broker")}
+            quantity = _decimal(canonical.get("quantity"))
+            facts[record.record_id] = {
+                "identity": identity,
+                "record_digest": record_digest(record.raw_fields),
+                "identity_complete": (
+                    all(identity.values())
+                    and holding_broker_scope(identity.get("broker")) != "unknown"
+                ),
+                "comparable": (
+                    all(identity.values()) and quantity is not None and quantity >= 0
+                    and holding_broker_scope(identity.get("broker")) != "unknown"
+                    and canonical.get("asset_type") in {item.value for item in AssetType}
+                    and is_known_holding_currency(canonical.get("currency"))
+                ),
+            }
+        proof = {
+            "complete": True,
+            "covered_record_ids": sorted(covered),
+            "proven_deleted_ids": sorted(deleted),
+            "records": facts,
+            "trigger": dict(trigger),
+        }
+        cases = [
+            case for validation in validations
+            for case in self._cases_for_record(validation, evaluation)
+        ]
+        for case in cases:
+            case["evidence"] = {"duplicate_observation": proof}
+        return {
+            "cases": cases,
+            "discovery_receipts": [
+                self._discovery_receipt(case, trigger=trigger) for case in cases
+            ],
+            "case_keys": [case["case_key"] for case in cases],
+            "blocking_case_keys": [case["case_key"] for case in cases],
+            "trigger": dict(trigger),
+            "duplicate_proof": proof,
+        }
+
+    def _reconcile_duplicate_plan(
+        self, plan: Dict[str, Any], *, enqueue_receipts: bool = True,
+    ) -> Dict[str, Any]:
+        with self.store._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            return self.store._reconcile_duplicate_cases_tx(
+                conn, plan=plan, now=self.store.now_factory().isoformat(),
+                enqueue_receipts=enqueue_receipts,
+            )
 
     def plan_global_orphans(
         self,
@@ -1061,6 +1200,7 @@ class HoldingsWorkflowService:
         *,
         trigger: Dict[str, Any],
         prove_external: bool,
+        duplicate_proof: bool = False,
     ) -> Dict[str, Any]:
         combined = {
             "created_case_keys": [],
@@ -1070,8 +1210,19 @@ class HoldingsWorkflowService:
             "closed_case_keys": [],
             "enqueued_receipt_keys": [],
         }
+        if duplicate_proof:
+            raw_records = [item.raw for item in evaluation.report.records]
+            result = self._reconcile_duplicate_plan(self.plan_duplicate_observation(
+                raw_records, trigger=trigger,
+                covered_record_ids=[record.record_id for record in raw_records],
+            ))
+            for key, values in result.items():
+                combined.setdefault(key, []).extend(values)
         for validation in evaluation.report.records:
-            cases = self._cases_for_record(validation, evaluation)
+            cases = [
+                case for case in self._cases_for_record(validation, evaluation)
+                if case["kind"] != "duplicate_identity"
+            ]
             receipts = [self._discovery_receipt(item) for item in cases]
             stored = self.store.materialize_holding_cases(
                 cases=cases,
@@ -1233,6 +1384,11 @@ class HoldingsWorkflowService:
         if case["kind"] == "orphan_global":
             action = {
                 "description": "请在 holdings 表补齐缺失账户后重新证明",
+                "command": "pm holdings reconcile --notify --confirm",
+            }
+        elif case["kind"] == "duplicate_identity":
+            action = {
+                "description": "请在 holdings 表人工修复重复身份后执行完整核对",
                 "command": "pm holdings reconcile --notify --confirm",
             }
         elif case["state"] == "pending_apply":

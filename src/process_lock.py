@@ -23,6 +23,32 @@ def nav_history_lock_key() -> str:
     return "nav-history-write"
 
 
+def holdings_observation_lock_key(file_token: str, table_id: str) -> str:
+    """Coordinate every duplicate observation of the same configured table."""
+    target = (str(file_token or "").strip(), str(table_id or "").strip())
+    if not all(target):
+        raise ValueError("holdings observation lock requires file_token and table_id")
+    return f"holdings-observation:{target[0]}:{target[1]}"
+
+
+@contextmanager
+def holdings_observation_lock(
+    *, data_dir: Path | None = None, lock_factory=None,
+) -> Iterator[None]:
+    """Resolve the local table configuration and lock before reading holdings."""
+    try:
+        file_token, table_id = config.get_feishu_table_ref("holdings")
+        key = holdings_observation_lock_key(file_token, table_id)
+    except ValueError:
+        if config.get("feishu.tables.holdings"):
+            raise
+        # Offline/fake-storage callers have no remote target to coordinate.
+        key = "holdings-observation:local-unconfigured"
+    factory = lock_factory or process_lock
+    with factory(key, **({"data_dir": data_dir} if data_dir is not None else {})):
+        yield
+
+
 def holding_record_lock_key(record_id: str) -> str:
     normalized = str(record_id or "").strip()
     if not normalized:

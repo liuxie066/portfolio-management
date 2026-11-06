@@ -18,6 +18,15 @@ curl http://127.0.0.1:8765/health
 
 Default URL: `http://127.0.0.1:8765`.
 
+## Local holdings change observation
+
+`pm holdings changes init/scan/status` are local workflow commands and add no
+public HTTP/OM contract. Observation uses a strict fresh Agent read, a shared
+target lock and OperationStateStore for baselines/cases/receipts. Both listener
+entrypoints can run its opt-in worker; HTTP API startup does not enable it.
+Manual scans do not settle background generations or update background health.
+See the [operation contract](holdings-event-listener-runbook.md#non-futu-holdings-change-monitor).
+
 ## Capital bridge facts
 
 The read-only capital facts endpoint exposes deterministic MTD/YTD inputs for

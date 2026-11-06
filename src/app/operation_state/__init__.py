@@ -8,6 +8,7 @@ from ._holding_event_mixin import HoldingEventMixin
 from ._cash_flow_event_mixin import CashFlowEventMixin
 from ._operation_receipt_mixin import OperationReceiptMixin
 from ._futu_refresh_mixin import FutuRefreshMixin
+from ._holding_monitor_mixin import HoldingMonitorMixin
 
 
 class OperationStateStore(
@@ -20,6 +21,7 @@ class OperationStateStore(
     CashFlowEventMixin,
     OperationReceiptMixin,
     FutuRefreshMixin,
+    HoldingMonitorMixin,
 ):
     """SQLite state independent from Feishu facts and cash-flow effect cutover."""
 

@@ -14,7 +14,6 @@ from src.time_utils import bj_now_naive
 from .payload import positive_finite_decimal, remaining_timeout, sleep_with_deadline
 
 
-RATE_CACHE_FILE = config.get_data_dir() / "rate_cache.json"
 _REQUIRED_RATES = ("USDCNY", "HKDCNY")
 
 

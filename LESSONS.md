@@ -46,3 +46,17 @@
   明确失败、未运行和剩余阻塞，不绕过门禁，也不越界修无关文件。该项仍需收口时人工核对。
 - **证据**：[发现 DR-FD-01](docs/reviews/code-review-20260818-123350.md)、
   [修复复核](docs/reviews/code-review-20260818-123500.md)。其中历史 Ruff 数量不代表当前基线。
+
+## 数值规范化不能依赖 Decimal 运算精度
+
+- **触发条件**：将原始持仓 quantity／avg_cost 转成基线、比较值或 case digest；尤其是
+  完整读表包含范围外数据，或原始数字超过默认 28 位精度时。
+- **错误原因**：用 `quantize`／`normalize` 做字符串规范化，前者对 `1e30` 抛异常，
+  后者会舍入长小数；投影在范围过滤前调用时，一条排除行也能阻断整轮扫描。
+- **下次检查方式**：以不改变数值的格式转换生成 canonical 值；运行
+  `python3 -m pytest tests/test_holding_change_monitor.py tests/test_holding_change_monitor_boundaries.py -q`，
+  保留不同 Decimal precision、大数／长小数、范围外 quantity／cost 及长小数变更断言。
+- **证据**：[发现及修复 NFHC-C01](docs/reviews/code-review-20261106-102504.md#findings)、
+  [共享数值规则](src/domain/holding_values.py)、
+  [观测回归](tests/test_holding_change_monitor.py)、
+  [精度与 canonical payload 回归](tests/test_holding_change_monitor_boundaries.py)。

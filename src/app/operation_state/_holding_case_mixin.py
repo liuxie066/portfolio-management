@@ -583,6 +583,142 @@ class HoldingCaseMixin:
             result.append(item)
         return result
 
+    def _reconcile_duplicate_cases_tx(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        plan: Dict[str, Any],
+        now: str,
+        enqueue_receipts: bool = True,
+    ) -> Dict[str, list[str]]:
+        """Reconcile only duplicates under the caller's observation transaction.
+
+        A missing row is never deletion proof. Every former group member must
+        have a complete current identity or an explicit confirmed deletion.
+        """
+        proof = dict(plan.get("duplicate_proof") or {})
+        if proof.get("complete") is not True:
+            raise ValueError("duplicate reconciliation requires complete observation proof")
+        facts = dict(proof.get("records") or {})
+        covered = set(proof.get("covered_record_ids") or [])
+        deleted = set(proof.get("proven_deleted_ids") or [])
+        if deleted.intersection(facts):
+            raise ValueError("duplicate deletion proof includes present records")
+        cases = list(plan.get("cases") or [])
+        if any(case.get("kind") != "duplicate_identity" for case in cases):
+            raise ValueError("duplicate reconciliation accepts duplicate cases only")
+        old_rows = conn.execute(
+            "SELECT * FROM holding_reconciliation_cases "
+            "WHERE kind = 'duplicate_identity' AND state IN ({})".format(
+                ",".join("?" for _ in _OPEN_HOLDING_CASE_STATES)
+            ), _OPEN_HOLDING_CASE_STATES,
+        ).fetchall()
+
+        def fully_observed(row: sqlite3.Row) -> bool:
+            if row["record_id"] in deleted:
+                return True
+            if row["record_id"] not in covered:
+                return False
+            current = json.loads(row["current_json"] or "{}")
+            members = set(current.get("record_ids") or [row["record_id"]])
+            for member in members:
+                if member in deleted:
+                    continue
+                fact = dict(facts.get(member) or {})
+                identity = dict(fact.get("identity") or {})
+                if fact.get("identity_complete") is not True or not all(
+                    identity.get(key) for key in ("asset_id", "account", "broker")
+                ):
+                    return False
+            return True
+
+        # Generic materialization supersedes old semantic cases. Suppress that
+        # replacement until the old member set has a complete coverage proof.
+        protected_records = {
+            row["record_id"] for row in old_rows if not fully_observed(row)
+        }
+        safe_cases = [
+            case for case in cases
+            if case["record_id"] in covered
+            and (
+                case["record_id"] not in protected_records
+                or any(row["case_key"] == case["case_key"] for row in old_rows)
+            )
+        ]
+        result = self._materialize_holding_cases_tx(
+            conn, cases=safe_cases,
+            discovery_receipts=list(plan.get("discovery_receipts") or []),
+            trigger=dict(plan.get("trigger") or {}), now=now,
+            enqueue_receipts=enqueue_receipts,
+        )
+        result["closed_case_keys"] = []
+        active = {case["case_key"] for case in safe_cases}
+        for row in old_rows:
+            if row["case_key"] in active or not fully_observed(row):
+                continue
+            fresh = conn.execute(
+                "SELECT state FROM holding_reconciliation_cases WHERE case_key = ?",
+                (row["case_key"],),
+            ).fetchone()
+            if fresh["state"] not in _OPEN_HOLDING_CASE_STATES:
+                continue
+            stored_identity = json.loads(row["identity_json"] or "{}")
+            fact = dict(facts.get(row["record_id"]) or {})
+            observed_identity = dict(fact.get("identity") or {})
+            was_deleted = row["record_id"] in deleted
+            identity_changed = not was_deleted and stored_identity != observed_identity
+            if not was_deleted and not identity_changed and fact.get("comparable") is not True:
+                continue
+            # An absent active case cannot prove uniqueness when the row was
+            # deliberately excluded from this observation's case coverage.
+            if not was_deleted and any(
+                key != row["record_id"]
+                and dict(value.get("identity") or {}) == observed_identity
+                for key, value in facts.items()
+            ) and not identity_changed:
+                continue
+            state = "superseded" if identity_changed else "resolved_external"
+            resolution = {
+                "decision": (
+                    "record_deleted" if was_deleted else
+                    "record_identity_changed" if identity_changed else
+                    "fresh_scan_proved_repair"
+                ),
+                "readback_digest": fact.get("record_digest"),
+                "expected_identity": stored_identity,
+                "observed_identity": observed_identity,
+                "duplicate_observation": proof,
+                "trigger": dict(plan.get("trigger") or {}),
+            }
+            if row["resolution_json"]:
+                resolution["previous_resolution"] = json.loads(row["resolution_json"])
+            conn.execute(
+                "UPDATE holding_reconciliation_cases SET state = ?, resolution_json = ?, "
+                "last_error = NULL, updated_at = ? WHERE case_key = ?",
+                (state, _canonical_json(resolution), now, row["case_key"]),
+            )
+            self._insert_case_event_tx(
+                conn, case_key=row["case_key"], event_type=state,
+                payload=resolution, created_at=now,
+            )
+            receipt_key = (
+                f"holdings:case:closed:{row['case_key']}:{state}:"
+                f"{fact.get('record_digest') or 'record-deleted'}"
+            )
+            if enqueue_receipts and insert_repeatable_closure_receipt_tx(
+                conn, receipt_key=receipt_key,
+                payload={
+                    "case_key": row["case_key"], "record_id": row["record_id"],
+                    "account": row["account"], "field": row["field"],
+                    "terminal_state": state, **resolution,
+                }, now=now,
+            ):
+                result["enqueued_receipt_keys"].append(receipt_key)
+            result[
+                "superseded_case_keys" if identity_changed else "closed_case_keys"
+            ].append(row["case_key"])
+        return result
+
     def resolve_holding_cases_external(
         self,
         *,
@@ -642,6 +778,9 @@ class HoldingCaseMixin:
         receipt_keys: list[str] = []
         rows = conn.execute(query, params).fetchall()
         for row in rows:
+            # A single-row field scan never proves a cross-row identity repaired.
+            if row["kind"] == "duplicate_identity":
+                continue
             stored_identity = json.loads(row["identity_json"] or "{}")
             identity_matches = stored_identity == dict(current_identity)
             terminal_state = (
