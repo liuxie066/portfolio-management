@@ -417,6 +417,7 @@ class HoldingsRepository:
         account: Optional[str] = None,
         record_id: Optional[str] = None,
         deadline: float | None = None,
+        require_complete: bool = False,
     ) -> List[RawHoldingRecord]:
         """Read complete untyped Feishu rows without applying query defaults."""
 
@@ -444,6 +445,7 @@ class HoldingsRepository:
                 'holdings',
                 filter_str=filter_str,
                 field_names=self.HOLDING_PROJECTION_FIELDS,
+                **({"require_complete": True} if require_complete else {}),
                 **read_kwargs,
             )
         remaining_timeout(deadline, float('inf'))

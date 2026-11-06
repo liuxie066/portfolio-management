@@ -50,6 +50,15 @@ futu:
       trd_env: REAL
       trd_market: HK
 
+holdings:
+  change_monitor:
+    enabled: false
+    # Explicit PM accounts; initialize a silent baseline before enabling.
+    accounts: []
+    coalesce_seconds: 2
+    reconcile_interval_seconds: 60
+    stale_seconds: 120
+
 cash_flow:
   effects:
     # Set once during `pm cash-flow effects init`; changing it later is refused.

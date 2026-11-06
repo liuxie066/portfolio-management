@@ -145,6 +145,20 @@ class HoldingEventMixin:
                 raise ValueError(
                     f"holding event id collision with different payload: {event_id}"
                 )
+            if cursor.rowcount == 1:
+                from src import config
+                settings = config.get("holdings.change_monitor", {}) or {}
+                enabled = settings.get("enabled") is True
+                coalesce = settings.get("coalesce_seconds", 2)
+                if not isinstance(coalesce, (int, float)) or isinstance(coalesce, bool) or coalesce <= 0:
+                    coalesce = 2
+                due = (self.now_factory() + timedelta(seconds=coalesce)).isoformat()
+                if enabled:
+                    conn.execute("""UPDATE holding_change_monitor SET requested=requested+1,
+                        next_due=CASE WHEN failure_count>0 THEN next_due
+                            WHEN next_due IS NULL OR next_due>? THEN ? ELSE next_due END
+                        WHERE file_token=? AND table_id=? AND ready=1 AND enabled=1""",
+                        (due, due, file_token, table_id))
         return cursor.rowcount == 1
 
     def claim_holding_events(

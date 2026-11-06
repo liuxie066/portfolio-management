@@ -26,6 +26,26 @@
 - Linux 部署：`docs/deploy-linux.md`
 - Schema：`docs/schema.md`、`docs/migrations.md`
 
+## 非富途持仓变动回执
+
+`pm holdings changes` 观察飞书表内的非富途股票和非 MMF 基金数量／身份变化，
+不查询券商或改写持仓。后台默认关闭，先在 `holdings.change_monitor.accounts`
+显式填写账户，再预览并静默建立基线：
+
+```bash
+./pm holdings changes init --json
+./pm holdings changes init --apply --confirm --json
+./pm holdings changes scan --json
+./pm holdings changes scan --apply --confirm --json
+./pm holdings changes status --json
+```
+
+首次初始化不发送历史持仓；真实 scan 会持久结算变化并尝试发送 Agent 回执。
+持续运行需另行启用 `holdings.change_monitor.enabled` 及已有 listener，默认 2 秒合并、
+60 秒核对、120 秒无后台成功观测标 stale。单次成功不代表后台运行或消息已送达。
+完整操作、重复身份 gap、删除确认和回滚边界见
+[监听操作手册](docs/holdings-event-listener-runbook.md#non-futu-holdings-change-monitor)。
+
 ## 快速开始
 
 ```bash

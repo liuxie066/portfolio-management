@@ -613,6 +613,179 @@ def test_recovery_supersedes_when_frozen_identity_drifted(tmp_path, field, value
     assert service.store.get_holding_case(case_key)["state"] == "superseded"
 
 
+class _DuplicateStorage:
+    def __init__(self, rows):
+        self.rows = list(rows)
+        self.reads = []
+
+    def get_raw_holdings(self, *, account=None, record_id=None, require_complete=False):
+        self.reads.append((account, record_id, require_complete))
+        return [
+            row for row in self.rows
+            if (account is None or row.raw_fields.get("account") == account)
+            and (record_id is None or row.record_id == record_id)
+        ]
+
+
+def _duplicate_row(record_id, **fields):
+    return RawHoldingRecord(record_id, {
+        "asset_id": "AAPL", "asset_name": "Apple", "account": "lx", "broker": "IBKR",
+        "asset_type": "us_stock", "quantity": 1, "currency": "USD", "asset_class": "美国资产",
+        **fields,
+    })
+
+
+def _duplicate_service(tmp_path, rows, *, lock_factory=None):
+    storage = _DuplicateStorage(rows)
+    def no_provider(*args, **kwargs):
+        raise AssertionError("duplicate observation must not query a provider")
+    reconciliation = HoldingsReconciliationService(
+        storage=storage, futu_observer=no_provider,
+        fund_name_lookup=no_provider, hk_stock_name_lookup=no_provider,
+    )
+    service = HoldingsWorkflowService(
+        storage=storage, store=OperationStateStore(tmp_path / "duplicates.sqlite3"),
+        reconciliation=reconciliation,
+        lock_factory=lock_factory or (lambda key: nullcontext()),
+    )
+    return service, storage
+
+
+def test_duplicate_plan_is_pure_and_matches_existing_validator_identity(tmp_path):
+    rows = [_duplicate_row("two", asset_type="cash", quantity="bad"), _duplicate_row("one")]
+    service, storage = _duplicate_service(tmp_path, rows)
+    monitor = service.plan_duplicate_observation(
+        rows, trigger={"mode": "monitor"}, covered_record_ids=["one"],
+    )
+    assert storage.reads == []
+    assert service.store.list_holding_cases() == []
+    assert len(monitor["cases"]) == 1
+    case = monitor["cases"][0]
+    assert case["current"]["record_ids"] == ["one", "two"]
+    assert case["state"] == "pending_manual_edit"
+    assert case["field"] == "__record__:duplicate_identity"
+    evaluation = service.reconciliation.evaluate_records(rows)
+    ordinary = next(
+        item for item in service.plan_evaluation(evaluation, trigger={})["cases"]
+        if item["record_id"] == "one" and item["kind"] == "duplicate_identity"
+    )
+    assert case["case_key"] == ordinary["case_key"]
+    assert case["case_precondition_digest"] == ordinary["case_precondition_digest"]
+    assert "--record-id" not in monitor["discovery_receipts"][0]["payload"]["action"]["command"]
+
+
+def test_single_record_event_and_notify_cannot_close_duplicate_case(tmp_path):
+    service, storage = _duplicate_service(tmp_path, [_duplicate_row("one"), _duplicate_row("two")])
+    first = service.notify(account="lx")
+    keys = first["workflow"]["created_case_keys"]
+    assert len(keys) == 2
+    one = next(case for case in service.store.list_holding_cases() if case["record_id"] == "one")
+    assert service.notify(record_id="one")["workflow"]["closed_case_keys"] == []
+    plan = service.process_event_notification(record_id="one", trigger={"event_id": "event-one"})
+    with service.store._connect() as conn:
+        result = service.store._resolve_absent_holding_cases_tx(
+            conn, record_id="one", active_case_keys=plan["active_case_keys"],
+            record_digest="single-read", current_identity=one["identity"],
+            trigger={"mode": "event"}, now=service.store.now_factory().isoformat(),
+        )
+    assert result["closed_case_keys"] == []
+    assert all(service.store.get_holding_case(key)["state"] == "pending_manual_edit" for key in keys)
+    assert storage.reads[0] == ("lx", None, True)
+
+
+def test_complete_notify_reconciles_duplicate_members_and_reopens_without_resend(tmp_path):
+    service, storage = _duplicate_service(tmp_path, [_duplicate_row("one"), _duplicate_row("two")])
+    first = service.notify()
+    keys = set(first["workflow"]["created_case_keys"])
+    storage.rows[0] = _duplicate_row("one", quantity=2, asset_name="Edited name")
+    repeat = service.notify(account="lx")["workflow"]
+    assert repeat["created_case_keys"] == []
+    assert repeat["enqueued_receipt_keys"] == []
+    assert set(repeat["refreshed_case_keys"]) == keys
+    storage.rows[1] = _duplicate_row("two", asset_id="MSFT", asset_name="Microsoft")
+    repaired = service.notify()["workflow"]
+    assert len(repaired["closed_case_keys"]) == 1
+    assert len(repaired["superseded_case_keys"]) == 1
+    storage.rows[1] = _duplicate_row("two")
+    reopened = service.notify()["workflow"]
+    assert set(reopened["reopened_case_keys"]) == keys
+    assert reopened["enqueued_receipt_keys"] == []
+
+
+def test_duplicate_missing_requires_deletion_proof_and_valid_remaining_fields(tmp_path):
+    service, storage = _duplicate_service(tmp_path, [_duplicate_row("one"), _duplicate_row("two")])
+    keys = service.notify()["workflow"]["created_case_keys"]
+    storage.rows = [_duplicate_row("one", quantity="invalid")]
+    first_missing = service.plan_duplicate_observation(
+        storage.rows, trigger={}, covered_record_ids=[],
+    )
+    assert service._reconcile_duplicate_plan(first_missing)["closed_case_keys"] == []
+    deletion = service.plan_duplicate_observation(
+        storage.rows, trigger={}, covered_record_ids=["one"], proven_deleted_ids=["two"],
+    )
+    archived = service._reconcile_duplicate_plan(deletion)
+    assert len(archived["closed_case_keys"]) == 1
+    deleted = service.store.get_holding_case(archived["closed_case_keys"][0])
+    assert deleted["record_id"] == "two"
+    assert deleted["resolution"]["decision"] == "record_deleted"
+    storage.rows = [_duplicate_row("one")]
+    repaired = service._reconcile_duplicate_plan(service.plan_duplicate_observation(
+        storage.rows, trigger={}, covered_record_ids=["one"], proven_deleted_ids=["two"],
+    ))
+    assert set(archived["closed_case_keys"] + repaired["closed_case_keys"]) == set(keys)
+
+
+@pytest.mark.parametrize("identity_edit", [{"asset_id": None}, {"broker": "unknown"}])
+def test_incomplete_identity_does_not_close_or_supersede_old_duplicate_group(tmp_path, identity_edit):
+    service, storage = _duplicate_service(tmp_path, [_duplicate_row("one"), _duplicate_row("two")])
+    keys = service.notify()["workflow"]["created_case_keys"]
+    storage.rows[1] = _duplicate_row("two", **identity_edit)
+    result = service.notify()["workflow"]
+    assert not set(keys).intersection(result["closed_case_keys"] + result["superseded_case_keys"])
+    assert all(service.store.get_holding_case(key)["state"] == "pending_manual_edit" for key in keys)
+
+
+def test_duplicate_transaction_keeps_unrelated_field_cases_and_rolls_back(tmp_path):
+    rows = [_duplicate_row("one"), _duplicate_row("two")]
+    service, storage = _duplicate_service(tmp_path, rows)
+    field_case = service.notify(record_id="one")["workflow"]
+    assert field_case["created_case_keys"] == []
+    plan = service.plan_duplicate_observation(rows, trigger={}, covered_record_ids=["one", "two"])
+    with pytest.raises(RuntimeError, match="rollback"):
+        with service.store._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            service.store._reconcile_duplicate_cases_tx(
+                conn, plan=plan, now=service.store.now_factory().isoformat(),
+            )
+            raise RuntimeError("rollback")
+    assert service.store.list_holding_cases() == []
+    storage.rows = [_duplicate_row("one", currency=""), _duplicate_row("two")]
+    service.notify(record_id="one")
+    currency_case = next(case for case in service.store.list_holding_cases() if case["field"] == "currency")
+    service._reconcile_duplicate_plan(plan)
+    assert service.store.get_holding_case(currency_case["case_key"])["state"] == "pending_apply"
+
+
+def test_full_notify_acquires_observation_before_read_then_account_lock(tmp_path):
+    order = []
+    @contextmanager
+    def lock(key):
+        order.append(("enter", key))
+        yield
+        order.append(("exit", key))
+    service, storage = _duplicate_service(tmp_path, [_duplicate_row("one"), _duplicate_row("two")], lock_factory=lock)
+    reader = storage.get_raw_holdings
+    def read(**kwargs):
+        order.append(("read", kwargs))
+        return reader(**kwargs)
+    storage.get_raw_holdings = read
+    service.notify(account="lx")
+    assert order[0][0] == "enter" and order[0][1].startswith("holdings-observation:")
+    assert order[1] == ("read", {"account": "lx", "require_complete": True})
+    assert order[2] == ("enter", "account-write:lx")
+    assert order[-1][0] == "exit" and order[-1][1] == order[0][1]
+
+
 def test_remote_success_then_local_finalize_failure_recovers_without_second_patch(tmp_path):
     class FailFinalizeStore(OperationStateStore):
         def finalize_holding_cases(self, **kwargs):

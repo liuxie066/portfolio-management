@@ -32,6 +32,31 @@ class _PortfolioServicePatch:
         self.app_module.PortfolioService = self.old
 
 
+def test_holdings_changes_status_is_read_only_in_fresh_process(tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    data_dir = tmp_path / "data"
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        f"data:\n  dir: {data_dir}\n"
+        "holdings:\n  change_monitor:\n    enabled: false\n    accounts: [example]\n"
+        "feishu:\n  app_token: example-base\n  tables:\n    holdings: example-table\n"
+    )
+    result = subprocess.run(
+        [sys.executable, str(pm.REPO_ROOT / "scripts/pm.py"), "holdings", "changes", "status", "--json"],
+        cwd=tmp_path, text=True, capture_output=True, timeout=30,
+        env={"PATH": os.environ["PATH"], "PORTFOLIO_CONFIG_FILE": str(config_file),
+             "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "uninitialized"
+    assert payload["source"] == "local" and payload["read_only"] is True
+    assert not data_dir.exists()
+
+
 def test_pm_report_requires_preview_flag():
     try:
         pm.main(["report", "daily", "--json"])

@@ -188,6 +188,77 @@ service is re-enabled. Do not delete the SQLite database, fabricate a processed
 outcome, guess FX, auto-confirm a CASH effect, or manually patch a conflicted
 holdings field as a recovery shortcut.
 
+## Non-Futu holdings change monitor
+
+This opt-in worker observes Feishu table facts for explicitly configured PM
+accounts: non-Futu stocks and non-MMF funds (including supported legacy fund
+types). CASH, MMF and Futu quantity receipts keep their existing owners. It never
+writes holdings or claims a quantity decrease is a sale. It cannot reconstruct
+edits that reverted before the next read.
+
+```yaml
+holdings:
+  change_monitor:
+    enabled: false
+    accounts: [example]
+    coalesce_seconds: 2
+    reconcile_interval_seconds: 60
+    stale_seconds: 120
+```
+
+Before enabling, preview then confirm a silent baseline. These commands use the
+Agent identity to read the configured table; init/scan default to preview.
+
+```bash
+pm holdings changes init --json
+pm holdings changes init --apply --confirm --json
+pm holdings changes scan --json
+pm holdings changes scan --apply --confirm --json
+pm holdings changes status --json
+```
+
+The first baseline sends no historical holdings. An applied scan commits local
+observations, duplicate-validation cases and frozen receipts, then attempts
+Agent delivery; it does not turn on continuous work. Once `enabled: true` and the
+existing listener are separately authorized, both `pm events listen` and
+`pm holdings events listen` run the monitor. Startup catches up from the prior
+baseline. Event admission durably marks a refresh; normal complete scans also
+run every 60 seconds. Shut down waits for the monitor's current observation;
+the same target lock serializes manual scans and duplicate-case proof paths.
+
+`status` is local-only and does not initialize a missing database. It separates
+manual/background observations, gaps, missing candidates and receipt states;
+120 seconds without a background success is stale. A manual success cannot
+make a stopped background worker healthy. The 10-second event-to-enqueue goal
+needs measurement at the target account size; queued is not delivered. Failed
+or unknown delivery follows `pm receipts dispatch` / `pm receipts resolve` and
+the existing five-minute dispatcher timer; ambiguous sending is never blindly
+retried.
+
+A row missing from two complete reads at least two seconds apart is reported as
+“记录已删除”, not quantity zero. Incomplete pages and permission/network failures
+do not confirm deletion. Invalid fields and repeated business keys preserve the
+last valid baseline as a gap. Full-table duplicate observations enter the
+existing Holdings validation case path; a single-record event/reconcile cannot
+close such a case. Same-member repeated scans do not resend discovery; the
+same issue reopening remains visible in cases/status under the existing
+no-discovery-resend policy.
+
+Changing target/accounts or comparison policy requires an explicit new
+baseline; it is never silently reset after restart or SQLite loss. Preview and
+confirm `pm holdings changes init --rebuild --apply --confirm --json` when
+rebuilding is authorized. Historical audit/outbox rows are preserved and remain
+under their existing delivery authorization, including pending/unknown rows;
+rebuilding does not retract messages or cancel receipts. The new epoch prevents
+receipt-key collisions.
+
+For rollback, first stop observation and dispatch, back up the operation database
+and decide how to handle new-type pending/unknown receipts. All users of that
+shared database must use compatible code. v0.2.12 does not understand the new
+receipt type or monitor schema key; do not hand new outbox rows directly to its
+dispatcher. Disabling the feature preserves the baseline and does not disable
+original validation, cash or Futu workflows.
+
 ## Holdings currency validation
 
 Holdings currency policy v2 validates both existing codes and proposed codes

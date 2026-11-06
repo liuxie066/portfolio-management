@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
+from src.domain.holding_values import (
+    holding_text as _text,
+    holding_decimal as _decimal,
+    canonical_holding_number as _canonical_number,
+    holding_broker_scope as holding_broker_scope,
+)
 import hashlib
 import json
 from ._json import canonical_json as _canonical_json
@@ -46,33 +52,21 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
-def _text(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    if not isinstance(value, (str, int, float, Decimal)):
-        return None
-    normalized = str(value).strip()
-    return normalized or None
-
-
-def _decimal(value: Any) -> Optional[Decimal]:
-    if value is None or isinstance(value, bool):
-        return None
-    if isinstance(value, str) and not value.strip():
-        return None
-    try:
-        result = Decimal(str(value).replace(",", "").strip())
-    except (InvalidOperation, AttributeError, TypeError, ValueError):
-        return None
-    return result if result.is_finite() else None
-
-
-def _canonical_number(value: Decimal) -> str:
-    if value == 0:
-        return "0"
-    if value == value.to_integral():
-        return str(value.quantize(Decimal("1")))
-    return format(value.normalize(), "f")
+def duplicate_holding_groups(
+    records: Iterable[RawHoldingRecord],
+) -> dict[tuple[str, str, str], tuple[RawHoldingRecord, ...]]:
+    """Group duplicate business identities without filtering raw holding fields."""
+    grouped: dict[tuple[str, str, str], list[RawHoldingRecord]] = {}
+    for record in records:
+        fields = record.raw_fields
+        identity = tuple(_text(fields.get(key)) for key in ("asset_id", "account", "broker"))
+        if all(identity):
+            grouped.setdefault(identity, []).append(record)
+    return {
+        identity: tuple(members)
+        for identity, members in grouped.items()
+        if len(members) > 1
+    }
 
 
 def _futu_asset_identity(value: str) -> tuple[str, Optional[str]]:
@@ -434,25 +428,6 @@ class HoldingsValidationReport:
             "evidence_errors": dict(self.evidence_errors),
             "records": [item.as_dict() for item in self.records],
         }
-
-
-def holding_broker_scope(value: Optional[str]) -> str:
-    if not isinstance(value, str):
-        return "unknown"
-    compact = (
-        value.strip().replace("（", "(").replace("）", ")")
-        .replace(" ", "").replace("\u3000", "").lower()
-    )
-    if (
-        not compact
-        or compact in {"n/a", "na", "none", "null"}
-        or compact.startswith(("unknown", "未知", "其他", "其它", "other", "manual", "手动", "未指定", "待确认"))
-        or not any(char.isalnum() for char in compact)
-    ):
-        return "unknown"
-    if compact.startswith(("moomoo", "富途", "futu")):
-        return "futu"
-    return "non_futu"
 
 
 def _is_futu_broker(value: Optional[str]) -> bool:
@@ -1125,21 +1100,11 @@ class HoldingsValidator:
 
     @staticmethod
     def _mark_duplicates(records: list[RecordValidation]) -> None:
-        grouped: dict[tuple[str, str, str], list[RecordValidation]] = {}
-        for item in records:
-            fields = item.raw.raw_fields
-            asset_id = _text(fields.get("asset_id"))
-            account = _text(fields.get("account"))
-            broker = _text(fields.get("broker"))
-            if not asset_id or not account or not broker:
-                continue
-            grouped.setdefault((asset_id, account, broker), []).append(item)
-        for identity, duplicates in grouped.items():
-            if len(duplicates) < 2:
-                continue
-            record_ids = sorted(item.raw.record_id for item in duplicates)
-            for item in duplicates:
-                item.issues.append(
+        by_raw_id = {id(item.raw): item for item in records}
+        for identity, duplicates in duplicate_holding_groups(item.raw for item in records).items():
+            record_ids = sorted(item.record_id for item in duplicates)
+            for raw in duplicates:
+                by_raw_id[id(raw)].issues.append(
                     RecordIssue(
                         kind="duplicate_identity",
                         reason_code="DUPLICATE_HOLDING_IDENTITY",

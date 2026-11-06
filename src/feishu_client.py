@@ -415,7 +415,8 @@ class FeishuClient:
 
     def list_records(self, table_name: str, filter_str: str = None,
                      field_names: List[str] = None, page_size: int = 500,
-                     *, deadline: float | None = None) -> List[Dict]:
+                     *, deadline: float | None = None,
+                     require_complete: bool = False) -> List[Dict]:
         """
         查询记录列表
 
@@ -430,6 +431,7 @@ class FeishuClient:
         records = []
         page_token = None
         seen_page_tokens = set()
+        seen_record_ids = set()
 
         while True:
             endpoint = f"/bitable/v1/apps/{app_token}/tables/{table_id}/records"
@@ -445,15 +447,29 @@ class FeishuClient:
             data = self._request('GET', endpoint, params=params, **(
                 {'deadline': deadline, '_stage': f'{table_name}_read'} if deadline is not None else {}
             ))
+            if require_complete and (
+                not isinstance(data, dict) or 'items' not in data
+                or not isinstance(data.get('has_more'), bool)
+            ):
+                raise RuntimeError(f"Feishu {table_name} records completeness is unproven")
             items = data.get('items', [])
             if not isinstance(items, list):
                 raise RuntimeError(f"Feishu {table_name} records response items is invalid")
 
             for item in items:
+                if require_complete and (
+                    not isinstance(item, dict)
+                    or not isinstance(item.get('record_id'), str) or not item['record_id'].strip()
+                    or not isinstance(item.get('fields'), dict)
+                ):
+                    raise RuntimeError(f"Feishu {table_name} record shape is invalid")
                 record = {
                     'record_id': item['record_id'],
                     'fields': item['fields']
                 }
+                if require_complete and record['record_id'] in seen_record_ids:
+                    raise RuntimeError(f"Feishu {table_name} pagination repeated record_id")
+                seen_record_ids.add(record['record_id'])
                 records.append(record)
 
             next_page_token = data.get('page_token')

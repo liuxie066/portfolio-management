@@ -2,9 +2,12 @@
 
 import sqlite3
 
+from ._holding_monitor_mixin import initialize_holding_monitor_schema
+
 SCHEMA_VERSION = "2"
 HOLDINGS_WORKFLOW_SCHEMA_VERSION = "1"
 CASH_FLOW_EVENT_SCHEMA_VERSION = "1"
+HOLDING_MONITOR_SCHEMA_VERSION = "1"
 
 
 def initialize_schema(conn: sqlite3.Connection) -> None:
@@ -25,6 +28,11 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
                 "cash_flow_event_schema_version",
                 CASH_FLOW_EVENT_SCHEMA_VERSION,
                 "cash flow event",
+            ),
+            (
+                "holding_change_monitor_schema_version",
+                HOLDING_MONITOR_SCHEMA_VERSION,
+                "holding change monitor",
             ),
         ):
             feature_row = conn.execute(
@@ -245,4 +253,9 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
         """,
         ("cash_flow_event_schema_version", CASH_FLOW_EVENT_SCHEMA_VERSION),
     )
+    conn.execute(
+        "INSERT INTO operation_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        ("holding_change_monitor_schema_version", HOLDING_MONITOR_SCHEMA_VERSION),
+    )
+    initialize_holding_monitor_schema(conn)
 

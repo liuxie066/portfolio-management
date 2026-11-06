@@ -23,6 +23,7 @@ historical Skill/Python API remains available only as a compatibility adapter.
 - Schema checks: `docs/migrations.md`
 - PM runtime and data quality: `docs/quality-monitoring/README.md`
 - OM-facing PM API contract: `docs/om-api-contract.md`
+- Non-Futu holdings change monitor and receipts design: [non-futu-holdings-change-monitor-design.md](non-futu-holdings-change-monitor-design.md); [operations](holdings-event-listener-runbook.md#non-futu-holdings-change-monitor)
 
 ## Product Entrypoints
 

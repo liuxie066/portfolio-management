@@ -11,7 +11,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional
 
 from src.domain.holdings import RawHoldingRecord
 from src.models import Holding
-from src.process_lock import account_lock_key, process_lock
+from src.process_lock import account_lock_key, holdings_observation_lock, process_lock
 
 from .holdings_reconciliation_service import (
     HoldingsReconciliationEvaluation,
@@ -502,8 +502,11 @@ class HoldingsNavPreflightService:
             raise ValueError(
                 "formal NAV cannot consume a Futu dry-run projection"
             )
-        with self.lock_factory(account_lock_key(account)):
-            records = list(self.storage.get_raw_holdings(account=account))
+        with (
+            holdings_observation_lock(lock_factory=self.lock_factory),
+            self.lock_factory(account_lock_key(account)),
+        ):
+            records = self.workflow._read_complete_holdings(account=account)
             source_mode = "feishu"
             if project_futu_dry_run:
                 records = self._project_futu_plan(
@@ -532,6 +535,7 @@ class HoldingsNavPreflightService:
                         plan,
                         evaluation,
                         enqueue_receipts=False,
+                        duplicate_proof=True,
                     )
                 except Exception as exc:
                     return {

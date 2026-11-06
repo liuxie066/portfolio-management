@@ -8,12 +8,14 @@ from src import config
 from src.feishu_client import FeishuClient
 
 from .notification_shells import render_receipt
+from .holding_change_receipt import RECEIPT_TYPE as HOLDING_CHANGE_RECEIPT_TYPE, message as holding_change_message
 from .futu_quantity_receipt import RECEIPT_TYPE as FUTU_QUANTITY_RECEIPT_TYPE, quantity_change_message
 
 
 class HoldingsReceiptService:
     SUPPORTED_TYPES = {
         FUTU_QUANTITY_RECEIPT_TYPE,
+        HOLDING_CHANGE_RECEIPT_TYPE,
         "holding_case_discovered",
         "holding_case_closed",
         "holding_case_attention_required",
@@ -100,6 +102,8 @@ class HoldingsReceiptService:
     def build_message(receipt_type: str, payload: Dict[str, Any]) -> str:
         if receipt_type == FUTU_QUANTITY_RECEIPT_TYPE:
             return quantity_change_message(payload)
+        if receipt_type == HOLDING_CHANGE_RECEIPT_TYPE:
+            return holding_change_message(payload)
         action = dict(payload.get("action") or {})
         identity = dict(payload.get("identity") or {})
         if receipt_type == "holding_case_discovered":
