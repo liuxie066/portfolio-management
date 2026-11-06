@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.13 - 2026-11-06
+
+- Add opt-in monitoring and durable receipts for non-Futu stock and non-MMF fund changes in the Feishu holdings table, with a silent initial baseline and explicit account scope.
+- Confirm deletions through complete observations, preserve trusted baselines across invalid data, and reconcile duplicate holdings through the existing repair workflow.
+- Add local holdings change initialization, preview, scan and status commands; keep background monitoring disabled by default.
+- Preserve exact decimal values in holdings comparisons and keep local status checks free of directory-creation side effects.
+
 ## 0.2.12 - 2026-10-30
 
 - Send compact PM receipts for verified background Futu stock and ETF quantity changes, while keeping unchanged, cost-only and MMF-only refreshes silent.
