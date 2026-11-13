@@ -47,8 +47,10 @@ curl http://127.0.0.1:8765/health
 python scripts/service.py stop
 ```
 
-当前没有独立的打包构建配置或前端构建步骤；源码安装后直接运行。
-语法编译使用下节的 `compileall`。日报 HTML 产物按
+运行包由 `scripts/build_release_package.py` 从已提交的 Git tree 构建，文件白名单
+归属 `.gitattributes`；GitHub 源码归档使用同一规则。安装器默认使用校验后的 Release
+运行包，完整源码安装须显式 `--source`。没有前端构建步骤；语法编译使用下节的
+`compileall`。日报 HTML 产物按
 [README 的日报入口](README.md#日报与发布) 生成，不等同于软件发布或公网部署。
 
 ## 按任务阅读
@@ -152,7 +154,7 @@ git push origin vX.Y.Z
 ssh liuxie-incus 'cd /home/liuxie/apps/portfolio-management && git fetch --tags origin && git checkout vX.Y.Z'
 
 # 2. 重新生成 systemd/env/launcher（--apply 只写资产，不自动重启服务）
-ssh liuxie-incus 'cd /home/liuxie/apps/portfolio-management && sudo scripts/install.sh --apply --dir /home/liuxie/apps/portfolio-management --ref vX.Y.Z'
+ssh liuxie-incus 'cd /home/liuxie/apps/portfolio-management && sudo scripts/install.sh --source --apply --dir /home/liuxie/apps/portfolio-management --ref vX.Y.Z'
 
 # 3. 重启常驻服务（timers 是 oneshot，下次触发自动用新代码，无需重启）
 ssh liuxie-incus 'sudo systemctl restart portfolio-management-api.service portfolio-holdings-event-listener.service'

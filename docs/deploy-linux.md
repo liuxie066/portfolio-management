@@ -31,14 +31,15 @@ systemd 路径；两个 Feishu App Secret 只通过 systemd encrypted credential
 推荐入口：
 
 ```bash
-# 先准备 checkout/venv 并查看 system asset 计划，不写 config/env/unit
+# 在解压后的运行包中准备 venv 并查看 system asset 计划，不写 config/env/unit
 sudo scripts/install.sh
 ```
 
 这个 bootstrap installer 会：
 
 - 清理继承的 `PYTHONPATH` / `PYTHONHOME`，避免装错 checkout。
-- 安装或更新代码目录。
+- 默认下载最新稳定 Release 的运行包并校验 `SHA256SUMS`，或复用当前解压的运行包。
+- 安装或更新运行目录，保留已有 `.venv`、个人配置和运行数据；不清理额外本地文件。
 - 创建 `.venv` 并安装 `requirements.txt`。
 - 生成稳定启动命令 `/usr/local/bin/pm`。
 - 调用 `scripts/install_linux.py` 验证已准备的 config，再写入 env/systemd 文件。
@@ -48,8 +49,16 @@ sudo scripts/install.sh
 如果希望安装脚本自己从 GitHub 拉取指定版本：
 
 ```bash
-sudo bash -c 'curl -fsSL https://raw.githubusercontent.com/liuxie066/portfolio-management/main/scripts/install.sh | bash -s -- --ref main'
+sudo bash -c 'curl -fsSL https://raw.githubusercontent.com/liuxie066/portfolio-management/main/scripts/install.sh | bash -s -- --ref v0.2.14'
 ```
+
+省略 `--ref` 使用最新稳定 Release。运行包模式只接受 `vX.Y.Z`，没有运行包或
+校验失败时停止，不回退到完整仓库。重新运行已解压目录内的安装脚本默认复用该
+版本；升级时显式指定目标 `--ref vX.Y.Z`。
+
+开发或维护已有 Git 部署时使用 `scripts/install.sh --source --ref main`，也可
+固定 tag。该模式保留完整开发文件，且只在显式选择时使用；安装器拒绝把已有 Git
+目录自动转为运行包安装。原有 Git 部署升级后重新生成资产也须加 `--source`。
 
 如果网络环境对 PyPI 慢或不稳定，可以指定镜像：
 
@@ -373,10 +382,21 @@ canonical Agent/Listener 字段。
 
 如果部署到受限 SSH 隔离实例，先进入实例并阅读实例内 `~/AGENTS.md`。只在当前实例内操作；不要请求或使用宿主机 Docker/Incus socket、宿主机账号或宿主机 root 权限。长期运行任务使用 systemd timer，不依赖临时 shell。
 
+## 运行包范围
+
+`.gitattributes` 采用默认排除、逐项保留的白名单，控制 GitHub 自动源码归档和
+用户运行包。`scripts/build_release_package.py` 对已提交的 HEAD 执行 `git archive`，
+生成 `dist/portfolio-management-X.Y.Z.tar.gz` 与 `dist/SHA256SUMS`；未提交改动不进入
+发布包。测试、开发流程/评审记录、历史决策、CI 和发布脚本不在用户包内。
+
+必须保留 `VERSION`、`config.example.yaml`、运行入口与调度脚本、质量刷新读取的
+`contracts/quality-monitoring/quality_status.v1.schema.json`，以及 `check-live` 仍检查
+存在性的 `docs/schema.md`。变更资源路径时同步调整白名单和归档/离线安装回归测试。
+
 ## 产品 Release 的同提交检查契约
 
 `vX.Y.Z` tag 发布先原生调用 `quality-contract.yml`，在同一 `github.sha` 上执行既有契约检查和发布边界测试；只有成功才进入 publisher。它是项目发布契约，不代表动态读取或替代 GitHub 管理员保护规则，也不等同全量业务回归。`pm-api-v*` 契约验证流程保持独立。
 
-publisher 核对 checkout HEAD、VERSION 和远端 tag 剥离后的 commit；创建或公开草稿前再次核对 tag。已有公开 Release 只有身份匹配才能复用。读取错误不会当作 Release 不存在；Release 按 tag 查询的 HTTP 404 后，还需使用既有写权限身份分页查询草稿（最多 10 页，每页 100 条）；仅完整列表确认没有同名 Release 才进入创建分支，重复匹配、列表错误或超出上限均拒绝。创建保留 `gh release create --verify-tag --generate-notes --fail-on-no-commits`，并显式指定相同 SHA；草稿继续使用 `gh release edit --draft=false`。
+publisher 核对 checkout HEAD、VERSION 和远端 tag 剥离后的 commit；创建或公开草稿前再次核对 tag。已有公开 Release 只有身份匹配才能复用。读取错误不会当作 Release 不存在；Release 按 tag 查询的 HTTP 404 后，还需使用既有写权限身份分页查询草稿（最多 10 页，每页 100 条）；仅完整列表确认没有同名 Release 才进入创建分支，重复匹配、列表错误或超出上限均拒绝。创建保留 `gh release create --verify-tag --generate-notes --fail-on-no-commits`，显式指定相同 SHA，并在同次 CLI 调用中上传运行包和校验文件；草稿继续使用 `gh release edit --draft=false`。复用已有公开版本或公开草稿前，必须核对两个附件的名称、大小与 GitHub SHA-256 digest；缺失或不符时停止，人工核实，不自动覆盖附件。发布后读回也校验附件。
 
 同 tag 工作流串行且不自动取消。helper 最多调用一次变更 CLI，失败或超时后读回 Release 和 tag，无法证明已公开且身份匹配时报告结果未知，需人工核实后再决定重跑；不自动删除、重打 tag 或回滚公开内容。CLI 内部请求并非一次远端写入保证，外部强制移动 tag 也不受此串行约束。真实发布仍需单独授权；本轮验证只使用合成 API/CLI，未执行真实发布。

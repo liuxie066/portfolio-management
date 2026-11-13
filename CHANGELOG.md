@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.14 - 2026-11-13
+
+- Publish runtime-only archives and SHA-256 checksums, excluding tests, development records and release tooling while preserving required configuration, schemas and operational scripts.
+- Install verified release packages by default; require explicit `--source` for full Git checkouts and preserve existing configuration and runtime data.
+- Check package contents and offline installation behavior before publishing, and verify uploaded release assets against the built files.
+
 ## 0.2.13 - 2026-11-06
 
 - Add opt-in monitoring and durable receipts for non-Futu stock and non-MMF fund changes in the Feishu holdings table, with a silent initial baseline and explicit account scope.

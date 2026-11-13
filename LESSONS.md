@@ -60,3 +60,15 @@
   [共享数值规则](src/domain/holding_values.py)、
   [观测回归](tests/test_holding_change_monitor.py)、
   [精度与 canonical payload 回归](tests/test_holding_change_monitor_boundaries.py)。
+
+## Git 忽略规则不定义用户发布范围
+
+- **触发条件**：发布源码归档、构建用户运行包或调整安装器获取代码的路径。
+- **错误原因**：v0.2.13 仅创建 GitHub Release，自动归档包含已跟踪的测试、开发流程和
+  评审记录；安装器使用完整 `git clone`，即使归档过滤也不能缩小该安装路径的范围。
+  `.gitignore` 不排除已跟踪文件，也不控制 `git archive`。
+- **下次检查方式**：使用 `.gitattributes` 的运行文件白名单构建实际归档，运行
+  `python -m pytest tests/test_release_package.py -q`，同时检查归档内容、必要资源、
+  默认安装路径和校验失败分支；完整源码安装须显式选择，不能作为下载失败的回退。
+- **证据**：[v0.2.13 发布](https://github.com/liuxie066/portfolio-management/releases/tag/v0.2.13)、
+  [归档白名单](.gitattributes)、[归档与离线安装回归](tests/test_release_package.py)。

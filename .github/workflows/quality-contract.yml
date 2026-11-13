@@ -39,4 +39,5 @@ jobs:
             tests/test_quality_document_ownership.py \
             tests/test_om_openapi_contract.py \
             tests/test_om_api_contract_release.py \
-            tests/test_release_workflow.py
+            tests/test_release_workflow.py \
+            tests/test_release_package.py

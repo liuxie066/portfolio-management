@@ -1,0 +1,58 @@
+# User archives contain runtime files only. Git checkouts retain development files.
+# Keep this allowlist as the single source for GitHub archives and release assets.
+* export-ignore
+
+/src -export-ignore
+/src/** -export-ignore
+/scripts -export-ignore
+/scripts/diagnose_pricing.py -export-ignore
+/scripts/generate_daily_report_html.py -export-ignore
+/scripts/install.sh -export-ignore
+/scripts/install_linux.py -export-ignore
+/scripts/install_macos.py -export-ignore
+/scripts/macos_preflight.sh -export-ignore
+/scripts/migrate_schema.py -export-ignore
+/scripts/nav_history_repair.py -export-ignore
+/scripts/pm.py -export-ignore
+/scripts/portfolio_scheduled_job.sh -export-ignore
+/scripts/publish_daily_report.py -export-ignore
+/scripts/serve.py -export-ignore
+/scripts/service.py -export-ignore
+/scripts/start_public_server.sh -export-ignore
+
+/contracts -export-ignore
+/contracts/quality-monitoring -export-ignore
+/contracts/quality-monitoring/quality_status.v1.schema.json -export-ignore
+
+/docs -export-ignore
+/docs/architecture.md -export-ignore
+/docs/cash-flow-effects-runbook.md -export-ignore
+/docs/cash-flow-holding-effects.md -export-ignore
+/docs/dependency-graph.md -export-ignore
+/docs/deploy-linux.md -export-ignore
+/docs/deploy-macos.md -export-ignore
+/docs/deploy-macos-operations.md -export-ignore
+/docs/holdings-event-listener-runbook.md -export-ignore
+/docs/migrations.md -export-ignore
+/docs/nav-daily-consistency.md -export-ignore
+/docs/nav-trading-calendar.md -export-ignore
+/docs/nav-valuation-evidence-replay.md -export-ignore
+/docs/om-api-contract.md -export-ignore
+/docs/pricing.md -export-ignore
+/docs/runbook.md -export-ignore
+/docs/runbook-onepage.md -export-ignore
+/docs/schema.md -export-ignore
+/docs/service.md -export-ignore
+/docs/valuation.md -export-ignore
+/docs/quality-monitoring -export-ignore
+/docs/quality-monitoring/README.md -export-ignore
+/docs/quality-monitoring/pm-operator.md -export-ignore
+
+/CHANGELOG.md -export-ignore
+/README.md -export-ignore
+/SKILL.md -export-ignore
+/VERSION -export-ignore
+/config.example.yaml -export-ignore
+/pm -export-ignore
+/requirements.txt -export-ignore
+/skill_api.py -export-ignore

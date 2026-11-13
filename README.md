@@ -268,10 +268,20 @@ python scripts/publish_daily_report.py --account lx --write-nav --confirm
 /var/lib/portfolio-management/reports
 ```
 
-推荐使用 bootstrap installer。它会参考 Hermes Agent 的部署模式：安装/更新
-代码、创建 `.venv`、安装依赖、生成稳定 `pm` launcher，并把 systemd/config
-写入交给保守的 Python 安装器。`--apply` 前必须先由操作者配置两份 encrypted
-credential；安装器只检查名称和文件元数据，不接收或生成 Secret。
+用户安装使用 GitHub Release 的 `portfolio-management-X.Y.Z.tar.gz` 和
+`SHA256SUMS`。运行包保留配置模板、运行时 schema、操作文档与安装/维护脚本，
+不包含测试、开发/评审记录或软件发布工具。GitHub 自动生成的源码归档使用同一
+白名单；开发请使用完整 Git checkout。
+
+推荐使用 bootstrap installer。它默认下载最新稳定 Release 的运行包并校验
+SHA-256，创建 `.venv`、安装依赖、生成稳定 `pm` launcher，再把 systemd/config
+写入交给 Python 安装器。可用 `--ref vX.Y.Z` 固定版本；完整源码安装或已有 Git
+部署须显式添加 `--source`，其默认 ref 为 `main`。安装器不会自动转换或清理已有
+Git 部署。`--apply` 前必须先由操作者配置两份 encrypted credential；安装器只
+检查名称和文件元数据，不接收或生成 Secret。
+
+以下命令在解压后的运行包根目录执行；在 Git checkout 中执行时，给安装命令加上
+`--source`。
 
 ```bash
 sudo scripts/install.sh --apply

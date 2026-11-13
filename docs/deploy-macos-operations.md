@@ -4,7 +4,7 @@ The [macOS design](deploy-macos.md) owns the deployment decisions. This page is 
 
 ## Prepare and inspect
 
-Use a stable local checkout at `~/.portfolio-management/current`, Python 3.12, and a non-secret `~/.portfolio-management/config.yaml`. Give the state and log directories mode `0700`; give the config mode `0600`. Create `~/.portfolio-management/reports` and `~/Library/LaunchAgents` under the same user. Do not point a job at a removable `/Volumes` checkout.
+Extract the verified Release runtime archive into a stable directory at `~/.portfolio-management/current` (or explicitly use a full Git checkout for development), use Python 3.12, and a non-secret `~/.portfolio-management/config.yaml`. Give the state and log directories mode `0700`; give the config mode `0600`. Create `~/.portfolio-management/reports` and `~/Library/LaunchAgents` under the same user. Do not point a job at a removable `/Volumes` checkout.
 
 ```bash
 cd "$HOME/.portfolio-management/current"

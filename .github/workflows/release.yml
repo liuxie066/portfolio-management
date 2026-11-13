@@ -34,5 +34,7 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+      - name: Build runtime archive and checksums
+        run: python scripts/build_release_package.py
       - name: Publish or verify release
         run: python scripts/publish_release.py

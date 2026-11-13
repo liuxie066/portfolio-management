@@ -5,12 +5,13 @@ retried here; this does not implement an exactly-once remote transaction.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import subprocess
 import sys
+from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
@@ -110,7 +111,27 @@ def _release(reads, tag):
     return data
 
 
-def publish(*, reads, mutate, repo, tag, expected_sha, head_sha, version):
+def _asset_metadata(paths):
+    return [
+        {"name": path.name, "size": path.stat().st_size,
+         "digest": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()}
+        for path in paths
+    ]
+
+
+def _verify_assets(release, expected):
+    if not expected:
+        return
+    assets = release.get("assets")
+    if not isinstance(assets, list) or len(assets) != len(expected):
+        raise ReleaseError("release assets do not match the runtime package")
+    actual = [{key: row.get(key) for key in ("name", "size", "digest")}
+              for row in assets if isinstance(row, dict)]
+    if sorted(actual, key=lambda row: str(row["name"])) != sorted(expected, key=lambda row: row["name"]):
+        raise ReleaseError("release assets do not match the runtime package")
+
+
+def publish(*, reads, mutate, repo, tag, expected_sha, head_sha, version, assets=()):
     """All reads and the single mutation invocation are injectable for tests."""
     if (not re.fullmatch(r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", tag)
             or not re.fullmatch(r"[0-9a-f]{40}", expected_sha)
@@ -119,15 +140,18 @@ def publish(*, reads, mutate, repo, tag, expected_sha, head_sha, version):
         raise ReleaseError("release source identity mismatch")
     if _tag_commit(reads, tag) != expected_sha:
         raise ReleaseError("release source identity mismatch")
+    expected_assets = _asset_metadata(assets)
     existing = _release(reads, tag)
     if _tag_commit(reads, tag) != expected_sha:
         raise ReleaseError("release source identity mismatch")
+    if existing is not None:
+        _verify_assets(existing, expected_assets)
     if existing is not None and not existing["draft"]:
         return "already-public"
     if existing is None:
         command = ["gh", "release", "create", tag, "--repo", repo, "--verify-tag",
                    "--title", tag, "--generate-notes", "--fail-on-no-commits",
-                   "--target", expected_sha]
+                   "--target", expected_sha, *map(str, assets)]
     else:
         command = ["gh", "release", "edit", tag, "--repo", repo, "--draft=false"]
     try:
@@ -139,6 +163,7 @@ def publish(*, reads, mutate, repo, tag, expected_sha, head_sha, version):
         commit = _tag_commit(reads, tag)
         if current is None or current["draft"] or commit != expected_sha:
             raise ReleaseError("publication outcome unknown; inspect before retry")
+        _verify_assets(current, expected_assets)
     except Exception:
         raise ReleaseError("publication outcome unknown; inspect before retry") from None
     return "verified-public"
@@ -150,12 +175,15 @@ def main():
         reads = GitHubReads(repo, os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN", ""))
         head = subprocess.run(["git", "rev-parse", "HEAD"], check=True,
                               capture_output=True, text=True, timeout=10).stdout.strip()
+        version = Path("VERSION").read_text().strip()
         result = publish(
             reads=reads,
             mutate=lambda command: subprocess.run(command, check=True, capture_output=True, timeout=90),
             repo=repo, tag=os.environ.get("GITHUB_REF_NAME", ""),
             expected_sha=os.environ.get("GITHUB_SHA", ""), head_sha=head,
-            version=Path("VERSION").read_text().strip(),
+            version=version,
+            assets=(Path("dist") / f"portfolio-management-{version}.tar.gz",
+                    Path("dist") / "SHA256SUMS"),
         )
         print(result)
         return 0

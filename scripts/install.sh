@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Linux bootstrap installer inspired by the Hermes Agent install flow:
 # - clear inherited Python environment that can shadow the checkout;
-# - install/update code in a stable FHS-style directory;
+# - install a verified runtime release in a stable FHS-style directory;
 # - create a venv and install dependencies;
 # - delegate system config/systemd writes to scripts/install_linux.py.
 
@@ -11,7 +11,9 @@ unset PYTHONPATH
 unset PYTHONHOME
 
 REPO_URL="${PORTFOLIO_REPO_URL:-https://github.com/liuxie066/portfolio-management.git}"
-REF="${PORTFOLIO_REF:-main}"
+REF="${PORTFOLIO_REF:-latest}"
+SOURCE=false
+RELEASE_TMP=""
 APP_DIR="${PORTFOLIO_APP_DIR:-}"
 CONFIG_DIR="${PORTFOLIO_CONFIG_DIR:-}"
 DATA_DIR="${PORTFOLIO_DATA_DIR:-}"
@@ -31,7 +33,7 @@ SCRIPT_DIR=""
 SCRIPT_REPO_ROOT=""
 if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  if [[ -d "$SCRIPT_DIR/../.git" ]]; then
+  if [[ -f "$SCRIPT_DIR/../VERSION" ]]; then
     SCRIPT_REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
   fi
 fi
@@ -51,9 +53,11 @@ Options:
   --enable-holdings-event-listener
                            Enable the Feishu holdings long-connection service.
   --overwrite-config      Disabled safety flag; config.yaml is never overwritten.
-  --repo URL              Git repository URL.
-  --ref REF               Branch, tag, or commit to checkout (default: main).
-  --dir PATH              App checkout directory.
+  --repo URL              GitHub repository URL.
+  --ref REF               Release tag (default: latest stable release).
+  --source                Use a full Git checkout for development or existing source deployments.
+                          With --source, --ref also accepts branches/commits (default: main).
+  --dir PATH              App installation directory.
   --config-dir PATH       Config directory.
   --data-dir PATH         Runtime data directory.
   --reports-dir PATH      Report output directory.
@@ -68,8 +72,11 @@ Defaults:
   root Linux: code=/opt/portfolio-management/current, launcher=/usr/local/bin/pm
   user Linux: code=~/.portfolio-management/current, launcher=~/.local/bin/pm
 
-By default this prepares code and the Python environment, then prints the
-system install plan. Add --apply to write system files.
+By default this downloads the runtime release and verifies SHA256SUMS, prepares
+its Python environment, then prints the system install plan. Runtime packages
+exclude tests, development records and release tooling. Add --apply to write
+system files. Full Git checkouts require --source; existing source deployments
+are never converted or cleaned automatically.
 
 When /etc/options-monitor/options-monitor.env exists, the installer scans only
 legacy Feishu role key names as migration evidence and copies no values. The
@@ -88,6 +95,7 @@ while [[ $# -gt 0 ]]; do
     --enable-quality-timer) ENABLE_QUALITY_TIMER=true; shift ;;
     --enable-holdings-event-listener) ENABLE_HOLDINGS_EVENT_LISTENER=true; shift ;;
     --overwrite-config) OVERWRITE_CONFIG=true; shift ;;
+    --source) SOURCE=true; shift ;;
     --repo) REPO_URL="$2"; shift 2 ;;
     --ref) REF="$2"; shift 2 ;;
     --dir) APP_DIR="$2"; shift 2 ;;
@@ -153,16 +161,75 @@ need_cmd() {
   fi
 }
 
-need_cmd git
 need_cmd "$PYTHON_BIN"
 
+prepare_release() {
+  if [[ -e "$APP_DIR/.git" ]]; then
+    echo "Install directory is a source checkout; use --source explicitly: $APP_DIR" >&2
+    exit 1
+  fi
+  if [[ -n "$SCRIPT_REPO_ROOT" && "$APP_DIR" == "$SCRIPT_REPO_ROOT" ]] &&
+     [[ "$REF" == latest || "$REF" == "v$(<"$APP_DIR/VERSION")" ]]; then
+    log "Using current runtime installation: $APP_DIR"
+    return
+  fi
+  if [[ -e "$APP_DIR" && ! -f "$APP_DIR/VERSION" ]]; then
+    echo "Install directory exists but is not a runtime installation: $APP_DIR" >&2
+    exit 1
+  fi
+  need_cmd curl
+  local release_url="${REPO_URL%.git}/releases"
+  if [[ "$REF" == latest ]]; then
+    local latest_url
+    latest_url="$(curl -fsSL -o /dev/null -w '%{url_effective}' "$release_url/latest")"
+    REF="${latest_url##*/}"
+  fi
+  if [[ ! "$REF" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+    echo "Runtime installation requires a release tag vX.Y.Z; branches/commits require --source." >&2
+    exit 1
+  fi
+  RELEASE_TMP="$(mktemp -d)"
+  trap 'rm -rf "$RELEASE_TMP"' EXIT
+  local archive="portfolio-management-${REF#v}.tar.gz"
+  log "Downloading runtime release $REF"
+  curl -fsSL "$release_url/download/$REF/$archive" -o "$RELEASE_TMP/$archive"
+  curl -fsSL "$release_url/download/$REF/SHA256SUMS" -o "$RELEASE_TMP/SHA256SUMS"
+  "$PYTHON_BIN" -I - "$RELEASE_TMP" "$archive" "$APP_DIR" "${REF#v}" <<'PY'
+import hashlib
+from pathlib import Path
+import shutil
+import sys
+import tarfile
+
+staging, name, destination, version = sys.argv[1:]
+staging = Path(staging)
+archive = staging / name
+expected = next(
+    (line.split()[0] for line in (staging / "SHA256SUMS").read_text().splitlines()
+     if len(line.split()) == 2 and line.split()[1] == name), None,
+)
+if expected != hashlib.sha256(archive.read_bytes()).hexdigest():
+    raise SystemExit("Runtime release checksum mismatch")
+with tarfile.open(archive) as source:
+    source.extractall(staging / "unpacked", filter="data")
+root = staging / "unpacked" / f"portfolio-management-{version}"
+if (root / "VERSION").read_text().strip() != version:
+    raise SystemExit("Runtime release version mismatch")
+shutil.copytree(root, destination, dirs_exist_ok=True)
+PY
+}
+
 prepare_checkout() {
-  if [[ -n "$SCRIPT_REPO_ROOT" && "$APP_DIR" == "$SCRIPT_REPO_ROOT" ]]; then
+  need_cmd git
+  if [[ "$REF" == latest ]]; then
+    REF=main
+  fi
+  if [[ -n "$SCRIPT_REPO_ROOT" && "$APP_DIR" == "$SCRIPT_REPO_ROOT" && -e "$APP_DIR/.git" ]]; then
     log "Using current checkout: $APP_DIR"
     return
   fi
 
-  if [[ -d "$APP_DIR/.git" ]]; then
+  if [[ -e "$APP_DIR/.git" ]]; then
     log "Updating existing checkout: $APP_DIR"
     git -C "$APP_DIR" fetch --tags origin
     if git -C "$APP_DIR" rev-parse --verify --quiet "origin/$REF" >/dev/null; then
@@ -231,10 +298,18 @@ run_asset_installer() {
   "$APP_DIR/.venv/bin/python" "${args[@]}"
 }
 
-prepare_checkout
+if [[ "$SOURCE" == true ]]; then
+  prepare_checkout
+else
+  prepare_release
+fi
 prepare_venv
 run_asset_installer
 
+SOURCE_OPTION=""
+if [[ "$SOURCE" == true ]]; then
+  SOURCE_OPTION=" --source"
+fi
 cat <<EOF
 
 Next:
@@ -245,14 +320,14 @@ Next:
   $LAUNCHER daily-job --json --no-service
 
 To enable the timer later:
-  sudo $APP_DIR/scripts/install.sh --apply --enable-timer --dir $APP_DIR
+  sudo $APP_DIR/scripts/install.sh$SOURCE_OPTION --apply --enable-timer --dir $APP_DIR
 
 To enable the loopback portfolio API later:
-  sudo $APP_DIR/scripts/install.sh --apply --enable-api-service --dir $APP_DIR
+  sudo $APP_DIR/scripts/install.sh$SOURCE_OPTION --apply --enable-api-service --dir $APP_DIR
 
 To enable quality artifact refresh later:
-  sudo $APP_DIR/scripts/install.sh --apply --enable-quality-timer --dir $APP_DIR
+  sudo $APP_DIR/scripts/install.sh$SOURCE_OPTION --apply --enable-quality-timer --dir $APP_DIR
 
 To enable the holdings event listener after its separate activation preflight:
-  sudo $APP_DIR/scripts/install.sh --apply --enable-holdings-event-listener --dir $APP_DIR
+  sudo $APP_DIR/scripts/install.sh$SOURCE_OPTION --apply --enable-holdings-event-listener --dir $APP_DIR
 EOF

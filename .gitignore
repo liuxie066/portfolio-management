@@ -18,6 +18,7 @@ __pycache__/
 
 # 本地运行产物
 .venv/
+dist/
 reports/
 audit/
 public/
