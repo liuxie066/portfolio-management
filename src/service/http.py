@@ -782,7 +782,14 @@ def create_app(service: Optional[PortfolioService] = None, allow_remote: Optiona
     @app.post("/report/daily-bundle", tags=["reports"])
     def daily_report_bundle_query(request: Request, payload: DailyReportBundleRequest):
         kwargs = _payload_dict(payload)
-        return _service(request).daily_report_bundle(**kwargs)
+        result = _service(request).daily_report_bundle(**kwargs)
+        if isinstance(result.get("snapshot"), dict):
+            # The internal write capability is not part of the report transport.
+            result = {**result, "snapshot": {
+                key: value for key, value in result["snapshot"].items()
+                if key != "normalized_valuation"
+            }}
+        return result
 
 
     @app.post("/daily-nav-job", tags=["nav"])
