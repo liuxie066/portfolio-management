@@ -42,6 +42,16 @@ as its strict opening anchor; YTD uses the last NAV in the previous calendar
 year. External cash flow is summed only through the actual ending NAV date.
 Missing strict anchors are returned as `status=unavailable`, not silently
 replaced by the first NAV inside the requested period.
+Each capital-facts request reads canonical NAV history afresh for that account,
+so a long-lived service observes writes from another process. Source read errors
+are surfaced rather than serving the previously cached NAV as current evidence.
+This adds source I/O; it does not change the calendar anchors or amount formulas.
+
+Full-report `top_holdings` retains missing market values as `null`, including
+merged rows with any unpriced component. Their weights are also `null`; weights
+require a positive total. A known zero amount remains zero. The existing flexible
+row schema is unchanged; consumers must preserve nullable valuation evidence
+rather than display it as a known zero.
 
 The service is unauthenticated and both binds to and accepts loopback clients only by default.
 The ASGI application enforces the actual client IP, so direct Uvicorn startup does not bypass

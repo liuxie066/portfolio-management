@@ -86,3 +86,28 @@ def test_public_nav_empty_and_canonical_failure_each_read_once(tmp_path, monkeyp
     assert result["success"] is False
     assert "canonical NAV unavailable" in result["error"]
     assert client.calls == 3
+
+
+def test_capital_facts_observe_separate_writer_and_reject_failed_source(tmp_path, monkeypatch):
+    import pytest
+    from types import SimpleNamespace
+    from src.app.capital_facts_service import CapitalFactsService
+
+    monkeypatch.setattr("src.time_utils.bj_today", lambda: date(2026, 9, 25))
+    client = _Client([_row("2026-08-31", "anchor"), _row("2026-09-24", "old")])
+    storage = FeishuStorage(client=client, local_nav_index_cache=LocalNavIndexCache(tmp_path / "nav.json"))
+    service = CapitalFactsService(storage=storage, today_fn=lambda: date(2026, 9, 25),
+                                 cash_flow_summary_service=SimpleNamespace(period=lambda *args: 0))
+    first = service.get(account="lx", period="mtd", as_of_month="2026-09")
+    assert first["period"]["end_date"] == "2026-09-24"
+    row = _row("2026-09-25", "new")
+    row["fields"]["total_value"] = 1200
+    client.rows.append(row)
+    second = service.get(account="lx", period="mtd", as_of_month="2026-09")
+    assert second["period"]["end_date"] == "2026-09-25"
+    assert second["amounts"]["ending_assets"] == 1200
+    assert client.calls == 2
+    client.fail = True
+    with pytest.raises(RuntimeError, match="canonical NAV unavailable"):
+        service.get(account="lx", period="mtd", as_of_month="2026-09")
+    assert client.calls == 3

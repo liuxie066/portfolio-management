@@ -1,0 +1,92 @@
+{
+  "before": {
+    "runs": [
+      {
+        "startup_ms": 459.14,
+        "health_median_ms": 0.808,
+        "health_max_ms": 1.154,
+        "resident_after_250_requests_mib": 75.67,
+        "process_peak_rss_mib": 75.7,
+        "network": "none (ASGI TestClient; real empty-queue lifespan)"
+      },
+      {
+        "startup_ms": 258.85,
+        "health_median_ms": 0.846,
+        "health_max_ms": 1.498,
+        "resident_after_250_requests_mib": 66.2,
+        "process_peak_rss_mib": 66.2,
+        "network": "none (ASGI TestClient; real empty-queue lifespan)"
+      },
+      {
+        "startup_ms": 261.23,
+        "health_median_ms": 0.843,
+        "health_max_ms": 5.981,
+        "resident_after_250_requests_mib": 66.16,
+        "process_peak_rss_mib": 66.16,
+        "network": "none (ASGI TestClient; real empty-queue lifespan)"
+      },
+      {
+        "startup_ms": 269.2,
+        "health_median_ms": 0.869,
+        "health_max_ms": 1.367,
+        "resident_after_250_requests_mib": 66.22,
+        "process_peak_rss_mib": 66.22,
+        "network": "none (ASGI TestClient; real empty-queue lifespan)"
+      },
+      {
+        "startup_ms": 247.2,
+        "health_median_ms": 0.737,
+        "health_max_ms": 0.877,
+        "resident_after_250_requests_mib": 66.16,
+        "process_peak_rss_mib": 66.16,
+        "network": "none (ASGI TestClient; real empty-queue lifespan)"
+      }
+    ],
+    "note": "Five cold processes; same Python/dependencies and synthetic input. No memory optimization claimed."
+  },
+  "after": {
+    "runs": [
+      {
+        "startup_ms": 248.14,
+        "health_median_ms": 0.738,
+        "health_max_ms": 0.978,
+        "resident_after_250_requests_mib": 66.44,
+        "process_peak_rss_mib": 66.44,
+        "network": "none (ASGI TestClient; real empty-queue lifespan)"
+      },
+      {
+        "startup_ms": 263.66,
+        "health_median_ms": 0.847,
+        "health_max_ms": 1.563,
+        "resident_after_250_requests_mib": 66.22,
+        "process_peak_rss_mib": 66.22,
+        "network": "none (ASGI TestClient; real empty-queue lifespan)"
+      },
+      {
+        "startup_ms": 273.97,
+        "health_median_ms": 0.826,
+        "health_max_ms": 1.208,
+        "resident_after_250_requests_mib": 66.27,
+        "process_peak_rss_mib": 66.27,
+        "network": "none (ASGI TestClient; real empty-queue lifespan)"
+      },
+      {
+        "startup_ms": 243.53,
+        "health_median_ms": 0.744,
+        "health_max_ms": 0.978,
+        "resident_after_250_requests_mib": 66.3,
+        "process_peak_rss_mib": 66.3,
+        "network": "none (ASGI TestClient; real empty-queue lifespan)"
+      },
+      {
+        "startup_ms": 243.48,
+        "health_median_ms": 0.754,
+        "health_max_ms": 1.073,
+        "resident_after_250_requests_mib": 66.22,
+        "process_peak_rss_mib": 66.22,
+        "network": "none (ASGI TestClient; real empty-queue lifespan)"
+      }
+    ],
+    "note": "Five cold processes; same Python/dependencies and synthetic input. No memory optimization claimed."
+  }
+}

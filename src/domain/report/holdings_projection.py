@@ -33,12 +33,15 @@ def merge_top_holdings(holdings: Iterable[Dict[str, Any]], total_value: float, t
 
         normalized_type = holding.get("normalized_type")
         raw_type = holding.get("type")
-        market_value = float(holding.get("market_value") or 0.0)
+        market_value = float(holding["market_value"]) if holding.get("market_value") is not None else None
         quantity = float(holding.get("quantity") or 0.0)
 
         if normalized_type == "cash" or is_cash_like(raw_type, code):
             cash_bucket["quantity"] += quantity
-            cash_bucket["market_value"] += market_value
+            cash_bucket["market_value"] = (
+                cash_bucket["market_value"] + market_value
+                if cash_bucket["market_value"] is not None and market_value is not None else None
+            )
             cash_bucket["_parts"].add(code)
             continue
 
@@ -61,7 +64,10 @@ def merge_top_holdings(holdings: Iterable[Dict[str, Any]], total_value: float, t
         else:
             row = merged_by_code[key]
             row["quantity"] += quantity
-            row["market_value"] += market_value
+            row["market_value"] = (
+                row["market_value"] + market_value
+                if row["market_value"] is not None and market_value is not None else None
+            )
             row["_parts"].add(code)
             if row.get("currency") != (holding.get("currency") or "MIXED"):
                 row["currency"] = "MIXED"
@@ -74,8 +80,8 @@ def merge_top_holdings(holdings: Iterable[Dict[str, Any]], total_value: float, t
 
     for row in merged_rows:
         row.pop("_parts", None)
-        market_value = float(row.get("market_value") or 0.0)
-        row["weight"] = (market_value / total_value) if total_value > 0 else 0.0
+        market_value = row["market_value"]
+        row["weight"] = market_value / total_value if market_value is not None and total_value > 0 else None
 
     merged_rows.sort(key=lambda row: float(row.get("market_value") or 0.0), reverse=True)
     return merged_rows[:top_n]

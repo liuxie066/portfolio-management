@@ -1,0 +1,42 @@
+{
+  "base": "43def4c",
+  "python": "3.12.13",
+  "platform": "macOS-27.2.1-arm64-arm-64bit",
+  "method": "3 warmups; 21 sequential samples; separate tracemalloc peak; synthetic in-memory storage; no network",
+  "scenarios": [
+    {
+      "before": {
+        "median_ms": 10.444,
+        "max_ms": 11.077,
+        "peak_allocated_kib": 86.5,
+        "repetitions": 21
+      },
+      "after": {
+        "median_ms": 1.7,
+        "max_ms": 1.829,
+        "peak_allocated_kib": 64.6,
+        "repetitions": 21
+      },
+      "identical_financial_payload": true,
+      "source_reads_per_build": 1,
+      "rows": 2500
+    },
+    {
+      "before": {
+        "median_ms": 41.358,
+        "max_ms": 44.708,
+        "peak_allocated_kib": 324.6,
+        "repetitions": 21
+      },
+      "after": {
+        "median_ms": 6.878,
+        "max_ms": 7.233,
+        "peak_allocated_kib": 245.0,
+        "repetitions": 21
+      },
+      "identical_financial_payload": true,
+      "source_reads_per_build": 1,
+      "rows": 10000
+    }
+  ]
+}

@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang='zh-CN'>
+<head>
+  <meta charset='utf-8' />
+  <meta name='viewport' content='width=device-width, initial-scale=1' />
+  <title>Daily Portfolio Report - 2026-11-17</title>
+  <style>
+    :root {
+      --bg: #f6f8fa;
+      --card: #ffffff;
+      --text: #24292f;
+      --muted: #57606a;
+      --border: #d0d7de;
+      --up: #1a7f37;
+      --down: #cf222e;
+      --accent: #0969da;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,"PingFang SC","Microsoft YaHei",sans-serif; background: var(--bg); color: var(--text); }
+    .wrap { max-width: 1120px; margin: 28px auto 56px; padding: 0 16px; }
+    .header { margin-bottom: 16px; }
+    .title { font-size: 30px; font-weight: 700; margin: 0; }
+    .sub { color: var(--muted); font-size: 14px; margin-top: 6px; }
+    .grid { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 12px; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 14px; margin-top: 12px; }
+    .kpi-title { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+    .kpi-value { font-size: 24px; font-weight: 700; line-height: 1.2; }
+    .up { color: var(--up); }
+    .down { color: var(--down); }
+    h2 { font-size: 18px; margin: 0 0 12px; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { border-top: 1px solid var(--border); padding: 10px 8px; text-align: left; }
+    th { color: var(--muted); font-weight: 600; background: #f6f8fa; }
+    .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+    /* Mobile readability */
+    @media (max-width: 980px) { .grid { grid-template-columns: repeat(2, minmax(0,1fr)); } }
+    @media (max-width: 560px) {
+      .wrap { margin: 16px auto 40px; }
+      .title { font-size: 22px; }
+      .sub { font-size: 12px; }
+      .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+      .card { padding: 12px; border-radius: 12px; }
+      .kpi-title { font-size: 11px; margin-bottom: 6px; }
+      .kpi-value { font-size: 20px; }
+      table { font-size: 13px; }
+      th, td { padding: 8px 6px; }
+
+      /* Hide less important columns on very small screens */
+      table.holdings th:nth-child(3), table.holdings td:nth-child(3) { display: none; } /* Market */
+      table.holdings th:nth-child(4), table.holdings td:nth-child(4) { display: none; } /* Quantity */
+
+      /* Make KPI cards 2-per-row */
+      .grid .card { margin-top: 0; }
+      .grid { margin-top: 12px; }
+    }
+
+    .footer { margin-top: 18px; color: var(--muted); font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class='wrap'>
+    <div class='header'>
+      <h1 class='title'>Portfolio Daily Report · 2026-11-17</h1>
+      <div class='sub'>snapshot_time: 2026-11-18T08:00:00+08:00 · run_id: synthetic-report-20261118</div>
+    </div>
+
+    <div class='grid'>
+      <div class='card'><div class='kpi-title'>Total Value</div><div class='kpi-value'>¥12,345,678.90</div></div>
+      <div class='card'><div class='kpi-title'>NAV</div><div class='kpi-value'>1.234567</div></div>
+      <div class='card'><div class='kpi-title'>Cash ratio</div><div class='kpi-value'>20.00%</div></div>
+      <div class='card'><div class='kpi-title'>Cash flow</div><div class='kpi-value up'>¥25,000.00</div></div>
+
+      <div class='card'><div class='kpi-title'>Daily PnL</div><div class='kpi-value down'>¥-12,345.67</div></div>
+      <div class='card'><div class='kpi-title'>MTD return</div><div class='kpi-value up'>+2.34%</div></div>
+      <div class='card'><div class='kpi-title'>YTD return</div><div class='kpi-value down'>-1.23%</div></div>
+      <div class='card'><div class='kpi-title'>MTD / YTD PnL</div><div class='kpi-value down'>¥289,123.45 / ¥-153,456.78</div></div>
+    </div>
+
+    <div class='card'>
+      <h2>Top Holdings</h2>
+      <div class='table-wrap'>
+        <table class='holdings'>
+          <thead>
+            <tr><th>Code</th><th>Name</th><th>Market</th><th>Quantity</th><th>Market Value</th><th>Weight</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>DEMO-A</td><td>全球股票示例基金</td><td>多券商汇总</td><td>12345.6789</td><td>¥4,938,271.56</td><td>40.00%</td></tr>
+<tr><td>DEMO-B</td><td>境内债券示例基金</td><td>多券商汇总</td><td>234567.89</td><td>¥3,703,703.67</td><td>30.00%</td></tr>
+<tr><td>CASH+MMF</td><td>现金及货基(合并)</td><td>多券商汇总</td><td>999999</td><td>¥2,469,135.78</td><td>20.00%</td></tr>
+<tr><td>DEMO-C</td><td>香港股票示例</td><td>多券商汇总</td><td>10000</td><td>¥1,234,567.89</td><td>10.00%</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class='card'>
+      <h2>Market Breakdown</h2>
+      <div class='table-wrap'>
+        <table class='breakdown'>
+          <thead>
+            <tr><th>Market</th><th>Value</th><th>Ratio</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>示例券商 A</td><td>¥7,407,407.34</td><td>60.00%</td></tr>
+<tr><td>示例券商 B</td><td>¥3,703,703.67</td><td>30.00%</td></tr>
+<tr><td>示例券商 C</td><td>¥1,234,567.89</td><td>10.00%</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class='card'><h2>Warnings</h2><ul><li>合成示例：部分价格来自缓存，请核对估值时间；本页不是生产账本。</li></ul></div>
+
+    <div class='footer'>Generated by scripts/generate_daily_report_html.py</div>
+  </div>
+</body>
+</html>

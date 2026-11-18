@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import logging
+import math
 import os
 import json
 import sys
@@ -80,16 +81,18 @@ def _dump(obj, as_json: bool):
 
 def _money(value) -> str:
     try:
-        return f"¥{float(value or 0):,.2f}"
+        number = float(value)
+        return f"¥{number:,.2f}" if math.isfinite(number) else "—"
     except (TypeError, ValueError):
-        return "¥0.00"
+        return "—"
 
 
 def _pct(value) -> str:
     try:
-        return f"{float(value or 0) * 100:.2f}%"
+        number = float(value)
+        return f"{number:.2%}" if math.isfinite(number) else "—"
     except (TypeError, ValueError):
-        return "0.00%"
+        return "—"
 
 
 def _print_distribution(payload):
@@ -123,9 +126,10 @@ def _print_distribution(payload):
 
 def _qty(value) -> str:
     try:
-        return f"{float(value or 0):,.4f}"
+        number = float(value)
+        return f"{number:,.4f}" if math.isfinite(number) else "—"
     except (TypeError, ValueError):
-        return "0.0000"
+        return "—"
 
 
 def _print_asset_distribution(payload):

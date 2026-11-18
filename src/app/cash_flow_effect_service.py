@@ -217,10 +217,7 @@ class CashFlowEffectService:
         if not callable(getter):
             self._nav_history_cache[account] = False
             return False
-        try:
-            rows = getter(account, days=9999)
-        except TypeError:
-            rows = getter(account)
+        rows = getter(account, days=9999, fresh=True)
         result = bool(rows)
         self._nav_history_cache[account] = result
         return result
@@ -336,6 +333,7 @@ class CashFlowEffectService:
         """Complete Feishu scan; partial reads never become successful runs."""
         scope = account or "all"
         with process_lock("cash-flow-effects:scanner"):
+            self._nav_history_cache.clear()
             previous_scan = self.store.latest_scan(scope=scope)
             try:
                 if cash_flow_dataset is None:
@@ -450,7 +448,6 @@ class CashFlowEffectService:
             try:
                 source = self.source_from_cash_flow(flow)
                 mode = "record_only" if flow.flow_date < cutover else "apply"
-                desired_state = self._initial_state(source, mode)
                 error = None
             except Exception as exc:
                 source = raw_source
@@ -458,6 +455,9 @@ class CashFlowEffectService:
                 desired_state = "blocked"
                 error = str(exc)
                 blocked += 1
+            else:
+                # NAV/calendar outages do not change the cash-flow source facts.
+                desired_state = self._initial_state(source, mode)
             source_hash = sha256_json({
                 "contract": HASH_CONTRACT_VERSION,
                 "source": source,
@@ -983,7 +983,6 @@ class CashFlowEffectService:
                     if current.flow_date < self.store.cutover_date
                     else "apply"
                 )
-                state = self._initial_state(source, mode)
                 event_type = "source_changed"
             except Exception as exc:
                 source = self._raw_source(current)
@@ -991,6 +990,8 @@ class CashFlowEffectService:
                 state = "blocked"
                 error = str(exc)
                 event_type = "source_changed_blocked"
+            else:
+                state = self._initial_state(source, mode)
         source_hash = sha256_json({
             "contract": HASH_CONTRACT_VERSION,
             "source": source,
@@ -1780,6 +1781,7 @@ class CashFlowEffectService:
         external_action: Optional[str] = None,
         historical_apply: bool = False,
     ) -> Dict[str, Any]:
+        self._nav_history_cache.clear()
         effect = self.store.get_effect(effect_id)
         if not effect:
             raise KeyError(f"cash-flow effect not found: {effect_id}")

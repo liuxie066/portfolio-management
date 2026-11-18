@@ -194,7 +194,7 @@ def test_pm_quality_payload_validates_and_is_dataset_scoped(monkeypatch, tmp_pat
     receipt_store = FutuSyncEvidenceStore(tmp_path / "receipts")
     _publish_receipt(receipt_store, _receipt())
     storage = SimpleNamespace(
-        get_nav_history=lambda _account, days: [_final_nav()],
+        get_nav_history=lambda _account, days, fresh: [_final_nav()],
         audit_nav_history_duplicates=lambda account: {
             "success": True,
             "duplicate_group_count": 0,
@@ -253,7 +253,7 @@ def test_pm_quality_finality_and_partial_write_fail_closed(monkeypatch, tmp_path
     receipt_store = FutuSyncEvidenceStore(tmp_path / "receipts")
     _publish_receipt(receipt_store, _receipt(cash_status="trusted", mmf_status="unavailable"))
     storage = SimpleNamespace(
-        get_nav_history=lambda _account, days: [_final_nav(include_finality=False)],
+        get_nav_history=lambda _account, days, fresh: [_final_nav(include_finality=False)],
         audit_nav_history_duplicates=lambda account: {
             "success": True,
             "duplicate_group_count": 0,
@@ -340,7 +340,7 @@ def test_stale_sync_receipt_marks_runtime_and_dependent_datasets_unavailable(
     receipt_store = FutuSyncEvidenceStore(tmp_path / "receipts")
     _publish_receipt(receipt_store, _receipt())
     storage = SimpleNamespace(
-        get_nav_history=lambda _account, days: [_final_nav()],
+        get_nav_history=lambda _account, days, fresh: [_final_nav()],
         audit_nav_history_duplicates=lambda account: {
             "success": True,
             "duplicate_group_count": 0,
@@ -381,7 +381,7 @@ def test_current_window_grace_keeps_previous_completed_window_current(
     receipt_store = FutuSyncEvidenceStore(tmp_path / "receipts")
     _publish_receipt(receipt_store, _receipt())
     storage = SimpleNamespace(
-        get_nav_history=lambda _account, days: [_final_nav()],
+        get_nav_history=lambda _account, days, fresh: [_final_nav()],
         audit_nav_history_duplicates=lambda account: {
             "success": True,
             "duplicate_group_count": 0,
@@ -412,7 +412,7 @@ def test_current_failed_sync_and_incomplete_opend_evidence_are_independent(
     failed["stages"]["fund_mmf"] = {"status": "failed"}
     _publish_receipt(receipt_store, failed)
     storage = SimpleNamespace(
-        get_nav_history=lambda _account, days: [_final_nav()],
+        get_nav_history=lambda _account, days, fresh: [_final_nav()],
         audit_nav_history_duplicates=lambda account: {
             "success": True,
             "duplicate_group_count": 0,
@@ -497,7 +497,7 @@ def test_duplicate_account_mapping_blocks_every_colliding_account(
     monkeypatch.setenv(config.CONFIG_FILE_ENV, str(path))
     config.reload_config()
     storage = SimpleNamespace(
-        get_nav_history=lambda _account, days: [],
+        get_nav_history=lambda _account, days, fresh: [],
         audit_nav_history_duplicates=lambda account: {
             "success": True,
             "duplicate_group_count": 0,
@@ -518,3 +518,59 @@ def test_duplicate_account_mapping_blocks_every_colliding_account(
     assert all(item["status"] == "unavailable" for item in mappings)
     assert all(item["reason_codes"] == ["ACCOUNT_MAPPING_DUPLICATE"] for item in mappings)
     assert payload["runtime"]["status"] == "unhealthy"
+
+
+@pytest.mark.parametrize("snapshot_details", [
+    {"snapshot_persisted": False, "snapshot_status": "prepared"},
+    {"snapshot_persisted": False, "snapshot_status": "failed"},
+    {"snapshot_status": "failed"},
+])
+def test_quality_fresh_nav_rejects_incomplete_snapshot_and_changed_price_evidence(monkeypatch, tmp_path, snapshot_details):
+    from src.feishu_storage import FeishuStorage
+    from src.local_cache import LocalNavIndexCache
+
+    _configure(monkeypatch, tmp_path)
+    monkeypatch.setattr("src.time_utils.bj_today", lambda: date(2026, 7, 26))
+    receipt_store = FutuSyncEvidenceStore(tmp_path / "receipts")
+    _publish_receipt(receipt_store, _receipt())
+    nav = _final_nav()
+    row = {"record_id": "nav", "fields": {"account": "lx", "date": nav.date.isoformat(), "total_value": 100,
+           "shares": 100, "nav": 1, "details": nav.details}}
+    fail = False
+    calls = []
+    def list_records(table, **kwargs):
+        assert table == "nav_history"
+        calls.append(kwargs)
+        if fail:
+            raise RuntimeError("canonical NAV unavailable")
+        return [row]
+    storage = FeishuStorage(client=SimpleNamespace(list_records=list_records),
+                            local_nav_index_cache=LocalNavIndexCache(tmp_path / "nav.json"))
+    service = PMQualityService(storage, receipt_store=receipt_store, artifact_store=QualityArtifactStore(tmp_path / "status.json"),
+                               instance_id="pm-test", now_fn=lambda: datetime(2026, 7, 26, 10, tzinfo=UTC))
+    def build():
+        return {item["dataset_id"]: item for item in service.build(accounts=["lx"])["datasets"]}
+    assert build()["pm.nav"]["status"] == "trusted"  # legacy final without snapshot markers
+    row["fields"]["details"] = {**nav.details, **snapshot_details}
+    result = build()
+    assert result["pm.nav"]["status"] == "untrusted"
+    assert "nav_finality:snapshot_incomplete" in result["pm.nav"]["blocked_by"]
+    row["fields"]["details"] = _final_nav(price_status="partial").details
+    result = build()
+    assert result["pm.prices"]["status"] == "partial"
+    assert result["pm.nav"]["status"] == "untrusted"
+    fail = True
+    result = build()
+    assert result["pm.prices"]["status"] == "unavailable"
+    assert result["pm.nav"]["status"] != "trusted"
+    assert len(calls) == 8  # one fresh valuation read plus the independent duplicate audit
+
+
+@pytest.mark.parametrize("snapshot_status", [[], {}, "planned", "unknown", ""])
+def test_finality_rejects_explicit_unrecognized_snapshot_marker(snapshot_status):
+    from src.app.nav_finality import evaluate_nav_finality
+    nav = _final_nav()
+    nav.details["snapshot_status"] = snapshot_status
+    decision = evaluate_nav_finality(nav.details, target_date=nav.date)
+    assert not decision.eligible
+    assert decision.reason == "snapshot_incomplete"

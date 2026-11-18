@@ -380,3 +380,14 @@ def test_cash_receipt_same_database_locks_across_different_data_dirs(tmp_path):
     assert not duplicate
     assert sum(results.get(timeout=5)["sent"] for _ in processes) == 1
     assert store.list_pending_receipts() == []
+
+
+def test_discovery_names_truncation_and_existing_pending_review_command():
+    message = CashFlowEffectReceiptService.build_message({
+        "receipt_type": "discovery",
+        "payload": {"pending_count": 15, "added": 15,
+                    "effects": [{"effect_id": f"effect-{i}", "state": "pending"} for i in range(10)]},
+    })
+    assert "新增 15" in message
+    assert "最多 10 条" in message
+    assert "待处理项：pm cash-flow review" in message

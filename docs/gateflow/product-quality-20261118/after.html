@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>投资组合日报 · demo · 2026-11-17</title>
+<style>
+:root { color-scheme:light dark; --bg:#f3f5f8; --card:#fff; --text:#172638; --muted:#536477; --border:#d9e0e8; --accent:#235c94; --up:#176d4b; --down:#bb3341; --note:#fff5df; }
+* { box-sizing:border-box; }
+html { scroll-padding-top:16px; }
+body { margin:0; background:var(--bg); color:var(--text); font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+a { color:var(--accent); text-underline-offset:4px; }
+a:focus-visible,summary:focus-visible { outline:3px solid var(--accent); outline-offset:5px; }
+.skip { position:absolute; top:-100px; padding:12px; background:var(--card); }
+.skip:focus { top:8px; left:8px; }
+.wrap { max-width:1120px; margin:40px auto; padding:0 24px; }
+header { border-bottom:2px solid var(--text); padding-bottom:24px; }
+.eyebrow { color:var(--muted); font-size:13px; letter-spacing:.08em; margin:0; }
+h1 { font-size:32px; letter-spacing:-.03em; line-height:1.25; margin:8px 0 16px; }
+h2 { font-size:20px; margin:0 0 12px; }
+p { margin:8px 0; }
+.context { display:flex; flex-wrap:wrap; gap:8px 24px; overflow-wrap:anywhere; }
+.status { font-weight:600; }
+nav { display:flex; flex-wrap:wrap; gap:12px 24px; margin:16px 0 24px; }
+nav a { padding:6px 0; }
+section { margin-top:28px; }
+.panel { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:24px; }
+.grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:24px; margin:0; }
+.metric { min-width:0; }
+dt,.hint,caption,.muted { color:var(--muted); }
+dt { font-size:13px; margin-bottom:8px; }
+dd { margin:0; font-size:24px; font-weight:650; line-height:1.35; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+dd.hint { font-size:12px; font-weight:400; margin-top:8px; }
+.primary .metric:first-child { grid-column:span 2; }
+.primary { grid-template-columns:repeat(5,minmax(0,1fr)); }
+.primary .metric:first-child dd:not(.hint) { font-size:32px; }
+.cash-flow { border-top:1px solid var(--border); padding-top:16px; margin-top:20px; }
+.up { color:var(--up); } .down { color:var(--down); }
+.notes { padding:18px 24px; background:var(--note); border-left:4px solid var(--accent); border-radius:4px; overflow-wrap:anywhere; }
+.notes h2 { font-size:16px; } .notes ul { margin:0; padding-left:20px; }
+table { border-collapse:collapse; width:100%; font-size:14px; }
+caption { text-align:left; font-size:13px; padding-bottom:16px; }
+th,td { padding:14px 10px; border-bottom:1px solid var(--border); text-align:left; overflow-wrap:anywhere; }
+thead th { color:var(--muted); font-size:12px; font-weight:600; }
+tbody th { font-weight:500; }
+.number { text-align:right; font-variant-numeric:tabular-nums; }
+.security,.code { display:block; } .code { color:var(--muted); font-size:12px; }
+.empty { color:var(--muted); padding:20px 0; }
+summary { cursor:pointer; padding:8px 0; font-weight:600; }
+.trace { overflow-wrap:anywhere; font-size:13px; }
+footer { color:var(--muted); margin-top:28px; font-size:12px; }
+@media(prefers-color-scheme:dark) { :root { --bg:#121a24; --card:#1a2634; --text:#e5edf5; --muted:#b0c0d0; --border:#39495b; --accent:#8fc3f6; --up:#7fdbb1; --down:#ff9da7; --note:#302b20; } }
+@media(max-width:900px) { .grid,.primary { grid-template-columns:repeat(2,minmax(0,1fr)); } .primary .metric:first-child { grid-column:auto; } }
+@media(max-width:600px) {
+ .wrap { margin:20px auto; padding:0 16px; } h1 { font-size:26px; }
+ .panel { padding:18px 14px; } .grid { gap:22px 12px; }
+ .primary .metric:first-child { grid-column:span 2; } dd { font-size:21px; }
+ .primary .metric:first-child dd:not(.hint) { font-size:30px; }
+ .holdings,.holdings tbody,.holdings tr,.holdings td,.holdings th { display:block; }
+ .holdings caption { display:block; }
+ .holdings thead { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
+ .holdings tr { padding:12px 0; border-bottom:1px solid var(--border); }
+ .holdings th,.holdings td { border:0; padding:5px 0; }
+ .holdings td { display:grid; grid-template-columns:90px minmax(0,1fr); gap:10px; text-align:right; }
+ .holdings td::before { content:attr(data-label); text-align:left; color:var(--muted); font-size:13px; }
+ th,td { padding:12px 5px; }
+}
+@media(max-width:480px) { .grid,.primary { grid-template-columns:minmax(0,1fr); } .primary .metric:first-child { grid-column:auto; } }
+@media print { :root { color-scheme:light; --bg:#fff; --card:#fff; --text:#111; --muted:#444; --border:#aaa; --up:#111; --down:#111; --note:#fff; } .wrap { margin:0; max-width:none; } nav,.skip { display:none; } .panel { break-inside:avoid; } details .trace { display:block; } }
+</style>
+</head>
+<body>
+<a class="skip" href="#overview">跳至资产概览</a>
+<main class="wrap">
+<header><p class="eyebrow">PORTFOLIO MANAGEMENT / DAILY REVIEW</p><h1>投资组合日报</h1>
+<div class="context"><span>账户 <strong>demo</strong></span><span>NAV 日期 <strong>2026-11-17</strong></span><span class="status">预览 · NAV 未写入</span></div>
+<p class="muted trace">快照时间：2026-11-18T08:00:00+08:00</p></header>
+<nav aria-label="日报章节"><a href="#overview">资产概览</a><a href="#returns">收益表现</a><a href="#holdings">主要持仓</a><a href="#brokers">券商分布</a><a href="#audit">追溯信息</a></nav>
+<aside class='notes' aria-labelledby='notes-title'><h2 id='notes-title'>估值与处理提示 · 1</h2><ul><li>合成示例：部分价格来自缓存，请核对估值时间；本页不是生产账本。</li></ul></aside>
+<section id="overview" class="panel" aria-labelledby="overview-title"><h2 id="overview-title">资产概览</h2><dl class="grid primary"><div class='metric'><dt>总资产 · CNY</dt><dd class=''>¥12,345,678.90</dd><dd class='hint'>按快照估值折合人民币</dd></div><div class='metric'><dt>当日盈亏 · CNY</dt><dd class='down'>¥-12,345.67</dd></div><div class='metric'><dt>单位净值</dt><dd class=''>1.234567</dd></div><div class='metric'><dt>现金占比</dt><dd class=''>20.00%</dd></div></dl><p class="cash-flow">当日现金流 · CNY <strong>¥25,000.00</strong> <span class="muted">／ 现金流与投资盈亏分列</span></p></section>
+<section id="returns" class="panel" aria-labelledby="returns-title"><h2 id="returns-title">收益表现</h2><dl class="grid"><div class='metric'><dt>本月收益率</dt><dd class='up'>+2.34%</dd></div><div class='metric'><dt>本月盈亏 · CNY</dt><dd class='up'>¥289,123.45</dd></div><div class='metric'><dt>本年收益率</dt><dd class='down'>-1.23%</dd></div><div class='metric'><dt>本年盈亏 · CNY</dt><dd class='down'>¥-153,456.78</dd></div></dl></section>
+<section id="holdings" class="panel" aria-labelledby="holdings-title"><h2 id="holdings-title">主要持仓</h2><table class='holdings'><caption>主要持仓（最多 10 项；同代码跨券商合并，现金与货基合并）</caption><thead><tr><th scope='col'>资产 / 代码</th><th scope='col'>券商</th><th scope='col' class='number'>数量</th><th scope='col' class='number'>市值 · CNY</th><th scope='col' class='number'>占比</th></tr></thead><tbody><tr><th scope='row'><span class='security'>全球股票示例基金</span><span class='code'>DEMO-A</span></th><td data-label='券商'>多券商汇总</td><td data-label='数量' class='number'>12,345.6789</td><td data-label='市值 · CNY' class='number'>¥4,938,271.56</td><td data-label='占比' class='number'>40.00%</td></tr><tr><th scope='row'><span class='security'>境内债券示例基金</span><span class='code'>DEMO-B</span></th><td data-label='券商'>多券商汇总</td><td data-label='数量' class='number'>234,567.89</td><td data-label='市值 · CNY' class='number'>¥3,703,703.67</td><td data-label='占比' class='number'>30.00%</td></tr><tr><th scope='row'><span class='security'>现金及货基(合并)</span><span class='code'>CASH+MMF</span></th><td data-label='券商'>多券商汇总</td><td data-label='数量' class='number'>不适用（合并）</td><td data-label='市值 · CNY' class='number'>¥2,469,135.78</td><td data-label='占比' class='number'>20.00%</td></tr><tr><th scope='row'><span class='security'>香港股票示例</span><span class='code'>DEMO-C</span></th><td data-label='券商'>多券商汇总</td><td data-label='数量' class='number'>10,000</td><td data-label='市值 · CNY' class='number'>¥1,234,567.89</td><td data-label='占比' class='number'>10.00%</td></tr></tbody></table></section>
+<section id="brokers" class="panel" aria-labelledby="brokers-title"><h2 id="brokers-title">券商分布</h2><table><caption>按快照中的券商归属汇总</caption><thead><tr><th scope='col'>券商</th><th scope='col' class='number'>市值 · CNY</th><th scope='col' class='number'>占比</th></tr></thead><tbody><tr><th scope='row'>示例券商 A</th><td class='number'>¥7,407,407.34</td><td class='number'>60.00%</td></tr><tr><th scope='row'>示例券商 B</th><td class='number'>¥3,703,703.67</td><td class='number'>30.00%</td></tr><tr><th scope='row'>示例券商 C</th><td class='number'>¥1,234,567.89</td><td class='number'>10.00%</td></tr></tbody></table></section>
+<section id="audit"><details open><summary>追溯信息与口径</summary><div class="trace"><p>snapshot_time: 2026-11-18T08:00:00+08:00</p><p>run_id: synthetic-report-20261118</p><p>金额统一折合人民币；“—”表示未提供或不可用，不代表零。现金与货基合并项不展示混合单位的数量。</p><p>这是静态快照，不会自动刷新。NAV 已记录仅表示本次写入结果，不等同于通过全部质量检查。</p></div></details></section>
+<footer>PM · 本地日报 · 依据同一次估值快照生成</footer>
+</main>
+</body>
+</html>

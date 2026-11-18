@@ -256,6 +256,10 @@ python scripts/publish_daily_report.py --account lx --write-nav --confirm
 
 输出中的 `public_url` 固定为 `null`，`public_url_status=disabled`。
 
+日报是可离线分享的单文件 HTML，展示账户、NAV 日期、快照时间和本次记录状态，
+区分预览与已记录。估值提示在资产摘要之前，金额统一标注 CNY，未知值显示为
+“—”；手机端保留持仓数量和券商信息，支持深色模式与打印。
+
 ## Linux 定时运行
 
 生产部署建议把代码、配置和运行数据分开：

@@ -50,7 +50,7 @@ class CapitalFactsService:
         navs = sorted(
             (
                 nav
-                for nav in self.storage.get_nav_history(account_value, days=10000)
+                for nav in self.storage.get_nav_history(account_value, days=10000, fresh=True)
                 if getattr(nav, "date", None) is not None
             ),
             key=lambda nav: nav.date,

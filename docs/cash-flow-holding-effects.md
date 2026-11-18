@@ -328,7 +328,11 @@ stateDiagram-v2
 `compensation_pending` 全部阻断。
 
 `scheduled` 不允许 preview/confirm；当目标 `nav_date < flow_date` 时不阻断
-该 NAV。到达 flow_date 后，如果前一业务日 NAV 尚未 final，保持 scheduled，
+该 NAV。扫描和确认分别重新读取账户 NAV 历史；不能复用上一轮“无历史”或
+旧 final 的判断。前一日 snapshot_persisted=false，或存在且不是 null 的 snapshot_status
+不是 complete 时不能作为已完成 final。prepared/failed 走已有快照恢复流程；
+未知或格式错误的标记须核对来源。历史 final 缺失标记或标记为 null 时保留原兼容
+规则。到达 flow_date 后，如果前一业务日 NAV 尚未 final，保持 scheduled，
 允许前一业务日 NAV 完成，但阻断 flow_date 当日及之后的 NAV。账户从未存在
 任何 NAV 时不要求虚构前一日 NAV，到达 flow_date 直接转为 `pending`；effect
 完成前仍阻断该账户的首个正式 NAV。
