@@ -3,6 +3,7 @@ from datetime import timedelta
 from unittest.mock import patch
 
 from src.models import AssetType, PriceCache
+from src.price_fetcher import PriceFetcher
 from src.pricing import BatchPricePlanner, PriceFailure, PriceQuote, PriceRequest, PriceService
 from src.pricing.types import ProviderResult
 from src.time_utils import bj_now_naive
@@ -222,3 +223,18 @@ def test_batch_planner_fetch_non_us_uses_provider_batch():
 
     assert result == {"000001": payload}
     mocked.assert_called_once()
+
+
+def test_batch_force_refresh_cannot_return_cache_after_provider_miss(monkeypatch):
+    storage = StubStorage(cached=_cache(timedelta(hours=1)))
+    fetcher = PriceFetcher(storage=storage, use_cache=True)
+    monkeypatch.setattr(
+        "src.pricing.batch.fetch_tencent_quotes_batch",
+        lambda _fetcher, codes, **_kwargs: ({}, codes),
+    )
+    with patch.object(fetcher, "_fetch_realtime", return_value=None) as realtime:
+        assert fetcher.fetch_batch(["000001.SZ"])["000001.SZ"]["cache_status"] == "hit"
+        realtime.assert_not_called()
+
+        assert fetcher.fetch_batch(["000001.SZ"], force_refresh=True) == {}
+        realtime.assert_called_once()

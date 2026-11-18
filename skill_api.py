@@ -394,14 +394,8 @@ class PortfolioSkill:
         run_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """单账户日报包薄入口：业务流程由 DailyAccountNavService 执行。"""
-        from src.app import DailyAccountNavService
-
-        return DailyAccountNavService(
+        return self._service().daily_report_bundle(
             account=self.account,
-            storage=self.storage,
-            portfolio=self.portfolio,
-            read_service=self._read_service(),
-        ).run(
             nav_date=nav_date,
             price_timeout=price_timeout,
             dry_run=dry_run,
@@ -431,13 +425,7 @@ class PortfolioSkill:
         run_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """每日净值任务薄入口：单/多账户统一由 DailyNavJobService 执行。"""
-        from src.app import DailyNavJobService
-
-        return DailyNavJobService(
-            storage=self.storage,
-            portfolio=self.portfolio,
-            default_account=self.account,
-        ).run(
+        return self._service().run_daily_nav_job(
             nav_date=nav_date,
             run_date=run_date,
             accounts=accounts,

@@ -50,7 +50,7 @@ def test_repair_uses_accuracy_audit_pipeline():
     })
     skill.storage.patch_nav_derived_fields = Mock()
 
-    result = skill.repair_nav_history_metrics(dry_run=False, write_report=False)
+    result = skill.repair_nav_history_metrics(dry_run=True, write_report=False)
 
     assert result['repair_policy'] == 'anomaly_only_via_accuracy_audit'
     assert result['count'] == 1
@@ -63,8 +63,4 @@ def test_repair_uses_accuracy_audit_pipeline():
     assert update['fields']['ytd_pnl'] is None
     assert result['accuracy_report']['repair_candidates'] == 1
     assert result['skipped_count'] == 2
-    skill.storage.patch_nav_derived_fields.assert_called_once_with(
-        'rec-bad',
-        update['fields'],
-        dry_run=False,
-    )
+    skill.storage.patch_nav_derived_fields.assert_not_called()

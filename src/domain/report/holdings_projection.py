@@ -85,3 +85,17 @@ def merge_top_holdings(holdings: Iterable[Dict[str, Any]], total_value: float, t
 
     merged_rows.sort(key=lambda row: float(row.get("market_value") or 0.0), reverse=True)
     return merged_rows[:top_n]
+
+
+def report_holdings_fields(holdings_data: dict, position_data: dict) -> dict:
+    """Project the valuation overview and top holdings used by reports."""
+    total_value = holdings_data.get("total_value", 0)
+    return {
+        "overview": {
+            "total_value": total_value,
+            "cash_ratio": position_data.get("cash_ratio", 0),
+            "stock_ratio": position_data.get("stock_ratio", 0),
+            "fund_ratio": position_data.get("fund_ratio", 0),
+        },
+        "top_holdings": merge_top_holdings(holdings_data.get("holdings", []), total_value or 0),
+    }

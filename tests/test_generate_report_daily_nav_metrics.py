@@ -57,6 +57,9 @@ class TestGenerateReportDailyNavMetrics(unittest.TestCase):
         self.assertEqual(result['ytd_nav_change'], 0.0456)
         self.assertEqual(result['mtd_pnl'], 12.3)
         self.assertEqual(result['ytd_pnl'], 45.6)
+        self.assertAlmostEqual(result['cagr'], 0.0888)
+        self.assertEqual(result['cagr_pct'], 8.88)
+        self.assertNotIn('returns', result)
 
     def test_generate_report_does_not_record_nav(self):
         skill = PortfolioSkill.__new__(PortfolioSkill)

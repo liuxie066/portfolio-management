@@ -14,7 +14,7 @@ from src.domain.nav.performance import (
     calc_year_return,
     sort_navs,
 )
-from src.domain.report.holdings_projection import merge_top_holdings
+from src.domain.report.holdings_projection import report_holdings_fields
 from src.time_utils import bj_now_naive, bj_today
 
 
@@ -90,12 +90,7 @@ class ReportQueryService:
             return {
                 "success": True,
                 "generated_at": bj_now_naive().isoformat(),
-                "overview": {
-                    "total_value": holdings_data.get("total_value", 0),
-                    "cash_ratio": position_data.get("cash_ratio", 0),
-                    "stock_ratio": position_data.get("stock_ratio", 0),
-                    "fund_ratio": position_data.get("fund_ratio", 0),
-                },
+                **report_holdings_fields(holdings_data, position_data),
                 "nav": nav_latest,
                 "returns": {
                     "monthly": calc_month_return(current_month, navs=working_navs),
@@ -107,11 +102,6 @@ class ReportQueryService:
                     "historical_volatility": hist_volatility,
                     "max_drawdown": hist_max_dd,
                 },
-                "top_holdings": merge_top_holdings(
-                    holdings=holdings_data.get("holdings", []),
-                    total_value=holdings_data.get("total_value", 0) or 0,
-                    top_n=10,
-                ),
                 "distribution": distribution_result,
             }
         except Exception as e:

@@ -231,6 +231,7 @@ def test_nav_receipt_claim_is_atomic_across_dispatchers(tmp_path):
 
     assert [row["receipt_key"] for row in claimed] == ["nav:run_atomic"]
     assert competing == []
+    first.start_nav_receipt_send("nav:run_atomic", claim_id="worker_1")
     first.mark_nav_receipt(
         "nav:run_atomic",
         claim_id="worker_1",
@@ -238,6 +239,43 @@ def test_nav_receipt_claim_is_atomic_across_dispatchers(tmp_path):
         message_id="msg_atomic",
     )
     assert second.get_nav_receipt("nav:run_atomic")["status"] == "sent"
+
+
+def test_nav_receipt_reclaims_unstarted_claim_but_never_replays_send(tmp_path):
+    clock = [datetime(2026, 7, 28, 8, 11)]
+    store = OperationStateStore(tmp_path / "operations.sqlite3", now_factory=lambda: clock[0])
+    for key in ("claimed", "sending"):
+        store.enqueue_nav_receipt(receipt_key=key, payload={})
+    assert len(store.claim_due_nav_receipts(claim_id="original")) == 2
+    store.start_nav_receipt_send("sending", claim_id="original")
+
+    clock[0] += timedelta(minutes=6)
+    rows = store.claim_due_nav_receipts(claim_id="restarted")
+    assert [row["receipt_key"] for row in rows] == ["claimed"]
+    assert store.get_nav_receipt("sending")["status"] == "unknown"
+    dispatch = NavReceiptOutboxService(store=store).dispatch_pending(receipt_key="sending")
+    assert dispatch["success"] is False
+    assert dispatch["attempted"] == 0
+    assert dispatch["unknown"] == 1
+    assert dispatch["unknown_receipt_keys"] == ["sending"]
+    with pytest.raises(KeyError):
+        store.start_nav_receipt_send("claimed", claim_id="original")
+
+
+def test_nav_receipt_sender_exception_stays_unknown_on_repeat(tmp_path):
+    store = OperationStateStore(tmp_path / "operations.sqlite3")
+    payload = {"run_id": "unknown", "dry_run": False}
+    attempts = []
+
+    class Sender:
+        def send(self, result):
+            attempts.append(result)
+            raise TimeoutError("no response")
+
+    service = NavReceiptOutboxService(store=store, sender=Sender())
+    assert service.enqueue_and_dispatch(payload)["status"] == "unknown"
+    assert service.enqueue_and_dispatch(payload)["status"] == "unknown"
+    assert attempts == [payload]
 
 
 def test_legacy_fx_confirmation_import_is_explicit_and_idempotent(tmp_path):

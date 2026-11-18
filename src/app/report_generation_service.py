@@ -6,6 +6,48 @@ from typing import Any, Callable, Dict, Optional
 from src.app.nav_payload import format_nav_payload
 
 
+def _report_cagr(nav: dict, since_inception: dict) -> tuple[Any, Any]:
+    details = nav.get("details") or {}
+    value = details.get("cagr")
+    pct = details.get("cagr_pct")
+    if value is None and since_inception.get("success"):
+        pct = since_inception.get("cagr_pct")
+        value = pct / 100 if pct is not None else since_inception.get("cagr")
+    return value, pct
+
+
+def build_daily_report(
+    *,
+    snapshot_time: Any,
+    nav: dict,
+    overview: dict,
+    top_holdings: Any,
+    warnings: list,
+    since_inception: dict,
+) -> dict:
+    """Project the NAV and presentation facts supplied by either report path."""
+    cagr, cagr_pct = _report_cagr(nav, since_inception)
+    return {
+        "success": True,
+        "snapshot_time": snapshot_time,
+        "report_type": "日报",
+        "date": nav.get("date"),
+        "overview": overview,
+        "nav": nav.get("nav"),
+        "total_value": nav.get("total_value"),
+        "cash_flow": nav.get("cash_flow"),
+        "pnl": nav.get("pnl"),
+        "mtd_nav_change": nav.get("mtd_nav_change"),
+        "ytd_nav_change": nav.get("ytd_nav_change"),
+        "mtd_pnl": nav.get("mtd_pnl"),
+        "ytd_pnl": nav.get("ytd_pnl"),
+        "top_holdings": top_holdings,
+        "cagr": cagr,
+        "cagr_pct": cagr_pct,
+        "warnings": warnings,
+    }
+
+
 class ReportGenerationService:
     """Build daily/monthly/yearly report payloads from a full report."""
 
@@ -36,36 +78,19 @@ class ReportGenerationService:
         nav_details = nav.get("details") or {}
         returns = full.get("returns") or {}
         since_inception = returns.get("since_inception") or {}
-        cagr_value = nav_details.get("cagr")
-        cagr_pct_value = nav_details.get("cagr_pct")
-        if cagr_value is None and since_inception.get("success"):
-            cagr_pct_value = since_inception.get("cagr_pct")
-            cagr_value = (cagr_pct_value / 100) if cagr_pct_value is not None else since_inception.get("cagr")
-
-        report_warnings = list(full.get("warnings") or [])
 
         if report_type == "daily":
-            return {
-                "success": True,
-                "snapshot_time": snapshot.get("snapshot_time"),
-                "report_type": "日报",
-                "date": nav.get("date"),
-                "overview": full["overview"],
-                "nav": nav.get("nav"),
-                "total_value": nav.get("total_value"),
-                "cash_flow": nav.get("cash_flow"),
-                "pnl": nav.get("pnl"),
-                "mtd_nav_change": nav.get("mtd_nav_change"),
-                "ytd_nav_change": nav.get("ytd_nav_change"),
-                "mtd_pnl": nav.get("mtd_pnl"),
-                "ytd_pnl": nav.get("ytd_pnl"),
-                "top_holdings": full.get("top_holdings"),
-                "cagr": cagr_value,
-                "cagr_pct": cagr_pct_value,
-                "warnings": report_warnings,
-            }
+            return build_daily_report(
+                snapshot_time=snapshot.get("snapshot_time"),
+                nav=nav,
+                overview=full["overview"],
+                top_holdings=full.get("top_holdings"),
+                warnings=list(full.get("warnings") or []),
+                since_inception=since_inception,
+            )
 
         if report_type == "monthly":
+            cagr_value, cagr_pct_value = _report_cagr(nav, since_inception)
             return {
                 "success": True,
                 "snapshot_time": snapshot.get("snapshot_time"),

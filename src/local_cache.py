@@ -29,7 +29,48 @@ FLUSH_INTERVAL_SECONDS = 5  # 5秒自动刷盘
 FLUSH_MAX_DIRTY_COUNT = 10   # 累积10条变更立即刷盘
 
 
-class LocalPriceCache:
+class _DelayedCacheFlush:
+    """Shared timer and shutdown lifecycle for the local JSON caches."""
+
+    def _schedule_flush(self):
+        """调度延迟写入（无锁版本，需在锁内调用）"""
+        if self._shutdown:
+            return
+        if self._flush_timer is None or not self._flush_timer.is_alive():
+            self._flush_timer = threading.Timer(FLUSH_INTERVAL_SECONDS, self._flush_delayed)
+            self._flush_timer.daemon = True
+            self._flush_timer.start()
+
+    def _flush_delayed(self):
+        """延迟写入回调"""
+        with self._lock:
+            if self._dirty_flag:
+                self._save_unlocked()
+            self._flush_timer = None
+
+    def flush(self):
+        """强制刷盘 - 线程安全"""
+        with self._lock:
+            if self._dirty_flag:
+                self._save_unlocked()
+            # 取消定时器
+            if self._flush_timer and self._flush_timer.is_alive():
+                self._flush_timer.cancel()
+                self._flush_timer = None
+
+    def close(self):
+        """关闭缓存，刷盘并清理资源"""
+        self._shutdown = True
+        self.flush()
+
+    def __del__(self):
+        """析构时确保数据写入"""
+        try:
+            self.close()
+        except Exception:
+            pass
+
+class LocalPriceCache(_DelayedCacheFlush):
     """本地文件价格缓存（替代飞书多维表存储）
 
     特性：
@@ -78,44 +119,6 @@ class LocalPriceCache:
             self._dirty_flag = False
         except IOError as e:
             logging.getLogger(__name__).warning(f"[警告] 保存本地价格缓存失败: {e}")
-
-    def _schedule_flush(self):
-        """调度延迟写入（无锁版本，需在锁内调用）"""
-        if self._shutdown:
-            return
-        if self._flush_timer is None or not self._flush_timer.is_alive():
-            self._flush_timer = threading.Timer(FLUSH_INTERVAL_SECONDS, self._flush_delayed)
-            self._flush_timer.daemon = True
-            self._flush_timer.start()
-
-    def _flush_delayed(self):
-        """延迟写入回调"""
-        with self._lock:
-            if self._dirty_flag:
-                self._save_unlocked()
-            self._flush_timer = None
-
-    def flush(self):
-        """强制刷盘 - 线程安全"""
-        with self._lock:
-            if self._dirty_flag:
-                self._save_unlocked()
-            # 取消定时器
-            if self._flush_timer and self._flush_timer.is_alive():
-                self._flush_timer.cancel()
-                self._flush_timer = None
-
-    def close(self):
-        """关闭缓存，刷盘并清理资源"""
-        self._shutdown = True
-        self.flush()
-
-    def __del__(self):
-        """析构时确保数据写入"""
-        try:
-            self.close()
-        except Exception:
-            pass
 
     def get(self, asset_id: str, *, allow_expired: bool = False, max_stale_after_expiry_sec: int = 0) -> Optional[PriceCache]:
         """获取价格缓存 - 线程安全
@@ -274,7 +277,7 @@ class LocalPriceCache:
 HOLDINGS_INDEX_FILE = _cache_file('holdings_index.json')
 
 
-class LocalHoldingsIndexCache:
+class LocalHoldingsIndexCache(_DelayedCacheFlush):
     """本地持仓索引缓存（business_key -> fields snapshot）
 
     存储结构：
@@ -344,38 +347,6 @@ class LocalHoldingsIndexCache:
         except IOError as e:
             logging.getLogger(__name__).warning(f"[警告] 保存本地持仓索引缓存失败: {e}")
 
-    def _schedule_flush(self):
-        if self._shutdown:
-            return
-        if self._flush_timer is None or not self._flush_timer.is_alive():
-            self._flush_timer = threading.Timer(FLUSH_INTERVAL_SECONDS, self._flush_delayed)
-            self._flush_timer.daemon = True
-            self._flush_timer.start()
-
-    def _flush_delayed(self):
-        with self._lock:
-            if self._dirty_flag:
-                self._save_unlocked()
-            self._flush_timer = None
-
-    def flush(self):
-        with self._lock:
-            if self._dirty_flag:
-                self._save_unlocked()
-            if self._flush_timer and self._flush_timer.is_alive():
-                self._flush_timer.cancel()
-                self._flush_timer = None
-
-    def close(self):
-        self._shutdown = True
-        self.flush()
-
-    def __del__(self):
-        try:
-            self.close()
-        except Exception:
-            pass
-
     def load_all(self) -> Dict[str, Dict[str, Any]]:
         with self._lock:
             return {k: dict(v) for k, v in self._cache.items()}
@@ -407,7 +378,7 @@ class LocalHoldingsIndexCache:
 NAV_INDEX_FILE = _cache_file('nav_index_cache.json')
 
 
-class LocalNavIndexCache:
+class LocalNavIndexCache(_DelayedCacheFlush):
     """本地 NAV 索引缓存。
 
     按 account 存储：
@@ -415,7 +386,6 @@ class LocalNavIndexCache:
     - month_end_base / year_end_base / inception_base
     - last_record
 
-    upsert_nav_records 支持按 date 替换或新增（用于批量回填/修复）。
     """
 
     VERSION = 1
@@ -464,47 +434,6 @@ class LocalNavIndexCache:
         except IOError as e:
             logging.getLogger(__name__).warning(f"[警告] 保存本地 NAV 索引缓存失败: {e}")
 
-    def _schedule_flush(self):
-        if self._shutdown:
-            return
-        if self._flush_timer is None or not self._flush_timer.is_alive():
-            self._flush_timer = threading.Timer(FLUSH_INTERVAL_SECONDS, self._flush_delayed)
-            self._flush_timer.daemon = True
-            self._flush_timer.start()
-
-    def _flush_delayed(self):
-        with self._lock:
-            if self._dirty_flag:
-                self._save_unlocked()
-            self._flush_timer = None
-
-    def flush(self):
-        with self._lock:
-            if self._dirty_flag:
-                self._save_unlocked()
-            if self._flush_timer and self._flush_timer.is_alive():
-                self._flush_timer.cancel()
-                self._flush_timer = None
-
-    def close(self):
-        self._shutdown = True
-        self.flush()
-
-    def __del__(self):
-        try:
-            self.close()
-        except Exception:
-            pass
-
-    @staticmethod
-    def _parse_date(s: Any) -> Optional[date]:
-        if not s or not isinstance(s, str):
-            return None
-        try:
-            return datetime.strptime(s[:10], '%Y-%m-%d').date()
-        except Exception:
-            return None
-
     def get_account(self, account: str) -> Dict[str, Any]:
         with self._lock:
             data = self._cache.get(account)
@@ -522,73 +451,12 @@ class LocalNavIndexCache:
             else:
                 self._schedule_flush()
 
-    @classmethod
-    def _rebuild_nav_account_payload(cls, base: Dict[str, Any], navs: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Rebuild derived account payload from nav_history rows."""
-        navs_sorted = sorted([dict(r) for r in navs], key=lambda r: r.get('date') or '')
-
-        month_end_base: Dict[str, Dict[str, Any]] = {}
-        year_end_base: Dict[str, Dict[str, Any]] = {}
-        for r in navs_sorted:
-            d = cls._parse_date(r.get('date'))
-            if not d:
-                continue
-            month_end_base[d.strftime('%Y-%m')] = dict(r)
-            year_end_base[str(d.year)] = dict(r)
-
-        inception_base = dict(navs_sorted[0]) if navs_sorted else None
-        last_record = dict(navs_sorted[-1]) if navs_sorted else None
-
-        out = dict(base or {})
-        out['nav_history'] = navs_sorted
-        out['month_end_base'] = month_end_base
-        out['year_end_base'] = year_end_base
-        out['inception_base'] = inception_base
-        out['last_record'] = last_record
-        out['record_count'] = len(navs_sorted)
-        if last_record:
-            out['latest_updated_at'] = last_record.get('updated_at')
-        else:
-            out['latest_updated_at'] = None
-        return out
-
-    def _save_account_navs_unlocked(self, account: str, navs: List[Dict[str, Any]], *, _flush: bool = False):
-        base = self._cache.get(account) if isinstance(self._cache.get(account), dict) else {}
-        rebuilt = self._rebuild_nav_account_payload(base, navs)
-        self._cache[account] = rebuilt
-        self._dirty_count += 1
-        self._dirty_flag = True
-        if _flush or self._dirty_count >= FLUSH_MAX_DIRTY_COUNT:
-            self._save_unlocked()
-        else:
-            self._schedule_flush()
-
-    def upsert_nav_records(self, account: str, records: List[Dict[str, Any]], *, _flush: bool = False):
-        """按 date 批量 upsert nav 记录（用于批量回填后增量刷新索引）。"""
-        if not records:
-            return
-        with self._lock:
-            base = self._cache.get(account) if isinstance(self._cache.get(account), dict) else {}
-            navs = list(base.get('nav_history') or [])
-            by_date: Dict[str, Dict[str, Any]] = {}
-            for r in navs:
-                ds = str((r or {}).get('date') or '')
-                if ds:
-                    by_date[ds] = dict(r)
-            for r in records:
-                ds = str((r or {}).get('date') or '')
-                if not ds:
-                    continue
-                by_date[ds] = dict(r)
-            merged = list(by_date.values())
-            self._save_account_navs_unlocked(account, merged, _flush=_flush)
-
 
 # 默认现金流聚合缓存文件路径
 CASH_FLOW_AGG_FILE = _cache_file('cash_flow_agg_cache.json')
 
 
-class LocalCashFlowAggCache:
+class LocalCashFlowAggCache(_DelayedCacheFlush):
     """本地现金流聚合缓存。
 
     按 account 存储：
@@ -642,38 +510,6 @@ class LocalCashFlowAggCache:
             self._dirty_flag = False
         except IOError as e:
             logging.getLogger(__name__).warning(f"[警告] 保存本地现金流聚合缓存失败: {e}")
-
-    def _schedule_flush(self):
-        if self._shutdown:
-            return
-        if self._flush_timer is None or not self._flush_timer.is_alive():
-            self._flush_timer = threading.Timer(FLUSH_INTERVAL_SECONDS, self._flush_delayed)
-            self._flush_timer.daemon = True
-            self._flush_timer.start()
-
-    def _flush_delayed(self):
-        with self._lock:
-            if self._dirty_flag:
-                self._save_unlocked()
-            self._flush_timer = None
-
-    def flush(self):
-        with self._lock:
-            if self._dirty_flag:
-                self._save_unlocked()
-            if self._flush_timer and self._flush_timer.is_alive():
-                self._flush_timer.cancel()
-                self._flush_timer = None
-
-    def close(self):
-        self._shutdown = True
-        self.flush()
-
-    def __del__(self):
-        try:
-            self.close()
-        except Exception:
-            pass
 
     def get_account(self, account: str) -> Dict[str, Any]:
         with self._lock:

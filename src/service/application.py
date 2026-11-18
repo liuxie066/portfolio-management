@@ -1142,6 +1142,17 @@ class PortfolioService:
                 "error": str(exc) or exc.__class__.__name__,
             }
 
+    def run_daily_nav_job(self, **kwargs: Any) -> Dict[str, Any]:
+        """Execute the NAV task without the HTTP/CLI receipt workflow."""
+        from src.app import DailyNavJobService
+
+        return DailyNavJobService(
+            storage=self.storage,
+            portfolio=self.portfolio,
+            default_account=self._resolve_account(None),
+            read_service_factory=self._read_service_factory,
+        ).run(**kwargs)
+
     def daily_nav_job(
         self,
         *,
@@ -1161,7 +1172,6 @@ class PortfolioService:
         valuation_ref: Optional[str] = None,
     ) -> Dict[str, Any]:
         from src.app.business_calendar_service import BusinessCalendarService
-        from src.app import DailyNavJobService
         from src.app.nav_history_receipt_service import NavHistoryReceiptService
         from src.app.nav_receipt_outbox_service import (
             NavReceiptOutboxService,
@@ -1171,12 +1181,7 @@ class PortfolioService:
 
         resolved_run_id = run_id or new_run_id("daily-nav-job", account or "multi")
         try:
-            result = DailyNavJobService(
-                storage=self.storage,
-                portfolio=self.portfolio,
-                default_account=self._resolve_account(None),
-                read_service_factory=self._read_service_factory,
-            ).run(
+            result = self.run_daily_nav_job(
                 nav_date=nav_date,
                 run_date=run_date,
                 accounts=accounts,
@@ -1243,7 +1248,11 @@ class PortfolioService:
                 "immediate_retry_suppressed": True,
             }
         except Exception as exc:
-            fallback = dict(receipt_sender.send(result))
-            fallback["outbox_error"] = str(exc) or exc.__class__.__name__
-            result["receipt"] = fallback
+            result["receipt"] = {
+                "success": False,
+                "status": "unknown",
+                "receipt_key": f"nav:{resolved_run_id}",
+                "outbox_error": str(exc) or exc.__class__.__name__,
+                "immediate_retry_suppressed": True,
+            }
         return result

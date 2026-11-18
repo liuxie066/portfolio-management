@@ -6,10 +6,12 @@ from typing import Any, Callable, Dict, Optional
 
 from src import config
 from src.app.notification_shells import render_receipt
+from src.feishu.errors import FeishuMessageNotSent
 from src.feishu_client import FeishuClient
 from src.process_lock import process_lock
 
 from .cash_flow_effect_store import CashFlowEffectStore
+from .receipt_delivery import receipt_outcome
 
 
 class CashFlowEffectReceiptContractError(ValueError):
@@ -59,17 +61,20 @@ class CashFlowEffectReceiptService:
     def dispatch_pending(self, *, limit: int = 100) -> Dict[str, Any]:
         db_path = self.store.db_path.resolve()
         with process_lock(f"cash-flow-effect-receipts:{db_path}", data_dir=db_path.parent):
+            interrupted = self.store.recover_interrupted_receipt_sends()
             rows = self.store.list_pending_receipts(limit=limit)
-            sent = failed = invalid = 0
+            sent = failed = invalid = unknown = 0
             results: list[Dict[str, Any]] = []
             for row in rows:
                 result = self._send(row)
-                success = bool(result.get("success"))
-                retryable = bool(result.get("retryable", True))
+                outcome = receipt_outcome(result)
+                success = outcome == "sent"
+                retryable = outcome == "failed" and bool(result.get("retryable", True))
                 self.store.mark_receipt(
                     row["receipt_key"],
                     success=success,
                     retryable=retryable,
+                    unknown=outcome == "unknown",
                     message_id=result.get("message_id"),
                     error=result.get("error"),
                 )
@@ -77,6 +82,8 @@ class CashFlowEffectReceiptService:
                     event_type = (
                         "receipt_sent"
                         if success
+                        else "receipt_unknown"
+                        if outcome == "unknown"
                         else "receipt_failed"
                         if retryable
                         else "receipt_invalid"
@@ -93,14 +100,17 @@ class CashFlowEffectReceiptService:
                     )
                 sent += int(success)
                 failed += int(not success)
-                invalid += int(not success and not retryable)
+                invalid += int(result.get("status") == "invalid")
+                unknown += int(outcome == "unknown")
                 results.append({"receipt_key": row["receipt_key"], **result})
             return {
-                "success": failed == 0,
+                "success": failed == 0 and not interrupted,
                 "attempted": len(rows),
                 "sent": sent,
                 "failed": failed,
                 "invalid": invalid,
+                "unknown": unknown + len(interrupted),
+                "interrupted_receipt_keys": interrupted,
                 "results": results,
             }
 
@@ -132,6 +142,7 @@ class CashFlowEffectReceiptService:
             return {
                 "success": False,
                 "status": "invalid",
+                "delivery_state": "failed",
                 "retryable": False,
                 "channel": "feishu",
                 "bot": "刘看山",
@@ -150,32 +161,48 @@ class CashFlowEffectReceiptService:
             return {
                 "success": False,
                 "status": "failed",
+                "delivery_state": "failed",
                 "channel": "feishu",
                 "bot": "刘看山",
                 "error": f"missing receipt config: {', '.join(missing)}",
             }
         try:
-            response = self.client_factory(
+            client = self.client_factory(
                 app_id=str(self.app_id),
                 app_secret=str(self.app_secret),
-            ).send_post_message(
+            )
+        except Exception as exc:
+            return {
+                "success": False,
+                "status": "failed",
+                "delivery_state": "failed",
+                "channel": "feishu",
+                "bot": "刘看山",
+                "error": str(exc) or type(exc).__name__,
+            }
+        self.store.start_receipt_send(row["receipt_key"])
+        try:
+            response = client.send_post_message(
                 open_id=str(self.open_id),
                 markdown=markdown,
             )
             return {
                 "success": True,
                 "status": "sent",
+                "delivery_state": "accepted",
                 "channel": "feishu",
                 "bot": "刘看山",
                 "message_id": response.get("message_id"),
             }
         except Exception as exc:
+            delivery_state = "failed" if isinstance(exc, FeishuMessageNotSent) else "unknown"
             return {
                 "success": False,
-                "status": "failed",
+                "status": delivery_state,
+                "delivery_state": delivery_state,
                 "channel": "feishu",
                 "bot": "刘看山",
-                "error": str(exc),
+                "error": str(exc) or type(exc).__name__,
             }
 
     @staticmethod

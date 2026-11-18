@@ -121,3 +121,14 @@ def get_crypto_value_price(
             raise KeyError(f"rates missing {currency}CNY")
         rates = fetch_exchange_rates()
     return get_crypto_value_price_with_rates(code, rates)
+
+
+def fixed_quote_factory(code: str) -> tuple[str, Callable[..., dict]] | None:
+    """Find the fixed quote builder and its diagnostic source for a pricing code."""
+    if is_crypto_value_code(code):
+        return "crypto_value", get_crypto_value_price
+    if code == "CASH" or code.endswith("-CASH"):
+        return "cash", get_cash_price
+    if code.endswith("-MMF"):
+        return "mmf", get_mmf_price
+    return None

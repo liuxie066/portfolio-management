@@ -29,3 +29,7 @@ class LegacyReadOnlyError(RuntimeError):
             f"Feishu {self.table} is a legacy read-only archive; "
             f"{self.operation} is disabled"
         )
+
+
+class FeishuMessageNotSent(ValueError):
+    """The message request was not issued or was explicitly rate-limited."""

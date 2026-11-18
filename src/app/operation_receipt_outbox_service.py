@@ -8,6 +8,7 @@ from uuid import uuid4
 from .cash_flow_receipt_service import CashFlowReceiptService
 from .holdings_receipt_service import HoldingsReceiptService
 from .operation_state_store import OperationStateStore
+from .receipt_delivery import receipt_outcome
 
 
 class OperationReceiptOutboxService:
@@ -81,14 +82,7 @@ class OperationReceiptOutboxService:
                         "status": "unknown",
                         "error": str(exc) or exc.__class__.__name__,
                     }
-            delivery_state = str(delivery.get("delivery_state") or "").lower()
-            outcome = (
-                "sent"
-                if bool(delivery.get("success")) and delivery_state == "accepted"
-                else "failed"
-                if delivery_state == "failed"
-                else "unknown"
-            )
+            outcome = receipt_outcome(delivery)
             try:
                 self.store.mark_operation_receipt(
                     receipt_key=row["receipt_key"],

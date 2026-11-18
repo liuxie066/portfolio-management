@@ -72,7 +72,18 @@ class NavReceiptMixin:
                 SET status = 'failed', claim_id = NULL, claimed_at = NULL,
                     last_error = COALESCE(last_error, 'dispatcher claim expired'),
                     updated_at = ?
-                WHERE status = 'sending' AND claimed_at <= ?
+                WHERE status = 'claimed' AND claimed_at <= ?
+                """,
+                (now, lease_cutoff),
+            )
+            # Older versions used "sending" at claim time as well. Their rows
+            # are ambiguous too and must not be retried automatically.
+            conn.execute(
+                """
+                UPDATE nav_receipt_outbox
+                SET status = 'unknown', claim_id = NULL, claimed_at = NULL,
+                    last_error = COALESCE(last_error, 'sending lease expired'), updated_at = ?
+                WHERE status = 'sending' AND (claimed_at <= ? OR claimed_at IS NULL)
                 """,
                 (now, lease_cutoff),
             )
@@ -82,7 +93,7 @@ class NavReceiptMixin:
                 cursor = conn.execute(
                     """
                     UPDATE nav_receipt_outbox
-                    SET status = 'sending', claim_id = ?, claimed_at = ?, updated_at = ?
+                    SET status = 'claimed', claim_id = ?, claimed_at = ?, updated_at = ?
                     WHERE receipt_key = ?
                       AND status IN ('pending', 'failed')
                       AND next_attempt_at <= ?
@@ -96,10 +107,23 @@ class NavReceiptMixin:
             item = dict(row)
             item["payload"] = json.loads(item.pop("payload_json"))
             item["claim_id"] = resolved_claim_id
-            item["status"] = "sending"
+            item["status"] = "claimed"
             item["claimed_at"] = now
             result.append(item)
         return result
+
+    def start_nav_receipt_send(self, receipt_key: str, *, claim_id: str) -> None:
+        now = self.now_factory().isoformat()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE nav_receipt_outbox SET status = 'sending', claimed_at = ?, updated_at = ?
+                WHERE receipt_key = ? AND status = 'claimed' AND claim_id = ?
+                """,
+                (now, now, receipt_key, claim_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"nav receipt claim not found: {receipt_key}")
 
     def list_due_nav_receipts(
         self,
@@ -128,17 +152,36 @@ class NavReceiptMixin:
             result.append(item)
         return result
 
+    def nav_receipt_unknown_summary(
+        self, *, limit: int, receipt_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        scope = "WHERE status = 'unknown'"
+        params = (receipt_key,) if receipt_key else ()
+        if receipt_key:
+            scope += " AND receipt_key = ?"
+        with self._connect() as conn:
+            count = conn.execute(
+                f"SELECT count(*) FROM nav_receipt_outbox {scope}", params
+            ).fetchone()[0]
+            rows = conn.execute(
+                f"SELECT receipt_key FROM nav_receipt_outbox {scope} ORDER BY created_at, receipt_key LIMIT ?",
+                (*params, max(0, int(limit))),
+            ).fetchall()
+        return {"unknown": count, "unknown_receipt_keys": [row[0] for row in rows]}
+
     def mark_nav_receipt(
         self,
         receipt_key: str,
         *,
         claim_id: str,
         success: bool,
+        unknown: bool = False,
         message_id: Optional[str] = None,
         error: Optional[str] = None,
     ) -> None:
         now_dt = self.now_factory()
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 """
                 SELECT attempt_count FROM nav_receipt_outbox
@@ -162,7 +205,7 @@ class NavReceiptMixin:
                 WHERE receipt_key = ? AND status = 'sending' AND claim_id = ?
                 """,
                 (
-                    "sent" if success else "failed",
+                    "unknown" if unknown else "sent" if success else "failed",
                     attempt_count,
                     next_attempt.isoformat(),
                     message_id,

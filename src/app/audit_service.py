@@ -424,7 +424,13 @@ class AuditService:
     # ------------------------------------------------------------------
 
     def repair_nav_history_metrics(self, account: Optional[str] = None, days: int = 900, dry_run: bool = True, write_report: bool = True) -> Dict[str, Any]:
-        """按统一准确性审计结果修复 nav_history 派生字段；仅修复真正 anomaly，默认 dry_run。"""
+        """Preview audit candidates. Actual writes use the journaled NAV repair CLI."""
+        if not dry_run:
+            return {
+                "success": False,
+                "dry_run": False,
+                "error": "Use scripts/nav_history_repair.py to plan and apply historical NAV corrections.",
+            }
         accuracy_func = getattr(self.api, 'audit_nav_history_accuracy', None) if self.api is not None else None
         accuracy = (
             accuracy_func(account=account, days=days, write_report=False)
@@ -493,14 +499,6 @@ class AuditService:
                 'exemptions': item.get('exemptions'),
             })
 
-        if not dry_run:
-            for item in updates:
-                self.storage.patch_nav_derived_fields(
-                    item['record_id'],
-                    item['fields'],
-                    dry_run=False,
-                )
-
         repair_account = account or self.account
         result = {
             'success': True,
@@ -519,6 +517,5 @@ class AuditService:
             },
         }
         if write_report:
-            suffix = 'dryrun' if dry_run else 'applied'
-            result['report_file'] = self._write_report(result, f'nav_history_repair_{suffix}', repair_account)
+            result['report_file'] = self._write_report(result, 'nav_history_repair_dryrun', repair_account)
         return result

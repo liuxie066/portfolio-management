@@ -85,6 +85,7 @@ def test_nav_receipt_sends_one_consolidated_success_message():
     assert result == {
         "success": True,
         "status": "sent",
+        "delivery_state": "accepted",
         "channel": "feishu",
         "bot": "刘看山",
         "message_id": "om_nav",
@@ -676,7 +677,8 @@ def test_nav_receipt_missing_config_and_send_failure_are_reported():
     ).send({"success": False, "dry_run": False, "status": "failed", "error": "nav failed"})
     assert failed == {
         "success": False,
-        "status": "failed",
+        "status": "unknown",
+        "delivery_state": "unknown",
         "channel": "feishu",
         "bot": "刘看山",
         "error": "send failed",

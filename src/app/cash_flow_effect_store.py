@@ -1021,6 +1021,40 @@ class CashFlowEffectStore:
             result.append(item)
         return result
 
+    def recover_interrupted_receipt_sends(self) -> list[str]:
+        """Mark orphaned sends unknown while holding the dispatcher process lock."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            keys = [
+                row[0] for row in conn.execute(
+                    "SELECT receipt_key FROM cash_flow_effect_receipts WHERE status = 'sending'"
+                )
+            ]
+            if not keys:
+                return keys
+            conn.execute(
+                """
+                UPDATE cash_flow_effect_receipts
+                SET status = 'unknown', last_error = 'send interrupted', updated_at = ?
+                WHERE status = 'sending'
+                """,
+                (bj_now_naive().isoformat(),),
+            )
+            return keys
+
+    def start_receipt_send(self, receipt_key: str) -> None:
+        """Persist the send boundary before invoking Feishu."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE cash_flow_effect_receipts SET status = 'sending', updated_at = ?
+                WHERE receipt_key = ? AND status IN ('pending', 'failed')
+                """,
+                (bj_now_naive().isoformat(), receipt_key),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"receipt not available to send: {receipt_key}")
+
     def list_invalid_receipts(self, *, limit: int = 100) -> list[Dict[str, Any]]:
         """Return terminal render-contract failures for operator audit."""
         with self._connect() as conn:
@@ -1045,10 +1079,11 @@ class CashFlowEffectStore:
         *,
         success: bool,
         retryable: bool = True,
+        unknown: bool = False,
         message_id: Optional[str] = None,
         error: Optional[str] = None,
     ) -> None:
-        status = "sent" if success else "failed" if retryable else "invalid"
+        status = "unknown" if unknown else "sent" if success else "failed" if retryable else "invalid"
         with self._connect() as conn:
             cursor = conn.execute(
                 """
