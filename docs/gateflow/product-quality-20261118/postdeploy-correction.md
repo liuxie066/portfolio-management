@@ -56,3 +56,14 @@ The service-mode report E2E remains blocked on v0.2.15 until this correction is
 reviewed and included in an explicitly bound subsequent release/upgrade.
 
 Independent full review: [no substantive findings](review-postdeploy-correction.md). All findings are closed; no fix/re-review round was needed. The remaining deployed-version blocker is explicitly retained above, not waived.
+
+## Delivery continuation
+
+The user's subsequent clarification keeps release, the existing PM production
+upgrade and post-deployment E2E within the original PM review work. This correction
+is now bound to v0.2.16 and the existing liuxie-incus installation. The v0.2.15
+release and its failed report-E2E evidence remain historical facts. No migration,
+Alibaba production writer, OM/OpenD change or test message is included. Business
+code and its full validation/review are unchanged; version/package checks and CI
+must pass on the final release commit before merging and publishing. Deployment
+and the new post-deployment result are recorded in the task delivery receipts.

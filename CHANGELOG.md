@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.16 - 2026-11-18
+
+- Restore service-mode daily report publishing by keeping internal valuation write capabilities out of HTTP responses while preserving report facts and direct-service validation.
+
 ## 0.2.15 - 2026-11-18
 
 - Clarify daily reports with account and recording status, valuation notes, accessible navigation, responsive holdings, and self-contained light/dark layouts.
