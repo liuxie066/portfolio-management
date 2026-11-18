@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.17 - 2026-11-18
+
+- Preserve completed cash-flow effects when verified audit timestamps change without changing financial facts.
+- Keep single and batch NAV caches consistent with confirmed writes, and rebuild the NAV index once per update.
+- Hold ambiguous receipt sends for inspection and preserve force-refresh through batch quote fallback.
+- Share daily report projections and event handling, and route historical NAV corrections through journaled maintenance.
+
 ## 0.2.16 - 2026-11-18
 
 - Restore service-mode daily report publishing by keeping internal valuation write capabilities out of HTTP responses while preserving report facts and direct-service validation.
