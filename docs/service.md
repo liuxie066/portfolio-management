@@ -299,6 +299,10 @@ Request:
 The bundle is one service call instead of a client-side chain of
 `/nav/record`, `/report/daily`, and `/nav`. It must reuse one priced snapshot
 for NAV recording, report payload, and recent NAV output.
+The HTTP bundle omits the internal `snapshot.normalized_valuation` object,
+which carries an in-process write capability. The direct Python service retains
+that object; the HTTP response keeps the serializable valuation, holdings, NAV
+and report fields consumed by the CLI and HTML publisher.
 
 Internal boundaries:
 
