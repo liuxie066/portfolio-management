@@ -72,3 +72,14 @@
   默认安装路径和校验失败分支；完整源码安装须显式选择，不能作为下载失败的回退。
 - **证据**：[v0.2.13 发布](https://github.com/liuxie066/portfolio-management/releases/tag/v0.2.13)、
   [归档白名单](.gitattributes)、[归档与离线安装回归](tests/test_release_package.py)。
+
+## 依赖读取失败不等于业务来源变更
+
+- **触发条件**：现金流 source hash / correction 生成路径加入 NAV、日历等外部证据读取。
+- **错误原因**：把门禁读取放在来源格式校验的异常捕获内，瞬时 NAV 故障会落到 raw
+  source 分支，产生不同 hash，错误 supersede 未变的现金流并把扫描记成完成。
+- **下次检查方式**：来源规范化和依赖门禁分别处理；来源未变但依赖失败时，验证
+  scan 失败、preview 报错、没有新 correction 和 CASH 写入。运行
+  `tests/test_cash_flow_effect_service.py::test_nav_outage_does_not_supersede_unchanged_cash_flow_or_complete_scan`。
+- **证据**：[完整审阅及修复复核](docs/gateflow/product-quality-20261118/review-complete.md)、
+  [现金流回归](tests/test_cash_flow_effect_service.py)。

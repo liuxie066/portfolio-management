@@ -84,7 +84,7 @@ class FakeStorage:
         self.replacements.append(replacement)
         return replacement
 
-    def get_nav_history(self, account, days=9999):
+    def get_nav_history(self, account, days=9999, *, fresh=False):
         return [item for item in self.navs if item.account == account]
 
     def get_nav_on_date(self, account, nav_date):
@@ -1647,3 +1647,84 @@ def test_cash_scan_with_real_repository_skips_noncash_name_and_blocks_bad_cash(t
     assert recovered["changed"] == 0
     receipt = next(row for row in service.store.list_pending_receipts() if row["receipt_type"] == "runtime_recovered")
     assert receipt["payload"]["occurred_at"] == recovered["scan_run"]["completed_at"]
+
+
+@pytest.mark.parametrize("snapshot_details", [
+    {"snapshot_persisted": False, "snapshot_status": "prepared"},
+    {"snapshot_persisted": False, "snapshot_status": "failed"},
+    {"snapshot_status": "failed"},
+    {"snapshot_status": "prepared"},
+])
+def test_confirm_refreshes_prior_nav_and_blocks_incomplete_snapshot(tmp_path, monkeypatch, snapshot_details):
+    from src.feishu_storage import FeishuStorage
+    from src.local_cache import LocalNavIndexCache
+
+    previous = date(2026, 9, 24)
+    details = {"finality": NavWriteContext(status="final", writer="daily-nav-job", write_reason="test", nav_date=previous).to_details(),
+               "snapshot_persisted": True, "snapshot_status": "complete"}
+    row = {"record_id": "prior", "fields": {"account": "lx", "date": previous.isoformat(),
+           "total_value": 100, "shares": 100, "nav": 1, "details": details}}
+    calls = []
+    fail = False
+    def list_records(table, **kwargs):
+        calls.append(kwargs)
+        assert table == "nav_history"
+        assert '"lx"' in kwargs["filter_str"]
+        if fail:
+            raise RuntimeError("NAV source unavailable")
+        return [row]
+    canonical = FeishuStorage(client=SimpleNamespace(list_records=list_records),
+                              local_nav_index_cache=LocalNavIndexCache(tmp_path / "nav.json"))
+    storage = FakeStorage(flows=[_flow(flow_date=date(2026, 9, 25))], holdings=[_cash()])
+    storage.get_nav_history = canonical.get_nav_history
+    storage.get_nav_on_date = canonical.get_nav_on_date
+    calendar = BusinessCalendarService(market_days=lambda day: {"CN": True, "HK": False, "US": False})
+    service = _service(tmp_path, monkeypatch, storage, calendar=calendar)
+    service.initialize_fingerprints()
+    effect = next(item for item in service.review(account="lx")["effects"] if item["effect_kind"] == "cash_flow")
+    preview = service.preview(effect["effect_id"], external_action="apply_delta")
+    row["fields"]["details"] = {"finality": details["finality"], **snapshot_details}
+    before = len(calls)
+    with pytest.raises(ValueError, match="preceding final NAV"):
+        service.confirm(effect["effect_id"], preview_hash=preview["preview_hash"], external_action="apply_delta", confirm=True)
+    assert len(calls) == before + 1
+    assert storage.replacements == []
+    fail = True
+    with pytest.raises(RuntimeError, match="NAV source unavailable"):
+        service.confirm(effect["effect_id"], preview_hash=preview["preview_hash"], external_action="apply_delta", confirm=True)
+    assert storage.replacements == []
+    fail = False
+    row["fields"]["details"] = details
+    assert service.confirm(effect["effect_id"], preview_hash=preview["preview_hash"], external_action="apply_delta", confirm=True)["success"]
+    assert len(storage.replacements) == 1
+
+
+def test_next_scan_does_not_reuse_absent_history_decision(tmp_path, monkeypatch):
+    storage = FakeStorage(flows=[_flow(flow_date=date(2026, 9, 25))], holdings=[_cash()])
+    calendar = BusinessCalendarService(market_days=lambda day: {"CN": True, "HK": False, "US": False})
+    service = _service(tmp_path, monkeypatch, storage, calendar=calendar)
+    service.scan(account="lx")
+    assert service._nav_history_cache["lx"] is False
+    storage.navs = [SimpleNamespace(account="lx", nav_date=date(2026, 9, 24), details={})]
+    service.scan(account="lx")
+    assert service._nav_history_cache["lx"] is True
+    assert not service._previous_nav_is_final("lx", date(2026, 9, 25))
+
+
+def test_nav_outage_does_not_supersede_unchanged_cash_flow_or_complete_scan(tmp_path, monkeypatch):
+    storage = FakeStorage(flows=[_flow(flow_date=date(2026, 9, 25))], holdings=[_cash()])
+    service = _service(tmp_path, monkeypatch, storage)
+    service.initialize_fingerprints()
+    effect = next(item for item in service.review(account="lx")["effects"] if item["effect_kind"] == "cash_flow")
+    before = service.store.get_latest_for_record(effect["record_id"])
+    def fail(*args, **kwargs):
+        raise RuntimeError("NAV source unavailable")
+    storage.get_nav_history = fail
+    with pytest.raises(RuntimeError, match="NAV source unavailable"):
+        service.scan(account="lx")
+    assert service.store.latest_scan(scope="lx")["status"] == "failed"
+    assert service.store.get_latest_for_record(effect["record_id"]) == before
+    with pytest.raises(RuntimeError, match="NAV source unavailable"):
+        service.preview(effect["effect_id"], external_action="apply_delta")
+    assert service.store.get_latest_for_record(effect["record_id"]) == before
+    assert storage.replacements == []

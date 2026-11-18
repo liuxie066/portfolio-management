@@ -154,3 +154,35 @@ def test_full_report_synthetic_nav_reuses_core_nav_calculation():
     assert report["nav"]["details"]["is_synthetic"] is True
     calc_mock.assert_called_once()
     build_mock.assert_called_once()
+
+
+def test_full_report_preserves_unpriced_holding_values_through_projection():
+    from src.domain.report.holdings_projection import merge_top_holdings
+
+    rows = [
+        {"code": "UNPRICED", "name": "missing quote", "quantity": 10, "market_value": None, "broker": "A"},
+        {"code": "UNPRICED", "name": "missing quote", "quantity": 5, "market_value": 50, "broker": "B"},
+        {"code": "CNY-CASH", "type": "cash", "quantity": 100, "market_value": 100},
+        {"code": "USD-CASH", "type": "cash", "quantity": 10, "market_value": None},
+        {"code": "ZERO", "quantity": 0, "market_value": 0},
+    ]
+    snapshot = _snapshot()
+    snapshot["holdings_data"]["holdings"] = rows
+    service = ReportQueryService(account="a", storage=SimpleNamespace(), portfolio=SimpleNamespace(), read_service=_read_service())
+    report = service.full_report(snapshot=snapshot, navs=[])
+    assert report["success"]
+    projected = {item["code"]: item for item in report["top_holdings"]}
+    assert projected["UNPRICED"]["quantity"] == 15
+    for code in ("UNPRICED", "CASH+MMF"):
+        assert projected[code]["market_value"] is None
+        assert projected[code]["weight"] is None
+    assert projected["ZERO"]["market_value"] == 0
+    assert projected["ZERO"]["weight"] == 0
+    reverse = {item["code"]: item for item in merge_top_holdings(list(reversed(rows)), 1000)}
+    assert reverse == projected
+
+
+def test_top_holding_weight_needs_a_positive_known_total():
+    from src.domain.report.holdings_projection import merge_top_holdings
+    for total in (0, -100):
+        assert merge_top_holdings([{"code": "A", "quantity": 1, "market_value": 100}], total)[0]["weight"] is None

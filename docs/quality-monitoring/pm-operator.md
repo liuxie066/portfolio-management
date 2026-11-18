@@ -22,6 +22,11 @@ Quality Hub 只读取 PM 发布的脱敏状态，不读取 PM 数据库，也不
 `investment.quality_status.v1` artifact。它不得修改持仓、cash、MMF、NAV
 或 Feishu 业务记录。
 
+每次 producer 刷新会重新读取账户的 NAV 事实和估值证据，来源失败时输出不可用，
+不把进程缓存标成最新事实。带有明确未完成持仓快照标记的 NAV 不能发布为 trusted；
+需先完成已有快照恢复。重复 NAV 审计仍独立执行，`quality status` 和 HTTP reader
+仍只读取已发布产物，不触发上述来源读取。
+
 ## 生产边界
 
 - `quality.onboarded=false` 时保持未接入，不得伪装为 healthy。

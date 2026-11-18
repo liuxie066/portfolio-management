@@ -1,0 +1,109 @@
+{
+  "account": "demo",
+  "run_id": "synthetic-report-20261118",
+  "nav_result": {
+    "success": true,
+    "dry_run": true,
+    "status": "preview"
+  },
+  "report": {
+    "success": true,
+    "date": "2026-11-17",
+    "snapshot_time": "2026-11-18T08:00:00+08:00",
+    "total_value": 12345678.9,
+    "nav": 1.234567,
+    "cash_flow": 25000,
+    "pnl": -12345.67,
+    "mtd_nav_change": 0.0234,
+    "ytd_nav_change": -0.0123,
+    "mtd_pnl": 289123.45,
+    "ytd_pnl": -153456.78,
+    "overview": {
+      "cash_ratio": 0.2
+    },
+    "warnings": [
+      "合成示例：部分价格来自缓存，请核对估值时间；本页不是生产账本。"
+    ],
+    "top_holdings": [
+      {
+        "code": "DEMO-A",
+        "name": "全球股票示例基金",
+        "broker": "多券商汇总",
+        "quantity": 12345.6789,
+        "market_value": 4938271.56,
+        "weight": 0.4
+      },
+      {
+        "code": "DEMO-B",
+        "name": "境内债券示例基金",
+        "broker": "多券商汇总",
+        "quantity": 234567.89,
+        "market_value": 3703703.67,
+        "weight": 0.3
+      },
+      {
+        "code": "CASH+MMF",
+        "name": "现金及货基(合并)",
+        "broker": "多券商汇总",
+        "quantity": 999999,
+        "market_value": 2469135.78,
+        "weight": 0.2,
+        "currency": "MIXED"
+      },
+      {
+        "code": "DEMO-C",
+        "name": "香港股票示例",
+        "broker": "多券商汇总",
+        "quantity": 10000,
+        "market_value": 1234567.89,
+        "weight": 0.1
+      }
+    ]
+  },
+  "full": {
+    "warnings": [
+      "合成示例：部分价格来自缓存，请核对估值时间；本页不是生产账本。"
+    ]
+  },
+  "snapshot": {
+    "account": "demo",
+    "snapshot_time": "2026-11-18T08:00:00+08:00",
+    "run_id": "synthetic-report-20261118",
+    "holdings_data": {
+      "holdings": [
+        {
+          "code": "DEMO-A",
+          "name": "全球股票示例基金",
+          "broker": "示例券商 A",
+          "quantity": 12345.6789,
+          "market_value": 4938271.56,
+          "weight": 0.4
+        },
+        {
+          "code": "DEMO-B",
+          "name": "境内债券示例基金",
+          "broker": "示例券商 B",
+          "quantity": 234567.89,
+          "market_value": 3703703.67,
+          "weight": 0.3
+        },
+        {
+          "code": "CNY-CASH",
+          "name": "现金示例",
+          "broker": "示例券商 A",
+          "quantity": 2469135.78,
+          "market_value": 2469135.78,
+          "weight": 0.2
+        },
+        {
+          "code": "DEMO-C",
+          "name": "香港股票示例",
+          "broker": "示例券商 C",
+          "quantity": 10000,
+          "market_value": 1234567.89,
+          "weight": 0.1
+        }
+      ]
+    }
+  }
+}

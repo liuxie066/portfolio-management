@@ -239,7 +239,8 @@ class CashFlowEffectReceiptService:
                 ],
                 sections=[
                     (
-                        "变化明细",
+                        "变化明细（最多 10 条）" if pending == 0
+                        else "变化明细（最多 10 条；待处理项：pm cash-flow review）",
                         details,
                     )
                 ],

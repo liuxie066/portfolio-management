@@ -2313,3 +2313,17 @@ def test_cash_baseline_init_uses_narrow_read_before_database_creation(tmp_path, 
         with redirect_stdout(io.StringIO()):
             assert pm.main(command) == 0
         assert CashFlowEffectStore(path).list_fingerprints()[0]["last_confirmed_amount"] == "100.00"
+
+
+@pytest.mark.parametrize("formatter", [pm._money, pm._pct, pm._qty])
+@pytest.mark.parametrize("value", [None, "", "invalid", float("nan"), float("inf")])
+def test_human_numbers_do_not_turn_unknown_into_zero(formatter, value):
+    assert formatter(value) == "—"
+
+
+def test_human_zero_and_machine_json_remain_real_values(capsys):
+    assert pm._money(0) == "¥0.00"
+    assert pm._pct(0) == "0.00%"
+    assert pm._qty(0) == "0.0000"
+    pm._dump({"amount": None, "zero": 0}, True)
+    assert json.loads(capsys.readouterr().out) == {"amount": None, "zero": 0}

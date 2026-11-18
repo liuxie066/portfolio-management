@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, List, Tuple
 
 
 def sort_navs(navs: Iterable[Any]) -> List[Any]:
-    return sorted(list(navs or []), key=lambda nav: nav.date or date.min)
+    return sorted(navs or [], key=lambda nav: nav.date or date.min)
 
 
 def calc_risk_metrics(navs: Iterable[Any]) -> Tuple[float, float]:
@@ -39,15 +39,21 @@ def calc_risk_metrics(navs: Iterable[Any]) -> Tuple[float, float]:
 
 
 def calc_month_return(month: str, *, navs: Iterable[Any]) -> Dict[str, Any]:
-    navs_sorted = sort_navs(navs)
-    month_navs = [nav for nav in navs_sorted if nav.date.strftime("%Y-%m") == month]
+    try:
+        period = date.fromisoformat(f"{month}-01")
+        if period.strftime("%Y-%m") != month:
+            raise ValueError("noncanonical month")
+    except ValueError:
+        return {"success": False, "message": f"{month} 数据不足"}
+    navs_list = list(navs or [])
+    # min/max preserve the first equal-date row without sorting the full history.
+    month_navs = [nav for nav in navs_list if (nav.date.year, nav.date.month) == (period.year, period.month)]
     if len(month_navs) < 1:
         return {"success": False, "message": f"{month} 数据不足"}
 
     end_nav = max(month_navs, key=lambda nav: nav.date)
-    year, mon = int(month[:4]), int(month[5:7])
-    prev_month = f"{year - 1}-12" if mon == 1 else f"{year}-{mon - 1:02d}"
-    prev_month_navs = [nav for nav in navs_sorted if nav.date.strftime("%Y-%m") == prev_month]
+    prev_month = (period.year - 1, 12) if period.month == 1 else (period.year, period.month - 1)
+    prev_month_navs = [nav for nav in navs_list if (nav.date.year, nav.date.month) == prev_month]
     if prev_month_navs:
         start_nav = max(prev_month_navs, key=lambda nav: nav.date)
         start_nav_label = "上月末"
@@ -69,14 +75,19 @@ def calc_month_return(month: str, *, navs: Iterable[Any]) -> Dict[str, Any]:
 
 
 def calc_year_return(year: str, *, navs: Iterable[Any]) -> Dict[str, Any]:
-    navs_sorted = sort_navs(navs)
-    year_navs = [nav for nav in navs_sorted if nav.date.strftime("%Y") == year]
+    try:
+        year_number = int(year)
+        if date(year_number, 1, 1).strftime("%Y") != year:
+            raise ValueError("noncanonical year")
+    except (TypeError, ValueError):
+        return {"success": False, "message": f"{year} 数据不足"}
+    navs_list = list(navs or [])
+    year_navs = [nav for nav in navs_list if nav.date.year == year_number]
     if len(year_navs) < 1:
         return {"success": False, "message": f"{year} 数据不足"}
 
     end_nav = max(year_navs, key=lambda nav: nav.date)
-    prev_year = str(int(year) - 1)
-    prev_year_navs = [nav for nav in navs_sorted if nav.date.strftime("%Y") == prev_year]
+    prev_year_navs = [nav for nav in navs_list if nav.date.year == year_number - 1]
     if prev_year_navs:
         start_nav = max(prev_year_navs, key=lambda nav: nav.date)
         start_nav_label = "上年末"

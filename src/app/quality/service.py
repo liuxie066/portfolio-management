@@ -514,7 +514,7 @@ class PMQualityService:
         existing: dict[str, dict[str, Any]],
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         try:
-            navs = self.storage.get_nav_history(account, days=1)
+            navs = self.storage.get_nav_history(account, days=1, fresh=True)
         except Exception:
             navs = []
         latest = navs[-1] if navs else None

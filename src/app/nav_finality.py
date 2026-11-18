@@ -125,4 +125,7 @@ def evaluate_nav_finality(
     )
     if reason is not None:
         return NavFinalityDecision(False, reason, finality)
+    snapshot_status = (details or {}).get("snapshot_status")
+    if (details or {}).get("snapshot_persisted") is False or (snapshot_status is not None and snapshot_status != "complete"):
+        return NavFinalityDecision(False, "snapshot_incomplete", finality)
     return NavFinalityDecision(True, "eligible_final", finality)

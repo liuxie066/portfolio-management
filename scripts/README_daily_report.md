@@ -12,6 +12,24 @@ explicit `--write-nav --confirm`, and same-day overwrite remains disabled.
 `generate_daily_report_html.py` is renderer-only and must receive a prepared
 JSON bundle.
 
+The report is self-contained (no external fonts, scripts or styles). It displays
+the account, NAV date, snapshot time and explicit preview/recorded status;
+missing recording evidence remains unknown. “Recorded” does not certify official
+finality or overall data quality. Valuation notes appear before the summary.
+Broker allocation reflects the snapshot's `broker` field, and amounts are CNY.
+Unknown values remain “—”; mixed cash/MMF units have no displayed quantity.
+Mobile layouts preserve all table fields, with keyboard section links, dark mode
+and print styling.
+
+For a reproducible offline preview from a development checkout (no service or
+credentials needed):
+
+```bash
+python scripts/generate_daily_report_html.py \
+  --bundle tests/fixtures/product_quality/daily_report.json \
+  --output reports/demo.html
+```
+
 ## What it does
 
 1. Prefer the local service bundle endpoint: `POST /report/daily-bundle`
@@ -57,6 +75,10 @@ python scripts/publish_daily_report.py --nav-date 2026-05-22
 - Default execution sends `dry_run=true`, `confirm=false` to the NAV bundle while still rendering and publishing HTML files.
 - `--write-nav` without `--confirm` is rejected; `--write-nav --confirm` sends `dry_run=false`, `confirm=true`.
 - `--account-label` is display-only.
+- A configured account label belongs to the local default account and is shown
+  only when the returned bundle resolves to that account. An explicit
+  `--account-label` applies to the requested report; the actual account is always
+  shown alongside it.
 - `--account` controls which portfolio account is loaded; if omitted, the script uses `PORTFOLIO_ACCOUNT` / `config.yaml` default.
 - `--service-url` overrides the local service endpoint.
 - `--require-service` fails when the local service is unavailable; `--no-service` forces the direct application service path.

@@ -28,7 +28,8 @@ class PublishConfig:
     workspace: Path
     reports_dir: Path
     publish_root: Path
-    account_label: str
+    account_label: Optional[str]
+    account_label_account: Optional[str] = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,7 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--account", default=None, help="Account to operate on. Defaults to config/PORTFOLIO_ACCOUNT.")
     parser.add_argument(
         "--account-label",
-        default=app_config.get("report.account_label", app_config.get_account()),
+        default=None,
         help="Display-only account label shown in the HTML report.",
     )
     parser.add_argument(
@@ -105,6 +106,10 @@ def parse_args() -> argparse.Namespace:
         sync_futu_dry_run=app_config.get_bool("report.sync_futu_dry_run", True),
     )
     args = parser.parse_args()
+    args.account_label_account = None
+    if args.account_label is None and args.account in (None, app_config.get_account()):
+        args.account_label = app_config.get("report.account_label")
+        args.account_label_account = app_config.get_account()
     if args.write_nav and not args.confirm:
         parser.error("--write-nav requires --confirm")
     return args
@@ -127,6 +132,7 @@ def build_config(args: argparse.Namespace) -> PublishConfig:
         reports_dir=Path(args.reports_dir),
         publish_root=Path(args.publish_root),
         account_label=args.account_label,
+        account_label_account=getattr(args, "account_label_account", None),
     )
 
 
@@ -266,11 +272,11 @@ def _build_report_data_direct(
 
 
 def render_daily_report_html(report_bundle: dict[str, Any], config: PublishConfig) -> tuple[str, str]:
-    """Render daily report HTML using the single GitHub-style template.
+    """Render daily report HTML using the single self-contained template.
 
     We keep only ONE template to reduce maintenance cost and avoid style drift.
     """
-    # Reuse the GitHub-style renderer from generate_daily_report_html.py
+    # Reuse the renderer without fetching or recomputing portfolio facts.
     from scripts import generate_daily_report_html as gh
 
     # build_snapshot() is created in build_report_data(); reuse it to avoid extra price fetch.
@@ -286,7 +292,16 @@ def render_daily_report_html(report_bundle: dict[str, Any], config: PublishConfi
     }
 
     dt = report.get('date') or date.today().isoformat()
-    html = gh.render_html({'report': report, 'full': full, 'snapshot': snapshot})
+    account = report_bundle.get('account') or snapshot.get('account')
+    account_label = config.account_label
+    if config.account_label_account is not None and config.account_label_account != account:
+        account_label = None
+    html = gh.render_html({
+        'report': report, 'full': full, 'snapshot': snapshot,
+        'account': report_bundle.get('account'),
+        'account_label': account_label,
+        'nav_result': nav_result,
+    })
     return dt, html
 
 

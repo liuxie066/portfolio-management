@@ -57,7 +57,7 @@ def test_mtd_capital_facts_use_strict_previous_month_anchor_and_partial_month_cu
         "ending_assets": 1050.0,
     }
     assert result["reconciliation"]["status"] == "ok"
-    storage.get_nav_history.assert_called_once_with("lx", days=10000)
+    storage.get_nav_history.assert_called_once_with("lx", days=10000, fresh=True)
     cash_flows.period.assert_called_once_with("lx", date(2026, 7, 1), date(2026, 7, 16))
 
 
