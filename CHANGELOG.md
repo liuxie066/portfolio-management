@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.15 - 2026-11-18
+
+- Clarify daily reports with account and recording status, valuation notes, accessible navigation, responsive holdings, and self-contained light/dark layouts.
+- Preserve unknown amounts across reports and CLI output, and make pending cash-flow receipt limits explicit.
+- Refresh canonical NAV evidence for capital facts, cash-flow gates and quality checks; reject explicitly incomplete snapshots and preserve cash-flow identity when source reads fail.
+- Reduce period-return computation and allocation without changing financial results or historical ordering semantics.
+
 ## 0.2.14 - 2026-11-13
 
 - Publish runtime-only archives and SHA-256 checksums, excluding tests, development records and release tooling while preserving required configuration, schemas and operational scripts.
