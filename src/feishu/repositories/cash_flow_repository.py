@@ -252,6 +252,7 @@ class CashFlowRepository:
         *,
         account: Optional[str] = None,
         record_id: Optional[str] = None,
+        require_complete: bool = False,
     ) -> List[RawCashFlowRecord]:
         """Read complete, untyped rows without applying model defaults."""
 
@@ -276,7 +277,9 @@ class CashFlowRepository:
                 if requested_account is not None
                 else None
             )
-            records = self._list_cash_flow_records(filter_str=filter_str)
+            records = self._list_cash_flow_records(
+                filter_str=filter_str, require_complete=require_complete,
+            )
 
         raw_records: List[RawCashFlowRecord] = []
         for record in records:
@@ -309,6 +312,7 @@ class CashFlowRepository:
         self,
         *,
         filter_str: Optional[str],
+        require_complete: bool = False,
     ) -> List[Dict[str, Any]]:
         """Request the registry projection, tolerating only absent optional updated_at."""
 
@@ -317,6 +321,7 @@ class CashFlowRepository:
                 'cash_flow',
                 filter_str=filter_str,
                 field_names=self.CASH_FLOW_PROJECTION_FIELDS,
+                **({"require_complete": True} if require_complete else {}),
             )
         except Exception as exc:
             if 'FieldNameNotFound' not in str(exc):
@@ -330,6 +335,7 @@ class CashFlowRepository:
                 'cash_flow',
                 filter_str=filter_str,
                 field_names=fallback_fields,
+                **({"require_complete": True} if require_complete else {}),
             )
 
     def preload_cash_flow_aggs(self, account: str, force_refresh: bool = False) -> Dict[str, Any]:

@@ -200,6 +200,103 @@ class CashFlowEffectService:
             "updated_at": cls._source_value(flow.updated_at),
         }
 
+    @classmethod
+    def _valid_effect_source(cls, source: Dict[str, Any]) -> bool:
+        """Use the existing financial contract, including canonical field shape."""
+        try:
+            fields = {key: value for key, value in source.items()
+                      if key not in {"record_id", "signed_amount"}}
+            fields["amount"] = source["signed_amount"]
+            facts = CompletedCashFlowFacts.require(RawCashFlowRecord(
+                record_id=source["record_id"], raw_fields=fields,
+            ))
+            return cls.source_from_cash_flow(facts.to_cash_flow()) == source
+        except (ValueError, TypeError, KeyError):
+            return False
+
+    def audit_timestamp_proof(
+        self, parent: Dict[str, Any], source: Dict[str, Any], mode: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Prove an audit-only version can retain an already completed outcome.
+
+        A terminal state alone is not proof. Follow explicit inherited links to
+        a matching original confirmation/completion event, without synthesizing
+        a new confirmation or treating compensation/observations as application.
+        """
+        def eligible(effect):
+            stored = effect.get("source") or {}
+            return (
+                effect.get("effect_kind") == "cash_flow"
+                and effect.get("state") in TERMINAL_STATES
+                and effect.get("mode") == mode
+                and effect.get("hash_contract_version") == HASH_CONTRACT_VERSION
+                and not effect.get("compensation_task_id")
+                and all(effect.get(key) == stored.get(key) for key in (
+                    "record_id", "account", "broker", "currency", "flow_date", "signed_amount",
+                ))
+                and self._valid_effect_source(stored)
+                and effect.get("source_hash") == sha256_json({
+                    "contract": HASH_CONTRACT_VERSION, "source": stored,
+                })
+                and {k: v for k, v in stored.items() if k != "updated_at"}
+                == {k: v for k, v in source.items() if k != "updated_at"}
+            )
+
+        if (not self._valid_effect_source(source) or not eligible(parent)
+                or parent["source"].get("updated_at") == source.get("updated_at")):
+            return None
+        effect = parent
+        evidence = []
+        while True:
+            if not eligible(effect) or effect["state"] != parent["state"]:
+                return None
+            confirmation = effect.get("confirmation") or {}
+            if (not confirmation.get("confirmed_at") or not confirmation.get("run_id")
+                    or not effect.get("preview_hash")):
+                return None
+            events = self.store.list_events(effect["effect_id"])
+            if confirmation.get("kind") == "audit_timestamp_inherited":
+                previous = self.store.get_previous_version(effect)
+                if (not previous or previous["effect_id"] != confirmation.get("parent_effect_id")
+                        or previous["version"] + 1 != effect["version"]):
+                    return None
+                expected = {**(previous.get("confirmation") or {}),
+                            "kind": "audit_timestamp_inherited",
+                            "parent_effect_id": previous["effect_id"],
+                            "completion_effect_id": confirmation.get("completion_effect_id")}
+                if confirmation != expected:
+                    return None
+                if any(effect.get(key) != previous.get(key) for key in (
+                    "preview_hash", "before", "targets", "target_source", "warnings",
+                )):
+                    return None
+                event = next((event for event in events if
+                              event["event_type"] == "audit_timestamp_inherited"
+                              and event["payload"].get("parent_effect_id") == previous["effect_id"]
+                              and event["payload"].get("completion_effect_id") == confirmation.get("completion_effect_id")
+                              and event["payload"].get("source_hash") == effect["source_hash"]), None)
+                if event is None:
+                    return None
+                evidence.append({"effect": effect, "event": event})
+                effect = previous
+                continue
+            if confirmation.get("kind"):
+                return None
+            completion_type = "applied" if effect["state"] == "applied" else "record_only_confirmed"
+            event = next((event for event in events if
+                          event["event_type"] == completion_type
+                          and event["payload"].get("preview_hash") == effect["preview_hash"]), None)
+            if event is None:
+                return None
+            evidence.append({"effect": effect, "event": event})
+            anchor = effect["effect_id"]
+            if any(item["effect"]["confirmation"].get("completion_effect_id") != anchor
+                   for item in evidence[:-1]):
+                return None
+            return {"parent_effect_id": parent["effect_id"],
+                    "completion_effect_id": anchor, "state": parent["state"],
+                    "proof_digest": sha256_json(evidence)}
+
     @staticmethod
     def _source_value(value: Any) -> Any:
         if isinstance(value, (date, datetime)):
@@ -485,6 +582,13 @@ class CashFlowEffectService:
                     changed_effect_ids.append(latest["effect_id"])
                     changed += 1
                 continue
+            proof = self.audit_timestamp_proof(latest, source, mode) if latest else None
+            if proof is not None:
+                self.store.inherit_audit_completion(parent=latest, source=source, proof=proof)
+                # The new source version is auditable, but is not a new cash
+                # operation/discovery requiring an actionable receipt.
+                changed += 1
+                continue
             effect = self.store.create_version(
                 source=source,
                 source_hash=source_hash,
@@ -578,7 +682,7 @@ class CashFlowEffectService:
             deleted_count=deleted,
             blocked_count=blocked,
         )
-        if enqueue_receipts and (added or changed or deleted or blocked):
+        if enqueue_receipts and (added or deleted or blocked or changed_effect_ids):
             effect_summaries = []
             for effect_id in dict.fromkeys(changed_effect_ids):
                 effect = self.store.get_effect(effect_id)
@@ -1004,6 +1108,10 @@ class CashFlowEffectService:
                 new_source_hash=source_hash,
                 new_source=source,
             )
+            return source, source_hash, mode, None
+        proof = self.audit_timestamp_proof(effect, source, mode)
+        if proof is not None:
+            self.store.inherit_audit_completion(parent=effect, source=source, proof=proof)
             return source, source_hash, mode, None
         correction = self.store.create_version(
             source=source,

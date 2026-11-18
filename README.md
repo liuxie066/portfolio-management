@@ -204,6 +204,8 @@ NAV/校验读取不触发补全。币种按有来源的离线代码目录校验�
 确认 hash 绑定当前 Feishu fact、fresh holding 和全部目标；任一变化都要求重新
 预览确认。正式 NAV 同时要求 generated FX fields 与 holding effects 完成。
 完整操作和激活步骤见 `docs/cash-flow-effects-runbook.md`。
+仅 `updated_at` 变化且原完成证据齐全时，新审计版本保留完成状态，不重复影响现金。
+旧 pending 的恢复是单独的账户级精确计划维护操作，默认只读，不随扫描自动执行。
 
 生产 installer 生成四组独立 timer：周一至周六 `08:10 Asia/Shanghai` 先观测
 lx/sy Futu CASH 并同步 MMF/股票/ETF，再单次执行

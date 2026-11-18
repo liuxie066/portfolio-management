@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import threading
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import date
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
@@ -62,8 +63,9 @@ def sha256_json(value: Any) -> str:
 class CashFlowEffectStore:
     """Single-host durable store; normal construction never creates a database."""
 
-    def __init__(self, db_path: Optional[str | Path] = None):
+    def __init__(self, db_path: Optional[str | Path] = None, *, read_only: bool = False):
         self.db_path = self.resolve_db_path(db_path)
+        self.read_only = read_only
         self._transaction_state = threading.local()
         if not self.db_path.exists():
             raise RuntimeError(
@@ -125,7 +127,14 @@ class CashFlowEffectStore:
             yield active
             return
         try:
-            conn = self._connect_path(self.db_path)
+            if self.read_only:
+                conn = sqlite3.connect(
+                    self.db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=10,
+                )
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA query_only = ON")
+            else:
+                conn = self._connect_path(self.db_path)
         except sqlite3.Error as exc:
             raise RuntimeError(
                 f"cash-flow effect database unavailable: {self.db_path}: {exc}"
@@ -142,6 +151,8 @@ class CashFlowEffectStore:
     @contextmanager
     def transaction(self):
         """Make nested store operations one SQLite transaction."""
+        if self.read_only:
+            raise RuntimeError("read-only cash-flow effect store")
         if getattr(self._transaction_state, "connection", None) is not None:
             raise RuntimeError("nested cash-flow effect transactions are not supported")
         if not self.db_path.exists():
@@ -340,13 +351,15 @@ class CashFlowEffectStore:
         target = Path(destination).expanduser()
         if not target.is_absolute():
             target = Path.cwd() / target
-        if target.exists():
-            raise RuntimeError(f"cash-flow effect backup already exists: {target}")
         target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError as exc:
+            raise RuntimeError(f"cash-flow effect backup already exists: {target}") from exc
+        os.close(descriptor)
         try:
             with self._connect() as source, sqlite3.connect(target) as output:
                 source.backup(output)
-            target.chmod(0o600)
             verification = CashFlowEffectStore(target).integrity_check()
         except Exception:
             # Keep a failed artifact for investigation; never hide it by deleting.
@@ -574,6 +587,73 @@ class CashFlowEffectStore:
                 ),
             ).fetchone()
         return self._decode(row) if row else None
+
+    def get_previous_version(self, effect: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT * FROM cash_flow_effects
+                   WHERE effect_kind = ? AND record_id = ? AND version < ?
+                   ORDER BY version DESC LIMIT 1""",
+                (effect["effect_kind"], effect["record_id"], effect["version"]),
+            ).fetchone()
+        return self._decode(row) if row else None
+
+    def inherit_audit_completion(
+        self, *, parent: Dict[str, Any], source: Dict[str, Any],
+        proof: Dict[str, Any], current: Optional[Dict[str, Any]] = None,
+        plan_digest: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Atomically retain completion evidence; never apply a financial effect.
+
+        The application owns eligibility. Exact row comparisons fence stale
+        decisions, including explicit recovery of an existing pending version.
+        """
+        if self.read_only:
+            raise RuntimeError("read-only cash-flow effect store")
+        scope = (
+            nullcontext() if getattr(self._transaction_state, "connection", None)
+            is not None else self.transaction()
+        )
+        with scope:
+            if self.get_effect(parent["effect_id"]) != parent:
+                raise RuntimeError("audit completion parent changed")
+            latest = self.get_latest_for_record(parent["record_id"])
+            if latest != (current or parent):
+                raise RuntimeError("audit completion latest version changed")
+            if current is None:
+                current = self.create_version(
+                    source=source,
+                    source_hash=sha256_json({"contract": HASH_CONTRACT_VERSION, "source": source}),
+                    state=parent["state"], mode=parent["mode"],
+                    event_type="audit_timestamp_observed",
+                )
+            original = {key: current.get(key) for key in (
+                "state", "confirmation", "preview_hash", "before", "targets",
+                "target_source", "warnings", "last_error",
+                "updated_at",
+            )}
+            confirmation = {
+                **parent["confirmation"],
+                "kind": "audit_timestamp_inherited",
+                "parent_effect_id": parent["effect_id"],
+                "completion_effect_id": proof["completion_effect_id"],
+            }
+            return self.update_effect(
+                current["effect_id"], state=parent["state"],
+                fields={
+                    "confirmation_json": confirmation,
+                    "preview_hash": parent["preview_hash"],
+                    "before_json": parent.get("before"),
+                    "targets_json": parent.get("targets"),
+                    "target_source": parent.get("target_source"),
+                    "warnings_json": parent.get("warnings"),
+                    "last_error": None,
+                },
+                event_type="audit_timestamp_inherited",
+                event_payload={**proof, "source_hash": current["source_hash"],
+                               "plan_digest": plan_digest, "previous_fields": original},
+                expected_states={current["state"]},
+            )
 
     def list_effects(
         self,

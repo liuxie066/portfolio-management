@@ -350,14 +350,24 @@ stateDiagram-v2
 `source_hash` 至少覆盖所有目标相关字段。处理规则：
 
 - 新记录：创建 version 1。
-- 目标相关字段未变化：保留当前版本，不重复创建 effect。
+- 完整 source hash 未变化：保留当前版本，不重复创建 effect。
 - 目标相关字段变化：创建新版本，旧的未完成版本变为 `superseded`。
 - 已 applied 事件被修改：新版本必须表达旧影响的撤销和新影响的应用，
   重新逐条确认。
 - 记录被删除：创建 deletion 版本。已 applied 的非 Futu 事件需要预览撤销；
   Futu 使用新的 OpenD 绝对现金观测，不用数学方式猜测撤销结果。
-- 只修改 `remark` 等不影响目标的字段：记录事实快照变化用于审计，但不使
-  已确认的目标失效。
+- 仅审计字段 `updated_at` 变化：仍保留完整 source hash 并创建可见新版本。
+  若直接前版的 applied/record_only 有完整确认、对应完成事件及预览证据，且
+  所有其他 canonical source 字段、身份、mode 和 hash contract 相同，新版本
+  继承该完成事实；保留原确认时间/操作者和目标，显式链接前版及最初完成版本，
+  不再写资金、不更新 baseline、不发送待处理回执。缺证据或任何 compensation
+  引用均不得继承。None→整数本身不是完成证明。
+- remark/source/dedup、金额/汇率/日期/账户等任何其他字段变化仍需复核；本轮
+  规则不把所有“非金额字段”都视为 audit-only。这明确收窄了早期关于 remark
+  不使目标失效的设计表述，沿用完整 source hash 的审计版本契约。
+- 旧版本已产生的 pending 不由扫描自动恢复；只能走独立、显式账户及精确计划
+  的维护入口。恢复只继承有证据的终态，不重新执行 applied，也不将全部记录
+  改为 record_only。详见操作手册的 Audit timestamp recovery。
 - 同一个 `record_id + source_hash` 被 15 分钟 scanner、manual review 和
   NAV preflight 重复观察时，只能对应同一个 effect version。
 

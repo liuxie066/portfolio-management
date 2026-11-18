@@ -210,3 +210,65 @@ observed balance change; they do not request manual processing. Unresolved
 effects still require review even when they fall beyond the ten displayed rows.
 Older queued receipts without source/count metadata show an informational
 status and an inspection command, rather than asserting that processing is pending.
+
+## Audit timestamp recovery
+
+Normal scans keep a visible source version when only `updated_at` changes, but
+inherit a proven `applied`/`record_only` outcome. Original confirmation time,
+operator, preview targets and completion anchor remain inspectable; an
+`audit_timestamp_inherited` event records the parent and source hash. This is
+not a new financial application or human confirmation. All other canonical
+fields and processing mode must match. Missing completion evidence or any
+compensation reference fails closed. A remark or financial change still needs
+review, and holdings/finality gates remain independent.
+
+This rule does **not** automatically repair a pending version created by an
+older release. The separate maintenance command below plans recovery for one
+explicit account using fresh, complete source reads and a read-only SQLite
+connection. It does not scan or append workflow events during planning.
+
+```bash
+./pm --no-service cash-flow effects audit-timestamp \
+  --account ACCOUNT --plan-file /private/path/audit-plan.json --json
+```
+
+The new file is created with mode `0600` and never overwritten; stdout contains
+only counts/digest/path. Review its candidates and skipped reasons privately.
+Only a pending version without prior workflow evidence whose immediate
+predecessor has a matching original completion proof is eligible. A timestamp
+changing from absent to integer is insufficient on its own. Former
+`record_only` versions remain record-only; former `applied` versions retain the
+same financial anchor without replaying it. Do not bulk-confirm rejected rows.
+
+Only after separate authorization to change that account's workflow state:
+
+```bash
+./pm --no-service cash-flow effects audit-timestamp \
+  --account ACCOUNT --plan-file /private/path/audit-plan.json \
+  --apply --confirm --backup /private/path/before-audit.sqlite3 --json
+```
+
+Use this on the host owning the configured effects database. This command has
+no HTTP endpoint or service fallback. It validates database identity, cutover,
+complete source digest, exact candidate states and parent proof under existing
+scanner/account locks. After an online backup to a fresh destination, all
+eligible entries are revalidated and updated in one SQLite transaction. Stale
+or mixed plans fail without partial state changes; replay of a fully completed,
+still-current plan is a no-op. Plans bind the whole account source read, so even
+an unrelated source change requires a new reviewed plan.
+Replay checks the originally recovered candidates and source; it never recovers
+formerly skipped or newly pending entries. Those require a new plan. A malformed
+raw cash-flow row rejects planning for the whole account rather than omitting it.
+
+Neither mode writes cash flows, holdings, NAV, fingerprints or message outbox.
+Apply writes only local completion lineage/events; it does not initiate an
+external financial action. No schema, hash-contract, configuration or dependency
+migration is required. Source reads and SQLite are not one external transaction:
+a later Feishu edit must still be discovered by the normal fresh scan/NAV gate.
+Historical compensation is deliberately excluded, even if it appears resolved.
+
+Keep the saved plan, backup and events private. Previous workflow fields are
+retained in the inheritance event. Any rollback requires a separate review of
+subsequent activity; do not restore a whole old database over later business
+writes. This software change and its synthetic tests are **not authorization or
+proof of recovery for the 46 previously observed production records**.
