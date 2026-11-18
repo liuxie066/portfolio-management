@@ -11,6 +11,7 @@ from src.app.nav_finality import NavWriteContext
 from src.app.quality.evidence import valuation_quality_evidence
 from src.app.quality.policy import assert_official_nav_write_allowed
 from src.domain.nav_calculator import ClosedNavTarget, NavCalculator
+from src.domain.nav_history_index import NavHistoryIndex
 from src.domain.snapshot_contracts import (
     NormalizedValuationSnapshot,
     SnapshotWriteAuthority,
@@ -698,19 +699,11 @@ class NavRecordService:
         nav_index = self.manager._build_nav_lookup(all_navs)
 
         yesterday_nav = self.manager._find_latest_nav_before(all_navs, today, nav_index=nav_index)
-        prev_year_end_nav = self.manager._find_year_end_nav(all_navs, str(today.year - 1), nav_index=nav_index)
-        prev_month_end_nav = self.manager._find_prev_month_end_nav(all_navs, today.year, today.month, nav_index=nav_index)
-        mtd_return_base_nav = self.manager._find_mtd_return_base_nav(all_navs, today, nav_index=nav_index)
-        ytd_return_base_nav = self.manager._find_ytd_return_base_nav(all_navs, today, nav_index=nav_index)
         last_nav = yesterday_nav
-
-        yearly_data = {}
-        for yr in range(start_year, today.year + 1):
-            yr_str = str(yr)
-            yearly_data[yr_str] = {
-                "prev_end": self.manager._find_year_end_nav(all_navs, str(yr - 1), nav_index=nav_index),
-                "end": self.manager._find_year_end_nav(all_navs, yr_str, nav_index=nav_index),
-            }
+        period_bases = NavHistoryIndex.period_bases(
+            all_navs, today, start_year, nav_index=nav_index
+        )
+        yearly_data = period_bases["yearly_data"]
 
         if cash_flow_dataset is not None:
             cash_flow_summary = cash_flow_dataset.summary(last_nav=last_nav)
@@ -734,12 +727,8 @@ class NavRecordService:
             today=today,
             total_value=total_value,
             yesterday_nav=yesterday_nav,
-            prev_year_end_nav=prev_year_end_nav,
-            prev_month_end_nav=prev_month_end_nav,
-            mtd_return_base_nav=mtd_return_base_nav,
-            ytd_return_base_nav=ytd_return_base_nav,
             last_nav=last_nav,
-            yearly_data=yearly_data,
+            **period_bases,
             daily_cash_flow=daily_cash_flow,
             monthly_cash_flow=monthly_cash_flow,
             yearly_cash_flow=yearly_cash_flow,
@@ -829,10 +818,10 @@ class NavRecordService:
         NavCalculator.assert_nav_invariants(
             nav_record=nav_record,
             last_nav=last_nav,
-            prev_month_end_nav=prev_month_end_nav,
-            prev_year_end_nav=prev_year_end_nav,
-            mtd_return_base_nav=mtd_return_base_nav,
-            ytd_return_base_nav=ytd_return_base_nav,
+            prev_month_end_nav=period_bases["prev_month_end_nav"],
+            prev_year_end_nav=period_bases["prev_year_end_nav"],
+            mtd_return_base_nav=period_bases["mtd_return_base_nav"],
+            ytd_return_base_nav=period_bases["ytd_return_base_nav"],
             daily_cash_flow=daily_cash_flow,
             monthly_cash_flow=monthly_cash_flow,
             yearly_cash_flow=yearly_cash_flow,
@@ -864,8 +853,8 @@ class NavRecordService:
                 current_year=current_year,
                 start_year=start_year,
                 yesterday_nav=yesterday_nav,
-                prev_year_end_nav=prev_year_end_nav,
-                prev_month_end_nav=prev_month_end_nav,
+                prev_year_end_nav=period_bases["prev_year_end_nav"],
+                prev_month_end_nav=period_bases["prev_month_end_nav"],
                 yearly_data=yearly_data,
                 daily_cash_flow=daily_cash_flow,
                 cumulative_cash_flow=cumulative_cash_flow,

@@ -549,16 +549,19 @@ class CashFlowEffectService:
             except Exception as exc:
                 source = raw_source
                 mode = "apply"
-                desired_state = "blocked"
                 error = str(exc)
                 blocked += 1
-            else:
-                # NAV/calendar outages do not change the cash-flow source facts.
-                desired_state = self._initial_state(source, mode)
             source_hash = sha256_json({
                 "contract": HASH_CONTRACT_VERSION,
                 "source": source,
             })
+            if (
+                latest and latest["state"] in {"applied", "record_only"}
+                and latest["source_hash"] == source_hash
+            ):
+                continue
+            # Unresolved effects and changed sources still require live finality.
+            desired_state = "blocked" if error is not None else self._initial_state(source, mode)
             if latest and latest["source_hash"] == source_hash:
                 if (
                     latest["state"] == "scheduled"

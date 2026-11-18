@@ -8,7 +8,7 @@ import json
 import re
 from datetime import date, datetime, timezone, timedelta
 from decimal import Decimal, ROUND_HALF_UP
-from typing import List, Optional, Dict, Any, Mapping
+from typing import Optional, Dict, Any, Mapping
 
 from .models import (
     AssetType, TransactionType, AssetClass, Industry,
@@ -77,18 +77,6 @@ class _MemoryAccountCache:
 
     def set_account(self, account: str, payload: Dict[str, Any], *, _flush: bool = False):
         self._cache[account] = json.loads(json.dumps(payload))
-
-    def upsert_nav_records(self, account: str, records: List[Dict[str, Any]], *, _flush: bool = False):
-        base = dict(self._cache.get(account) or {})
-        navs = list(base.get('nav_history') or [])
-        by_date = {str((row or {}).get('date') or ''): dict(row) for row in navs if (row or {}).get('date')}
-        for record in records:
-            ds = str((record or {}).get('date') or '')
-            if ds:
-                by_date[ds] = dict(record)
-        base['nav_history'] = sorted(by_date.values(), key=lambda row: row.get('date') or '')
-        base['record_count'] = len(base['nav_history'])
-        self._cache[account] = base
 
     def append_flow(self, account: str, flow_date: date, cny_amount: float, record_id: Optional[str], updated_at: Optional[str], *, _flush: bool = False):
         base = dict(self._cache.get(account) or {})

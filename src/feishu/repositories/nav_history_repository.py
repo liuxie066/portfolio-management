@@ -315,28 +315,27 @@ class NavHistoryRepository:
             persist_payload.pop('_nav_objects', None)
             self._local_nav_index_cache.set_account(account, persist_payload)
 
+    def _list_nav_records(self, filter_str: Optional[str], fields: List[str]) -> List[Dict[str, Any]]:
+        """Read the requested projection, tolerating legacy tables without updated_at."""
+        try:
+            return self.client.list_records(
+                'nav_history', filter_str=filter_str, field_names=fields,
+            )
+        except Exception as exc:
+            if 'FieldNameNotFound' not in str(exc):
+                raise
+            return self.client.list_records(
+                'nav_history', filter_str=filter_str,
+                field_names=[field for field in fields if field != 'updated_at'],
+            )
+
     def audit_nav_history_duplicates(self, account: Optional[str] = None) -> Dict[str, Any]:
         """Read-only audit for duplicate nav_history rows by business key."""
         filter_str = None
         if account:
             filter_str = f'CurrentValue.[account] = "{self._escape_filter_value(account)}"'
 
-        try:
-            records = self.client.list_records(
-                'nav_history',
-                filter_str=filter_str,
-                field_names=self.NAV_INDEX_PROJECTION_FIELDS,
-            )
-        except Exception as e:
-            if 'FieldNameNotFound' in str(e):
-                fallback_fields = [f for f in self.NAV_INDEX_PROJECTION_FIELDS if f != 'updated_at']
-                records = self.client.list_records(
-                    'nav_history',
-                    filter_str=filter_str,
-                    field_names=fallback_fields,
-                )
-            else:
-                raise
+        records = self._list_nav_records(filter_str, self.NAV_INDEX_PROJECTION_FIELDS)
 
         try:
             payload = self._build_nav_index_payload(account or '', records)
@@ -376,22 +375,7 @@ class NavHistoryRepository:
         cached_local = self._local_nav_index_cache.get_account(account)
 
         filter_str = f'CurrentValue.[account] = "{self._escape_filter_value(account)}"'
-        try:
-            records = self.client.list_records(
-                'nav_history',
-                filter_str=filter_str,
-                field_names=self.NAV_INDEX_PROJECTION_FIELDS,
-            )
-        except Exception as e:
-            if 'FieldNameNotFound' in str(e):
-                fallback_fields = [f for f in self.NAV_INDEX_PROJECTION_FIELDS if f != 'updated_at']
-                records = self.client.list_records(
-                    'nav_history',
-                    filter_str=filter_str,
-                    field_names=fallback_fields,
-                )
-            else:
-                raise
+        records = self._list_nav_records(filter_str, self.NAV_INDEX_PROJECTION_FIELDS)
 
         try:
             payload = self._build_nav_index_payload(account, records)
@@ -474,28 +458,33 @@ class NavHistoryRepository:
             return datetime.strptime(nav_date[:10], '%Y-%m-%d').date()
         return nav_date
 
-    def _nav_to_index_row(self, nav: NAVHistory, updated_at: Optional[str] = None) -> Dict[str, any]:
-        """Compatibility name for a complete row used by incremental cache updates."""
-        return self._nav_to_cache_row(nav, updated_at=updated_at)
+    def _nav_cache_row_after_write(
+        self,
+        record_id: Optional[str],
+        effects: Dict[str, Any],
+        existing_row: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Apply exactly the submitted fields, preserving omitted source values."""
+        row = dict(existing_row or {})
+        row.update(self._from_feishu_fields(effects, 'nav_history'))
+        row['record_id'] = record_id
+        # The write does not supply an authoritative new remote revision timestamp.
+        row['updated_at'] = self._extract_updated_at_str(effects)
+        return self._nav_to_cache_row(self._dict_to_nav(row), updated_at=row['updated_at'])
 
-    def _apply_nav_rows_to_local_cache(self, account: str, rows: List[Dict[str, any]]):
-        """增量更新本地 NAV 索引缓存，并失效内存镜像。"""
+    def _apply_nav_rows_to_local_cache(self, account: str, rows: List[Dict[str, Any]]):
+        """Merge into the preloaded history and publish a single rebuilt index."""
         if not rows:
             return
-        self._local_nav_index_cache.upsert_nav_records(account, rows, _flush=True)
-        cached = self._local_nav_index_cache.get_account(account)
-        rebuilt = self._build_nav_payload_from_cache_rows(
-            account,
-            list(cached.get('nav_history') or []),
-        )
+        existing = self.get_nav_index(account).get('nav_history') or []
+        by_date = {row['date']: row for row in existing}
+        by_date.update((row['date'], row) for row in rows)
+        rebuilt = self._build_nav_payload_from_cache_rows(account, list(by_date.values()))
         persist_payload = dict(rebuilt)
         persist_payload.pop('_nav_objects', None)
-        self._local_nav_index_cache.set_account(
-            account,
-            persist_payload,
-            _flush=True,
-        )
-        self._invalidate_nav_index(account)
+        self._local_nav_index_cache.set_account(account, persist_payload, _flush=True)
+        self._nav_index_mem_cache[account] = rebuilt
+        self._nav_index_loaded_accounts.add(account)
 
     def _validate_nav_write(self, nav: NAVHistory):
         """Validate a full nav record write before persisting."""
@@ -732,11 +721,9 @@ class NavHistoryRepository:
                 'existing': bool(existing_record_id),
                 'record_id': existing_record_id,
                 'fields': feishu_fields,
-                'cache_row': self._nav_to_index_row(nav, updated_at=feishu_fields.get('updated_at')),
             }
 
         used_fields = feishu_fields
-        compatibility_dropped_details = False
         try:
             if existing_record_id:
                 self.client.update_record('nav_history', existing_record_id, feishu_fields)
@@ -759,7 +746,6 @@ class NavHistoryRepository:
             fallback_fields = dict(feishu_fields)
             fallback_fields.pop('details', None)
             used_fields = fallback_fields
-            compatibility_dropped_details = True
 
             if existing_record_id:
                 self.client.update_record('nav_history', existing_record_id, fallback_fields)
@@ -768,21 +754,7 @@ class NavHistoryRepository:
                 result = self.client.create_record('nav_history', fallback_fields)
                 nav.record_id = result['record_id']
 
-        cache_row = self._nav_to_index_row(nav, updated_at=used_fields.get('updated_at'))
-        if compatibility_dropped_details:
-            cache_row['details'] = (
-                (existing_row or {}).get('details')
-                if existing_record_id
-                else None
-            )
-        if existing_record_id and (not preserve_none_for_update):
-            existing_cache_row = dict(existing_row or {})
-            merged_row = dict(existing_cache_row)
-            merged_row.update(cache_row)
-            for k, v in list(merged_row.items()):
-                if v is None and k in existing_cache_row:
-                    merged_row[k] = existing_cache_row.get(k)
-            cache_row = merged_row
+        cache_row = self._nav_cache_row_after_write(nav.record_id, used_fields, existing_row)
         return {
             'existing': bool(existing_record_id),
             'record_id': nav.record_id,
@@ -864,19 +836,15 @@ class NavHistoryRepository:
                             update_payloads.append({'record_id': rid, 'fields': feishu_fields})
                             nav.record_id = rid
 
-                            merged_row = dict(existing_row or {})
-                            merged_row.update(self._nav_to_index_row(nav, updated_at=feishu_fields.get('updated_at')))
-                            if not preserve_none_for_update:
-                                for k, v in list(merged_row.items()):
-                                    if v is None and k in (existing_row or {}):
-                                        merged_row[k] = existing_row.get(k)
-                            update_rows_for_cache.append(merged_row)
+                            update_rows_for_cache.append(
+                                self._nav_cache_row_after_write(rid, feishu_fields, existing_row)
+                            )
                             if dry_run:
                                 previews.append({'account': account, 'date': ds, 'existing': True, 'fields': feishu_fields})
                         else:
                             feishu_fields = self._to_feishu_fields(fields, 'nav_history', preserve_none=False)
                             create_payloads.append({'fields': feishu_fields})
-                            create_rows_for_cache.append(self._nav_to_index_row(nav, updated_at=feishu_fields.get('updated_at')))
+                            create_rows_for_cache.append(self._nav_cache_row_after_write(None, feishu_fields))
                             created_navs.append(nav)
                             if dry_run:
                                 previews.append({'account': account, 'date': ds, 'existing': False, 'fields': feishu_fields})
@@ -902,13 +870,9 @@ class NavHistoryRepository:
                                         f = dict(p.get('fields') or {})
                                         f.pop('details', None)
                                         fallback_updates.append({'record_id': p['record_id'], 'fields': f})
-                                        r = dict(row)
-                                        r['updated_at'] = f.get('updated_at')
-                                        existing_for_date = existing_row_by_date.get(
-                                            str(r.get('date') or '')
-                                        ) or {}
-                                        r['details'] = existing_for_date.get('details')
-                                        fallback_rows.append(r)
+                                        fallback_rows.append(self._nav_cache_row_after_write(
+                                            p['record_id'], f, existing_row_by_date.get(row['date']),
+                                        ))
                                     try:
                                         updated_records = self.client.batch_update_records(
                                             'nav_history',
@@ -996,10 +960,10 @@ class NavHistoryRepository:
                                                 getattr(fallback_error, 'confirmed_results', None) or []
                                             ),
                                         ) from fallback_error
-                                    for i, p in enumerate(fallback_creates):
-                                        if i < len(create_rows_for_cache):
-                                            create_rows_for_cache[i]['updated_at'] = (p.get('fields') or {}).get('updated_at')
-                                            create_rows_for_cache[i]['details'] = None
+                                    create_rows_for_cache = [
+                                        self._nav_cache_row_after_write(None, p['fields'])
+                                        for p in fallback_creates
+                                    ]
                                 else:
                                     raise self._stage_aware_batch_error(
                                         account=account,
@@ -1184,24 +1148,7 @@ class NavHistoryRepository:
         """Fresh-read complete NAV rows while retaining Missing/Null/Value state."""
 
         filter_str = f'CurrentValue.[account] = "{self._escape_filter_value(account)}"'
-        try:
-            records = self.client.list_records(
-                'nav_history',
-                filter_str=filter_str,
-                field_names=self.NAV_CANONICAL_PROJECTION_FIELDS,
-            )
-        except Exception as exc:
-            if 'FieldNameNotFound' not in str(exc):
-                raise
-            records = self.client.list_records(
-                'nav_history',
-                filter_str=filter_str,
-                field_names=[
-                    field
-                    for field in self.NAV_CANONICAL_PROJECTION_FIELDS
-                    if field != 'updated_at'
-                ],
-            )
+        records = self._list_nav_records(filter_str, self.NAV_CANONICAL_PROJECTION_FIELDS)
 
         try:
             payload = self._build_nav_index_payload(account, records)

@@ -102,3 +102,30 @@ class NavHistoryIndex:
         if prev_year_end:
             return prev_year_end
         return cls.find_first_in_year_before(navs, as_of_date.year, as_of_date, nav_index=nav_index)
+
+
+    @classmethod
+    def period_bases(
+        cls, navs: list, day: date, start_year: int, *,
+        nav_index: dict, first_period_end_on_tie: bool = False,
+    ) -> dict:
+        """Supply the same period anchors to preview and recording."""
+        # The legacy preview selected the first row on a duplicate period-end
+        # date. Formal recording and return-base selection use the index.
+        end_index = nav_index
+        if first_period_end_on_tie and len(set(nav_index["dates"])) != len(navs):
+            end_index = None
+
+        def year_end(year: int):
+            return cls.find_year_end(navs, str(year), nav_index=end_index)
+
+        return {
+            "prev_year_end_nav": year_end(day.year - 1),
+            "prev_month_end_nav": cls.find_prev_month_end(navs, day.year, day.month, nav_index=end_index),
+            "mtd_return_base_nav": cls.find_mtd_return_base(navs, day, nav_index=nav_index),
+            "ytd_return_base_nav": cls.find_ytd_return_base(navs, day, nav_index=nav_index),
+            "yearly_data": {
+                str(year): {"prev_end": year_end(year - 1), "end": year_end(year)}
+                for year in range(start_year, day.year + 1)
+            },
+        }

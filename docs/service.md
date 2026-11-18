@@ -226,7 +226,7 @@ Request:
 }
 ```
 
-Use this for a single account NAV write. `overwrite_existing` defaults to `false` across HTTP, client, application, skill compatibility, portfolio, storage, and CLI layers; set it to `true` only for a deliberate correction. For scheduled production work prefer `daily-nav-job`. A real multi-account job first persists one Feishu receipt in the local outbox, attempts immediate delivery, and returns `receipt.status=sent` or `queued`; dry-run returns `receipt.status=skipped`.
+Use this for a single account NAV write. `overwrite_existing` defaults to `false` across HTTP, client, application, skill compatibility, portfolio, storage, and CLI layers; set it to `true` only for a deliberate correction. For scheduled production work prefer `daily-nav-job`. A real multi-account job first persists one Feishu receipt in the local outbox, attempts immediate delivery, and reports whether it was sent, queued for retry, or unknown. Dry-run returns `receipt.status=skipped`. Unknown delivery is held for inspection and is excluded from automatic dispatch.
 
 ## Daily NAV Job
 
@@ -336,6 +336,21 @@ publisher remains artifact-writing by default while sending `dry_run=true`,
 - `PortfolioService.generate_report()` -> `ReportGenerationService.generate_report()`
 - `PortfolioService.daily_report_bundle()` -> `DailyAccountNavService.run()`
 - `PortfolioService.daily_nav_job()` -> `DailyNavJobService.run()`
+
+The read-only daily report and the daily NAV bundle use the same daily report
+projection. Each supplies its own NAV and valuation facts. The bundle keeps its
+existing return breakdown and run ID.
+
+The Python compatibility method `repair_nav_history_metrics` previews audit
+candidates. Historical corrections must use `scripts/nav_history_repair.py`,
+which verifies the repair plan, checks the current record and reads back each
+update. The compatibility method rejects `dry_run=False` and points callers to
+the maintenance CLI.
+
+Daily NAV receipt dispatch keeps expired sends with uncertain delivery in
+`unknown` for manual reconciliation. A claim that expired before sending can
+be retried. Python compatibility callers of `daily_nav_job` continue to run the
+same task without dispatching a receipt.
 
 ## NAV Mutation Serialization
 

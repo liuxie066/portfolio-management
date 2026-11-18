@@ -58,7 +58,7 @@ def test_repair_only_updates_anomaly_rows():
     skill.storage.patch_nav_derived_fields.assert_not_called()
 
 
-def test_repair_clears_fields_when_base_missing_on_anomaly():
+def test_repair_preview_marks_missing_base_fields_for_clear():
     skill = PortfolioSkill(account='lx')
     skill.audit_nav_history_metrics = Mock(return_value={
         'success': True,
@@ -85,7 +85,7 @@ def test_repair_clears_fields_when_base_missing_on_anomaly():
     })
     skill.storage.patch_nav_derived_fields = Mock()
 
-    result = skill.repair_nav_history_metrics(dry_run=False, write_report=False)
+    result = skill.repair_nav_history_metrics(dry_run=True, write_report=False)
 
     assert result['count'] == 1
     fields = result['updates'][0]['fields']
@@ -94,8 +94,17 @@ def test_repair_clears_fields_when_base_missing_on_anomaly():
     assert fields['ytd_nav_change'] == 0.05
     assert fields['ytd_pnl'] == 5.0
     assert fields['pnl'] == 8.88
-    skill.storage.patch_nav_derived_fields.assert_called_once_with(
-        'rec1',
-        fields,
-        dry_run=False,
-    )
+    skill.storage.patch_nav_derived_fields.assert_not_called()
+
+
+def test_legacy_repair_refuses_direct_write_before_audit():
+    skill = PortfolioSkill(account='lx')
+    skill.audit_nav_history_accuracy = Mock()
+    skill.storage.patch_nav_derived_fields = Mock()
+
+    result = skill.repair_nav_history_metrics(dry_run=False, write_report=False)
+
+    assert result['success'] is False
+    assert 'scripts/nav_history_repair.py' in result['error']
+    skill.audit_nav_history_accuracy.assert_not_called()
+    skill.storage.patch_nav_derived_fields.assert_not_called()

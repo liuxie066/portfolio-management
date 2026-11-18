@@ -1048,3 +1048,25 @@ def test_send_post_message_rejects_invalid_input_before_request(
         client.send_post_message(open_id=open_id, markdown=markdown)
 
     client._request.assert_not_called()
+
+
+def test_message_transport_distinguishes_no_send_from_ambiguous_timeout(monkeypatch):
+    import requests
+
+    from src.feishu.errors import FeishuMessageNotSent
+
+    client = FeishuClient(app_id="synthetic", app_secret="synthetic")
+    send = Mock()
+    monkeypatch.setattr(client.session, "request", send)
+    headers = Mock(side_effect=RuntimeError("authorization unavailable"))
+    monkeypatch.setattr(client, "_get_headers", headers)
+    with pytest.raises(FeishuMessageNotSent, match="authorization"):
+        client.send_post_message(open_id="synthetic", markdown="# Receipt\nBody")
+    send.assert_not_called()
+
+    headers.side_effect = None
+    headers.return_value = {}
+    send.side_effect = requests.exceptions.ReadTimeout("response unknown")
+    with pytest.raises(requests.exceptions.ReadTimeout):
+        client.send_post_message(open_id="synthetic", markdown="# Receipt\nBody")
+    send.assert_called_once()

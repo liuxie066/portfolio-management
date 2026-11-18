@@ -25,55 +25,15 @@ def _use_temporary_nav_lock_dir(monkeypatch, tmp_path):
 class StubLocalNavIndexCache:
     def __init__(self):
         self.accounts: Dict[str, Dict[str, Any]] = {}
-        self.upsert_calls = 0
+        self.update_flushes = 0
 
     def get_account(self, account: str) -> Dict[str, Any]:
         return dict(self.accounts.get(account) or {})
 
     def set_account(self, account: str, payload: Dict[str, Any], _flush: bool = False):
+        if _flush and payload:
+            self.update_flushes += 1
         self.accounts[account] = dict(payload)
-
-    def upsert_nav_records(self, account: str, records: List[Dict[str, Any]], _flush: bool = False):
-        self.upsert_calls += 1
-        base = dict(self.accounts.get(account) or {})
-        navs = list(base.get('nav_history') or [])
-
-        by_date: Dict[str, Dict[str, Any]] = {}
-        for r in navs:
-            ds = str((r or {}).get('date') or '')
-            if ds:
-                by_date[ds] = dict(r)
-
-        for r in records:
-            ds = str((r or {}).get('date') or '')
-            if ds:
-                by_date[ds] = dict(r)
-
-        merged = [by_date[k] for k in sorted(by_date.keys())]
-        month_end = {}
-        year_end = {}
-        for r in merged:
-            ds = r.get('date') or ''
-            ym = ds[:7]
-            yy = ds[:4]
-            if ym:
-                month_end[ym] = dict(r)
-            if yy:
-                year_end[yy] = dict(r)
-
-        base.update(
-            {
-                'account': account,
-                'nav_history': merged,
-                'record_count': len(merged),
-                'month_end_base': month_end,
-                'year_end_base': year_end,
-                'inception_base': dict(merged[0]) if merged else None,
-                'last_record': dict(merged[-1]) if merged else None,
-                'latest_updated_at': (merged[-1].get('updated_at') if merged else None),
-            }
-        )
-        self.accounts[account] = base
 
 
 class StubNavBulkClient:
@@ -320,7 +280,7 @@ def test_single_nav_create_fails_closed_when_feishu_rejects_required_finality_de
     assert len(client.create_record_calls) == 1
     assert 'details' in client.create_record_calls[0]['fields']
     assert nav.record_id is None
-    assert local_cache.upsert_calls == 0
+    assert local_cache.update_flushes == 0
 
 
 def test_single_legacy_nav_create_still_retries_without_optional_details():
@@ -352,7 +312,7 @@ def test_single_legacy_nav_create_still_retries_without_optional_details():
     assert 'details' in client.create_record_calls[0]['fields']
     assert 'details' not in client.create_record_calls[1]['fields']
     assert nav.record_id == 'rec_nav_new_legacy'
-    assert local_cache.upsert_calls == 1
+    assert local_cache.update_flushes == 1
     assert local_cache.get_account('lx')['nav_history'][0]['details'] is None
 
 
@@ -388,7 +348,7 @@ def test_single_nav_update_fails_closed_when_feishu_rejects_required_finality_de
     assert len(client.update_record_calls) == 1
     assert 'details' in client.update_record_calls[0]['fields']
     assert client._records[0]['fields'] == initial_fields
-    assert local_cache.upsert_calls == 0
+    assert local_cache.update_flushes == 0
 
 
 def test_bulk_nav_create_fails_closed_when_feishu_rejects_required_finality_details():
@@ -418,7 +378,7 @@ def test_bulk_nav_create_fails_closed_when_feishu_rejects_required_finality_deta
     assert len(client.batch_create_records_calls) == 1
     assert 'details' in client.batch_create_records_calls[0][0]['fields']
     assert nav.record_id is None
-    assert local_cache.upsert_calls == 0
+    assert local_cache.update_flushes == 0
 
 
 def test_bulk_nav_update_fails_closed_when_feishu_rejects_required_finality_details():
@@ -456,7 +416,7 @@ def test_bulk_nav_update_fails_closed_when_feishu_rejects_required_finality_deta
     assert len(client.batch_update_records_calls) == 1
     assert 'details' in client.batch_update_records_calls[0][0]['fields']
     assert client._records[0]['fields'] == initial_fields
-    assert local_cache.upsert_calls == 0
+    assert local_cache.update_flushes == 0
 
 
 def test_nav_bulk_upsert_upsert_mode_keeps_existing_cache_values_for_none_fields():
@@ -730,14 +690,14 @@ def test_nav_bulk_upsert_updates_nav_index_cache_incrementally():
     ]
     storage.write_nav_records(payload, mode='replace', dry_run=False)
 
-    # Local cache got an incremental upsert call
-    assert nav_idx_cache.upsert_calls >= 1
+    # The updated index is persisted once after the write.
+    assert nav_idx_cache.update_flushes == 1
     acc = nav_idx_cache.accounts.get('lx') or {}
     assert acc.get('record_count') == 2
     dates = [x.get('date') for x in (acc.get('nav_history') or [])]
     assert dates == ['2026-03-01', '2026-03-03']
 
-    # get_nav_index should be served from local cache after invalidation (no extra list_records)
+    # The rebuilt memory index avoids a second remote read.
     before = len(client.list_records_calls)
     idx = storage.get_nav_index('lx')
     after = len(client.list_records_calls)
@@ -1399,7 +1359,7 @@ def test_update_success_create_failure_preserves_scopes_and_rebuilds_cache():
 
     # The repository publishes only the fresh remote readback, never the
     # optimistic create row that failed to complete.
-    assert local_cache.upsert_calls == 0
+    assert local_cache.update_flushes == 0
     cached_rows = local_cache.get_account('lx')['nav_history']
     assert [(row['date'], row['total_value']) for row in cached_rows] == [
         ('2026-03-12', 1100.0),
@@ -1481,3 +1441,34 @@ def test_update_success_create_schema_rejection_marks_target_failed_not_unknown(
     assert [(row['date'], row['total_value']) for row in cached_rows] == [
         ('2026-03-15', 1010.0),
     ]
+
+
+@pytest.mark.parametrize("bulk", [False, True], ids=["single", "bulk"])
+def test_nav_replace_cache_matches_source_for_omitted_and_submitted_fields(bulk):
+    client_class = StubNavBulkClient if bulk else StubNavSingleWriteClient
+    client = client_class(initial_records=[{
+        "record_id": "existing-nav",
+        "fields": {
+            "date": "2026-03-01", "account": "lx", "total_value": 1000,
+            "shares": 1000, "nav": 1.0, "pnl": 8.0, "cash_value": 100,
+        },
+    }])
+    cache = StubLocalNavIndexCache()
+    storage = FeishuStorage(client=client, local_nav_index_cache=cache)
+    nav = NAVHistory(date=date(2026, 3, 1), account="lx", total_value=1200,
+                     shares=1000, nav=1.2, pnl=None, cash_value=88)
+    if bulk:
+        storage.write_nav_records([nav], mode="replace")
+        fields = client.batch_update_records_calls[0][0]["fields"]
+    else:
+        storage.write_nav_record(nav, overwrite_existing=True)
+        fields = client.update_record_calls[0]["fields"]
+
+    assert "pnl" not in fields
+    assert fields["cash_value"] == 88.0
+    assert cache.update_flushes == 1
+    cached = storage.get_nav_history("lx", days=9999)
+    fresh = storage.get_nav_history("lx", days=9999, fresh=True)
+    assert len(cached) == len(fresh) == 1
+    assert cached[0].pnl == fresh[0].pnl == 8.0
+    assert cached[0].cash_value == fresh[0].cash_value == 88.0

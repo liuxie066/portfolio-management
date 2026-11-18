@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from .nav_history_receipt_service import NavHistoryReceiptService
 from .operation_state_store import OperationStateStore
+from .receipt_delivery import receipt_outcome
 
 
 class NavReceiptOutboxService:
@@ -43,6 +44,16 @@ class NavReceiptOutboxService:
                 "message_id": row.get("message_id"),
                 "deduplicated": True,
             }
+        if row and row.get("status") == "unknown":
+            return {
+                "success": False,
+                "status": "unknown",
+                "delivery_state": "unknown",
+                "channel": "feishu",
+                "bot": "刘看山",
+                "receipt_key": receipt_key,
+                "error": row.get("last_error") or "delivery could not be confirmed",
+            }
         return {
             "success": False,
             "status": "queued",
@@ -67,20 +78,26 @@ class NavReceiptOutboxService:
         results = []
         sent = failed = 0
         for row in rows:
+            self.store.start_nav_receipt_send(row["receipt_key"], claim_id=claim_id)
             try:
                 delivery = dict(self.sender.send(dict(row["payload"])))
             except Exception as exc:
                 delivery = {
                     "success": False,
-                    "status": "failed",
+                    "delivery_state": "unknown",
                     "error": str(exc) or exc.__class__.__name__,
                 }
-            success = bool(delivery.get("success"))
+            # Keep the preexisting custom sender contract. An explicit
+            # delivery_state always takes precedence over the legacy status.
+            legacy_state = {"sent": "accepted", "failed": "failed"}.get(delivery.get("status"))
+            outcome = receipt_outcome({"delivery_state": legacy_state, **delivery})
+            success = outcome == "sent"
             try:
                 self.store.mark_nav_receipt(
                     row["receipt_key"],
                     claim_id=claim_id,
                     success=success,
+                    unknown=outcome == "unknown",
                     message_id=delivery.get("message_id"),
                     error=delivery.get("error"),
                 )
@@ -94,17 +111,21 @@ class NavReceiptOutboxService:
                 **delivery,
                 "receipt_key": row["receipt_key"],
             }
-            if not success:
+            if outcome == "unknown":
+                result.update(success=False, status="unknown", delivery_state="unknown")
+            elif not success:
                 result["status"] = "queued"
                 result["queued"] = True
             sent += int(success)
-            failed += int(not success)
+            failed += int(outcome == "failed")
             results.append(result)
+        unknown = self.store.nav_receipt_unknown_summary(limit=limit, receipt_key=receipt_key)
         return {
-            "success": failed == 0,
+            "success": failed == 0 and unknown["unknown"] == 0,
             "attempted": len(rows),
             "sent": sent,
             "failed": failed,
+            **unknown,
             "results": results,
         }
 

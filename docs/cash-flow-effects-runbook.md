@@ -113,8 +113,10 @@ the latest scan of the same scope determines current recovery state; an old erro
 sent after recovery is labelled historical and includes recovery time/scan.
 A later failure also prevents an old recovery receipt from claiming current health.
 Legacy receipts use their original outbox creation time when occurrence metadata
-is absent. Receipt sends are serialized per database on the same host; a crash
-after remote send but before local marking can still duplicate a retry.
+is absent. Receipt sends are serialized per database on the same host. Each
+send is recorded before calling Feishu. If the send is interrupted or its
+result cannot be confirmed, the dispatcher reports an unknown outcome and
+does not resend automatically.
 
 Futu CASH is observe-only in `pm futu sync`. Its original-currency values remain
 source evidence only: they are not compared with PM's CNY-denominated aggregate

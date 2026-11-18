@@ -194,6 +194,40 @@ def test_event_inbox_deduplicates_claims_retries_and_persists_outcome(tmp_path):
     assert row["outcome"] == {"case_keys": ["case-1"]}
 
 
+@pytest.mark.parametrize("kind", ["holding", "cash_flow"])
+def test_event_inbox_reclaims_expired_lease_without_incrementing_attempts(tmp_path, kind):
+    clock = [datetime(2026, 7, 31, 20, 0)]
+    store = OperationStateStore(tmp_path / "operations.sqlite3", now_factory=lambda: clock[0])
+    accept = getattr(store, f"accept_{kind}_event")
+    claim = getattr(store, f"claim_{kind}_events")
+    actions = [{"action": "edited", "record_id": "rec-1"}]
+    for event_id in ("event-1", "event-2"):
+        assert accept(
+            event_id=event_id,
+            event_type="drive.file.bitable_record_changed_v1",
+            file_token="file",
+            table_id="table",
+            revision="7",
+            action_list=actions,
+            payload_digest=event_id,
+        )
+        clock[0] += timedelta(seconds=1)
+    initially_claimed = claim(limit=1, claim_id="first")
+    assert [item["event_id"] for item in initially_claimed] == ["event-1"]
+    assert [item["event_id"] for item in claim(limit=1, claim_id="second")] == ["event-2"]
+    original_attempts = initially_claimed[0]["attempt_count"]
+    clock[0] += timedelta(minutes=4, seconds=59)
+    assert claim(limit=1, claim_id="early") == []
+    clock[0] += timedelta(seconds=1)
+    [reclaimed] = claim(limit=1, claim_id="replacement")
+    assert reclaimed["event_id"] == "event-1"
+    assert reclaimed["claim_id"] == "replacement"
+    assert reclaimed["attempt_count"] == original_attempts
+    assert reclaimed["last_error"] == "worker claim expired"
+    assert reclaimed["action_list"] == actions
+    assert reclaimed["outcome"] is None
+
+
 def test_case_event_and_receipt_materialization_is_atomic(tmp_path):
     store = OperationStateStore(tmp_path / "operations.sqlite3")
     first = _case("case-1")

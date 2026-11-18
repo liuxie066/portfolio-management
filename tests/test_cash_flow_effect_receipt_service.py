@@ -16,6 +16,35 @@ class FakeClient:
         return {"message_id": "om_123"}
 
 
+def test_interrupted_effect_receipt_is_not_resent(tmp_path, monkeypatch):
+    store = CashFlowEffectStore.initialize(
+        db_path=tmp_path / "effects.sqlite3", cutover_date="2026-10-01"
+    )
+    store.enqueue_receipt(
+        receipt_key="interrupted", receipt_type="runtime_error", payload={"scope": "synthetic"}
+    )
+    calls = []
+    service = CashFlowEffectReceiptService(
+        store=store, app_id="app", app_secret="dummy", open_id="user",
+        client_factory=lambda **kwargs: FakeClient(**kwargs, calls=calls),
+    )
+
+    def fail_mark(*args, **kwargs):
+        raise OSError("local receipt result could not be saved")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "mark_receipt", fail_mark)
+        with pytest.raises(OSError):
+            service.dispatch_pending()
+
+    result = service.dispatch_pending()
+    assert result["unknown"] == 1
+    assert result["interrupted_receipt_keys"] == ["interrupted"]
+    assert result["attempted"] == 0
+    assert [call[0] for call in calls] == ["init", "send_post"]
+    assert store.list_pending_receipts() == []
+
+
 def test_stale_preview_receipt_is_an_actionable_contract():
     message = CashFlowEffectReceiptService.build_message(
         {

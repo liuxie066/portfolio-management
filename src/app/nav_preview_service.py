@@ -5,6 +5,7 @@ from datetime import date, timedelta
 from typing import Any, Optional
 
 from src.domain.nav_calculator import NavCalculator
+from src.domain.nav_history_index import NavHistoryIndex
 from src.models import NAVHistory
 
 
@@ -35,30 +36,12 @@ class NavPreviewService:
             return None
 
         current_year = str(today.year)
-        build_lookup = getattr(self.portfolio, "_build_nav_lookup", None)
-        nav_index = build_lookup(history_navs) if callable(build_lookup) else None
-        prev_year_end_nav = self.portfolio._find_year_end_nav(history_navs, str(today.year - 1))
-        prev_month_end_nav = self.portfolio._find_prev_month_end_nav(history_navs, today.year, today.month)
-        find_mtd_base = getattr(self.portfolio, "_find_mtd_return_base_nav", None)
-        find_ytd_base = getattr(self.portfolio, "_find_ytd_return_base_nav", None)
-        mtd_return_base_nav = (
-            find_mtd_base(history_navs, today, nav_index=nav_index)
-            if callable(find_mtd_base)
-            else prev_month_end_nav
+        period_bases = NavHistoryIndex.period_bases(
+            history_navs, today, self.start_year,
+            nav_index=NavHistoryIndex.build(history_navs),
+            first_period_end_on_tie=True,
         )
-        ytd_return_base_nav = (
-            find_ytd_base(history_navs, today, nav_index=nav_index)
-            if callable(find_ytd_base)
-            else prev_year_end_nav
-        )
-
-        yearly_data = {}
-        for yr in range(self.start_year, today.year + 1):
-            yr_str = str(yr)
-            yearly_data[yr_str] = {
-                "prev_end": self.portfolio._find_year_end_nav(history_navs, str(yr - 1)),
-                "end": self.portfolio._find_year_end_nav(history_navs, yr_str),
-            }
+        yearly_data = period_bases["yearly_data"]
 
         cash_flow_summary = self._summarize_cash_flows(today=today, last_nav=last_nav)
         daily_cash_flow = cash_flow_summary["daily"]
@@ -74,12 +57,8 @@ class NavPreviewService:
             today=today,
             total_value=live_total,
             yesterday_nav=last_nav,
-            prev_year_end_nav=prev_year_end_nav,
-            prev_month_end_nav=prev_month_end_nav,
-            mtd_return_base_nav=mtd_return_base_nav,
-            ytd_return_base_nav=ytd_return_base_nav,
             last_nav=last_nav,
-            yearly_data=yearly_data,
+            **period_bases,
             daily_cash_flow=daily_cash_flow,
             monthly_cash_flow=monthly_cash_flow,
             yearly_cash_flow=yearly_cash_flow,

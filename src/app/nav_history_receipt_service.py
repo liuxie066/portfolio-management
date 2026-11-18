@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from src import config
 from src.app.notification_shells import render_receipt
+from src.feishu.errors import FeishuMessageNotSent
 from src.feishu_client import FeishuClient
 
 
@@ -102,33 +103,50 @@ class NavHistoryReceiptService:
             return {
                 "success": False,
                 "status": "failed",
+                "delivery_state": "failed",
                 "channel": "feishu",
                 "bot": "刘看山",
                 "error": f"missing receipt config: {', '.join(missing)}",
             }
 
         try:
-            sent = self.client_factory(
+            markdown = self.build_message(job_result, executed_at=self.now_factory())
+            client = self.client_factory(
                 app_id=str(self.app_id),
                 app_secret=str(self.app_secret),
-            ).send_post_message(
+            )
+        except Exception as exc:
+            return {
+                "success": False,
+                "status": "failed",
+                "delivery_state": "failed",
+                "channel": "feishu",
+                "bot": "刘看山",
+                "error": str(exc) or type(exc).__name__,
+            }
+
+        try:
+            sent = client.send_post_message(
                 open_id=str(self.open_id),
-                markdown=self.build_message(job_result, executed_at=self.now_factory()),
+                markdown=markdown,
             )
             return {
                 "success": True,
                 "status": "sent",
+                "delivery_state": "accepted",
                 "channel": "feishu",
                 "bot": "刘看山",
                 "message_id": sent.get("message_id"),
             }
         except Exception as exc:
+            delivery_state = "failed" if isinstance(exc, FeishuMessageNotSent) else "unknown"
             return {
                 "success": False,
-                "status": "failed",
+                "status": delivery_state,
+                "delivery_state": delivery_state,
                 "channel": "feishu",
                 "bot": "刘看山",
-                "error": str(exc),
+                "error": str(exc) or type(exc).__name__,
             }
 
     @classmethod

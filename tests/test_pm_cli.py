@@ -790,7 +790,10 @@ def test_failed_cash_scan_attempts_receipt_without_masking_scan_error(tmp_path, 
     assert store.list_effects() == []
 
 
-def test_receipt_timer_retries_cash_errors_without_successful_scan(tmp_path, monkeypatch):
+@pytest.mark.parametrize("failure_stage", ["before_send", "during_send"])
+def test_receipt_timer_distinguishes_failed_and_unknown_cash_delivery(
+    tmp_path, monkeypatch, failure_stage
+):
     from src import config
     from src.app.cash_flow_effect_store import CashFlowEffectStore
     import src.app.cash_flow_effect_receipt_service as cash_module
@@ -809,14 +812,17 @@ def test_receipt_timer_retries_cash_errors_without_successful_scan(tmp_path, mon
     monkeypatch.setattr(operation_module.OperationReceiptOutboxService, "dispatch_pending",
                         lambda self, **kwargs: {"success": True})
     messages = []
+    clients = []
 
     class Client:
         def __init__(self, **kwargs):
-            pass
+            clients.append(1)
+            if failure_stage == "before_send" and len(clients) == 1:
+                raise RuntimeError("client setup failed before send")
 
         def send_post_message(self, **kwargs):
             messages.append(kwargs["markdown"])
-            if len(messages) == 1:
+            if failure_stage == "during_send":
                 raise RuntimeError("temporary transport error")
             return {"message_id": "sent"}
 
@@ -827,16 +833,19 @@ def test_receipt_timer_retries_cash_errors_without_successful_scan(tmp_path, mon
             super().__init__(**kwargs, app_id="app", app_secret="secret", open_id="user", client_factory=Client)
 
     monkeypatch.setattr(cash_module, "CashFlowEffectReceiptService", ConfiguredReceiptService)
-    for expected_sent in [0, 1]:
+    expected = [(0, 0), (1, 0)] if failure_stage == "before_send" else [(0, 1), (0, 0)]
+    for expected_sent, expected_unknown in expected:
         stdout = io.StringIO()
         with redirect_stdout(stdout):
             assert pm.main(["receipts", "dispatch", "--confirm", "--limit", "1", "--json"]) == 1
         result = json.loads(stdout.getvalue())
         assert result["branches"]["cash_flow_effects"]["sent"] == expected_sent
+        assert result["branches"]["cash_flow_effects"]["unknown"] == expected_unknown
     assert store.list_pending_receipts() == []
     assert store.latest_scan()["status"] == "failed"
-    assert "当前状态｜运行异常" in messages[1]
-    assert failed["completed_at"] in messages[1]
+    assert len(messages) == 1
+    assert "当前状态｜运行异常" in messages[0]
+    assert failed["completed_at"] in messages[0]
 
 
 def test_cash_receipt_dispatch_rejects_corrupt_existing_database(tmp_path, monkeypatch):

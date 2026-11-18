@@ -9,7 +9,7 @@ from src.asset_utils import detect_asset_type
 from .batch import BatchPricePlanner
 from .cache import PriceCachePolicy
 from .classifier import canonicalize_pricing_code
-from .fixed import get_cash_price, get_crypto_value_price, get_mmf_price, is_crypto_value_code
+from .fixed import fixed_quote_factory
 from .provider import PriceProvider
 from .payload import normalize_price_payload
 from .result import BatchPriceResult, PriceFailure, PriceQuote
@@ -104,28 +104,25 @@ class PriceService:
         )
         stale_quote: PriceQuote | None = None
 
-        if not force_refresh:
-            try:
-                cached_quote = cache_policy.get(
-                    canonical_code,
-                    accept_stale=accept_stale_when_closed,
-                    max_stale_after_expiry_sec=max_stale_after_expiry_sec,
-                )
-            except (TypeError, ValueError):
-                cached_quote = None
-            if cached_quote is not None:
-                payload = cached_quote.to_payload()
-                payload["code"] = original_code
-                cached_quote = PriceQuote.from_payload(
-                    payload,
-                    code=original_code,
-                    cache_status=cached_quote.cache_status,
-                    stale=cached_quote.stale,
-                    source_chain=cached_quote.source_chain,
-                )
-                if not cached_quote.stale:
-                    return cached_quote
-                stale_quote = cached_quote
+        cached_quote = cache_policy.get(
+            canonical_code,
+            force_refresh=force_refresh,
+            accept_stale=accept_stale_when_closed,
+            max_stale_after_expiry_sec=max_stale_after_expiry_sec,
+        )
+        if cached_quote is not None:
+            payload = cached_quote.to_payload()
+            payload["code"] = original_code
+            cached_quote = PriceQuote.from_payload(
+                payload,
+                code=original_code,
+                cache_status=cached_quote.cache_status,
+                stale=cached_quote.stale,
+                source_chain=cached_quote.source_chain,
+            )
+            if not cached_quote.stale:
+                return cached_quote
+            stale_quote = cached_quote
 
         if use_cache_only:
             return stale_quote or PriceFailure(
@@ -135,16 +132,9 @@ class PriceService:
                 source_chain=["cache"],
             )
 
-        fixed_source = None
-        fixed_factory = None
-        if is_crypto_value_code(canonical_code):
-            fixed_source, fixed_factory = "crypto_value", get_crypto_value_price
-        elif canonical_code == "CASH" or canonical_code.endswith("-CASH"):
-            fixed_source, fixed_factory = "cash", get_cash_price
-        elif canonical_code.endswith("-MMF"):
-            fixed_source, fixed_factory = "mmf", get_mmf_price
-
-        if fixed_factory is not None:
+        fixed = fixed_quote_factory(canonical_code)
+        if fixed is not None:
+            fixed_source, fixed_factory = fixed
             try:
                 payload = fixed_factory(canonical_code, lambda: self._fetch_rates(deadline))
                 payload["code"] = original_code

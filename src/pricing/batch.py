@@ -8,7 +8,7 @@ from src.asset_utils import detect_asset_type, detect_market_type
 
 from .cache import PriceCachePolicy, market_type_from_asset_type
 from .classifier import canonicalize_pricing_code
-from .fixed import get_cash_price, get_crypto_value_price, get_mmf_price, is_crypto_value_code
+from .fixed import fixed_quote_factory
 from .payload import normalize_price_payload, remaining_timeout
 from .providers.tencent_batch import fetch_tencent_quotes_batch
 from .providers.us_batch import fetch_us_batch
@@ -70,39 +70,31 @@ class BatchPricePlanner:
             writable=bool(getattr(self.fetcher, "cache_writes", True)),
         )
 
-        for canonical, originals in original_by_canonical.items():
+        for canonical in original_by_canonical:
             primary = primary_by_canonical[canonical]
-            if not force_refresh:
-                try:
-                    cached_quote = cache_policy.get(
-                        canonical,
-                        accept_stale=accept_stale_when_closed,
-                        max_stale_after_expiry_sec=max_stale_after_expiry_sec,
-                    )
-                except (TypeError, ValueError):
-                    cached_quote = None
-                if cached_quote is not None:
-                    payload = cached_quote.to_payload()
-                    payload["code"] = primary
-                    if cached_quote.stale:
-                        stale_cache[canonical] = payload
-                    else:
-                        results[canonical] = payload
-                        continue
+            cached_quote = cache_policy.get(
+                canonical,
+                force_refresh=force_refresh,
+                accept_stale=accept_stale_when_closed,
+                max_stale_after_expiry_sec=max_stale_after_expiry_sec,
+            )
+            if cached_quote is not None:
+                payload = cached_quote.to_payload()
+                payload["code"] = primary
+                if cached_quote.stale:
+                    stale_cache[canonical] = payload
+                else:
+                    results[canonical] = payload
+                    continue
 
             if use_cache_only:
                 if canonical in stale_cache:
                     results[canonical] = stale_cache[canonical]
                 continue
 
-            fixed_factory = None
-            if is_crypto_value_code(canonical):
-                fixed_factory = get_crypto_value_price
-            elif canonical == "CASH" or canonical.endswith("-CASH"):
-                fixed_factory = get_cash_price
-            elif canonical.endswith("-MMF"):
-                fixed_factory = get_mmf_price
-            if fixed_factory is not None:
+            fixed = fixed_quote_factory(canonical)
+            if fixed is not None:
+                _, fixed_factory = fixed
                 try:
                     payload = fixed_factory(canonical, lambda: self._fetch_rates(deadline))
                     payload["code"] = primary
@@ -146,6 +138,8 @@ class BatchPricePlanner:
                             canonical_names,
                             asset_type_map=canonical_asset_types,
                             deadline=deadline,
+                            force_refresh=force_refresh,
+                            market_closed_ttl_multiplier=market_closed_ttl_multiplier,
                         )
                     )
                 if us_codes:
@@ -175,6 +169,9 @@ class BatchPricePlanner:
         _nested: bool = False,
         asset_type_map: Dict[str, Any] | None = None,
         deadline: float | None = None,
+        *,
+        force_refresh: bool = False,
+        market_closed_ttl_multiplier: float = 1.0,
     ) -> Dict[str, Dict]:
         """Fetch non-US quotes via bounded Tencent batch, then sequential fallback."""
         del max_workers, _nested
@@ -204,8 +201,9 @@ class BatchPricePlanner:
                 result = self.fetcher.fetch(
                     code,
                     asset_name,
-                    force_refresh=False,
+                    force_refresh=force_refresh,
                     asset_type_map=asset_type_map,
+                    market_closed_ttl_multiplier=market_closed_ttl_multiplier,
                     deadline=deadline,
                 )
                 if result and "error" not in result:

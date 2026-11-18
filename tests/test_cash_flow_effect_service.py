@@ -1728,3 +1728,25 @@ def test_nav_outage_does_not_supersede_unchanged_cash_flow_or_complete_scan(tmp_
         service.preview(effect["effect_id"], external_action="apply_delta")
     assert service.store.get_latest_for_record(effect["record_id"]) == before
     assert storage.replacements == []
+
+
+def test_unchanged_applied_flow_does_not_need_live_nav_finality(tmp_path, monkeypatch):
+    storage = FakeStorage(flows=[_flow(flow_date=date(2026, 9, 25))], holdings=[_cash()])
+    service = _service(tmp_path, monkeypatch, storage)
+    service.scan(account="lx")
+    effect = service.store.get_latest_for_record("cf_1")
+    service.store.update_effect(effect["effect_id"], state="applied", event_type="test_applied")
+
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("NAV source unavailable")
+
+    storage.get_nav_history = unavailable
+    service.scan(account="lx")
+    assert service.store.latest_scan(scope="lx")["status"] == "completed"
+    assert service.store.get_latest_for_record("cf_1")["effect_id"] == effect["effect_id"]
+
+    storage.flows = [_flow(amount=21, flow_date=date(2026, 9, 25))]
+    with pytest.raises(RuntimeError, match="NAV source unavailable"):
+        service.scan(account="lx")
+    assert service.store.latest_scan(scope="lx")["status"] == "failed"
+    assert service.store.get_latest_for_record("cf_1")["effect_id"] == effect["effect_id"]

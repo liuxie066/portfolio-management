@@ -48,3 +48,17 @@ def test_nav_history_index_resolves_return_base_from_current_period_start():
     assert NavHistoryIndex.find_ytd_return_base(navs, date(2026, 5, 25), nav_index=index).date == date(2026, 5, 1)
     assert NavHistoryIndex.find_mtd_return_base(navs, date(2026, 5, 1), nav_index=index) is None
     assert NavHistoryIndex.find_ytd_return_base(navs, date(2026, 5, 1), nav_index=index) is None
+
+
+def test_preview_keeps_first_duplicate_period_end_without_changing_return_base():
+    day = date(2025, 12, 31)
+    first, last = _nav(day, nav=1), _nav(day, nav=2)
+    rows = [first, last]
+    index = NavHistoryIndex.build(rows)
+    preview = NavHistoryIndex.period_bases(
+        rows, date(2026, 1, 2), 2026, nav_index=index, first_period_end_on_tie=True,
+    )
+    recorded = NavHistoryIndex.period_bases(rows, date(2026, 1, 2), 2026, nav_index=index)
+    assert preview["prev_year_end_nav"] is preview["prev_month_end_nav"] is first
+    assert preview["mtd_return_base_nav"] is preview["ytd_return_base_nav"] is last
+    assert recorded["prev_year_end_nav"] is recorded["prev_month_end_nav"] is last

@@ -88,6 +88,7 @@ class PriceCachePolicy:
         self,
         code: str,
         *,
+        force_refresh: bool = False,
         accept_stale: bool = False,
         max_stale_after_expiry_sec: int = 0,
     ) -> Optional[PriceQuote]:
@@ -101,16 +102,19 @@ class PriceCachePolicy:
           price, so the stale quote is still the correct one. If the market
           has traded since, reject (fail closed).
         """
-        if not self.enabled:
+        if force_refresh or not self.enabled:
             return None
 
         semantic_stale = accept_stale and max_stale_after_expiry_sec <= 0
         storage_window = STALE_RETRIEVAL_WINDOW_SEC if semantic_stale else max_stale_after_expiry_sec
-        cached = self.storage.get_price(
-            code,
-            allow_expired=accept_stale or not self.writable,
-            max_stale_after_expiry_sec=storage_window,
-        )
+        try:
+            cached = self.storage.get_price(
+                code,
+                allow_expired=accept_stale or not self.writable,
+                max_stale_after_expiry_sec=storage_window,
+            )
+        except (TypeError, ValueError):
+            return None
         if not cached:
             return None
 
@@ -123,17 +127,19 @@ class PriceCachePolicy:
             except Exception:
                 is_expired = True
 
-        payload = price_cache_to_payload(cached, is_stale=is_expired)
+        try:
+            payload = price_cache_to_payload(cached, is_stale=is_expired)
+            if is_expired:
+                if not accept_stale:
+                    return None
+                if semantic_stale and self._market_has_traded_since(code, expire_dt):
+                    return None
+                payload["source"] = "cache_fallback"
+                return PriceQuote.from_payload(payload, code=code, cache_status="stale_fallback", stale=True)
 
-        if is_expired:
-            if not accept_stale:
-                return None
-            if semantic_stale and self._market_has_traded_since(code, expire_dt):
-                return None
-            payload["source"] = "cache_fallback"
-            return PriceQuote.from_payload(payload, code=code, cache_status="stale_fallback", stale=True)
-
-        return PriceQuote.from_payload(payload, code=code, cache_status="hit")
+            return PriceQuote.from_payload(payload, code=code, cache_status="hit")
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _market_has_traded_since(code: str, expire_dt: Optional[datetime]) -> bool:

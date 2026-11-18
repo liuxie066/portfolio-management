@@ -20,7 +20,7 @@ from src.feishu.contracts import (
     parse_table_ref,
     validate_write_fields,
 )
-from src.feishu.errors import FeishuReadTimeout, FeishuRecordNotFoundError
+from src.feishu.errors import FeishuMessageNotSent, FeishuReadTimeout, FeishuRecordNotFoundError
 from src.time_utils import remaining_timeout, sleep_with_deadline
 
 
@@ -243,7 +243,13 @@ class FeishuClient:
         self._rate_limit(**({'deadline': deadline} if deadline is not None else {}))
 
         url = f"{self.BASE_URL}{endpoint}"
-        headers = self._get_headers(**({'deadline': deadline} if deadline is not None else {}))
+        is_message_send = method == 'POST' and endpoint == '/im/v1/messages'
+        try:
+            headers = self._get_headers(**({'deadline': deadline} if deadline is not None else {}))
+        except Exception as exc:
+            if is_message_send:
+                raise FeishuMessageNotSent("Feishu message authorization failed before sending") from exc
+            raise
 
         requested_timeout = kwargs.pop('timeout', None)
         request_kwargs = dict(kwargs, timeout=self._bounded_timeout(requested_timeout, deadline, _stage))
@@ -265,6 +271,8 @@ class FeishuClient:
         # 处理限流错误（最多重试3次）
         if response.status_code == 429:
             if _retry_count >= 3:
+                if is_message_send:
+                    raise FeishuMessageNotSent("Feishu message rejected by rate limit")
                 response.raise_for_status()
             try:
                 sleep_with_deadline(1 * (2 ** _retry_count), deadline)
@@ -354,17 +362,17 @@ class FeishuClient:
         open_id_value = str(open_id or '').strip()
         markdown_value = str(markdown or '').strip()
         if not open_id_value:
-            raise ValueError("open_id is required")
+            raise FeishuMessageNotSent("open_id is required")
         if not markdown_value:
-            raise ValueError("markdown is required")
+            raise FeishuMessageNotSent("markdown is required")
 
         lines = markdown_value.splitlines()
         title_line = lines[0]
         if not title_line.startswith("# "):
-            raise ValueError("markdown must start with '# <title>'")
+            raise FeishuMessageNotSent("markdown must start with '# <title>'")
         title = title_line[2:].strip()
         if not title:
-            raise ValueError("markdown title is required")
+            raise FeishuMessageNotSent("markdown title is required")
 
         paragraphs: List[List[Dict[str, Any]]] = []
         spacer_pending = False
@@ -378,7 +386,7 @@ class FeishuClient:
             if line.startswith("## "):
                 section_title = line[3:].strip()
                 if not section_title:
-                    raise ValueError("post section title is required")
+                    raise FeishuMessageNotSent("post section title is required")
                 paragraphs.append([{
                     'tag': 'text',
                     'text': section_title,
@@ -387,7 +395,7 @@ class FeishuClient:
             else:
                 paragraphs.append([{'tag': 'text', 'text': line}])
         if not paragraphs:
-            raise ValueError("markdown body is required")
+            raise FeishuMessageNotSent("markdown body is required")
 
         data = self._request(
             'POST',
