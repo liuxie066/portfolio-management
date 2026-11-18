@@ -1240,6 +1240,42 @@ def cmd_cash_flow_effects_backup(args):
     return result
 
 
+def cmd_cash_flow_effects_audit_timestamp(args):
+    """Explicit local maintenance; never use service fallback or a scan."""
+    if not bool(getattr(args, "no_service", False)):
+        raise SystemExit("audit-timestamp requires explicit --no-service on the deployment host")
+    if args.apply and (not args.confirm or not args.backup):
+        raise SystemExit("audit-timestamp --apply requires --confirm and --backup")
+    if not args.apply and (args.confirm or args.backup):
+        raise SystemExit("--confirm/--backup are only valid with --apply")
+
+    def direct():
+        from src.feishu_storage import FeishuStorage
+        from src.maintenance.cash_flow_audit_timestamp import CashFlowAuditTimestampRecovery
+
+        recovery = CashFlowAuditTimestampRecovery(storage=FeishuStorage())
+        if args.apply:
+            return recovery.apply(
+                account=args.account, plan=json.loads(Path(args.plan_file).read_text()),
+                confirm=True, backup=args.backup,
+            )
+        plan = recovery.plan(account=args.account)
+        # Plans contain private record identities. Never overwrite an approved
+        # plan, and do not expose it through ordinary CLI stdout.
+        descriptor = os.open(args.plan_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w") as stream:
+            json.dump(plan, stream, ensure_ascii=False, indent=2)
+            stream.write(chr(10))
+        return {"success": True, "plan_file": args.plan_file,
+                "plan_digest": plan["plan_digest"],
+                "eligible": len(plan["candidates"]), "skipped": len(plan["skipped"]),
+                "workflow_writes": 0}
+
+    result = _call_backend(args, direct)
+    _dump(result, args.json)
+    return result
+
+
 def cmd_compensation_list(args):
     from src.app.compensation_service import CompensationService
 
@@ -2380,6 +2416,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_effects_backup.add_argument("--confirm", action="store_true")
     p_effects_backup.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     p_effects_backup.set_defaults(func=cmd_cash_flow_effects_backup)
+
+    p_audit_timestamp = cash_flow_effects_sub.add_parser(
+        "audit-timestamp", help="plan explicit timestamp-only completion recovery (no financial writes)",
+    )
+    p_audit_timestamp.add_argument("--account", required=True)
+    p_audit_timestamp.add_argument("--plan-file", required=True)
+    p_audit_timestamp.add_argument("--apply", action="store_true")
+    p_audit_timestamp.add_argument("--confirm", action="store_true")
+    p_audit_timestamp.add_argument("--backup")
+    p_audit_timestamp.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    p_audit_timestamp.set_defaults(func=cmd_cash_flow_effects_audit_timestamp)
 
     p_compensation = sp.add_parser("compensation", help="inspect and retry durable compensation tasks")
     compensation_sub = p_compensation.add_subparsers(dest="compensation_cmd", required=True)

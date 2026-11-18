@@ -33,10 +33,12 @@ class CashFlowMixin:
         *,
         account: Optional[str] = None,
         record_id: Optional[str] = None,
+        require_complete: bool = False,
     ) -> List[RawCashFlowRecord]:
         return self.cash_flow.get_raw_cash_flows(
             account=account,
             record_id=record_id,
+            **({"require_complete": True} if require_complete else {}),
         )
 
     def preload_cash_flow_aggs(
