@@ -140,6 +140,20 @@ def _cash_record(record_id="rec_cash", **overrides):
     return {"record_id": record_id, "fields": fields}
 
 
+def test_cash_fresh_accepts_feishu_millisecond_dates():
+    client = StubHoldingsClient([
+        _cash_record(created_at=1784732887000, updated_at=1792985446000),
+    ])
+    storage = FeishuStorage(client=client, local_holdings_index_cache=StubLocalHoldingsIndexCache())
+
+    rows = storage.get_cash_holdings_fresh()
+
+    assert len(rows) == 1
+    assert rows[0].created_at == datetime(2026, 7, 22, 23, 8, 7)
+    assert rows[0].updated_at == datetime(2026, 10, 26, 11, 30, 46)
+    assert rows[0].quantity == 100
+
+
 def test_cash_fresh_skips_nameless_noncash_but_full_read_still_fails():
     client = StubHoldingsClient([
         _cash_record(),

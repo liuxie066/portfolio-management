@@ -517,9 +517,14 @@ def test_record_digest_normalizes_semantically_equivalent_field_values():
     [
         ("2026/07/31", datetime(2026, 7, 31)),
         ("2026-07-31 12:00:00", datetime(2026, 7, 31, 12)),
+        (1784732887000, datetime(2026, 7, 22, 23, 8, 7)),
+        (1792985446000, datetime(2026, 10, 26, 11, 30, 46)),
+        (0, datetime(1970, 1, 1, 8)),
+        (57600000, datetime(1970, 1, 2)),
+        (1784732887123.0, datetime(2026, 7, 22, 23, 8, 7, 123000)),
     ],
 )
-def test_validation_accepts_canonical_and_predecessor_holding_dates(
+def test_validation_accepts_supported_holding_dates(
     created_at,
     expected,
 ):
@@ -541,7 +546,10 @@ def test_invalid_transport_timestamp_is_a_nonblocking_warning():
     assert report.records[0].to_holding().updated_at is None
 
 
-@pytest.mark.parametrize("updated_at", ["2026-08-01", "2026/8/1", "not-a-timestamp"])
+@pytest.mark.parametrize("updated_at", [
+    "2026-08-01", "2026/8/1", "not-a-timestamp", "1784732887000",
+    True, False, float("nan"), float("inf"), 10**1000,
+])
 def test_holding_date_validation_is_not_permissive(updated_at):
     report = HoldingsValidator().validate([_record(updated_at=updated_at)])
 
