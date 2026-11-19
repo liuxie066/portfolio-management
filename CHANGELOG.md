@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.19 - 2026-11-19
+
+- Sync long and short Futu option positions with their contract multipliers and value them at Futu closing prices in daily NAV and portfolio analysis.
+- Reconcile account cash and money-market funds as separate Holdings records and keep external cash-flow confirmation separate from broker cash writeback.
+- Require verified morning Futu holdings evidence for official NAV and support replay from archived valuation evidence.
+
 ## 0.2.18 - 2026-11-19
 
 - Accept Feishu millisecond timestamps in holdings metadata so Cash Flow scans and Futu holdings synchronization can read valid records.
