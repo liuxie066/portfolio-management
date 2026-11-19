@@ -1750,3 +1750,40 @@ def test_unchanged_applied_flow_does_not_need_live_nav_finality(tmp_path, monkey
         service.scan(account="lx")
     assert service.store.latest_scan(scope="lx")["status"] == "failed"
     assert service.store.get_latest_for_record("cf_1")["effect_id"] == effect["effect_id"]
+
+
+def test_futu_posting_requires_cash_read_after_posting_and_records_without_write(tmp_path, monkeypatch):
+    from src.app.futu_sync_evidence import FutuSyncEvidenceStore
+
+    storage = FakeStorage(
+        flows=[_flow(broker="富途")],
+        holdings=[_cash(100, broker="富途")],
+    )
+    service = _service(tmp_path, monkeypatch, storage)
+    monkeypatch.setattr(service, "_previous_nav_is_final", lambda *_: True)
+    evidence_store = FutuSyncEvidenceStore()
+    sync = {
+        "status": "verified",
+        "snapshot_id": "sync-1",
+        "cash_read_started_at": "2026-07-26T00:00:00+00:00",
+        "observed_at_utc": "2026-07-26T00:00:02+00:00",
+    }
+    evidence_store.save_cash_write("lx", sync)
+    service.scan()
+    effect = service.store.get_latest_for_record("cf_1")
+    posting = {"reference": "test-transfer", "posted_at": "2026-07-26T00:00:01+00:00"}
+    with pytest.raises(ValueError, match="verified cash sync after"):
+        service.preview(effect["effect_id"], futu_posting=posting)
+
+    evidence_store.save_cash_write(
+        "lx", {**sync, "cash_read_started_at": "2026-07-26T00:00:03+00:00"},
+    )
+    preview = service.preview(effect["effect_id"], futu_posting=posting)
+    assert preview["targets"] == []
+    result = service.confirm(
+        effect["effect_id"], preview_hash=preview["preview_hash"],
+        confirm=True, futu_posting=posting,
+    )
+    assert result["effect"]["state"] == "record_only"
+    assert result["effect"]["confirmation"]["futu_posting"]["reference"] == "test-transfer"
+    assert storage.get_holding_fresh("CNY-CASH", "lx", "富途").quantity == 100

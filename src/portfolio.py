@@ -156,7 +156,9 @@ class PortfolioManager:
                             price_snapshot: Dict[str, Any] | None = None,
                             price_warnings: list[str] | None = None,
                             total_shares: Any = None,
-                            holdings_provenance: Dict[str, Any] | None = None) -> PortfolioValuation:
+                            holdings_provenance: Dict[str, Any] | None = None,
+                            option_nav_date: Any = None,
+                            valuation_fx: Dict[str, Any] | None = None) -> PortfolioValuation:
         """计算账户估值
 
         Args:
@@ -180,6 +182,8 @@ class PortfolioManager:
             price_warnings=price_warnings,
             total_shares=total_shares,
             holdings_provenance=holdings_provenance,
+            option_nav_date=option_nav_date,
+            valuation_fx=valuation_fx,
         )
 
     def calculate_normalized_valuation(

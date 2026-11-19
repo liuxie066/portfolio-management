@@ -1088,3 +1088,24 @@ def test_historical_receipt_artifact_requires_bound_source_key(tmp_path):
             normalized_valuation=normalized,
             preparation="historical_receipt_recovery",
         )
+
+
+def test_futu_scheduled_capture_can_be_archived_and_replayed(tmp_path):
+    store = NavValuationEvidenceStore(tmp_path)
+    proven = _official(holdings_provenance={
+        "normalized_holdings_digest": HOLDINGS_DIGEST,
+        "futu_capture": {
+            "account": "lx", "status": "verified", "snapshot_id": "capture-1",
+            "fx": {"rates": {"USDCNY": 7.25, "HKDCNY": 0.9}},
+        },
+    })
+    prepared = store.prepare(
+        account="lx", nav_date="2026-08-13", source_run_id="daily-nav-job-source:lx",
+        snapshot_time="2026-08-14T08:11:45+08:00", holdings_digest=HOLDINGS_DIGEST,
+        cash_flow_financial_fingerprint=CASH_FLOW_FINGERPRINT,
+        source_effect_store_revision="cfs_source", normalized_valuation=proven,
+        preparation="futu_scheduled_capture",
+    )
+    saved = store.save(prepared)
+    loaded = store.load(saved["valuation_ref"], expected_account="lx", expected_nav_date="2026-08-13")
+    assert loaded["artifact"]["preparation"] == "futu_scheduled_capture"

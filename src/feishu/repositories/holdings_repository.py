@@ -69,6 +69,7 @@ class HoldingsRepository:
             'account': holding.account,
             'quantity': holding.quantity,
             'avg_cost': holding.avg_cost,
+            'contract_multiplier': holding.contract_multiplier,
             'currency': holding.currency,
             'asset_class': holding.asset_class.value if holding.asset_class else None,
             'industry': holding.industry.value if holding.industry else None,
@@ -145,6 +146,7 @@ class HoldingsRepository:
             'account': canonical.account,
             'quantity': canonical.quantity,
             'avg_cost': canonical.avg_cost,
+            'contract_multiplier': canonical.contract_multiplier,
             'currency': canonical.currency,
             'asset_class': canonical.asset_class.value if canonical.asset_class else None,
             'industry': canonical.industry.value if canonical.industry else None,
@@ -710,7 +712,7 @@ class HoldingsRepository:
             if (
                 not include_empty
                 and holding.quantity < 0
-                and holding.asset_type != AssetType.CASH
+                and holding.asset_type not in {AssetType.CASH, AssetType.OPTION}
             ):
                 continue
             holdings.append(holding)
@@ -738,7 +740,7 @@ class HoldingsRepository:
                 continue
             if not include_empty and holding.quantity == 0:
                 continue
-            if not include_empty and holding.quantity < 0 and holding.asset_type != AssetType.CASH:
+            if not include_empty and holding.quantity < 0 and holding.asset_type not in {AssetType.CASH, AssetType.OPTION}:
                 continue
             holdings.append(holding)
 
@@ -866,14 +868,14 @@ class HoldingsRepository:
         owned = set(explicit & {
             'asset_name', 'asset_type', 'quantity', 'currency',
         })
-        for optional_field in ('avg_cost', 'asset_class', 'industry'):
+        for optional_field in ('avg_cost', 'asset_class', 'industry', 'contract_multiplier'):
             if optional_field in explicit:
                 owned.add(optional_field)
         if 'tag' in explicit:
             owned.add('tag')
         if base is None:
             owned.update(HOLDING_REQUIRED_VALUE_FIELDS)
-            for optional_field in ('avg_cost', 'asset_class', 'industry'):
+            for optional_field in ('avg_cost', 'asset_class', 'industry', 'contract_multiplier'):
                 if getattr(canonical, optional_field) is not None:
                     owned.add(optional_field)
             if canonical.tag:
@@ -904,7 +906,7 @@ class HoldingsRepository:
         base = self._find_holding_identity(fresh, identity)
         if base is None:
             owned = set(HOLDING_REQUIRED_VALUE_FIELDS)
-            for optional_field in ('avg_cost', 'asset_class', 'industry'):
+            for optional_field in ('avg_cost', 'asset_class', 'industry', 'contract_multiplier'):
                 if getattr(canonical, optional_field) is not None:
                     owned.add(optional_field)
             if canonical.tag:
@@ -986,7 +988,7 @@ class HoldingsRepository:
             if working is None:
                 working_by_identity[identity] = canonical_holding(incoming)
                 owned = set(HOLDING_REQUIRED_VALUE_FIELDS)
-                for optional_field in ('avg_cost', 'asset_class', 'industry'):
+                for optional_field in ('avg_cost', 'asset_class', 'industry', 'contract_multiplier'):
                     if getattr(incoming, optional_field) is not None:
                         owned.add(optional_field)
                 if incoming.tag:
@@ -1003,6 +1005,9 @@ class HoldingsRepository:
                 if 'avg_cost' in explicit:
                     working.avg_cost = incoming.avg_cost
                     owned.add('avg_cost')
+                if incoming.asset_type == AssetType.OPTION and 'contract_multiplier' in explicit:
+                    working.contract_multiplier = incoming.contract_multiplier
+                    owned.add('contract_multiplier')
             else:
                 if 'quantity' in explicit:
                     is_cash_like = working.asset_type in {AssetType.CASH, AssetType.MMF}
@@ -1317,6 +1322,7 @@ class HoldingsRepository:
             'account': holding.account,
             'quantity': holding.quantity,
             'avg_cost': holding.avg_cost,
+            'contract_multiplier': holding.contract_multiplier,
             'currency': holding.currency,
             'asset_class': holding.asset_class,
             'industry': holding.industry,
@@ -1382,6 +1388,7 @@ class HoldingsRepository:
             account=str(data['account']).strip(),
             quantity=quantity,
             avg_cost=avg_cost,
+            contract_multiplier=data.get("contract_multiplier") or None,
             currency=currency,
             asset_class=AssetClass(data.get('asset_class')) if data.get('asset_class') else None,
             industry=Industry(data.get('industry')) if data.get('industry') else None,

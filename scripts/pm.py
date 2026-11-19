@@ -1148,6 +1148,8 @@ def cmd_cash_flow_effects_preview(args):
             args.effect_id,
             external_action=getattr(args, "external_action", None),
             historical_apply=bool(args.historical_apply),
+            **({"futu_posting": {"reference": args.futu_entry_ref, "posted_at": args.futu_posted_at}}
+               if getattr(args, "futu_entry_ref", None) or getattr(args, "futu_posted_at", None) else {}),
         )
 
     result = _call_backend(args, direct)
@@ -1175,6 +1177,8 @@ def cmd_cash_flow_effects_confirm(args):
             confirm=True,
             external_action=getattr(args, "external_action", None),
             historical_apply=bool(args.historical_apply),
+            **({"futu_posting": {"reference": args.futu_entry_ref, "posted_at": args.futu_posted_at}}
+               if getattr(args, "futu_entry_ref", None) or getattr(args, "futu_posted_at", None) else {}),
         )
         result = dict(result)
         result["receipts"] = _dispatch_effect_receipts(store)
@@ -2370,6 +2374,8 @@ def build_parser() -> argparse.ArgumentParser:
             "already_reflected",
         ),
     )
+    p_effects_preview.add_argument("--futu-entry-ref")
+    p_effects_preview.add_argument("--futu-posted-at")
     p_effects_preview.add_argument("--historical-apply", action="store_true")
     p_effects_preview.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     p_effects_preview.set_defaults(func=cmd_cash_flow_effects_preview)
@@ -2386,6 +2392,8 @@ def build_parser() -> argparse.ArgumentParser:
             "already_reflected",
         ),
     )
+    p_effects_confirm.add_argument("--futu-entry-ref")
+    p_effects_confirm.add_argument("--futu-posted-at")
     p_effects_confirm.add_argument("--historical-apply", action="store_true")
     p_effects_confirm.add_argument("--confirm", action="store_true")
     p_effects_confirm.add_argument("--json", action="store_true", default=argparse.SUPPRESS)

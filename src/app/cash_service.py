@@ -71,6 +71,22 @@ class CashService:
         """
         if asset_type == AssetType.CASH:
             raise RuntimeError("cash_effect_confirmation_required")
+        return self._sync_absolute_balance(
+            account=account, asset_id=asset_id, asset_name=asset_name,
+            asset_type=asset_type, target=target, broker=broker, dry_run=dry_run,
+        )
+
+    def sync_futu_cash(self, *, account: str, target: float, dry_run: bool) -> dict[str, Any]:
+        """Apply the verified CNY aggregate for the mapped Futu account."""
+        return self._sync_absolute_balance(
+            account=account, asset_id=CASH_ASSET_ID, asset_name="人民币现金",
+            asset_type=AssetType.CASH, target=target, broker="富途", dry_run=dry_run,
+        )
+
+    def _sync_absolute_balance(
+        self, *, account: str, asset_id: str, asset_name: str, asset_type: AssetType,
+        target: float, broker: str, dry_run: bool,
+    ) -> dict[str, Any]:
         target_qty = float(self.quantize_money(target))
         existing = self.storage.get_holding_fresh(asset_id, account, broker)
         current_qty = float(self.quantize_money(existing.quantity if existing else 0))

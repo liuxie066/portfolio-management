@@ -132,11 +132,19 @@ class FutuSyncReceiptService:
                 if mmf_counts_confirmed
                 else "MMF 结果未确认"
             )
-            fields.append((
-                "CASH / MMF",
-                "富途原币余额仅观测；PM 使用 CNY-CASH 人民币汇总，不做金额对账；"
-                f"{mmf_result}",
-            ))
+            if cash_mmf.get("cash_mode") == "writeback":
+                cash_write = cash_mmf.get("cash_write")
+                cash_text = (
+                    f"CNY-CASH ¥{cash_write['current']:,.2f}→¥{cash_write['target']:,.2f}"
+                    if cash_write else "CNY-CASH 未核验"
+                )
+                fields.append(("CASH / MMF", f"{cash_text}；{mmf_result}"))
+            else:
+                fields.append((
+                    "CASH / MMF",
+                    "富途原币余额仅观测；PM 使用 CNY-CASH 人民币汇总，不做金额对账；"
+                    f"{mmf_result}",
+                ))
         partial_write_possible = bool(
             sync_result.get("partial_write_possible")
             or cash_mmf.get("partial_write_possible")

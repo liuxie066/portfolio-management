@@ -91,7 +91,9 @@ def canonical_record_payload(raw_fields: Mapping[str, Any]) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     for field_name in VALIDATION_RELEVANT_FIELDS:
         value = raw_fields.get(field_name)
-        if field_name in {"quantity", "avg_cost"}:
+        if field_name == "contract_multiplier" and value is None:
+            continue
+        if field_name in {"quantity", "avg_cost", "contract_multiplier"}:
             parsed = _decimal(value)
             payload[field_name] = (
                 _canonical_number(parsed)
@@ -331,6 +333,7 @@ class RecordValidation:
             broker=str(_text(fields.get("broker")) or ""),
             quantity=float(quantity) if quantity is not None else 0.0,
             avg_cost=float(avg_cost) if avg_cost is not None else None,
+            contract_multiplier=fields.get("contract_multiplier") or None,
             currency=str(_text(fields.get("currency")) or "").upper(),
             asset_class=(
                 AssetClass(str(asset_class_value))
@@ -501,6 +504,23 @@ class HoldingsValidator:
         outcomes.append(self._optional_transport_field("updated_at", fields.get("updated_at")))
 
         issues: list[RecordIssue] = []
+        if effective_type == AssetType.OPTION:
+            multiplier = _decimal(fields.get("contract_multiplier"))
+            quantity = _decimal(fields.get("quantity"))
+            if (
+                multiplier is None or multiplier <= 0
+                or multiplier != multiplier.to_integral_value()
+                or (quantity is not None and quantity != quantity.to_integral_value())
+            ):
+                outcomes.append(FieldOutcome(
+                    field="contract_multiplier",
+                    status="invalid",
+                    current=fields.get("contract_multiplier"),
+                    reason_code="OPTION_CONTRACT_METADATA_INVALID",
+                    blocks_official_nav=True,
+                ))
+            else:
+                outcomes.append(self._optional_decimal("contract_multiplier", fields.get("contract_multiplier")))
         if account_outcome.status != "valid":
             issues.append(
                 RecordIssue(
@@ -601,7 +621,9 @@ class HoldingsValidator:
             authority_id = f"asset_id:{str(asset_id).upper()}"
         elif position is not None and futu_evidence is not None:
             market = position.market.upper()
-            if position.security_type == "ETF":
+            if position.security_type in {"DRVT", "OPTION"}:
+                proposed = AssetType.OPTION
+            elif position.security_type == "ETF":
                 proposed = AssetType.EXCHANGE_FUND
             elif market == "HK":
                 proposed = AssetType.HK_STOCK

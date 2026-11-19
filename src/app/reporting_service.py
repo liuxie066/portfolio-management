@@ -61,7 +61,12 @@ class ReportingService:
             total_value = valuation.total_value_cny
             equity_value = valuation.stock_value_cny
             fund_value = valuation.fund_value_cny
-            non_cash_value = equity_value + fund_value
+            option_rows = [
+                holding for holding in getattr(valuation, "holdings", ())
+                if holding.asset_type.value == "option"
+            ]
+            option_value = getattr(valuation, "option_value_cny", 0.0)
+            non_cash_value = equity_value + fund_value + option_value
             cash_value = valuation.cash_value_cny
             return {
                 "success": True,
@@ -69,6 +74,11 @@ class ReportingService:
                 "stock_value": equity_value,
                 "fund_value": fund_value,
                 "non_cash_value": non_cash_value,
+                **({
+                    "option_value": option_value,
+                    "option_long_value": sum(row.market_value_cny or 0.0 for row in option_rows if row.quantity > 0),
+                    "option_short_value": sum(row.market_value_cny or 0.0 for row in option_rows if row.quantity < 0),
+                } if option_rows else {}),
                 "cash_value": cash_value,
                 "stock_ratio": valuation.stock_ratio,
                 "fund_ratio": valuation.fund_ratio,

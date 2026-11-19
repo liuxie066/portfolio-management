@@ -90,12 +90,26 @@ def merge_top_holdings(holdings: Iterable[Dict[str, Any]], total_value: float, t
 def report_holdings_fields(holdings_data: dict, position_data: dict) -> dict:
     """Project the valuation overview and top holdings used by reports."""
     total_value = holdings_data.get("total_value", 0)
+    options = [
+        row for row in holdings_data.get("holdings", [])
+        if row.get("normalized_type") == "option"
+    ]
+    option_values = {}
+    if options:
+        long_value = sum(row.get("market_value") or 0.0 for row in options if row["quantity"] > 0)
+        short_value = sum(row.get("market_value") or 0.0 for row in options if row["quantity"] < 0)
+        option_values = {
+            "option_long_value": long_value,
+            "option_short_value": short_value,
+            "option_value": long_value + short_value,
+        }
     return {
         "overview": {
             "total_value": total_value,
             "cash_ratio": position_data.get("cash_ratio", 0),
             "stock_ratio": position_data.get("stock_ratio", 0),
             "fund_ratio": position_data.get("fund_ratio", 0),
+            **option_values,
         },
         "top_holdings": merge_top_holdings(holdings_data.get("holdings", []), total_value or 0),
     }

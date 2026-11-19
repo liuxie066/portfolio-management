@@ -19,13 +19,11 @@ If full Futu holdings sync is enabled:
 ./pm futu sync --account lx --json
 ```
 
-`pm futu sync` is dry-run by default. It observes `cn_cash/us_cash/hk_cash`,
-synchronizes MMF plus LONG STOCK/ETF quantity and Futu `average_cost`, and never
-writes or value-reconciles CASH directly. PM uses one CNY-denominated aggregate
-`CNY-CASH` holding; original-currency observations do not create holdings or
-CASH Effects. Futu's aggregate `cash` and `diluted_cost` are never used. Run it
-independently before `daily-job` so broker observations and non-CASH holdings
-refresh even when NAV skips an existing date.
+`pm futu sync` is dry-run by default. It projects Futu `cn_cash/us_cash/hk_cash`
+into the account's `CNY-CASH` holding with evidenced FX and synchronizes the
+separate MMF holding, stock/ETF and long/short option positions. Run it
+independently before `daily-job` so the account is reconciled even when NAV
+skips an existing date.
 
 A real write sends a success/failure receipt from the configured Feishu
 “刘看山” app. Dry-runs do not send. Check `receipt.status` in JSON output;
@@ -40,7 +38,7 @@ fallback.
 Run `systemctl start portfolio-feishu-preflight.service` before enabling jobs.
 
 Durable background Futu refreshes enqueue a compact receipt only for successful,
-trusted STOCK/ETF quantity changes, including new/zeroed positions:
+trusted stock, ETF or option quantity changes, including new/zeroed positions:
 the shared PM receipt shell with type “富途持仓同步”, status “✅ 成功” and a
 single “持仓变化｜EXAMPLE：数量 50→51” field (synthetic example).
 Cost/MMF-only and unchanged refreshes remain silent. The existing operation receipt dispatcher sends through the same

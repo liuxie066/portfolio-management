@@ -46,7 +46,7 @@ Use `./pm daily-job`.
 
 It resolves the NAV date, audits duplicate `nav_history` rows, checks pending
 manual `cash_flow` generated fields and confirmed holding effects, optionally
-observes Futu CASH and syncs MMF, values each account, writes NAV, and records
+syncs Futu cash, MMF and positions, values each account, writes NAV, and records
 holdings snapshots.
 
 ### Daily Report
@@ -94,10 +94,11 @@ adapter that delegates inward.
   writing.
 - `cash_flow` rows may be manually entered, but generated fields must be
   reconciled before daily NAV writes.
-- CASH holding changes require a durable effect preview hash and separate,
-  explicit confirmation; the 15-minute scanner never confirms or writes.
-- Futu sync reads only `cn_cash/us_cash/hk_cash` as CASH observations. It does
-  not use or write an aggregate cash balance.
+- The 15-minute cash-flow scanner discovers changes. Cash flow confirmation
+  records deposits and withdrawals and applies eligible manually maintained
+  balance changes.
+- Futu sync converts `cn_cash/us_cash/hk_cash` to the broker-managed
+  `CNY-CASH` balance and independently writes the MMF holding.
 
 ## Diagnostics
 

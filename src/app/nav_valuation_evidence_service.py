@@ -1,7 +1,7 @@
 """Immutable normalized-valuation evidence for guarded NAV replay."""
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 import json
 import os
@@ -289,6 +289,7 @@ class NavValuationEvidenceStore:
         preparation = artifact.get("preparation")
         if preparation not in {
             "cash_flow_gate_failure",
+            "futu_scheduled_capture",
             "historical_recovery",
             "historical_receipt_recovery",
         }:
@@ -330,6 +331,13 @@ class NavValuationEvidenceStore:
         )
         if valuation_holdings_digest != holdings_digest:
             raise ValueError("NAV valuation evidence holdings digest mismatch")
+        if preparation == "futu_scheduled_capture":
+            capture = (normalized.canonical_payload().get("holdings_provenance") or {}).get("futu_capture") or {}
+            if (
+                capture.get("status") != "verified" or capture.get("account") != expected_account
+                or not capture.get("snapshot_id") or not capture.get("fx")
+            ):
+                raise ValueError("invalid Futu scheduled NAV capture")
         if preparation == "historical_receipt_recovery":
             holdings_provenance = dict(
                 normalized.canonical_payload().get("holdings_provenance") or {}
@@ -358,6 +366,8 @@ def _rows(payload: Any) -> list[dict[str, Any]]:
 def _fetch_opend_daily_closes(
     symbols: Sequence[str],
     nav_date: date,
+    *,
+    require_exact_code: bool = False,
 ) -> dict[str, dict[str, Any]]:
     try:
         import futu as futu_sdk
@@ -389,6 +399,7 @@ def _fetch_opend_daily_closes(
                 row
                 for row in _rows(data)
                 if str(row.get("time_key") or "")[:10] == nav_date.isoformat()
+                and (not require_exact_code or str(row.get("code") or "") == symbol)
             ]
             if len(matches) != 1:
                 raise ValueError(
@@ -401,6 +412,75 @@ def _fetch_opend_daily_closes(
     finally:
         ctx.close()
     return result
+
+
+def fetch_option_closes(
+    holdings: Sequence[Any],
+    nav_date: date | None,
+    rates: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Return exact-contract closing marks for the latest eligible market sessions."""
+    from collections import defaultdict
+    from datetime import time, timedelta
+    from zoneinfo import ZoneInfo
+
+    from src.app.business_calendar_service import BusinessCalendarService
+    from src.domain.snapshot_contracts import finite_decimal
+    from src.pricing.payload import positive_finite_decimal
+
+    calendar = BusinessCalendarService.from_config()
+    sessions: dict[str, date] = {}
+    symbols_by_date = defaultdict(dict)
+    for holding in holdings:
+        market, separator, _ = holding.asset_id.partition(".")
+        expected_currency = {"US": "USD", "HK": "HKD"}.get(market)
+        if not separator or expected_currency is None or holding.currency != expected_currency:
+            raise ValueError(f"invalid option code or currency: {holding.asset_id}")
+        if market not in sessions:
+            zone = ZoneInfo("America/New_York" if market == "US" else "Asia/Hong_Kong")
+            local_now = datetime.now(zone)
+            # Some US ETF and HK index options finish after the equity session.
+            close_cutoff = time(16, 15) if market == "US" else time(16, 30)
+            eligible_date = nav_date or local_now.date()
+            if nav_date is None and local_now.time() <= close_cutoff:
+                eligible_date -= timedelta(days=1)
+            for offset in range(31):
+                candidate = eligible_date - timedelta(days=offset)
+                explanation = calendar.explain(candidate)
+                if explanation["reason"] == "weekend":
+                    continue
+                state = explanation.get("markets", {}).get(market)
+                if state is None:
+                    raise ValueError(f"option market calendar unavailable: {market} {candidate}")
+                if state:
+                    regular_close = datetime.combine(candidate, close_cutoff, zone)
+                    if datetime.now(zone) <= regular_close:
+                        raise ValueError(f"option market session has not closed: {market} {candidate}")
+                    sessions[market] = candidate
+                    break
+            else:
+                raise ValueError(f"no recent option market session: {market}")
+        symbols_by_date[sessions[market]][holding.asset_id] = expected_currency
+
+    quotes = {}
+    for fact_date, symbols in symbols_by_date.items():
+        rows = _fetch_opend_daily_closes(sorted(symbols), fact_date, require_exact_code=True)
+        for symbol, currency in symbols.items():
+            price = finite_decimal(rows[symbol]["price"], field="option close")
+            if price < 0:
+                raise ValueError(f"negative option close: {symbol}")
+            fx = positive_finite_decimal(rates[f"{currency}CNY"], f"{currency}CNY")
+            quotes[symbol] = {
+                "code": symbol,
+                "price": str(price),
+                "cny_price": str(price * fx),
+                "exchange_rate": float(fx),
+                "currency": currency,
+                "fact_date": fact_date.isoformat(),
+                "source": "futu_opend_option_close",
+                "fetched_at": datetime.now(timezone.utc).isoformat(),
+            }
+    return quotes
 
 
 def _fetch_eastmoney_fund_nav(code: str, nav_date: date) -> dict[str, Any]:

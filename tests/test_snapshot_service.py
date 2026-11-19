@@ -514,6 +514,23 @@ def test_snapshot_digest_v2_covers_native_unit_price():
     assert snapshot_digest([first]) != snapshot_digest([second])
 
 
+def test_short_option_snapshot_replays_signed_contract_value():
+    option = Holding(
+        asset_id="US.TEST271217P100000", asset_name="TEST put",
+        asset_type=AssetType.OPTION, account="a", broker="富途",
+        quantity=-2, currency="USD", contract_multiplier=10,
+    )
+    row = NormalizedValuationRow.from_holding(
+        option, account="a", normalized_type="option", price="2", cny_price="14",
+        source="futu_opend_option_close",
+    )
+    snapshot = row.to_snapshot_row(as_of="2026-03-19")
+    assert snapshot.quantity == -2
+    assert snapshot.contract_multiplier == 10
+    assert snapshot.market_value_cny == -280
+    assert snapshot_row_payload(snapshot)["contract_multiplier"] == 10
+
+
 def test_snapshot_identity_and_full_row_projection_have_one_contract():
     row = _normalized_valuation().to_snapshot_rows(as_of="2026-03-19")[0]
     table = get_table_contract("holdings_snapshot")
@@ -523,7 +540,9 @@ def test_snapshot_identity_and_full_row_projection_have_one_contract():
         str(getattr(row, field_name))
         for field_name in SNAPSHOT_BUSINESS_KEY_FIELDS
     )
-    assert tuple(snapshot_row_payload(row)) == tuple(table.fields_by_name)
+    assert tuple(snapshot_row_payload(row)) == tuple(
+        field for field in table.fields_by_name if field != "contract_multiplier"
+    )
     assert tuple(SnapshotsRepository.PROJECTION_FIELDS) == tuple(
         table.fields_by_name
     )

@@ -675,6 +675,7 @@ class NavRecordService:
             "stock_value_cny": float(
                 valuation_projection.non_cash_value
                 - valuation_projection.fund_value
+                - NavCalculator.to_decimal(canonical_valuation.option_value_cny)
             ),
             "fund_value_cny": float(valuation_projection.fund_value),
             "cn_asset_value": float(valuation_projection.cn_exposure_value),

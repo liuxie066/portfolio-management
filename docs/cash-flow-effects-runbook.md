@@ -118,11 +118,23 @@ send is recorded before calling Feishu. If the send is interrupted or its
 result cannot be confirmed, the dispatcher reports an unknown outcome and
 does not resend automatically.
 
-Futu CASH is observe-only in `pm futu sync`. Its original-currency values remain
-source evidence only: they are not compared with PM's CNY-denominated aggregate
-`CNY-CASH`, and they do not create `broker_cash_reconciliation` effects. This
-does not change the separately confirmed effect workflow for Feishu cash-flow
-ledger facts.
+Futu position refresh synchronizes the aggregate CNY account cash and separate
+MMF holding. Before the first writeback, inventory and resolve pending
+Futu cash compensation or partially-applied targets while the old runtime is active. Re-preview unfinished
+Futu deposit/withdrawal effects after the first verified cash sync.
+
+When confirming a Futu cash-flow event, independently match its account,
+direction, currency and amount to the broker's booked transfer. Supply the
+broker reference and its timezone-aware posting time to both preview and
+confirmation. The proof requires a verified sync whose balance read started
+after the posting. Confirmation records the flow for share accounting.
+
+```bash
+pm cash-flow effects preview --effect-id ID \
+  --futu-entry-ref REFERENCE --futu-posted-at '2026-11-17T13:00:00+08:00' --json
+pm cash-flow effects confirm --effect-id ID --preview-hash HASH \
+  --futu-entry-ref REFERENCE --futu-posted-at '2026-11-17T13:00:00+08:00' --confirm
+```
 
 For a non-Futu cash-flow effect, declare whether the current manual CASH
 holding already includes the event:
@@ -160,8 +172,9 @@ pm cash-flow effects confirm --effect-id ID --preview-hash HASH \
   --external-action restore --confirm
 ```
 
-Futu external drift continues to use the OpenD absolute target and fail closed.
-Legacy Futu per-currency reconciliation is not an active source of new effects.
+Trigger a Futu account sync to repair drift in broker-managed cash. The verified
+readback resolves the cash holding observation; use the posting confirmation flow
+for separately registered deposits or withdrawals.
 
 ## Compensation
 
@@ -172,9 +185,9 @@ requires a new explicit confirmation:
 pm cash-flow effects retry --effect-id ID --confirm
 ```
 
-The generic compensation command may also repair the absolute target. The next
-effect audit performs fresh readback and closes the effect only if the target
-matches.
+The generic compensation command can also repair an eligible manual cash
+target. The next effect audit verifies the readback. Resolve legacy Futu cash
+compensation before the runtime cutover.
 
 If the Feishu fact changes while compensation is pending, finish the recorded
 absolute targets first. The service then creates a new correction effect; it

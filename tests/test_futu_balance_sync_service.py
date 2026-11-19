@@ -391,6 +391,7 @@ def test_authoritative_cash_and_mmf_missing_block_before_write():
 
 
 def test_authoritative_zero_is_present_and_preserves_per_currency_evidence():
+    from datetime import UTC, datetime
     account_fingerprint = (
         "sha256:"
         "a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3"
@@ -415,7 +416,15 @@ def test_authoritative_zero_is_present_and_preserves_per_currency_evidence():
             pagination_complete=True,
         )
     )
-    result = FutuBalanceSyncService(FakeStorage(), provider).sync_cash_and_mmf(account="lx", dry_run=True)
+    def fx_loader():
+        return {"USDCNY": 7.2, "HKDCNY": 0.9}, {
+            "observed_at_utc": datetime.now(UTC).isoformat(),
+            "sources": {"USDCNY": "test", "HKDCNY": "test"},
+        }
+
+    result = FutuBalanceSyncService(FakeStorage(), provider, fx_loader=fx_loader).sync_cash_and_mmf(
+        account="lx", dry_run=True,
+    )
     assert result["success"] is True
     assert result["source_metadata"]["cash"] == {
         "mode": "per_currency",
@@ -1217,12 +1226,19 @@ def test_sync_portfolio_blocks_missing_average_cost_without_fallback_or_writes()
     assert storage.bulk_calls == []
 
 
-def test_sync_portfolio_excludes_options_and_blocks_short_stock():
-    option = _position(code="US.FUTU260116C100000", security_type="DRVT", average_cost=None)
+def test_sync_portfolio_includes_short_options_and_blocks_short_stock():
+    from dataclasses import replace
+    code = "US.FUTU260116C100000"
+    option = replace(
+        _position(code=code, security_type="DRVT", average_cost=None, position_side="SHORT"),
+        asset_id=code,
+        contract_multiplier=100,
+    )
     storage = FakePortfolioStorage()
     result = FutuBalanceSyncService(storage, FakePortfolioProvider([option])).sync_portfolio(account="lx")
     assert result["success"] is True
-    assert result["positions"] == []
+    assert result["positions"][0]["asset_id"] == code
+    assert result["positions"][0]["target_quantity"] == -10
 
     short = _position(position_side="SHORT")
     result = FutuBalanceSyncService(storage, FakePortfolioProvider([short])).sync_portfolio(account="lx")

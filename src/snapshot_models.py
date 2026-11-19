@@ -41,6 +41,7 @@ class HoldingSnapshot(BaseModel):
     dedup_key: str
     asset_name: Optional[str] = None
     avg_cost: Optional[float] = None
+    contract_multiplier: Optional[int] = Field(None, gt=0)
     source: Optional[str] = None
     remark: Optional[str] = None
 
@@ -76,8 +77,8 @@ class HoldingSnapshot(BaseModel):
         value = Decimal(str(v))
         if not value.is_finite():
             raise ValueError(f'{info.field_name} must be a finite number')
-        if value <= 0:
-            raise ValueError(f'{info.field_name} must be positive')
+        if value < 0:
+            raise ValueError(f'{info.field_name} must be nonnegative')
         return float(value)
 
     @field_validator('market_value_cny', mode='before')
@@ -102,8 +103,12 @@ class HoldingSnapshot(BaseModel):
 
     @model_validator(mode='after')
     def _assert_replayable_market_value(self):
+        if (self.price == 0) != (self.cny_price == 0) or (
+            self.price == 0 and self.contract_multiplier is None
+        ):
+            raise ValueError("zero price requires a priced option snapshot")
         expected = (
-            Decimal(str(self.quantity)) * Decimal(str(self.cny_price))
+            Decimal(str(self.quantity)) * Decimal(str(self.cny_price)) * (self.contract_multiplier or 1)
         ).quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
         actual = Decimal(str(self.market_value_cny)).quantize(
             MONEY_QUANT,

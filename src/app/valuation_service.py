@@ -44,6 +44,8 @@ class ValuationService:
         price_warnings: Sequence[str] | None = None,
         total_shares: Any = None,
         holdings_provenance: Mapping[str, Any] | None = None,
+        option_nav_date: Any = None,
+        valuation_fx: Mapping[str, Any] | None = None,
     ) -> PortfolioValuation:
         normalized = self.calculate_normalized_valuation(
             account=account,
@@ -61,6 +63,8 @@ class ValuationService:
             price_warnings=price_warnings,
             total_shares=total_shares,
             holdings_provenance=holdings_provenance,
+            option_nav_date=option_nav_date,
+            valuation_fx=valuation_fx,
         )
         return normalized.to_portfolio_valuation()
 
@@ -79,6 +83,8 @@ class ValuationService:
         price_warnings: Sequence[str] | None = None,
         total_shares: Any = None,
         holdings_provenance: Mapping[str, Any] | None = None,
+        option_nav_date: Any = None,
+        valuation_fx: Mapping[str, Any] | None = None,
     ) -> NormalizedValuationSnapshot:
         account_holdings = (
             list(holdings)
@@ -116,7 +122,7 @@ class ValuationService:
         normalization_warnings: list[str] = []
         if price_snapshot is None and self.price_fetcher and fetch_prices:
             prices, fetch_warnings = self.fetch_price_snapshot(
-                holdings=account_holdings,
+                holdings=[holding for holding in account_holdings if holding.asset_type != AssetType.OPTION],
                 supplemental_codes=supplemental,
                 price_timeout_seconds=price_timeout_seconds,
                 allow_stale_price_fallback=allow_stale_price_fallback,
@@ -130,6 +136,25 @@ class ValuationService:
                 price = self.storage.get_price(holding.asset_id)
                 if price:
                     prices[holding.asset_id] = price
+
+        option_holdings = [
+            holding for holding in account_holdings
+            if holding.asset_type == AssetType.OPTION and holding.quantity != 0
+        ]
+        if option_holdings and price_snapshot is None and fetch_prices:
+            from src.app.nav_valuation_evidence_service import fetch_option_closes
+
+            try:
+                rates = valuation_fx
+                if rates is None:
+                    rates, evidence = self.price_fetcher.fx_service.fetch_exchange_rates_with_evidence()
+                    if evidence["is_stale"]:
+                        raise ValueError("stale option FX")
+                prices.update(fetch_option_closes(
+                    option_holdings, option_nav_date, rates,
+                ))
+            except Exception as exc:
+                price_errors.append(f"期权收盘价获取失败: {exc}")
 
         price_lookup = dict(prices)
         for code, payload in list(prices.items()):
@@ -168,6 +193,10 @@ class ValuationService:
                 or price_lookup.get(normalize_code(holding_code))
                 or {}
             )
+            if holding.asset_type == AssetType.OPTION:
+                price = prices.get(holding.asset_id) or {}
+                if self._price_field(price, "source") != "futu_opend_option_close":
+                    price = {}
             normalized_type = normalize_holding_type(holding)
             raw_type = holding.asset_type.value if holding.asset_type else None
             currency = str(holding.currency or self._price_field(price, "currency", "CNY")).upper()
@@ -185,13 +214,26 @@ class ValuationService:
             cny_price_dec = None
             if price:
                 try:
-                    price_dec = positive_finite_decimal(self._price_field(price, "price"), "price")
+                    price_raw = self._price_field(price, "price")
+                    if holding.asset_type == AssetType.OPTION and Decimal(str(price_raw)) == 0:
+                        price_dec = Decimal("0")
+                    else:
+                        price_dec = positive_finite_decimal(price_raw, "price")
                     cny_raw = self._price_field(price, "cny_price")
                     if cny_raw is None and currency == "CNY":
                         cny_raw = price_dec
-                    cny_price_dec = positive_finite_decimal(cny_raw, "cny_price")
+                    if valuation_fx is not None and currency != "CNY":
+                        rate = positive_finite_decimal(valuation_fx[f"{currency}CNY"], f"{currency}CNY")
+                        cny_price_dec = price_dec * rate
+                        if isinstance(price, dict):
+                            price = {**price, "cny_price": str(cny_price_dec), "exchange_rate": float(rate)}
+                            prices[holding.asset_id] = price
+                    elif holding.asset_type == AssetType.OPTION and price_dec == 0 and Decimal(str(cny_raw)) == 0:
+                        cny_price_dec = Decimal("0")
+                    else:
+                        cny_price_dec = positive_finite_decimal(cny_raw, "cny_price")
                     valid_price = True
-                except (TypeError, ValueError):
+                except (ArithmeticError, KeyError, TypeError, ValueError):
                     valid_price = False
 
             if valid_price:

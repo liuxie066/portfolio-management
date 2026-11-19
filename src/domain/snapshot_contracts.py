@@ -94,6 +94,8 @@ def snapshot_row_payload(snapshot: HoldingSnapshot) -> dict[str, Any]:
     if not isinstance(snapshot, HoldingSnapshot):
         raise TypeError("snapshot_row_payload requires HoldingSnapshot")
     payload = snapshot.model_dump(mode="python", exclude={"record_id"})
+    if payload["contract_multiplier"] is None:
+        del payload["contract_multiplier"]
     for field_name in (
         "quantity",
         "price",
@@ -624,6 +626,7 @@ class NormalizedValuationRow:
     cny_price: Optional[Decimal]
     market_value_cny: Optional[Decimal]
     source: str
+    contract_multiplier: Optional[int] = None
 
     def __post_init__(self) -> None:
         _nonblank(self.account, field="account")
@@ -638,6 +641,16 @@ class NormalizedValuationRow:
             raise ValueError("normalized valuation row quantity is not canonical")
         if quantity == 0:
             raise ValueError("zero quantity rows must be excluded before normalization")
+        if self.asset_type == "option":
+            if (
+                self.normalized_type != "option"
+                or type(self.contract_multiplier) is not int
+                or self.contract_multiplier <= 0
+                or quantity != quantity.to_integral_value()
+            ):
+                raise ValueError("invalid option valuation contract")
+        elif self.contract_multiplier is not None:
+            raise ValueError("contract multiplier requires an option holding")
         price_fields = (self.price, self.cny_price, self.market_value_cny)
         if any(value is None for value in price_fields):
             if not all(value is None for value in price_fields):
@@ -651,9 +664,11 @@ class NormalizedValuationRow:
             self.market_value_cny,
             field="market_value_cny",
         )
-        if price <= 0 or cny_price <= 0:
-            raise ValueError("price and cny_price must be positive finite numbers")
-        expected = (quantity * cny_price).quantize(
+        if price < 0 or cny_price < 0 or (
+            self.asset_type != "option" and (price == 0 or cny_price == 0)
+        ) or ((price == 0) != (cny_price == 0)):
+            raise ValueError("invalid price or cny_price for valuation")
+        expected = (quantity * cny_price * (self.contract_multiplier or 1)).quantize(
             MONEY_QUANT,
             rounding=ROUND_HALF_UP,
         )
@@ -686,6 +701,7 @@ class NormalizedValuationRow:
         if quantity == 0:
             raise ValueError("zero quantity rows must be excluded before normalization")
 
+        multiplier = getattr(holding, "contract_multiplier", None)
         price_decimal: Optional[Decimal]
         cny_price_decimal: Optional[Decimal]
         market_value: Optional[Decimal]
@@ -698,7 +714,7 @@ class NormalizedValuationRow:
         else:
             price_decimal = finite_decimal(price, field="price")
             cny_price_decimal = finite_decimal(cny_price, field="cny_price")
-            market_value = (quantity * cny_price_decimal).quantize(
+            market_value = (quantity * cny_price_decimal * (multiplier or 1)).quantize(
                 MONEY_QUANT,
                 rounding=ROUND_HALF_UP,
             )
@@ -735,6 +751,7 @@ class NormalizedValuationRow:
             cny_price=cny_price_decimal,
             market_value_cny=market_value,
             source=_nonblank(source, field="source"),
+            contract_multiplier=multiplier,
         )
 
     @property
@@ -764,6 +781,7 @@ class NormalizedValuationRow:
             "cny_price": canonical_decimal(self.cny_price),
             "market_value_cny": canonical_decimal(self.market_value_cny),
             "source": self.source,
+            **({"contract_multiplier": self.contract_multiplier} if self.contract_multiplier else {}),
         }
 
     def to_holding(self, *, weight: Optional[Decimal]) -> Any:
@@ -774,6 +792,7 @@ class NormalizedValuationRow:
             asset_id=self.asset_id,
             asset_name=self.asset_name,
             asset_type=self.asset_type,
+            contract_multiplier=self.contract_multiplier,
             account=self.account,
             broker=self.broker,
             quantity=float(self.quantity),
@@ -821,6 +840,7 @@ class NormalizedValuationRow:
             asset_name=self.asset_name or None,
             avg_cost=float(self.avg_cost) if self.avg_cost is not None else None,
             source="record_nav",
+            contract_multiplier=self.contract_multiplier,
         )
 
 
@@ -1087,6 +1107,7 @@ class NormalizedValuationSnapshot:
                 normalized_type=str(row.get("normalized_type") or ""),
                 broker=str(row.get("broker") or ""),
                 quantity=normalize_quantity(row.get("quantity")),
+                contract_multiplier=row.get("contract_multiplier"),
                 avg_cost=(
                     finite_decimal(row.get("avg_cost"), field="avg_cost")
                     if row.get("avg_cost") is not None
@@ -1308,6 +1329,7 @@ class NormalizedValuationSnapshot:
                 if raw_type in {"cash", "mmf"}
                 else "fund"
                 if "fund" in raw_type
+                else "option" if raw_type == "option"
                 else "equity"
             )
             rows.append(
@@ -1333,7 +1355,7 @@ class NormalizedValuationSnapshot:
         row_equity = sum(
             (row.market_value_cny or Decimal("0"))
             for row in rows
-            if row.normalized_type not in {"cash", "fund"}
+            if row.normalized_type not in {"cash", "fund", "option"}
         )
         declared = {
             "cash": finite_decimal(
@@ -1398,7 +1420,7 @@ class NormalizedValuationSnapshot:
         return sum(
             (row.market_value_cny or Decimal("0"))
             for row in self.rows
-            if row.normalized_type not in {"cash", "fund"}
+            if row.normalized_type not in {"cash", "fund", "option"}
         )
 
     def _component_value(self, category: str) -> Decimal:
@@ -1421,8 +1443,15 @@ class NormalizedValuationSnapshot:
         return self.row_equity_value + self._component_value("equity")
 
     @property
+    def option_value(self) -> Decimal:
+        return sum(
+            (row.market_value_cny or Decimal("0") for row in self.rows if row.normalized_type == "option"),
+            Decimal("0"),
+        )
+
+    @property
     def non_cash_value(self) -> Decimal:
-        return self.equity_value + self.fund_value
+        return self.equity_value + self.fund_value + self.option_value
 
     @property
     def total_value(self) -> Decimal:
@@ -1495,6 +1524,7 @@ class NormalizedValuationSnapshot:
             cash_value_cny=float(self.cash_value),
             stock_value_cny=float(self.equity_value),
             fund_value_cny=float(self.fund_value),
+            option_value_cny=float(self.option_value),
             cn_asset_value=float(self._region_value("中国资产")),
             us_asset_value=float(self._region_value("美国资产")),
             hk_asset_value=float(self._region_value("港股资产")),
@@ -1514,6 +1544,8 @@ class NormalizedValuationSnapshot:
         holdings = []
         for holding in list(getattr(valuation, "holdings", None) or []):
             holdings.append({
+                **({"contract_multiplier": holding.contract_multiplier}
+                   if getattr(holding, "contract_multiplier", None) else {}),
                 "record_id": getattr(holding, "record_id", None),
                 "account": str(getattr(holding, "account", "") or ""),
                 "asset_id": str(getattr(holding, "asset_id", "") or ""),
@@ -1601,6 +1633,8 @@ class NormalizedValuationSnapshot:
             "cash_value_cny": number("cash_value_cny"),
             "stock_value_cny": number("stock_value_cny"),
             "fund_value_cny": number("fund_value_cny"),
+            **({"option_value_cny": number("option_value_cny")}
+               if getattr(valuation, "option_value_cny", 0) else {}),
             "cn_asset_value": number("cn_asset_value"),
             "us_asset_value": number("us_asset_value"),
             "hk_asset_value": number("hk_asset_value"),

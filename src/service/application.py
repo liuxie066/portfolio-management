@@ -401,6 +401,8 @@ class PortfolioService:
                     for holding in account_holdings:
                         if holding.quantity == 0:
                             counts["zero_quantity"] += 1
+                        elif getattr(holding.asset_type, "value", holding.asset_type) == "option":
+                            counts["unsupported"] += 1
                         else:
                             nonzero_holdings.append(holding)
                     account_holdings = nonzero_holdings
@@ -421,7 +423,10 @@ class PortfolioService:
                             f"{account}: unknown broker on {counts['excluded_unknown_broker']} Holdings row(s)"
                         )
                 else:
-                    account_holdings = list(self.storage.get_holdings(account=account, deadline=request_deadline))
+                    account_holdings = [
+                        holding for holding in self.storage.get_holdings(account=account, deadline=request_deadline)
+                        if getattr(holding.asset_type, "value", holding.asset_type) != "option"
+                    ]
                 remaining_timeout(request_deadline, float('inf'))
             except Exception as exc:
                 account_items.append(
@@ -600,7 +605,7 @@ class PortfolioService:
                     item["warnings"].append(f"{account}: valuation holdings differ from raw source slice")
                     if item.get("status") == "complete":
                         item["status"] = "partial"
-                filter_counts[account]["unsupported"] = sum(
+                filter_counts[account]["unsupported"] += sum(
                     1 for row in item.get("holdings") or []
                     if not _finite_amount(row.get("market_value_cny"))
                 ) + len(expected - actual)

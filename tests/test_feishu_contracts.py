@@ -146,7 +146,7 @@ def test_holdings_write_contract_is_the_identity_and_clearability_source():
         field.name
         for field in table.fields
         if field.clearable
-    } == {"avg_cost", "asset_class", "industry"}
+    } == {"avg_cost", "asset_class", "industry", "contract_multiplier"}
 
     with pytest.raises(ValueError, match="fields cannot be cleared: tag"):
         validate_write_fields("holdings", "update", {"tag": None})
