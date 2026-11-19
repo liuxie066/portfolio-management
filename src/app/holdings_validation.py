@@ -1076,7 +1076,7 @@ class HoldingsValidator:
         normalized = _text(value)
         if normalized is not None:
             try:
-                parse_holding_date(normalized, field_name=field_name)
+                parse_holding_date(value, field_name=field_name)
             except (TypeError, ValueError):
                 return FieldOutcome(
                     field=field_name,

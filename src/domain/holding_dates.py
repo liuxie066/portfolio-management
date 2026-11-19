@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 
@@ -17,10 +17,17 @@ def format_holding_date(value: datetime) -> str:
 
 
 def parse_holding_date(value: Any, *, field_name: str) -> Optional[datetime]:
-    """Parse canonical holdings dates plus the immediately preceding format."""
+    """Parse text dates and Feishu millisecond timestamps in Beijing time."""
 
     if value in (None, ""):
         return None
+    if type(value) in (int, float):
+        try:
+            return datetime.fromtimestamp(
+                value / 1000, tz=timezone(timedelta(hours=8))
+            ).replace(tzinfo=None)
+        except (ValueError, OverflowError, OSError):
+            raise ValueError(f"invalid {field_name}: {value}") from None
     text = str(value).strip()
     for date_format in (
         HOLDING_DATE_FORMAT,

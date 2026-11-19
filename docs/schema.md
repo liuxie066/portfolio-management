@@ -235,8 +235,9 @@ Manual view fields:
 
 System fields:
 - `created_at`, `updated_at` are Text dates written as `YYYY/MM/DD`. Reads also
-  accept the predecessor `YYYY-MM-DD HH:MM:SS` representation during the
-  compatibility transition; new writes never emit that predecessor form.
+  accept the predecessor `YYYY-MM-DD HH:MM:SS` representation and numeric Feishu
+  Unix millisecond timestamps, interpreted as Beijing time. New writes retain
+  the canonical text format.
 
 `asset_class` describes the geography of the underlying assets or economic
 exposure, not fund domicile, distribution channel, trading currency, or listing
