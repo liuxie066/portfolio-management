@@ -66,6 +66,7 @@ class AssetType(str, Enum):
     CRYPTO = "crypto"
     BOND = "bond"
     OTHER = "other"
+    OPTION = "option"
 
 
 class Currency(str, Enum):
@@ -136,6 +137,7 @@ class Holding(BaseModel):
     broker: str = Field("", description="券商/平台")
     quantity: float = Field(0.0, description="持仓数量")
     avg_cost: Optional[float] = Field(None, description="平均成本价")
+    contract_multiplier: Optional[int] = Field(None, gt=0, description="期权合约乘数")
     currency: str = Field(..., description="币种")
 
     # 分类
@@ -450,6 +452,7 @@ class PortfolioValuation(BaseModel):
     cash_value_cny: float = 0.0
     stock_value_cny: float = 0.0
     fund_value_cny: float = 0.0
+    option_value_cny: float = 0.0
 
     # 市场分布
     cn_asset_value: float = 0.0

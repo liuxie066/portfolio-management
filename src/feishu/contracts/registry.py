@@ -77,7 +77,7 @@ _HOLDING_FIELDS = (
         FieldOwnership.MANUAL,
         options=(
             "a_stock", "cash", "otc_fund", "other", "hk_stock",
-            "us_stock", "exchange_fund", "us_fund", "mmf", "crypto",
+            "us_stock", "exchange_fund", "us_fund", "mmf", "crypto", "option",
         ),
     ),
     _field("account", 1, "Text", FieldEncoding.TEXT, FieldOwnership.MANUAL),
@@ -87,6 +87,8 @@ _HOLDING_FIELDS = (
         "avg_cost", 2, "Number", FieldEncoding.NUMBER, FieldOwnership.MIXED,
         required=False, clearable=True,
     ),
+    _field("contract_multiplier", 2, "Number", FieldEncoding.NUMBER,
+           FieldOwnership.SYSTEM, required=False, clearable=True),
     _field("currency", 1, "Text", FieldEncoding.TEXT, FieldOwnership.MANUAL),
     _field(
         "asset_class", 3, "SingleSelect", FieldEncoding.SINGLE_SELECT,
@@ -171,6 +173,8 @@ _SNAPSHOT_FIELDS = (
         "avg_cost", 2, "Number", FieldEncoding.NUMBER, FieldOwnership.SYSTEM,
         required=False, clearable=True,
     ),
+    _field("contract_multiplier", 2, "Number", FieldEncoding.NUMBER,
+           FieldOwnership.SYSTEM, required=False, clearable=True),
     _field(
         "source", 1, "Text", FieldEncoding.TEXT, FieldOwnership.SYSTEM,
         required=False, clearable=True,

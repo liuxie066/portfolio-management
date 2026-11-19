@@ -99,8 +99,8 @@ class SnapshotsRepository:
         desired_payload = snapshot_row_payload(desired)
         return {
             field: desired_values[field]
-            for field in desired_payload
-            if current_payload[field] != desired_payload[field]
+            for field in desired_values
+            if current_payload.get(field) != desired_payload.get(field)
         }
 
     def apply_holding_snapshot_actions(

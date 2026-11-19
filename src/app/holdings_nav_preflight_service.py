@@ -340,7 +340,10 @@ class ValidatedHoldingsSnapshot:
                 if field_name not in required_fields or field_name in fields:
                     raise ValueError("receipt holdings outcome field is invalid")
                 fields[field_name] = outcome.get("current")
-            if set(fields) != required_fields:
+            expected_fields = required_fields
+            if fields.get("asset_type") != "option":
+                expected_fields = required_fields - {"contract_multiplier"}
+            if set(fields) != expected_fields:
                 raise ValueError("receipt holdings outcome fields are incomplete")
             identity = dict(serialized.get("identity") or {})
             for field_name in ("asset_id", "account", "broker"):

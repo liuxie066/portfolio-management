@@ -295,8 +295,10 @@ pm daily-job --accounts lx,hb,sy --write --confirm --json --no-service
 晚间模式只执行两个 `pm futu sync`。两个账户都会被尝试；任一同步失败时，
 早间模式会阻断 NAV，避免使用过期 holdings 估值。lx/sy 都通过
 `config.yaml` 的同名 `futu.profiles` 显式路由，不再读取单独的 sy env 文件。
-Futu CASH 只保留原币观测证据，不与 PM 的 `CNY-CASH` 人民币汇总金额对账，
-也不生成 reconciliation effect；股票/ETF 与 MMF 保持各自同步。
+富途分币种现金使用带来源的汇率折算，按账户写回 `CNY-CASH`。货币基金
+`CNY-MMF`、股票、ETF 和期权仍分别作为持仓核对。启用该版本前，核对飞书
+Holdings 与 Holdings Snapshot 的合约乘数字段和 Holdings 的 `option` 选项。
+按 Cash Flow 操作手册检查富途旧预览及未结补偿，再启用 PM，最后启用 OM 的期权触发。
 Cash Flow 激活、备份和恢复见 `docs/cash-flow-effects-runbook.md`。
 
 完整 Futu 同步和回执需要 Agent 应用的非秘密身份：

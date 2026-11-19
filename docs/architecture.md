@@ -97,7 +97,7 @@ flowchart TB
     CLI --> CashFlow
 
     DailyJob --> AccountNav
-    DailyJob -.Futu CASH observation / MMF.-> FutuSync
+    DailyJob -.Futu cash and holdings sync.-> FutuSync
     AccountNav --> Read
     AccountNav --> CashFlow
     AccountNav --> FeishuStorage
@@ -157,14 +157,15 @@ flowchart TB
     delivery; the independent dispatcher retries failed delivery.
 
 Production Futu accounts run `pm futu sync` as an independent step before
-`daily-job`. This observes per-currency CASH and updates MMF, STOCK/ETF
-quantity, and `average_cost` even when NAV recording later skips an existing
-date. The embedded daily-job option has the same observe-only CASH semantics.
+`daily-job`. The sync reconciles aggregate account cash, the independent MMF
+holding, stocks, ETFs and options even when NAV recording later skips an
+existing date. Formal NAV consumes the verified morning holdings capture.
 
 ## Report Boundaries
 
-- `FutuBalanceSyncService` owns broker CASH observation and non-CASH holdings
-  synchronization; it never directly writes CASH.
+- `FutuBalanceSyncService` owns the mapped broker's aggregate cash, independent
+  MMF balance and broker positions. Cash Flow confirms external transfers
+  separately for NAV share accounting.
 - `PortfolioService` serializes each account's complete full Futu sync from
   broker observation through evidence persistence. Its durable OM refresh endpoint
   commits `(account, request_id)` admission to `OperationStateStore` before 202.

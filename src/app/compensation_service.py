@@ -522,6 +522,13 @@ class CompensationService:
             canonical_identity.account,
             canonical_identity.broker,
         )
+        if canonical_identity.broker == "富途" and canonical_identity.asset_id in {
+            "CNY-CASH", "USD-CASH", "HKD-CASH",
+        }:
+            from .futu_sync_evidence import FutuSyncEvidenceStore
+
+            if FutuSyncEvidenceStore().manages_cash(canonical_identity.account):
+                raise ValueError("legacy Futu cash compensation cannot replace a synchronized balance")
         current_state = self.serialize_holding(current)
         before = target.get("before")
         desired = target.get("target")

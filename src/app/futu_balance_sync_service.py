@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 import json
@@ -16,6 +16,7 @@ from src.domain.holdings import (
     asset_class_for_economic_exposure,
 )
 from src.models import (
+    CASH_ASSET_ID,
     AssetClass,
     AssetType,
     Currency,
@@ -23,9 +24,10 @@ from src.models import (
     Holding,
 )
 from src.process_lock import account_lock_key, process_lock
+from src.pricing.payload import positive_finite_decimal
 
 from .cash_service import CashService
-from .futu_sync_evidence import FutuSyncEvidenceStore
+from .futu_sync_evidence import FutuSyncEvidenceStore, futu_holdings_digest
 from .futu_sync_reconciler import FutuSyncReconciler
 
 
@@ -44,6 +46,7 @@ class FutuBalanceSnapshot:
     mmf_present: bool = False
     source_snapshot_id: Optional[str] = None
     observed_at_utc: Optional[str] = None
+    cash_read_started_at: Optional[str] = None
     account_fingerprint: Optional[str] = None
     trd_env: Optional[str] = None
     trd_market: Optional[str] = None
@@ -66,6 +69,7 @@ class FutuPositionSnapshot:
     position_side: str = "N/A"
     raw_code: str = ""
     currency_explicit: bool = True
+    contract_multiplier: Optional[int] = None
     quantity_fact: ProviderNumericFact = field(init=False, repr=False)
     average_cost_fact: ProviderNumericFact = field(init=False, repr=False)
     currency_valid: bool = field(init=False, repr=False)
@@ -119,6 +123,7 @@ class FutuPortfolioSnapshot:
     cash_by_currency: Dict[str, Optional[float]] | None = None
     mmf: Optional[float] = None
     positions: tuple[FutuPositionSnapshot, ...] = ()
+    complete_option_markets: frozenset[str] = frozenset()
     source: str = "futu"
     account_id: Optional[int] = None
     profile_fingerprint: Optional[str] = None
@@ -128,6 +133,7 @@ class FutuPortfolioSnapshot:
     mmf_present: bool = False
     source_snapshot_id: Optional[str] = None
     observed_at_utc: Optional[str] = None
+    cash_read_started_at: Optional[str] = None
     account_fingerprint: Optional[str] = None
     trd_env: Optional[str] = None
     trd_market: Optional[str] = None
@@ -174,6 +180,9 @@ class FutuHoldingSyncItem:
     cost_changed: bool
     cost_source: str
     currency: str
+
+
+OPTION_SECURITY_TYPES = frozenset({"DRVT", "OPTION"})
 
 
 class FutuOpenApiBalanceProvider:
@@ -294,6 +303,7 @@ class FutuOpenApiBalanceProvider:
         ctx = self._open_trade_context(futu_sdk)
         try:
             self._verify_account_authority(futu_sdk, ctx)
+            cash_read_started_at = datetime.now(UTC).isoformat()
             row = self._fetch_accinfo_row(futu_sdk, ctx)
         finally:
             self._close(ctx)
@@ -311,6 +321,7 @@ class FutuOpenApiBalanceProvider:
             mmf_present="fund_assets" in row and row.get("fund_assets") not in (None, "", "N/A"),
             source_snapshot_id=f"futu-{uuid.uuid4().hex}",
             observed_at_utc=observed_at,
+            cash_read_started_at=cash_read_started_at,
             account_fingerprint=self.account_fingerprint,
             trd_env=self.trd_env,
             trd_market=self.trd_market,
@@ -325,15 +336,25 @@ class FutuOpenApiBalanceProvider:
         quote_ctx = None
         try:
             self._verify_account_authority(futu_sdk, trade_ctx)
+            cash_read_started_at = datetime.now(UTC).isoformat()
             account_row = self._fetch_accinfo_row(futu_sdk, trade_ctx)
             position_rows = self._fetch_position_rows(futu_sdk, trade_ctx)
             if position_rows:
                 quote_ctx = futu_sdk.OpenQuoteContext(host=self.host, port=self.port)
                 security_types = self._fetch_security_types(futu_sdk, quote_ctx, position_rows)
+                multiplier_by_code = self._fetch_option_multipliers(
+                    futu_sdk, quote_ctx,
+                    [code for code, kind in security_types.items() if kind in OPTION_SECURITY_TYPES],
+                )
             else:
                 security_types = {}
+                multiplier_by_code = {}
             positions = tuple(
-                self._position_snapshot(row, security_types.get(str(row.get("code") or "")))
+                self._position_snapshot(
+                    row,
+                    security_types.get(str(row.get("code") or "").strip()),
+                    contract_multiplier=multiplier_by_code.get(str(row.get("code") or "").strip()),
+                )
                 for row in position_rows
             )
         finally:
@@ -345,6 +366,7 @@ class FutuOpenApiBalanceProvider:
             cash_by_currency=self._cash_balances_from_row(account_row),
             mmf=self._mmf_from_row(account_row),
             positions=positions,
+            complete_option_markets=frozenset({"HK", "US"}),
             source="futu-openapi",
             account_id=self.acc_id,
             profile_fingerprint=self.profile_fingerprint,
@@ -354,6 +376,7 @@ class FutuOpenApiBalanceProvider:
             mmf_present="fund_assets" in account_row and account_row.get("fund_assets") not in (None, "", "N/A"),
             source_snapshot_id=f"futu-{uuid.uuid4().hex}",
             observed_at_utc=observed_at,
+            cash_read_started_at=cash_read_started_at,
             account_fingerprint=self.account_fingerprint,
             trd_env=self.trd_env,
             trd_market=self.trd_market,
@@ -456,6 +479,10 @@ class FutuOpenApiBalanceProvider:
             kwargs.pop("currency", None)
             ret, data = ctx.position_list_query(**kwargs)
         self._ensure_ok(futu_sdk, ret, data, "position_list_query")
+        # OpenD returns a complete symbol-level account list when market,
+        # security and strategy filters are omitted.
+        if not isinstance(data, list) and not callable(getattr(data, "to_dict", None)):
+            raise ValueError("invalid Futu account position list")
         return _rows(data)
 
     def _fetch_security_types(
@@ -491,7 +518,34 @@ class FutuOpenApiBalanceProvider:
 
         return result
 
-    def _position_snapshot(self, row: dict[str, Any], security_type: Optional[str]) -> FutuPositionSnapshot:
+    def _fetch_option_multipliers(
+        self, futu_sdk: Any, quote_ctx: Any, codes: Sequence[str],
+    ) -> dict[str, int]:
+        if not codes:
+            return {}
+        ret, data = quote_ctx.get_market_snapshot(sorted(codes))
+        self._ensure_ok(futu_sdk, ret, data, "get_market_snapshot[options]")
+        expected = set(codes)
+        multipliers: dict[str, int] = {}
+        for row in _rows(data):
+            code = str(row.get("code") or "").strip()
+            fact = ProviderNumericFact.parse(row.get("option_contract_multiplier"))
+            if code not in expected or code in multipliers:
+                raise ValueError(f"unexpected or duplicate Futu option quote: {code}")
+            if not fact.is_valid or fact.value <= 0 or not fact.value.is_integer():
+                raise ValueError(f"invalid Futu option multiplier: {code}")
+            multipliers[code] = int(fact.value)
+        if set(multipliers) != expected:
+            raise ValueError("incomplete Futu option multiplier response")
+        return multipliers
+
+    def _position_snapshot(
+        self,
+        row: dict[str, Any],
+        security_type: Optional[str],
+        *,
+        contract_multiplier: Optional[int] = None,
+    ) -> FutuPositionSnapshot:
         raw_code = str(row.get("code") or "").strip()
         market = _market_from_code(raw_code, row.get("position_market"))
         raw_currency_value = row.get("currency")
@@ -502,7 +556,7 @@ class FutuOpenApiBalanceProvider:
         )
         currency_explicit = bool(raw_currency and raw_currency != "N/A")
         return FutuPositionSnapshot(
-            asset_id=_normalize_futu_code(raw_code),
+            asset_id=raw_code if security_type in OPTION_SECURITY_TYPES else _normalize_futu_code(raw_code),
             asset_name=str(row.get("stock_name") or _normalize_futu_code(raw_code)),
             security_type=str(security_type or "N/A").upper(),
             quantity=row.get("qty"),
@@ -512,6 +566,7 @@ class FutuOpenApiBalanceProvider:
             position_side=str(row.get("position_side") or "N/A").upper(),
             raw_code=raw_code,
             currency_explicit=currency_explicit,
+            contract_multiplier=contract_multiplier,
         )
 
     def _open_trade_context(self, futu_sdk: Any) -> Any:
@@ -556,7 +611,7 @@ class FutuOpenApiBalanceProvider:
 
 class FutuBalanceSyncService:
     MONEY_QUANT = Decimal("0.01")
-    ELIGIBLE_SECURITY_TYPES = {"STOCK", "ETF"}
+    ELIGIBLE_SECURITY_TYPES = {"STOCK", "ETF"} | OPTION_SECURITY_TYPES
     STOCK_SYNC_ASSET_TYPES = {
         AssetType.A_STOCK,
         AssetType.HK_STOCK,
@@ -575,12 +630,14 @@ class FutuBalanceSyncService:
         provider: Optional[Any] = None,
         evidence_store: Optional[FutuSyncEvidenceStore] = None,
         reconciler: Optional[FutuSyncReconciler] = None,
+        fx_loader: Optional[Any] = None,
     ):
         self.storage = storage
         self.provider = provider
         self.cash_service = CashService(storage)
         self.evidence_store = evidence_store or FutuSyncEvidenceStore()
         self.reconciler = reconciler or FutuSyncReconciler(storage)
+        self.fx_loader = fx_loader or self._load_cash_fx
 
     @classmethod
     def quantize_money(cls, value: Any) -> float:
@@ -597,63 +654,65 @@ class FutuBalanceSyncService:
         sync_run_id: Optional[str] = None,
     ) -> dict[str, Any]:
         resolved_run_id = sync_run_id or f"futu-sync-{uuid.uuid4().hex}"
-        source_requested = cash_balance is None and mmf_balance is None
-        try:
-            snapshot = (
-                FutuBalanceSnapshot(
-                    cash_by_currency={
-                        "CNY": cash_balance,
-                        "USD": None,
-                        "HKD": None,
-                    },
-                    mmf=mmf_balance,
-                    source="manual-observation",
-                )
-                if not source_requested
-                else self._fetch_balances(account)
-            )
-        except Exception as exc:
-            failure = self._failure(account, broker, dry_run, str(exc))
-            if source_requested and not dry_run and self.provider is None:
-                return self._persist_failed_attempt(
-                    failure,
-                    account=account,
-                    sync_run_id=resolved_run_id,
-                    reason_code="FUTU_SOURCE_QUERY_FAILED",
-                    phase="source_query",
-                )
-            return failure
-        try:
-            self._validate_authoritative_balances(snapshot)
-        except Exception as exc:
-            failure = self._failure(account, broker, dry_run, str(exc))
-            if snapshot.source == "futu-openapi" and not dry_run:
-                return self._persist_failed_attempt(
-                    failure,
-                    account=account,
-                    sync_run_id=resolved_run_id,
-                    reason_code="FUTU_SOURCE_VALIDATION_FAILED",
-                    phase="source_validation",
-                    snapshot=snapshot,
-                )
-            return failure
-
         with process_lock(account_lock_key(account)):
+            source_requested = cash_balance is None and mmf_balance is None
+            try:
+                if source_requested and broker == "富途":
+                    self._recover_cash_write(account=account, dry_run=dry_run)
+                snapshot = (
+                    FutuBalanceSnapshot(
+                        cash_by_currency={
+                            "CNY": cash_balance,
+                            "USD": None,
+                            "HKD": None,
+                        },
+                        mmf=mmf_balance,
+                        source="manual-observation",
+                    )
+                    if not source_requested
+                    else self._fetch_balances(account)
+                )
+            except Exception as exc:
+                failure = self._failure(account, broker, dry_run, str(exc))
+                if source_requested and not dry_run and self.provider is None:
+                    return self._persist_failed_attempt(
+                        failure,
+                        account=account,
+                        sync_run_id=resolved_run_id,
+                        reason_code="FUTU_SOURCE_QUERY_FAILED",
+                        phase="source_query",
+                    )
+                return failure
+            try:
+                self._validate_authoritative_balances(snapshot)
+            except Exception as exc:
+                failure = self._failure(account, broker, dry_run, str(exc))
+                if snapshot.source == "futu-openapi" and not dry_run:
+                    return self._persist_failed_attempt(
+                        failure,
+                        account=account,
+                        sync_run_id=resolved_run_id,
+                        reason_code="FUTU_SOURCE_VALIDATION_FAILED",
+                        phase="source_validation",
+                        snapshot=snapshot,
+                    )
+                return failure
+
             result = self._sync_cash_snapshot(
                 snapshot,
                 account=account,
                 broker=broker,
                 dry_run=dry_run,
             )
-        result["sync_run_id"] = resolved_run_id
-        self._attach_reconciliation(
-            snapshot,
-            result,
-            account=account,
-            broker=broker,
-            balances_only=True,
-        )
-        return self._persist_receipt_if_required(snapshot, result)
+            result["sync_run_id"] = resolved_run_id
+            self._attach_reconciliation(
+                snapshot,
+                result,
+                account=account,
+                broker=broker,
+                balances_only=True,
+            )
+            return self._persist_receipt_if_required(snapshot, result)
 
     def observe_portfolio(self, *, account: str) -> FutuPortfolioSnapshot:
         """Return one fresh, validated portfolio observation without any write.
@@ -683,38 +742,41 @@ class FutuBalanceSyncService:
             return self._failure(account, broker, dry_run, "allow-empty-stock-snapshot requires confirm=True")
 
         resolved_run_id = sync_run_id or f"futu-sync-{uuid.uuid4().hex}"
-        snapshot = None
-        try:
-            snapshot = self._fetch_portfolio(account)
-            self._validate_authoritative_balances(snapshot)
-            self._validate_authoritative_positions(snapshot)
-        except Exception as exc:
-            failure = self._failure(account, broker, dry_run, str(exc))
-            if not dry_run and (
-                self.provider is None
-                or getattr(snapshot, "source", None) == "futu-openapi"
-            ):
-                return self._persist_failed_attempt(
-                    failure,
-                    account=account,
-                    sync_run_id=resolved_run_id,
-                    reason_code=(
-                        "FUTU_SOURCE_QUERY_FAILED"
-                        if snapshot is None
-                        else "FUTU_SOURCE_VALIDATION_FAILED"
-                    ),
-                    phase="source_query" if snapshot is None else "source_validation",
-                    snapshot=snapshot,
-                )
-            return failure
-
         with process_lock(account_lock_key(account)):
+            snapshot = None
+            try:
+                if broker == "富途":
+                    self._recover_cash_write(account=account, dry_run=dry_run)
+                snapshot = self._fetch_portfolio(account)
+                self._validate_authoritative_balances(snapshot)
+                self._validate_authoritative_positions(snapshot)
+            except Exception as exc:
+                failure = self._failure(account, broker, dry_run, str(exc))
+                if not dry_run and (
+                    self.provider is None
+                    or getattr(snapshot, "source", None) == "futu-openapi"
+                ):
+                    return self._persist_failed_attempt(
+                        failure,
+                        account=account,
+                        sync_run_id=resolved_run_id,
+                        reason_code=(
+                            "FUTU_SOURCE_QUERY_FAILED"
+                            if snapshot is None
+                            else "FUTU_SOURCE_VALIDATION_FAILED"
+                        ),
+                        phase="source_query" if snapshot is None else "source_validation",
+                        snapshot=snapshot,
+                    )
+                return failure
+
             try:
                 items, replacements = self._build_position_diff(
                     snapshot.positions,
                     account=account,
                     broker=broker,
                     allow_empty_stock_snapshot=allow_empty_stock_snapshot,
+                    option_markets=snapshot.complete_option_markets,
                 )
             except Exception as exc:
                 failure = self._failure(account, broker, dry_run, str(exc))
@@ -778,6 +840,7 @@ class FutuBalanceSyncService:
                         mmf_present=snapshot.mmf_present,
                         source_snapshot_id=snapshot.source_snapshot_id,
                         observed_at_utc=snapshot.observed_at_utc,
+                        cash_read_started_at=snapshot.cash_read_started_at,
                         account_fingerprint=snapshot.account_fingerprint,
                         trd_env=snapshot.trd_env,
                         trd_market=snapshot.trd_market,
@@ -833,7 +896,109 @@ class FutuBalanceSyncService:
             if not result["success"]:
                 result["write_stage"] = "cash_mmf"
             self._attach_reconciliation(snapshot, result, account=account, broker=broker)
+            if result["success"] and snapshot.source == "futu-openapi" and not dry_run:
+                try:
+                    fresh = self.storage.get_holdings_fresh(account=account, include_empty=True)
+                    actual = {holding.asset_id: holding for holding in fresh if holding.broker == broker}
+                    proof = self.evidence_store.cash_write(account)
+                    stored_cash = actual.get(CASH_ASSET_ID)
+                    stored_mmf = actual.get(MMF_ASSET_ID)
+                    if (
+                        not proof or proof.get("snapshot_id") != snapshot.source_snapshot_id
+                        or proof.get("status") != "verified"
+                        or not self._cash_matches(stored_cash, account=account, target=proof["target"])
+                        or stored_cash.record_id != proof["record_id"]
+                        or stored_mmf is None or stored_mmf.asset_type != AssetType.MMF
+                        or stored_mmf.currency != "CNY" or stored_mmf.quantity != snapshot.mmf
+                    ):
+                        raise ValueError("Futu CASH/MMF readback changed before final reconciliation")
+                    for item in items:
+                        row = actual.get(item.asset_id)
+                        if (row.quantity if row else 0) != item.target_quantity:
+                            raise ValueError(f"Futu position readback mismatch: {item.asset_id}")
+                    for replacement in replacements:
+                        row = actual.get(replacement.asset_id)
+                        if row is None or row.contract_multiplier != replacement.contract_multiplier:
+                            raise ValueError(f"Futu option multiplier readback mismatch: {replacement.asset_id}")
+                    result["holdings_digest"] = futu_holdings_digest(fresh)
+                except Exception as exc:
+                    result.update(success=False, quality_status="untrusted", error=str(exc), partial_write_possible=True)
             return self._persist_receipt_if_required(snapshot, result)
+
+    @staticmethod
+    def _load_cash_fx() -> tuple[dict, dict]:
+        import requests
+
+        from src.pricing.fx import FxRateService
+
+        with requests.Session() as session:
+            return FxRateService(session).fetch_exchange_rates_with_evidence()
+
+    def _cash_target(self, snapshot: FutuBalanceSnapshot) -> tuple[float, dict[str, Any]]:
+        rates, evidence = self.fx_loader()
+        observed = datetime.fromisoformat(str(evidence["observed_at_utc"]))
+        age = datetime.now(UTC) - observed
+        if not timedelta(0) <= age <= timedelta(hours=24) or evidence.get("is_stale"):
+            raise ValueError("Futu cash FX is stale or invalid")
+        for pair in ("USDCNY", "HKDCNY"):
+            if not evidence.get("sources", {}).get(pair):
+                raise ValueError(f"Futu cash FX source missing: {pair}")
+        balances = snapshot.cash_by_currency
+        target = (
+            _decimal(balances["CNY"])
+            + _decimal(balances["USD"]) * positive_finite_decimal(rates["USDCNY"], "USDCNY")
+            + _decimal(balances["HKD"]) * positive_finite_decimal(rates["HKDCNY"], "HKDCNY")
+        )
+        return self.quantize_money(target), {**evidence, "rates": dict(rates)}
+
+    @staticmethod
+    def _cash_matches(holding: Optional[Holding], *, account: str, target: float) -> bool:
+        return (
+            holding is not None and holding.account == account and holding.broker == "富途"
+            and holding.asset_id == CASH_ASSET_ID and holding.asset_type == AssetType.CASH
+            and holding.currency == "CNY" and holding.quantity == target
+        )
+
+    def _recover_cash_write(self, *, account: str, dry_run: bool) -> None:
+        if dry_run:
+            return
+        proof = self.evidence_store.cash_write(account)
+        if not proof or proof.get("status") != "prepared":
+            return
+        stored = self.storage.get_holding_fresh(CASH_ASSET_ID, account, "富途")
+        if self._cash_matches(stored, account=account, target=proof["target"]) and (
+            proof.get("previous_record_id") in {None, stored.record_id}
+        ):
+            self.evidence_store.save_cash_write(
+                account, {**proof, "status": "verified", "record_id": stored.record_id},
+            )
+
+    def _sync_aggregate_cash(
+        self, snapshot: FutuBalanceSnapshot, *, account: str, dry_run: bool,
+    ) -> dict[str, Any]:
+        target, fx = self._cash_target(snapshot)
+        current = self.storage.get_holding_fresh(CASH_ASSET_ID, account, "富途")
+        proof = {
+            "account": account, "broker": "富途", "asset_id": CASH_ASSET_ID,
+            "snapshot_id": snapshot.source_snapshot_id,
+            "observed_at_utc": snapshot.observed_at_utc,
+            "cash_read_started_at": snapshot.cash_read_started_at,
+            "target": target, "fx": fx, "balances": snapshot.cash_by_currency,
+            "previous_quantity": current.quantity if current else None,
+            "previous_record_id": current.record_id if current else None,
+            "status": "prepared",
+        }
+        if not dry_run:
+            self.evidence_store.save_cash_write(account, proof)
+        result = self.cash_service.sync_futu_cash(account=account, target=target, dry_run=dry_run)
+        if not dry_run:
+            readback = self.storage.get_holding_fresh(CASH_ASSET_ID, account, "富途")
+            if not self._cash_matches(readback, account=account, target=target):
+                raise RuntimeError("Futu aggregate cash readback mismatch")
+            self.evidence_store.save_cash_write(
+                account, {**proof, "status": "verified", "record_id": readback.record_id},
+            )
+        return result
 
     def _sync_cash_snapshot(
         self,
@@ -844,10 +1009,12 @@ class FutuBalanceSyncService:
         dry_run: bool,
     ) -> dict[str, Any]:
         items = []
+        cash_result = None
+        writes_cash = snapshot.source == "futu-openapi"
         stages = {
             "securities_cash": {
                 "status": "succeeded",
-                "mode": "observe_only",
+                "mode": "writeback" if writes_cash else "observe_only",
                 "partial_write_possible": False,
             },
             "fund_mmf": {
@@ -855,7 +1022,13 @@ class FutuBalanceSyncService:
                 "partial_write_possible": False,
             },
         }
+        stage = "securities_cash"
         try:
+            if writes_cash:
+                if broker != "富途":
+                    raise ValueError("Futu cash writeback requires the mapped Futu broker")
+                cash_result = self._sync_aggregate_cash(snapshot, account=account, dry_run=dry_run)
+            stage = "fund_mmf"
             items.extend(self._sync_asset(
                 account=account,
                 broker=broker,
@@ -867,10 +1040,10 @@ class FutuBalanceSyncService:
             ))
             stages["fund_mmf"]["status"] = "succeeded"
         except Exception as exc:
-            stages["fund_mmf"] = {
+            stages[stage] = {
                 "status": "failed",
                 "partial_write_possible": not dry_run,
-                "reason_code": "FUND_MMF_WRITE_FAILED",
+                "reason_code": "FUND_MMF_WRITE_FAILED" if stage == "fund_mmf" else "FUTU_CASH_WRITE_FAILED",
             }
             return {
                 "success": False,
@@ -894,7 +1067,8 @@ class FutuBalanceSyncService:
             "source_snapshot_id": snapshot.source_snapshot_id,
             "source_metadata": self._public_source_metadata(snapshot),
             "stages": stages,
-            "cash_mode": "observe_only",
+            "cash_mode": "writeback" if writes_cash else "observe_only",
+            "cash_write": cash_result,
             "cash_observations": dict(snapshot.cash_by_currency or {}),
             "account_id": snapshot.account_id,
             "profile_fingerprint": snapshot.profile_fingerprint,
@@ -916,6 +1090,8 @@ class FutuBalanceSyncService:
             "success": bool(result.get("success")),
             "partial_write_possible": bool(result.get("partial_write_possible")),
             "reconciliation": result.get("reconciliation"),
+            "cash_write": self.evidence_store.cash_write(result["account"]),
+            "holdings_digest": result.get("holdings_digest"),
         }
         try:
             refs = self.evidence_store.save(result["account"], result["sync_run_id"], receipt)
@@ -1027,7 +1203,7 @@ class FutuBalanceSyncService:
             replica_untrusted = any(
                 verdict.get("status") != "trusted"
                 for dataset_id, verdict in datasets.items()
-                if dataset_id != "pm.cash_aggregate"
+                if dataset_id != "pm.cash_aggregate" or result.get("stages", {}).get("securities_cash", {}).get("mode") == "writeback"
             )
             if replica_untrusted or not datasets:
                 result["success"] = False
@@ -1122,13 +1298,27 @@ class FutuBalanceSyncService:
                 continue
             if position.security_type not in cls.ELIGIBLE_SECURITY_TYPES:
                 continue
-            if position.position_side == "SHORT" or quantity < 0:
+            if position.security_type in OPTION_SECURITY_TYPES:
+                multiplier = position.contract_multiplier
+                if (
+                    position.asset_id != position.raw_code
+                    or not position.raw_code.startswith(f"{position.market}.")
+                    or position.market not in {"US", "HK"}
+                    or (position.market, position.currency) not in {("US", "USD"), ("HK", "HKD")}
+                    or not position.currency_valid
+                    or type(multiplier) is not int or multiplier <= 0
+                    or not quantity.is_integer()
+                    or (quantity != 0 and position.position_side not in {"LONG", "SHORT"})
+                    or (position.position_side == "LONG" and quantity < 0)
+                ):
+                    errors.append(f"{subject}:invalid_option_contract")
+            elif position.position_side == "SHORT" or quantity < 0:
                 errors.append(f"{subject}:short stock/ETF position")
             elif position.position_side != "LONG":
                 errors.append(f"{subject}:position_side_unknown")
             if position.average_cost_fact.state == ProviderValueState.INVALID:
                 errors.append(f"{subject}:average_cost_invalid")
-            elif quantity != 0:
+            elif quantity != 0 and position.security_type not in OPTION_SECURITY_TYPES:
                 if position.average_cost_fact.state != ProviderValueState.VALID:
                     errors.append(f"{subject}:average_cost_missing")
                 elif float(position.average_cost) < 0:
@@ -1238,6 +1428,7 @@ class FutuBalanceSyncService:
         account: str,
         broker: str,
         allow_empty_stock_snapshot: bool,
+        option_markets: frozenset[str] = frozenset(),
     ) -> tuple[list[FutuHoldingSyncItem], list[Holding]]:
         eligible: dict[str, FutuPositionSnapshot] = {}
         for position in positions:
@@ -1247,7 +1438,7 @@ class FutuBalanceSyncService:
                 raise ValueError(f"duplicate normalized Futu position: {position.asset_id}")
             eligible[position.asset_id] = position
 
-        matchable_types = self.STOCK_SYNC_ASSET_TYPES | self.LEGACY_ETF_ASSET_TYPES
+        matchable_types = self.STOCK_SYNC_ASSET_TYPES | self.LEGACY_ETF_ASSET_TYPES | {AssetType.OPTION}
         existing: dict[str, Holding] = {}
         for holding in self.storage.get_holdings_fresh(
             account=account,
@@ -1264,7 +1455,8 @@ class FutuBalanceSyncService:
             for holding in existing.values()
             if holding.asset_type in self.STOCK_SYNC_ASSET_TYPES and holding.quantity != 0
         ]
-        if not eligible and canonical_nonzero and not allow_empty_stock_snapshot:
+        has_stock = any(position.security_type not in OPTION_SECURITY_TYPES for position in eligible.values())
+        if not has_stock and canonical_nonzero and not allow_empty_stock_snapshot:
             raise ValueError(
                 "empty eligible Futu stock snapshot would zero existing positions; "
                 "re-run with allow_empty_stock_snapshot=True and confirm=True after manual verification"
@@ -1276,10 +1468,15 @@ class FutuBalanceSyncService:
         def append_item(asset_id: str, current: Optional[Holding], target: Optional[FutuPositionSnapshot]) -> None:
             current_quantity = float(current.quantity if current else 0)
             target_quantity = float(target.quantity if target else 0)
+            if target is not None and target.security_type in OPTION_SECURITY_TYPES and target.position_side == "SHORT":
+                target_quantity = -abs(target_quantity)
+            current_multiplier = current.contract_multiplier if current else None
+            multiplier = target.contract_multiplier if target is not None else current_multiplier
+            multiplier_changed = current_multiplier != multiplier
             current_cost = current.avg_cost if current else None
             target_cost = (
                 self.quantize_money(target.average_cost)
-                if target is not None and target_quantity != 0
+                if target is not None and target_quantity != 0 and target.average_cost is not None
                 else None
             )
             quantity_changed = _decimal(current_quantity) != _decimal(target_quantity)
@@ -1291,7 +1488,7 @@ class FutuBalanceSyncService:
                 action = "create"
             elif target_quantity == 0 and (quantity_changed or cost_changed):
                 action = "zero"
-            elif quantity_changed or cost_changed:
+            elif quantity_changed or cost_changed or multiplier_changed:
                 action = "update"
             else:
                 action = "unchanged"
@@ -1311,6 +1508,10 @@ class FutuBalanceSyncService:
                         "explicit Futu currency required for new holding: "
                         f"{target.raw_code or target.asset_id}"
                     )
+                if target_type == AssetType.OPTION and current is not None and (
+                    current.asset_type != target_type or current.currency != target_currency
+                ):
+                    raise ValueError(f"existing option contract identity or currency disagrees with Futu: {asset_id}")
                 asset_type = current.asset_type if current else target_type
                 currency = current.currency if current else target_currency
                 asset_class = current.asset_class if current else target_asset_class
@@ -1321,7 +1522,10 @@ class FutuBalanceSyncService:
                 currency = current.currency
                 asset_class = current.asset_class
                 asset_name = current.asset_name
-                security_type = "ETF" if current.asset_type == AssetType.EXCHANGE_FUND else "STOCK"
+                if current.asset_type == AssetType.OPTION:
+                    security_type = "OPTION"
+                else:
+                    security_type = "ETF" if current.asset_type == AssetType.EXCHANGE_FUND else "STOCK"
 
             items.append(FutuHoldingSyncItem(
                 asset_id=asset_id,
@@ -1347,6 +1551,7 @@ class FutuBalanceSyncService:
                     broker=broker,
                     quantity=target_quantity,
                     avg_cost=target_cost,
+                    contract_multiplier=multiplier,
                     currency=currency,
                     asset_class=current.asset_class if current else asset_class,
                     industry=current.industry if current else None,
@@ -1364,7 +1569,14 @@ class FutuBalanceSyncService:
 
         for asset_id in sorted(set(existing) - matched):
             current = existing[asset_id]
+            if (
+                current.asset_type == AssetType.OPTION and current.quantity != 0
+                and _market_from_code(asset_id) not in option_markets
+            ):
+                raise ValueError(f"cannot prove complete option position slice: {asset_id}")
             if current.asset_type in self.STOCK_SYNC_ASSET_TYPES:
+                append_item(asset_id, current, None)
+            elif current.asset_type == AssetType.OPTION and _market_from_code(asset_id) in option_markets:
                 append_item(asset_id, current, None)
 
         return items, replacements
@@ -1434,7 +1646,9 @@ def _target_descriptor(
 ) -> tuple[AssetType, str, Optional[AssetClass]]:
     market = position.market.upper()
     currency = _normalize_currency(position.currency, market)
-    if position.security_type == "ETF":
+    if position.security_type in OPTION_SECURITY_TYPES:
+        asset_type = AssetType.OPTION
+    elif position.security_type == "ETF":
         asset_type = AssetType.EXCHANGE_FUND
     elif market == "HK":
         asset_type = AssetType.HK_STOCK

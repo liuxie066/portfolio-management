@@ -42,6 +42,7 @@ from .cash_flow_effect_store import (
     sha256_json,
 )
 from .compensation_service import CompensationService
+from .futu_sync_evidence import FutuSyncEvidenceStore
 from .nav_finality import evaluate_nav_finality
 
 
@@ -804,6 +805,20 @@ class CashFlowEffectService:
                 amount=observed_amount,
                 observation_hash=observed_hash,
             )
+            if holding is not None and holding.asset_id == CASH_ASSET_ID and holding.broker == FUTU_BROKER:
+                proof = FutuSyncEvidenceStore().cash_write(holding.account)
+                if (
+                    proof and proof.get("status") == "verified"
+                    and proof.get("target") == holding.quantity
+                    and proof.get("record_id") == holding.record_id
+                    and holding.currency == "CNY"
+                ):
+                    self.store.confirm_fingerprint(
+                        holding_identity=identity, holding_record_id=holding.record_id,
+                        amount=observed_amount, confirmation_hash=observed_hash,
+                        effect_id=f"futu:{proof['snapshot_id']}",
+                    )
+                    fingerprint = self.store.get_fingerprint(identity)
             if identity in compensation_identities:
                 # A partially applied target belongs to the compensation
                 # workflow, not to holding-drift reconciliation.
@@ -1604,18 +1619,80 @@ class CashFlowEffectService:
         )
         return {"action": action, "rows": rows}
 
+    def _futu_cash_posting(self, source: Dict[str, Any], posting: Optional[Dict[str, str]]) -> dict:
+        if not posting or not str(posting.get("reference") or "").strip() or not posting.get("posted_at"):
+            raise ValueError("Futu cash flow requires its broker posting reference and timestamp")
+        posted = datetime.fromisoformat(posting["posted_at"])
+        if posted.tzinfo is None:
+            raise ValueError("Futu cash posting timestamp requires a timezone")
+        sync = FutuSyncEvidenceStore().cash_write(source["account"])
+        if (
+            not sync or sync.get("status") != "verified"
+            or not sync.get("cash_read_started_at")
+            or datetime.fromisoformat(sync["cash_read_started_at"]) <= posted
+        ):
+            raise ValueError("Futu cash flow requires a verified cash sync after the broker posting")
+        reference = posting["reference"].strip()
+        for effect in self.store.list_effects(account=source["account"], latest_only=False, states={"record_only", "applied"}):
+            prior = (effect.get("confirmation") or {}).get("futu_posting") or {}
+            if prior.get("reference") == reference and prior.get("record_id") != source["record_id"]:
+                raise ValueError("Futu posting is already assigned to another cash flow")
+        return {
+            "reference": reference, "posted_at": posted.isoformat(),
+            "account": source["account"], "record_id": source["record_id"],
+            "currency": source["currency"], "signed_amount": source["signed_amount"],
+            "snapshot_id": sync["snapshot_id"], "cash_read_started_at": sync["cash_read_started_at"],
+        }
+
     def _build_preview(
         self,
         effect: Dict[str, Any],
         *,
         external_action: Optional[str] = None,
         historical_apply: bool = False,
+        futu_posting: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         if effect["state"] == "scheduled":
             raise ValueError("scheduled effect cannot be previewed")
         if effect["state"] not in {"pending", "blocked", "previewed", "stale"}:
             raise ValueError(f"effect cannot be previewed from state={effect['state']}")
         source = dict(effect.get("source") or {})
+        futu_sync = FutuSyncEvidenceStore()
+        managed_futu = (
+            source.get("broker") == FUTU_BROKER
+            and bool(futu_sync.manages_cash(source["account"]))
+        )
+        futu_proof = None
+        if managed_futu:
+            if effect["effect_kind"] != "cash_flow":
+                raise ValueError("refresh the Futu account to reconcile its cash")
+            futu_proof = (
+                {"deleted": True, "record_id": source["record_id"], "account": source["account"]}
+                if source.get("deleted")
+                else self._futu_cash_posting(source, futu_posting)
+            )
+        if effect["effect_kind"] == "cash_flow":
+            operations = self._cash_flow_operations(effect, source)
+            operations = [
+                (operation, delta) for operation, delta in operations
+                if not (operation.get("broker") == FUTU_BROKER and futu_sync.manages_cash(operation["account"]))
+            ]
+        else:
+            operations = [(source, None)]
+        if futu_proof and not operations:
+            payload = {
+                "hash_contract_version": HASH_CONTRACT_VERSION,
+                "effect_id": effect["effect_id"], "version": effect["version"],
+                "source_hash": effect["source_hash"], "mode": "record_only",
+                "futu_posting": futu_proof, "targets": [],
+            }
+            return {
+                "effect_id": effect["effect_id"], "mode": "record_only",
+                "before": None, "targets": [], "warnings": [],
+                "target_source": "futu_posting_record_only",
+                "preview_hash": sha256_json(payload), "hash_payload": payload,
+                "futu_posting": futu_proof,
+            }
         if effect["mode"] == "record_only" and not historical_apply:
             payload = {
                 "hash_contract_version": HASH_CONTRACT_VERSION,
@@ -1639,15 +1716,7 @@ class CashFlowEffectService:
         warnings: list[str] = []
         snapshot_cache: Dict[str, Any] = {}
         operation_holdings: dict[str, Optional[Holding]] = {}
-        operations: list[tuple[Dict[str, Any], Optional[Decimal]]]
         if effect["effect_kind"] == "cash_flow":
-            operations = [
-                (operation_source, delta)
-                for operation_source, delta in self._cash_flow_operations(
-                    effect,
-                    source,
-                )
-            ]
             # Fetch the fresh holding once per involved identity and share it
             # between reflection detection and target building.
             for operation_source, _ in operations:
@@ -1688,9 +1757,6 @@ class CashFlowEffectService:
                 warnings.append(
                     f"auto-detected external_action={external_action}"
                 )
-        else:
-            operations = [(source, None)]
-
         target_rows: list[Dict[str, Any]] = []
         for operation_source, delta in sorted(
             operations,
@@ -1769,6 +1835,8 @@ class CashFlowEffectService:
                         "external_action=accept_current or restore"
                     )
             elif operation_source["broker"] == FUTU_BROKER:
+                if futu_sync.manages_cash(operation_source["account"]):
+                    raise ValueError("Futu aggregate cash is owned by broker synchronization")
                 target_amount, evidence = self._futu_target(
                     operation_source,
                     snapshot_cache=snapshot_cache,
@@ -1868,6 +1936,7 @@ class CashFlowEffectService:
             "targets": targets,
             "target_source": target_source,
             "target_rows": target_rows,
+            **({"futu_posting": futu_proof} if futu_proof else {}),
         }
         return {
             "effect_id": effect["effect_id"],
@@ -1881,6 +1950,7 @@ class CashFlowEffectService:
             "target_rows": target_rows,
             "warnings": warnings,
             "futu_evidence": futu_evidence,
+            **({"futu_posting": futu_proof} if futu_proof else {}),
             "preview_hash": sha256_json(payload),
             "hash_payload": payload,
         }
@@ -1891,6 +1961,7 @@ class CashFlowEffectService:
         *,
         external_action: Optional[str] = None,
         historical_apply: bool = False,
+        futu_posting: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         self._nav_history_cache.clear()
         effect = self.store.get_effect(effect_id)
@@ -1913,6 +1984,7 @@ class CashFlowEffectService:
                 effect,
                 external_action=external_action,
                 historical_apply=historical_apply,
+                futu_posting=futu_posting,
             )
         except Exception as exc:
             if effect["state"] in {"pending", "previewed", "stale", "blocked"}:
@@ -1955,6 +2027,7 @@ class CashFlowEffectService:
         external_action: Optional[str] = None,
         historical_apply: bool = False,
         run_id: Optional[str] = None,
+        futu_posting: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         if not confirm:
             raise ValueError("cash-flow effect write requires confirm=True")
@@ -1976,6 +2049,7 @@ class CashFlowEffectService:
                     historical_apply=historical_apply,
                     run_id=run_id,
                     locked_accounts=set(locked_accounts),
+                    futu_posting=futu_posting,
                 )
 
     def _confirm_under_locks(
@@ -1987,6 +2061,7 @@ class CashFlowEffectService:
         historical_apply: bool,
         run_id: Optional[str],
         locked_accounts: set[str],
+        futu_posting: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         effect = self.store.get_effect(effect_id)
         if not effect:
@@ -2007,6 +2082,7 @@ class CashFlowEffectService:
             effect,
             external_action=external_action,
             historical_apply=historical_apply,
+            futu_posting=futu_posting,
         )
         if recomputed["preview_hash"] != preview_hash:
             self.store.update_effect(
@@ -2036,7 +2112,7 @@ class CashFlowEffectService:
             )
             raise ValueError("preview hash is stale; review and confirm again")
 
-        if effect["effect_kind"] == "cash_flow" and recomputed["mode"] == "apply":
+        if effect["effect_kind"] == "cash_flow" and (recomputed["mode"] == "apply" or recomputed.get("futu_posting")):
             account = effect["account"]
             self._nav_history_cache.pop(account, None)
             flow_date = date.fromisoformat(effect["source"]["flow_date"])
@@ -2045,6 +2121,8 @@ class CashFlowEffectService:
 
         confirmation = self._operator_context(run_id)
         account = effect["account"]
+        if recomputed.get("futu_posting"):
+            confirmation["futu_posting"] = recomputed["futu_posting"]
         if recomputed["mode"] == "record_only":
             if effect["effect_kind"] == "cash_holding_external_change":
                 source = effect["source"]

@@ -27,11 +27,12 @@ Generated from `src.feishu.contracts.TABLE_CONTRACTS`; do not edit this block by
 |---|---:|---|---|---|---|---|---|
 | `asset_id` | 1 | `Text` | `text` | `required` | `manual` | `no` |  |
 | `asset_name` | 1 | `Text` | `text` | `required` | `manual` | `no` |  |
-| `asset_type` | 3 | `SingleSelect` | `single_select` | `required` | `manual` | `no` | `a_stock`, `cash`, `otc_fund`, `other`, `hk_stock`, `us_stock`, `exchange_fund`, `us_fund`, `mmf`, `crypto` |
+| `asset_type` | 3 | `SingleSelect` | `single_select` | `required` | `manual` | `no` | `a_stock`, `cash`, `otc_fund`, `other`, `hk_stock`, `us_stock`, `exchange_fund`, `us_fund`, `mmf`, `crypto`, `option` |
 | `account` | 1 | `Text` | `text` | `required` | `manual` | `no` |  |
 | `broker` | 1 | `Text` | `text` | `required` | `manual` | `no` |  |
 | `quantity` | 2 | `Number` | `number` | `required` | `manual` | `no` |  |
 | `avg_cost` | 2 | `Number` | `number` | `optional` | `mixed` | `yes` |  |
+| `contract_multiplier` | 2 | `Number` | `number` | `optional` | `system` | `yes` |  |
 | `currency` | 1 | `Text` | `text` | `required` | `manual` | `no` |  |
 | `asset_class` | 3 | `SingleSelect` | `single_select` | `optional` | `manual` | `yes` | `美国资产`, `另类资产`, `中国资产`, `现金`, `港股资产` |
 | `industry` | 3 | `SingleSelect` | `single_select` | `optional` | `manual` | `yes` | `金融`, `AI`, `中概`, `非行业指数`, `区块链`, `能源`, `消费`, `房地产`, `半导体`, `现金`, `科技`, `其他` |
@@ -128,6 +129,7 @@ Write contracts:
 | `dedup_key` | 1 | `Text` | `text` | `required` | `system` | `no` |  |
 | `asset_name` | 1 | `Text` | `text` | `optional` | `system` | `yes` |  |
 | `avg_cost` | 2 | `Number` | `number` | `optional` | `system` | `yes` |  |
+| `contract_multiplier` | 2 | `Number` | `number` | `optional` | `system` | `yes` |  |
 | `source` | 1 | `Text` | `text` | `optional` | `system` | `yes` |  |
 | `remark` | 1 | `Text` | `text` | `optional` | `system` | `yes` |  |
 

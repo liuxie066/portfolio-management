@@ -122,6 +122,8 @@ class PortfolioReadService:
                 or quote_lookup.get(normalize_code(code))
             )
             raw_type = holding.asset_type.value if holding.asset_type else None
+            if raw_type == "option":
+                continue
             currency = str(holding.currency or "").strip().upper()
             if not isinstance(raw_quote, dict) and raw_type in {"cash", "mmf"} and currency == "CNY":
                 raw_quote = {
@@ -205,6 +207,8 @@ class PortfolioReadService:
         holdings: Optional[list[Any]] = None,
         holdings_provenance: Optional[Dict[str, Any]] = None,
         holdings_warnings: Optional[list[str]] = None,
+        option_nav_date: Any = None,
+        valuation_fx: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         valuation_kwargs: Dict[str, Any] = {}
         if price_timeout_seconds is not None:
@@ -213,6 +217,10 @@ class PortfolioReadService:
             valuation_kwargs["run_quote_pool"] = run_quote_pool
         if holdings is not None:
             valuation_kwargs["holdings"] = holdings
+        if option_nav_date is not None:
+            valuation_kwargs["option_nav_date"] = option_nav_date
+        if valuation_fx is not None:
+            valuation_kwargs["valuation_fx"] = valuation_fx
         valuation = self.portfolio.calculate_valuation(
             self.account,
             **valuation_kwargs,
@@ -317,7 +325,8 @@ class PortfolioReadService:
 
         equity_value = valuation.stock_value_cny
         fund_value = valuation.fund_value_cny
-        non_cash_value = equity_value + fund_value
+        option_value = getattr(valuation, "option_value_cny", 0.0)
+        non_cash_value = equity_value + fund_value + option_value
         cn_exposure_value = getattr(valuation, "cn_asset_value", 0.0)
         us_exposure_value = getattr(valuation, "us_asset_value", 0.0)
         hk_exposure_value = getattr(valuation, "hk_asset_value", 0.0)
@@ -338,6 +347,7 @@ class PortfolioReadService:
                 "stock_value": non_cash_value,
                 "non_cash_value": non_cash_value,
                 "fund_value": fund_value,
+                "option_value": option_value,
                 "cn_exposure_value": cn_exposure_value,
                 "us_exposure_value": us_exposure_value,
                 "hk_exposure_value": hk_exposure_value,

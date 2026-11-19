@@ -26,7 +26,7 @@ def written_result():
     }
 
 
-@pytest.mark.parametrize("before,after,security_type", [(50, 51, "STOCK"), (0, 10, "ETF"), (51, 0, "STOCK"), (0.5, 0.75, "STOCK")])
+@pytest.mark.parametrize("before,after,security_type", [(50, 51, "STOCK"), (0, 10, "ETF"), (51, 0, "STOCK"), (0.5, 0.75, "STOCK"), (0, -2, "DRVT"), (-2, 0, "OPTION")])
 def test_projects_actual_quantity_change_with_frozen_source(before, after, security_type):
     result = written_result()
     result["positions"][0].update(current_quantity=before, target_quantity=after, security_type=security_type)
@@ -63,7 +63,7 @@ def test_unchanged_cost_and_mmf_only_refreshes_stay_silent():
     assert quantity_change_payload(result) is None
     result["positions"] = []
     assert quantity_change_payload(result) is None
-    result["positions"] = [{"security_type": "OPTION", "quantity_changed": True}]
+    result["positions"] = [{"security_type": "BOND", "quantity_changed": True}]
     assert quantity_change_payload(result) is None
 
 

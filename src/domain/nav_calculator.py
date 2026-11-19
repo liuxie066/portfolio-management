@@ -134,13 +134,14 @@ class NavCalculator:
         equity = cls._finite_decimal(valuation.stock_value_cny, field="stock_value_cny")
         fund = cls._finite_decimal(valuation.fund_value_cny, field="fund_value_cny")
         persisted_cash = cls.quantize_money(cash)
-        persisted_non_cash = cls.quantize_money(equity + fund)
+        option = cls._finite_decimal(getattr(valuation, "option_value_cny", 0), field="option_value_cny")
+        persisted_non_cash = cls.quantize_money(equity + fund + option)
         persisted_fund = cls.quantize_money(fund)
         persisted_total = persisted_cash + persisted_non_cash
         if cls.quantize_money(observed_total) != persisted_total:
             raise ValueError(
                 "valuation decomposition mismatch: total_value_cny must equal "
-                "cash_value_cny + stock_value_cny + fund_value_cny"
+                "cash_value_cny + stock_value_cny + fund_value_cny + option_value_cny"
             )
         cn = cls._finite_decimal(valuation.cn_asset_value, field="cn_asset_value")
         us = cls._finite_decimal(valuation.us_asset_value, field="us_asset_value")
@@ -516,7 +517,17 @@ class NavCalculator:
             if not cls.money_equal(nav_record.total_value, expected_total):
                 errors.append(f"total_value 不等于 stock_value + cash_value: {nav_record.total_value} != {expected_total}")
 
-        if (
+        option_details = (nav_record.details or {}).get("options")
+        if option_details is not None:
+            try:
+                option_value = cls._finite_decimal(option_details["net_value_cny"], field="options.net_value_cny")
+                equity_value = cls._finite_decimal(option_details["equity_value_cny"], field="options.equity_value_cny")
+                fund_value = cls._finite_decimal(nav_record.fund_value, field="fund_value")
+                if not cls.money_equal(nav_record.stock_value, equity_value + fund_value + option_value):
+                    errors.append("non-cash value disagrees with the option valuation breakdown")
+            except (KeyError, TypeError, ValueError):
+                errors.append("invalid option valuation breakdown")
+        elif (
             nav_record.fund_value is not None
             and nav_record.stock_value is not None
             and nav_record.fund_value >= 0
@@ -771,6 +782,13 @@ class NavCalculator:
             "cagr": float(cls.quantize_nav(cagr)),
             "cagr_pct": float(cls.quantize_money(cagr * 100)),
         }
+        if getattr(valuation, "option_value_cny", 0) or any(
+            holding.asset_type.value == "option" for holding in getattr(valuation, "holdings", ())
+        ):
+            details["options"] = {
+                "net_value_cny": float(cls.quantize_money(valuation.option_value_cny)),
+                "equity_value_cny": float(cls.quantize_money(valuation.stock_value_cny)),
+            }
         for yr_str, yd in yearly_data.items():
             nav_change = yd.get("nav_change")
             appreciation = yd.get("appreciation")

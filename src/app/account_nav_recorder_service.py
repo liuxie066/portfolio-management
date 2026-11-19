@@ -4,6 +4,8 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, Dict, Optional
 
+from src import config
+from src.app.futu_sync_evidence import FutuSyncEvidenceStore
 from src.app.nav_finality import NavWriteContext
 from src.app.nav_payload import format_nav_payload
 from src.domain.cash_flow_contracts import CashFlowDatasetRefusal
@@ -166,6 +168,7 @@ class AccountNavRecorderService:
         holdings_preflight_result = None
         cash_flow_dataset = None
         loaded_evidence = None
+        captured_evidence = None
         try:
             futu_sync_result = None
             project_futu_dry_run = False
@@ -175,10 +178,14 @@ class AccountNavRecorderService:
                     if dry_run
                     else (False if sync_futu_dry_run is None else sync_futu_dry_run)
                 )
-                futu_sync_result = FutuBalanceSyncService(self.storage).sync_cash_and_mmf(
-                    account=self.account,
-                    dry_run=resolved_sync_futu_dry_run,
-                )
+                sync = FutuBalanceSyncService(self.storage)
+                if not resolved_sync_futu_dry_run and self.account in config.get("futu.profiles", {}):
+                    futu_sync_result = sync.sync_portfolio(account=self.account, dry_run=False, confirm=confirm)
+                else:
+                    futu_sync_result = sync.sync_cash_and_mmf(
+                        account=self.account,
+                        dry_run=resolved_sync_futu_dry_run,
+                    )
                 if not futu_sync_result.get("success"):
                     return _set_run_id(futu_sync_result, resolved_run_id)
                 project_futu_dry_run = bool(resolved_sync_futu_dry_run)
@@ -233,10 +240,9 @@ class AccountNavRecorderService:
                 )
                 artifact = loaded_evidence["artifact"]
                 validated = holdings_preflight_result["validated_snapshot"]
-                historical_receipt_replay = (
-                    artifact.get("preparation")
-                    == "historical_receipt_recovery"
-                )
+                historical_receipt_replay = artifact.get("preparation") in {
+                    "historical_receipt_recovery", "futu_scheduled_capture",
+                }
                 if (
                     validated.normalized_holdings_digest
                     != artifact.get("holdings_digest")
@@ -276,6 +282,17 @@ class AccountNavRecorderService:
                             "holdings_warnings": list(validated.warnings),
                         }
                     )
+                if self.account in config.get("futu.profiles", {}) and holdings_preflight_result is not None:
+                    if not dry_run:
+                        evidence = FutuSyncEvidenceStore().require_nav_capture(
+                            self.account, today, snapshot_kwargs["holdings"],
+                        )
+                        snapshot_kwargs["valuation_fx"] = evidence["fx"]["rates"]
+                        snapshot_kwargs["holdings_provenance"] = {
+                            **snapshot_kwargs["holdings_provenance"],
+                            "futu_capture": evidence,
+                        }
+                    snapshot_kwargs["option_nav_date"] = today
                 snapshot = self.read_service.build_snapshot(**snapshot_kwargs)
                 snapshot_ms = _now_ms() - t_snapshot
             else:
@@ -352,6 +369,20 @@ class AccountNavRecorderService:
                 raise ValueError(
                     "official NAV recording requires normalized_valuation"
                 )
+            futu_capture = (getattr(snapshot["valuation"], "holdings_provenance", None) or {}).get("futu_capture")
+            if not dry_run and loaded_evidence is None and futu_capture and cash_flow_dataset is not None:
+                store = self._valuation_evidence_store()
+                captured_evidence = store.save(store.prepare(
+                    account=self.account,
+                    nav_date=today,
+                    source_run_id=resolved_run_id,
+                    snapshot_time=snapshot["snapshot_time"],
+                    holdings_digest=holdings_preflight_result["validated_snapshot"].normalized_holdings_digest,
+                    cash_flow_financial_fingerprint=cash_flow_dataset.financial_fingerprint,
+                    source_effect_store_revision=cash_flow_dataset.effect_store_revision,
+                    normalized_valuation=normalized_valuation,
+                    preparation="futu_scheduled_capture",
+                ))
             snapshot_write_authority = SnapshotWriteAuthority(
                 account=self.account,
                 as_of=today.isoformat(),
@@ -515,6 +546,7 @@ class AccountNavRecorderService:
             failure = {
                 "success": False,
                 "error": str(e),
+                **({"valuation_ref": captured_evidence["valuation_ref"]} if captured_evidence else {}),
                 "account": self.account,
                 "date": today.isoformat(),
                 "run_id": resolved_run_id,

@@ -19,7 +19,7 @@
 
 - 多账户持仓/现金查询、仓位分布、NAV 计算与历史记录、估值后持仓快照。
 - 日净值任务统一处理业务日期、重复记录、现金流与持仓问题的写入门禁，输出汇总回执。
-- Futu OpenD 持仓同步、分币种 CASH 观测，以及人工现金流的发现、预览、确认流程。
+- Futu OpenD 股票、ETF、期权、账户现金和货币基金同步，以及外部现金流的发现、预览和确认流程。
 - 显式账户范围、默认关闭的非富途股票／非 MMF 基金表内变动监控：静默基线后观察数量、身份、归零及确认删除，持久回执；不证明成交或券商来源。操作见[监听手册](holdings-event-listener-runbook.md#non-futu-holdings-change-monitor)。
 - 从共享估值快照生成日报数据和本地 HTML；为 OM 提供持仓/估值证据、刷新受理和质量状态。
 
@@ -33,7 +33,7 @@
   业务权威。`transactions` 是可选历史只读能力，不恢复为日净值必需依赖。
 - **写入权限**：默认 dry-run；常规真实写入需显式写入与确认，默认不覆盖同日 NAV。
   CASH Effects 另需绑定当前事实的 preview hash 和独立确认；scanner 只发现，
-  Futu sync 对 CASH 只观测。详情以 [Cash Flow 操作手册](cash-flow-effects-runbook.md) 为准。
+  富途余额由账户同步自动更新，出入金确认记录资金事项。详情以 [Cash Flow 操作手册](cash-flow-effects-runbook.md) 为准。
 - **净值可信度**：使用北京日期语义和 CN/HK/US 交易日历；任一市场开市即具有该日
   候选资格，全休市默认跳过，仅显式 `--force-non-business-day` 可覆盖；日历不可用
   时阻断。重复、待补齐字段及未解决 effects 阻断正式写入；

@@ -27,7 +27,7 @@ def quantity_change_payload(result: dict[str, Any]) -> dict[str, Any] | None:
             "after": item["target_quantity"],
         }
         for item in result.get("positions", [])
-        if item.get("security_type") in {"STOCK", "ETF"}
+        if item.get("security_type") in {"STOCK", "ETF", "DRVT", "OPTION"}
         and item.get("quantity_changed") is True
     ]
     if not changes:

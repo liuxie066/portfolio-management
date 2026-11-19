@@ -10,7 +10,7 @@
 - 多账户日净值任务：自动跳过周末和配置的法定节假日
 - 写入前审计 `nav_history` 同账户同日期重复记录
 - 写入前阻断待补齐的人工 `cash_flow` 行
-- 通过 Futu OpenD 观测分币种 CASH；同步 MMF、股票/ETF 数量及平均成本
+- 通过 Futu OpenD 同步折算后的账户现金、独立货币基金、股票/ETF 和多空期权
 - 手工 cash flow 经 15 分钟发现、逐条预览和显式确认后更新同币种 CASH
 - 统计仓位分布，生成日报 payload 和本地 HTML 产物
 - 通过 `config.yaml` 和 systemd timer 部署到 Linux 长期运行
@@ -137,7 +137,7 @@ artifact，不会触发 OpenD 刷新、飞书写入或重新计算；它使用�
 # 多账户真实写入
 ./pm daily-job --accounts lx,alice --write --confirm --json
 
-# 先观测 Futu CASH 并同步其余 holdings，再估值和写 NAV
+# 先核对并同步富途现金、货币基金和证券持仓，再估值并写 NAV
 ./pm futu sync --account lx --write --confirm --json
 ./pm daily-job --account lx --write --confirm --json
 
@@ -156,11 +156,10 @@ dry-run 不发消息。回执、Agent 对话和全部 Base 读写都使用
 不拥有 Base 业务读写或消息发送权限。旧 `feishu.bitable.*` /
 `feishu.conversation.*` / `feishu.receipt.*` / `OM_FEISHU_BOT_*` 只用于迁移识别，生产 secure
 mode 不接受明文 Secret。通知失败会记录在返回值的 `receipt` 字段，不会覆盖
-已经完成的 holdings 同步结果。Futu CASH 在该命令中始终
-observe-only：`cn_cash/us_cash/hk_cash` 只保留为来源证据，不与 holdings
-金额对账，也不创建 CASH Effects。PM 使用 `CNY-CASH` 保存人民币汇总现金；
-只有独立的 cash-flow 台账流程经过 `cash-flow effects preview/confirm` 后才可
-写 CASH holding。
+已经完成的 holdings 同步结果。富途分币种现金 `cn_cash/us_cash/hk_cash` 用带来源的 FX
+折算后写回富途名下的 `CNY-CASH`。货币基金用 `fund_assets` 更新独立的 `CNY-MMF`。
+两条记录分别回读，按各自金额计入 NAV。富途外部出入金和净值份额仍由 Cash Flow 流程
+核验。
 
 `daily-job` 是单账户和多账户的统一入口。未显式传 `--nav-date` 时，它会取运行日前最近业务日。只有带受支持 `details.finality`、明确 `status=final` 且日期匹配的同日记录才会幂等返回 `skipped_existing_nav`；旧记录、手工记录或 finality 不匹配会阻断为 `existing_nav_not_final`，不会因“行已存在”而误判完成。真实执行完成后会通过同一“刘看山”应用发送一条多账户 NAV 汇总回执；dry-run 不发送，通知失败不会覆盖 NAV 写入结果。
 
@@ -207,9 +206,9 @@ NAV/校验读取不触发补全。币种按有来源的离线代码目录校验�
 仅 `updated_at` 变化且原完成证据齐全时，新审计版本保留完成状态，不重复影响现金。
 旧 pending 的恢复是单独的账户级精确计划维护操作，默认只读，不随扫描自动执行。
 
-生产 installer 生成四组独立 timer：周一至周六 `08:10 Asia/Shanghai` 先观测
-lx/sy Futu CASH 并同步 MMF/股票/ETF，再单次执行
-`daily-job --accounts lx,hb,sy`；周一至周五 `17:10` 重复 Futu 观测/同步但不
+生产 installer 生成四组独立 timer：周一至周六 `08:10 Asia/Shanghai` 先核对
+lx/sy 的富途账户现金、货币基金和证券持仓，再单次执行
+`daily-job --accounts lx,hb,sy`；周一至周五 `17:10` 重复富途核对但不
 写 NAV；Cash Flow scanner 每 15 分钟运行一次；NAV 回执 dispatcher 每 5
 分钟重试本地 outbox。完整 Futu 同步位于外层调度脚本，不属于 `daily-job`。
 
@@ -310,8 +309,8 @@ sudo scripts/install.sh --apply --enable-quality-timer
 
 完整步骤见 `docs/deploy-linux.md`。安装器使用版本化的
 `scripts/portfolio_scheduled_job.sh` 编排独立 `pm futu sync` 和
-`pm daily-job`；`daily-job` 中的旧 CASH/MMF 参数现在也只观测 CASH，不再
-直接写 CASH holding。
+`pm daily-job`。正式富途账户 NAV 使用保存的早间同步证据，期权按对应市场
+收盘价估值。
 
 ## 配置优先级
 

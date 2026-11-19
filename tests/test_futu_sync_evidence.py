@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 from src.app.futu_balance_sync_service import FutuBalanceSnapshot, FutuBalanceSyncService
@@ -9,12 +10,20 @@ from src.domain.holding_mutations import HoldingTarget
 from src.models import AssetType, Holding
 
 
+def _fx():
+    return {"USDCNY": 7.25, "HKDCNY": 0.9}, {
+        "observed_at_utc": datetime.now(UTC).isoformat(),
+        "sources": {"USDCNY": "test", "HKDCNY": "test"},
+    }
+
+
 class _Storage:
     def __init__(self, *, fail_asset_id: str | None = None) -> None:
         self.fail_asset_id = fail_asset_id
         self.holdings = {
             (asset_id, "lx", "富途"): Holding(
                 asset_id=asset_id,
+                record_id=f"rec_{asset_id}",
                 asset_name=asset_id,
                 asset_type=AssetType.CASH,
                 account="lx",
@@ -62,7 +71,7 @@ class _Storage:
 class _Provider:
     def fetch_balances(self) -> FutuBalanceSnapshot:
         return FutuBalanceSnapshot(
-            cash_by_currency={"CNY": 100, "USD": 0, "HKD": 0},
+            cash_by_currency={"CNY": 100, "USD": 20, "HKD": -10},
             mmf=200,
             source="futu-openapi",
             account_id=123,
@@ -93,6 +102,7 @@ def test_sync_receipt_persists_latest_and_history_across_restart(tmp_path: Path)
     result = FutuBalanceSyncService(
         _Storage(),
         _Provider(),
+        fx_loader=_fx,
         evidence_store=store,
     ).sync_cash_and_mmf(account="lx", sync_run_id="sync-run-001")
 
@@ -102,6 +112,9 @@ def test_sync_receipt_persists_latest_and_history_across_restart(tmp_path: Path)
     assert result["stages"]["fund_mmf"]["status"] == "succeeded"
     latest = FutuSyncEvidenceStore(tmp_path / "receipts").latest("lx")
     assert latest["sync_run_id"] == "sync-run-001"
+    assert latest["cash_write"]["status"] == "verified"
+    assert latest["cash_write"]["target"] == 236
+    assert latest["cash_write"]["fx"]["rates"] == {"USDCNY": 7.25, "HKDCNY": 0.9}
     assert latest["source_snapshot_id"] == "snapshot-redacted-001"
     assert latest["source_metadata"]["cash"]["source_fields"] == {
         "CNY": "cn_cash",
@@ -124,6 +137,7 @@ def test_cash_success_and_mmf_failure_is_dataset_scoped_partial_write(tmp_path: 
     result = FutuBalanceSyncService(
         storage,
         _Provider(),
+        fx_loader=_fx,
         evidence_store=FutuSyncEvidenceStore(tmp_path / "receipts"),
         reconciler=FutuSyncReconciler(storage, wait=lambda _seconds: None),
     ).sync_cash_and_mmf(account="lx", sync_run_id="sync-run-partial")
@@ -195,3 +209,43 @@ def test_source_query_failure_replaces_latest_with_redacted_failed_attempt(
     }
     assert latest["stages"]["source"]["status"] == "failed"
     assert "sensitive upstream detail" not in str(latest)
+
+
+def test_formal_nav_uses_matching_morning_futu_readback(tmp_path, monkeypatch):
+    from datetime import date
+    from types import SimpleNamespace
+
+    from src.app.business_calendar_service import BusinessCalendarService
+    from src.app.futu_sync_evidence import futu_holdings_digest
+
+    nav_date = date(2026, 11, 18)
+    run_date = date(2026, 11, 19)
+    monkeypatch.setattr("src.app.futu_sync_evidence.bj_today", lambda: run_date)
+    monkeypatch.setattr(
+        BusinessCalendarService, "from_config",
+        lambda: SimpleNamespace(default_nav_date=lambda *, run_date: nav_date),
+    )
+    store = FutuSyncEvidenceStore(tmp_path)
+    holdings = _Storage().get_holdings_fresh(account="lx")
+    sync = {
+        "source_snapshot_id": "one",
+        "success": True,
+        "holdings_digest": futu_holdings_digest(holdings),
+        "cash_write": {
+            "observed_at_utc": "2026-11-19T00:10:01+00:00",
+            "cash_read_started_at": "2026-11-19T00:10:00+00:00",
+            "status": "verified",
+            "snapshot_id": "one",
+        },
+    }
+    store.save("lx", "first", sync)
+    assert store.require_nav_capture("lx", nav_date, holdings) == sync["cash_write"]
+
+    import pytest
+
+    with pytest.raises(ValueError, match="do not match"):
+        store.require_nav_capture("lx", nav_date, [])
+    sync["cash_write"]["observed_at_utc"] = "2026-11-19T01:00:00+00:00"
+    store.save("lx", "late", sync)
+    with pytest.raises(ValueError, match="outside the early NAV window"):
+        store.require_nav_capture("lx", nav_date, holdings)

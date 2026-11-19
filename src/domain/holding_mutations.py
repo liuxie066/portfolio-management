@@ -28,6 +28,7 @@ HOLDING_VALUE_FIELDS = frozenset({
     "asset_type",
     "quantity",
     "avg_cost",
+    "contract_multiplier",
     "currency",
     "asset_class",
     "industry",
@@ -210,6 +211,11 @@ def canonical_holding_value(field_name: str, value: Any) -> Any:
         return candidate
     if field_name in {"quantity", "avg_cost"}:
         return _finite_number(value, field_name=field_name)
+    if field_name == "contract_multiplier":
+        number = _finite_number(value, field_name=field_name)
+        if number <= 0 or number != int(number):
+            raise ValueError("contract_multiplier must be a positive integer")
+        return int(number)
     if field_name == "currency":
         candidate = str(value).strip().upper()
         if (
@@ -242,6 +248,7 @@ def holding_values(holding: Holding) -> dict[str, Any]:
         "asset_type": holding.asset_type,
         "quantity": holding.quantity,
         "avg_cost": holding.avg_cost,
+        "contract_multiplier": holding.contract_multiplier,
         "currency": holding.currency,
         "asset_class": holding.asset_class,
         "industry": holding.industry,
@@ -289,10 +296,13 @@ def holding_state_digest(holding: Optional[Holding]) -> str:
     if holding is None:
         return EMPTY_HOLDING_DIGEST
     identity = HoldingIdentity.from_holding(holding)
+    values = holding_values(holding)
+    if values["contract_multiplier"] is None:
+        del values["contract_multiplier"]
     return _digest({
         "record_id": str(holding.record_id or "").strip() or None,
         "identity": identity.as_dict(),
-        "values": holding_values(holding),
+        "values": values,
         "created_at": holding.created_at,
         "updated_at": holding.updated_at,
     })
@@ -340,6 +350,7 @@ def canonical_holding(holding: Holding) -> Holding:
         asset_type=values["asset_type"],
         quantity=values["quantity"],
         avg_cost=values["avg_cost"],
+        contract_multiplier=values["contract_multiplier"],
         currency=values["currency"],
         asset_class=values["asset_class"],
         industry=values["industry"],
@@ -364,6 +375,7 @@ class HoldingPatch:
     asset_type: Any = UNSET
     quantity: Any = UNSET
     avg_cost: Any = UNSET
+    contract_multiplier: Any = UNSET
     currency: Any = UNSET
     asset_class: Any = UNSET
     industry: Any = UNSET
@@ -483,6 +495,7 @@ class HoldingTarget:
 
     def __post_init__(self) -> None:
         raw_values = dict(self.values)
+        raw_values.setdefault("contract_multiplier", None)
         missing = sorted(HOLDING_VALUE_FIELDS - set(raw_values))
         extra = sorted(set(raw_values) - HOLDING_VALUE_FIELDS)
         if missing or extra:
@@ -603,6 +616,7 @@ class HoldingTarget:
             asset_type=self.values["asset_type"],
             quantity=self.values["quantity"],
             avg_cost=self.values["avg_cost"],
+            contract_multiplier=self.values["contract_multiplier"],
             currency=self.values["currency"],
             asset_class=self.values["asset_class"],
             industry=self.values["industry"],
@@ -614,7 +628,10 @@ class HoldingTarget:
     def to_payload(self) -> dict[str, Any]:
         return {
             "identity": self.identity.as_dict(),
-            "values": _json_value(self.values),
+            "values": _json_value({
+                key: value for key, value in self.values.items()
+                if key != "contract_multiplier" or value is not None or key in self.owned_fields
+            }),
             "owned_fields": sorted(self.owned_fields),
             "base_record_id": self.base_record_id,
             "base_digest": self.base_digest,
