@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.18 - 2026-11-19
+
+- Accept Feishu millisecond timestamps in holdings metadata so Cash Flow scans and Futu holdings synchronization can read valid records.
+
 ## 0.2.17 - 2026-11-18
 
 - Preserve completed cash-flow effects when verified audit timestamps change without changing financial facts.
