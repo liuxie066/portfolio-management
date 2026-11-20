@@ -2312,7 +2312,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_mmf_reconcile.add_argument("--clearing-date", required=True)
     p_mmf_reconcile.add_argument("--flow-id", action="append", default=[])
 
-    p_mmf_publish = futu_sub.add_parser("mmf-publish", help="publish account evidence to private OSS")
+    p_mmf_publish = futu_sub.add_parser("mmf-publish", help="publish account evidence to the shared directory")
     p_mmf_publish.add_argument("--account", required=True)
     p_mmf_publish.add_argument("--confirm", action="store_true", help="publish the reviewed evidence")
     p_mmf_publish.add_argument("--json", action="store_true", default=argparse.SUPPRESS)

@@ -224,54 +224,61 @@ def mmf_valuation_holdings(holdings, funding, *, account, capture=None):
 
 
 def read_mmf_valuation_funding(account):
-    """Read OSS independently and bind its evidence to this PM account."""
-    from .futu_mmf_oss import mmf_oss_configured, read_mmf_oss
+    """Read the shared file independently and bind its evidence to this PM account."""
+    from .futu_mmf_shared import mmf_shared_configured, read_mmf_shared
 
-    if not mmf_oss_configured():
+    if not mmf_shared_configured():
         return {"status": "none"}
-    funding = read_mmf_oss(account)
+    funding = read_mmf_shared(account)
     if funding["status"] == "verified":
         provider = FutuOpenApiBalanceProvider.from_account(account)
         if (
             funding["account_fingerprint"] != provider.account_fingerprint
             or funding["environment"] != provider.trd_env
         ):
-            raise ValueError("OSS money-fund reconciliation account mismatch")
+            raise ValueError("Shared money-fund reconciliation account mismatch")
         _, snapshot = current_mmf_balance(account)
         if funding["snapshot_id"] != snapshot:
-            raise ValueError("OSS money-fund reconciliation is for a previous balance")
+            raise ValueError("Shared money-fund reconciliation is for a previous balance")
     return funding
 
 
 def publish_mmf_funding(account, *, confirm=False):
-    """Publish only to the shared private account object, with explicit confirmation."""
+    """Atomically publish the current account evidence in the shared directory."""
     import json
+    import os
     from pathlib import Path
-    import subprocess
-    from tempfile import TemporaryDirectory
+    from tempfile import NamedTemporaryFile
 
     from src.process_lock import account_lock_key, process_lock
 
-    from .futu_mmf_oss import mmf_oss_uri, read_mmf_oss
+    from .futu_mmf_shared import mmf_shared_path, read_mmf_shared
 
-    uri = mmf_oss_uri(account)
+    path = mmf_shared_path(account)
 
     def payload():
         return {"schema": "futu.mmf-funding.v1", **read_mmf_funding(account)}
 
     if not confirm:
-        return {"success": True, "published": False, "uri": uri, "evidence": payload()}
+        return {"success": True, "published": False, "path": str(path), "evidence": payload()}
     with process_lock(account_lock_key(account), blocking=False):
         evidence = payload()
-        with TemporaryDirectory(prefix="pm-mmf-funding-") as folder:
-            source = Path(folder) / "funding.json"
-            source.write_text(json.dumps(evidence, ensure_ascii=False), encoding="utf-8")
-            result = subprocess.run(
-                ["ossutil", "cp", str(source), uri, "--force"],
-                capture_output=True, check=False, timeout=10,
-            )
-            if result.returncode:
-                raise ValueError("Failed to publish OSS money-fund reconciliation")
-        if read_mmf_oss(account) != evidence:
-            raise ValueError("OSS money-fund reconciliation readback did not match the publication")
-        return {"success": True, "published": True, "uri": uri, "status": evidence["status"]}
+        raw = json.dumps(evidence, ensure_ascii=False).encode()
+        if len(raw) > 262144:
+            raise ValueError("Shared money-fund reconciliation file is too large")
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with NamedTemporaryFile(dir=path.parent, prefix=".mmf-", delete=False) as handle:
+            temporary = Path(handle.name)
+            try:
+                handle.write(raw)
+                handle.flush()
+                os.fsync(handle.fileno())
+                handle.close()
+                temporary.replace(path)
+            finally:
+                temporary.unlink(missing_ok=True)
+        if read_mmf_shared(account) != evidence:
+            raise ValueError("Shared money-fund reconciliation readback did not match")
+        return {
+            "success": True, "published": True, "path": str(path), "status": evidence["status"],
+        }

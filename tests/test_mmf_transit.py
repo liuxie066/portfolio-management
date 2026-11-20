@@ -204,35 +204,29 @@ def test_priced_holdings_and_nav_share_one_transit_row(monkeypatch):
     assert all(row["code"] != "CNY-MMF-TRANSIT" for row in settled["holdings"])
 
 
-def test_oss_publication_previews_then_uploads_and_reads_back(monkeypatch, tmp_path):
+def test_shared_publication_previews_then_atomically_replaces(monkeypatch, tmp_path):
     from contextlib import nullcontext
     import json
-    from pathlib import Path
-    import subprocess
-    from types import SimpleNamespace
+    from stat import S_IMODE
 
     from src.app import mmf_transit_service
     from src import process_lock
 
     funding = {"success": True, "account": "sy", "status": "none"}
-    monkeypatch.setenv("FUTU_MMF_FUNDING_OSS_PREFIX", "oss://test-bucket/reconciliation")
+    shared = tmp_path / "shared"
+    monkeypatch.setenv("FUTU_MMF_FUNDING_DIR", str(shared))
     monkeypatch.setattr(mmf_transit_service, "read_mmf_funding", lambda account: funding)
     monkeypatch.setattr(process_lock, "process_lock", lambda *args, **kwargs: nullcontext())
-    commands = []
-    uploaded = b""
-
-    def run(args, **kwargs):
-        nonlocal uploaded
-        commands.append(args[:2])
-        if args[1] == "cp":
-            assert args[3] == "oss://test-bucket/reconciliation/sy.json"
-            uploaded = Path(args[2]).read_bytes()
-        return SimpleNamespace(returncode=0, stdout=uploaded)
-
-    monkeypatch.setattr(subprocess, "run", run)
-    assert not mmf_transit_service.publish_mmf_funding("sy")["published"]
-    assert not commands
+    target = shared / "sy.json"
+    assert mmf_transit_service.publish_mmf_funding("sy")["path"] == str(target)
+    assert not shared.exists()
     assert mmf_transit_service.publish_mmf_funding("sy", confirm=True)["published"]
-    assert commands == [["ossutil", "cp"], ["ossutil", "cat"]]
-    assert json.loads(uploaded) == {"schema": "futu.mmf-funding.v1", **funding}
+    assert json.loads(target.read_bytes()) == {"schema": "futu.mmf-funding.v1", **funding}
+    assert S_IMODE(target.stat().st_mode) == 0o600
     assert mmf_transit_service.read_mmf_valuation_funding("sy")["status"] == "none"
+    with target.open("r") as previous:
+        funding["status"] = "unverified"
+        mmf_transit_service.publish_mmf_funding("sy", confirm=True)
+        assert json.load(previous)["status"] == "none"
+    assert mmf_transit_service.read_mmf_valuation_funding("sy")["status"] == "unverified"
+    assert list(shared.iterdir()) == [target]
