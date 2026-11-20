@@ -29,6 +29,8 @@ ENABLE_QUALITY_TIMER=false
 ENABLE_HOLDINGS_EVENT_LISTENER=false
 OVERWRITE_CONFIG=false
 PIP_INDEX_URL_VALUE="${PIP_INDEX_URL:-}"
+WHEEL_DIR=""
+EXTRA_REQUIREMENTS=""
 SCRIPT_DIR=""
 SCRIPT_REPO_ROOT=""
 if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
@@ -66,6 +68,11 @@ Options:
   --python PATH           Python executable used to create the venv.
   --run-user USER         systemd service user.
   --pip-index-url URL     Optional pip index URL.
+  --prepare-offline PATH  Prepare a new release using only wheels in PATH.
+                           Requires an explicit release tag and a new absolute --dir.
+                           Stops after dependency checks, before any system install.
+  --extra-requirements PATH
+                           Additional local requirements for offline preparation.
   -h, --help              Show this help.
 
 Defaults:
@@ -107,10 +114,23 @@ while [[ $# -gt 0 ]]; do
     --python) PYTHON_BIN="$2"; shift 2 ;;
     --run-user) RUN_USER="$2"; shift 2 ;;
     --pip-index-url) PIP_INDEX_URL_VALUE="$2"; shift 2 ;;
+    --prepare-offline) WHEEL_DIR="${2:?wheel directory required}"; shift 2 ;;
+    --extra-requirements) EXTRA_REQUIREMENTS="${2:?requirements path required}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+if [[ -n "$WHEEL_DIR" ]]; then
+  if [[ "$SOURCE" == true || "$APPLY" == true || ! "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ||
+        "$APP_DIR" != /* || -e "$APP_DIR" || -L "$APP_DIR" || "$WHEEL_DIR" != /* || ! -d "$WHEEL_DIR" ]]; then
+    echo "Offline preparation needs an explicit release tag, an unused absolute --dir, a local wheel directory, and no --source or --apply." >&2
+    exit 2
+  fi
+elif [[ -n "$EXTRA_REQUIREMENTS" ]]; then
+  echo "--extra-requirements requires --prepare-offline." >&2
+  exit 2
+fi
 
 if [[ -z "$APP_DIR" ]]; then
   if [[ -n "$SCRIPT_REPO_ROOT" ]]; then
@@ -173,7 +193,7 @@ prepare_release() {
     log "Using current runtime installation: $APP_DIR"
     return
   fi
-  if [[ -e "$APP_DIR" && ! -f "$APP_DIR/VERSION" ]]; then
+  if [[ -z "$WHEEL_DIR" && -e "$APP_DIR" && ! -f "$APP_DIR/VERSION" ]]; then
     echo "Install directory exists but is not a runtime installation: $APP_DIR" >&2
     exit 1
   fi
@@ -297,6 +317,24 @@ run_asset_installer() {
   log "Installing deployment assets"
   "$APP_DIR/.venv/bin/python" "${args[@]}"
 }
+
+if [[ -n "$WHEEL_DIR" ]]; then
+  requirements=(-r "$APP_DIR/requirements.txt")
+  if [[ -n "$EXTRA_REQUIREMENTS" ]]; then
+    test -f "$EXTRA_REQUIREMENTS" || exit 2
+    requirements+=(-r "$EXTRA_REQUIREMENTS")
+  fi
+  mkdir -p "$(dirname "$APP_DIR")"
+  mkdir "$APP_DIR"
+  prepare_release
+  "$PYTHON_BIN" -m venv "$APP_DIR/.venv"
+  PIP_CONFIG_FILE=/dev/null "$APP_DIR/.venv/bin/python" -m pip \
+    --isolated --disable-pip-version-check install --no-index --only-binary=:all: \
+    --find-links "$WHEEL_DIR" "${requirements[@]}"
+  PIP_CONFIG_FILE=/dev/null "$APP_DIR/.venv/bin/python" -m pip --isolated --disable-pip-version-check check
+  log "Prepared $REF in $APP_DIR"
+  exit 0
+fi
 
 if [[ "$SOURCE" == true ]]; then
   prepare_checkout
