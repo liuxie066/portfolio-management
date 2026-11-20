@@ -113,6 +113,7 @@ class FrozenHoldingRow:
     tag: tuple[str, ...]
     created_at: Optional[str]
     updated_at: Optional[str]
+    contract_multiplier: Optional[int] = None
 
     @classmethod
     def from_holding(cls, holding: Holding) -> "FrozenHoldingRow":
@@ -152,6 +153,7 @@ class FrozenHoldingRow:
                 if payload.get("updated_at") is not None
                 else None
             ),
+            contract_multiplier=holding.contract_multiplier,
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -170,6 +172,9 @@ class FrozenHoldingRow:
             "tag": list(self.tag),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            # Preserve the normalized digest of rows without a multiplier.
+            **({"contract_multiplier": self.contract_multiplier}
+               if self.contract_multiplier is not None else {}),
         }
 
     def to_holding(self) -> Holding:

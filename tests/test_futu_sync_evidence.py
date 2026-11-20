@@ -249,3 +249,54 @@ def test_formal_nav_uses_matching_morning_futu_readback(tmp_path, monkeypatch):
     store.save("lx", "late", sync)
     with pytest.raises(ValueError, match="outside the early NAV window"):
         store.require_nav_capture("lx", nav_date, holdings)
+
+
+def test_nav_capture_survives_option_freeze_and_rejects_multiplier_drift(tmp_path, monkeypatch):
+    from datetime import date
+
+    import pytest
+
+    from src.app.business_calendar_service import BusinessCalendarService
+    from src.app.futu_sync_evidence import futu_holdings_digest
+    from src.app.holdings_nav_preflight_service import FrozenHoldingRow
+    from src.domain.snapshot_contracts import NormalizedValuationRow
+
+    account = "synthetic"
+    capture_day = date(2026, 11, 20)
+    nav_day = date(2026, 11, 19)
+    monkeypatch.setattr("src.app.futu_sync_evidence.bj_today", lambda: capture_day)
+    monkeypatch.setattr(BusinessCalendarService, "default_nav_date", lambda self, **kwargs: nav_day)
+    option = Holding(
+        asset_id="SYNTHETIC_OPTION", asset_name="Synthetic option", asset_type=AssetType.OPTION,
+        account=account, broker="富途", quantity=-2, currency="USD", contract_multiplier=100,
+    )
+    cash = Holding(
+        asset_id="CNY-CASH", asset_name="Synthetic cash", asset_type=AssetType.CASH,
+        account=account, broker="富途", quantity=1, currency="CNY",
+    )
+    store = FutuSyncEvidenceStore(tmp_path)
+    proof = {
+        "status": "verified", "snapshot_id": "synthetic-snapshot",
+        "observed_at_utc": "2026-11-20T00:10:07+00:00",
+        "cash_read_started_at": "2026-11-20T00:10:06+00:00",
+    }
+    store.save(account, "synthetic-capture", {
+        "success": True, "source_snapshot_id": "synthetic-snapshot",
+        "cash_write": proof, "holdings_digest": futu_holdings_digest([option, cash]),
+    })
+
+    frozen_cash = FrozenHoldingRow.from_holding(cash)
+    assert "contract_multiplier" not in frozen_cash.as_dict()
+    frozen_option = FrozenHoldingRow.from_holding(option)
+    rows = [frozen_option.to_holding(), frozen_cash.to_holding()]
+    assert store.require_nav_capture(account, nav_day, rows) == proof
+    assert frozen_option.as_dict()["contract_multiplier"] == rows[0].contract_multiplier == 100
+    valued = NormalizedValuationRow.from_holding(
+        rows[0], account=account, normalized_type="option", price="2", cny_price="14",
+        source="futu_opend_option_close",
+    )
+    assert valued.to_snapshot_row(as_of=nav_day.isoformat()).market_value_cny == -2800
+
+    rows[0] = rows[0].model_copy(update={"contract_multiplier": 200})
+    with pytest.raises(ValueError, match="do not match verified NAV capture"):
+        store.require_nav_capture(account, nav_day, rows)

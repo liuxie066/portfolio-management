@@ -34,3 +34,5 @@ use the requested market session's close, or the latest prior close when that
 market is closed. Intraday report prices wait until 16:15 New York time for
 US options or 16:30 Hong Kong time for HK options before reading that day’s
 regular-session close. Late NAV runs require archived valuation evidence.
+The NAV holdings snapshot keeps each option's verified contract multiplier for
+both capture verification and valuation.
