@@ -55,6 +55,27 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
         BEGIN IMMEDIATE;
+        CREATE TABLE IF NOT EXISTS futu_mmf_transfer_observations (
+            account TEXT NOT NULL,
+            broker_account TEXT NOT NULL,
+            balance_snapshot_id TEXT NOT NULL,
+            receipt_id TEXT NOT NULL,
+            direction TEXT NOT NULL CHECK(direction IN ('subscription', 'redemption')),
+            currency TEXT NOT NULL,
+            amount TEXT NOT NULL,
+            source_debit TEXT NOT NULL,
+            target_credit TEXT NOT NULL,
+            PRIMARY KEY(account, broker_account, balance_snapshot_id, receipt_id)
+        );
+        CREATE TABLE IF NOT EXISTS futu_mmf_settlement_flows (
+            broker_account TEXT NOT NULL,
+            flow_id TEXT NOT NULL,
+            account TEXT NOT NULL,
+            receipt_id TEXT NOT NULL,
+            balance_snapshot_id TEXT NOT NULL,
+            amount TEXT NOT NULL,
+            PRIMARY KEY(broker_account, flow_id)
+        );
         CREATE TABLE IF NOT EXISTS futu_refresh_inbox (
             account TEXT NOT NULL,
             request_id TEXT NOT NULL,

@@ -3,7 +3,7 @@
   "release_state": "unreleased",
   "contract_release": null,
   "canonical_path": "contracts/om-api/v1.openapi.json",
-  "sha256": "c26f04f4e212a2289578dfeb41eb5f4e0b7c1a6a0a70e4cb3f6c4815434de462",
+  "sha256": "8a7a9b4b1da266d567641fed51bf12611bdc652bb6f92b50f0da53c2adcc7a74",
   "compatibility": {
     "breaking_change": "new_major_path",
     "legacy_paths_minimum_release_cycles": 2

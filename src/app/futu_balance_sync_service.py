@@ -53,6 +53,8 @@ class FutuBalanceSnapshot:
     refresh_cache: bool = True
     account_verified: bool = False
     pagination_complete: bool = False
+    pending_asset: Optional[float] = None
+    pending_asset_currency: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -140,6 +142,8 @@ class FutuPortfolioSnapshot:
     refresh_cache: bool = True
     account_verified: bool = False
     pagination_complete: bool = False
+    pending_asset: Optional[float] = None
+    pending_asset_currency: Optional[str] = None
 
 
 class FutuBalanceProvider(Protocol):
@@ -298,6 +302,30 @@ class FutuOpenApiBalanceProvider:
             "accounts": sorted(accounts, key=lambda item: int(item["acc_id"])),
         }
 
+    def fetch_mmf_cash_flows(self, clearing_date: str) -> list[dict[str, Any]]:
+        """Read only the configured account's broker-classified MMF cash flows."""
+        sdk = self._import_sdk()
+        ctx = self._open_trade_context(sdk)
+        try:
+            self._verify_account_authority(sdk, ctx)
+            ret, data = ctx.get_acc_cash_flow(
+                clearing_date=clearing_date,
+                trd_env=self._enum_value(sdk, "TrdEnv", self.trd_env),
+                acc_id=self.acc_id,
+            )
+            self._ensure_ok(sdk, ret, data, "get_acc_cash_flow")
+            return [
+                row for row in _rows(data)
+                if (str(row.get("cashflow_type", "")).strip().casefold(),
+                    str(row.get("cashflow_direction", "")).strip().upper())
+                in {
+                    ("基金赎回", "IN"), ("基金贖回", "IN"), ("fund redemption", "IN"),
+                    ("基金申购", "OUT"), ("基金申購", "OUT"), ("fund subscription", "OUT"),
+                }
+            ]
+        finally:
+            self._close(ctx)
+
     def fetch_balances(self) -> FutuBalanceSnapshot:
         futu_sdk = self._import_sdk()
         ctx = self._open_trade_context(futu_sdk)
@@ -309,7 +337,10 @@ class FutuOpenApiBalanceProvider:
             self._close(ctx)
 
         observed_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        pending_asset, pending_currency = self._pending_asset_from_row(row)
         return FutuBalanceSnapshot(
+            pending_asset=pending_asset,
+            pending_asset_currency=pending_currency,
             cash_by_currency=self._cash_balances_from_row(row),
             mmf=self._mmf_from_row(row),
             source="futu-openapi",
@@ -362,7 +393,10 @@ class FutuOpenApiBalanceProvider:
             self._close(trade_ctx)
 
         observed_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        pending_asset, pending_currency = self._pending_asset_from_row(account_row)
         return FutuPortfolioSnapshot(
+            pending_asset=pending_asset,
+            pending_asset_currency=pending_currency,
             cash_by_currency=self._cash_balances_from_row(account_row),
             mmf=self._mmf_from_row(account_row),
             positions=positions,
@@ -418,6 +452,16 @@ class FutuOpenApiBalanceProvider:
 
     def _mmf_from_row(self, row: dict[str, Any]) -> Optional[float]:
         return self._money_field(row, "fund_assets", quantize=True)
+
+    def _pending_asset_from_row(self, row: dict[str, Any]) -> tuple[Optional[float], Optional[str]]:
+        currency = str(row.get("currency") or "").strip().upper()
+        if currency not in {"CNH", "CNY", "HKD", "USD"}:
+            return None, None
+        try:
+            amount = self._money_field(row, "pending_asset", quantize=False)
+        except RuntimeError:
+            return None, None
+        return (amount, currency) if amount is not None else (None, None)
 
     @staticmethod
     def _money_field(row: dict[str, Any], field: str, *, quantize: bool) -> Optional[float]:
@@ -984,6 +1028,7 @@ class FutuBalanceSyncService:
             "observed_at_utc": snapshot.observed_at_utc,
             "cash_read_started_at": snapshot.cash_read_started_at,
             "target": target, "fx": fx, "balances": snapshot.cash_by_currency,
+            "fund_assets": snapshot.mmf,
             "previous_quantity": current.quantity if current else None,
             "previous_record_id": current.record_id if current else None,
             "status": "prepared",
@@ -1357,6 +1402,11 @@ class FutuBalanceSyncService:
                 "present_by_currency": dict(
                     snapshot.cash_present_by_currency or {}
                 ),
+            },
+            "pending_asset": {
+                "amount": getattr(snapshot, "pending_asset", None),
+                "currency": getattr(snapshot, "pending_asset_currency", None),
+                "scope": "account_aggregate",
             },
             "fund_mmf": {
                 "present": snapshot.mmf_present,
