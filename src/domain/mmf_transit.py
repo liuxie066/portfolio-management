@@ -1,5 +1,6 @@
 """Snapshot-bound valuation of confirmed cash and money-fund transfers."""
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 from enum import StrEnum
 
@@ -22,6 +23,8 @@ class ConfirmedMmfTransfer:
     amount: Decimal
     source_debit: Decimal
     target_credit: Decimal
+    request_date: date | None = None
+    cancelled: bool = False
 
     def __post_init__(self) -> None:
         if not all((self.account, self.broker_account, self.receipt_id, self.balance_snapshot_id)):
@@ -35,6 +38,9 @@ class ConfirmedMmfTransfer:
             raise ValueError("Transfer amounts must be finite decimals")
         if self.amount <= 0 or not 0 <= self.target_credit <= self.source_debit <= self.amount:
             raise ValueError("Inconsistent transfer amount, debit or credit")
+
+        if self.cancelled and self.source_debit != self.target_credit:
+            raise ValueError("Cancelled transfer requires proof of zero remaining adjustment")
 
     @property
     def in_transit(self) -> Decimal:

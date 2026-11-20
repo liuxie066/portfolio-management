@@ -278,5 +278,10 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
         "INSERT INTO operation_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         ("holding_change_monitor_schema_version", HOLDING_MONITOR_SCHEMA_VERSION),
     )
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(futu_mmf_transfer_observations)")}
+    if "request_date" not in columns:
+        conn.execute("ALTER TABLE futu_mmf_transfer_observations ADD COLUMN request_date TEXT")
+    if "cancelled" not in columns:
+        conn.execute("ALTER TABLE futu_mmf_transfer_observations ADD COLUMN cancelled INTEGER NOT NULL DEFAULT 0")
     initialize_holding_monitor_schema(conn)
 

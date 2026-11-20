@@ -763,6 +763,11 @@ class HistoricalNavValuationEvidenceService:
         from src.pricing.payload import positive_finite_decimal
 
         account = str(account or "").strip()
+        from src.app.futu_mmf_shared import mmf_shared_configured
+
+        if mmf_shared_configured() and account in (config.get("futu.profiles", {}) or {}):
+            raise ValueError("Historical NAV requires sealed valuation evidence for shared MMF funding")
+
         source_run_id = str(source_run_id or "").strip()
         expected_holdings_digest = str(expected_holdings_digest or "").strip()
         expected_cash_flow_fingerprint = str(

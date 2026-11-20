@@ -227,7 +227,7 @@ class PortfolioReadService:
             from .mmf_transit_service import mmf_valuation_holdings, read_mmf_valuation_funding
 
             funding = read_mmf_valuation_funding(self.account)
-            if funding["status"] != "none":
+            if funding["status"] != "disabled":
                 baseline = (
                     holdings if holdings is not None
                     else self.storage.get_holdings(account=self.account)

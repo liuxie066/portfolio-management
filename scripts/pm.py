@@ -878,6 +878,7 @@ def cmd_futu_mmf_receipt(args):
         result = record_app_receipt(
             account, **shared, direction=args.direction, currency=args.currency,
             amount=args.amount, source_debit=args.source_debit, target_credit=args.target_credit,
+            request_date=args.request_date, cancelled=args.cancelled,
         )
     else:
         result = reconcile_app_receipt(
@@ -2306,6 +2307,8 @@ def build_parser() -> argparse.ArgumentParser:
         parser.set_defaults(func=cmd_futu_mmf_receipt)
     p_mmf_record.add_argument("--direction", required=True, choices=("subscription", "redemption"))
     p_mmf_record.add_argument("--currency", required=True, choices=("CNY", "HKD", "USD"))
+    p_mmf_record.add_argument("--request-date", required=True, help="App request date, YYYY-MM-DD")
+    p_mmf_record.add_argument("--cancelled", action="store_true", help="confirm cancellation and no remaining debit")
     p_mmf_record.add_argument("--amount", required=True)
     p_mmf_record.add_argument("--source-debit", required=True)
     p_mmf_record.add_argument("--target-credit", required=True)

@@ -100,3 +100,10 @@ def test_missing_legacy_sy_env_does_not_affect_unified_profile_routing(tmp_path)
         "daily-job --accounts lx,hb,sy --write --confirm --json --no-service|port=unset",
     ]
     assert result.stderr == ""
+
+
+
+def test_morning_resume_preserves_the_confirmed_balance_capture(tmp_path):
+    result, calls, _ = _run(tmp_path, "morning-resume")
+    assert result.returncode == 0
+    assert calls == ["daily-job --accounts lx,hb,sy --write --confirm --json --no-service|port=unset"]

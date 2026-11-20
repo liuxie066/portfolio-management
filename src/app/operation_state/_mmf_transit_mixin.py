@@ -1,4 +1,5 @@
 """Durable, snapshot-bound confirmations of money-fund transfer evidence."""
+from datetime import date
 from decimal import Decimal
 
 from src.domain.mmf_transit import ConfirmedMmfTransfer, TransferDirection
@@ -11,23 +12,31 @@ class MmfTransitMixin:
             transfer.receipt_id, transfer.direction.value, transfer.currency,
             str(transfer.amount.normalize()), str(transfer.source_debit.normalize()),
             str(transfer.target_credit.normalize()),
+            transfer.request_date.isoformat() if transfer.request_date else None, int(transfer.cancelled),
         )
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             identity = conn.execute(
                 """
-                SELECT direction, currency, amount
+                SELECT direction, currency, amount, request_date, target_credit, cancelled
                 FROM futu_mmf_transfer_observations
                 WHERE account = ? AND broker_account = ? AND receipt_id = ?
-                LIMIT 1
+                ORDER BY rowid DESC LIMIT 1
                 """,
                 (transfer.account, transfer.broker_account, transfer.receipt_id),
             ).fetchone()
-            if identity is not None and tuple(identity) != values[4:7]:
-                raise ValueError("Transfer receipt direction, currency and amount are immutable")
+            if identity is not None:
+                if tuple(identity)[:3] != values[4:7] or (
+                    identity["request_date"] and identity["request_date"] != values[9]
+                ):
+                    raise ValueError("Transfer receipt direction, currency, amount and request date are immutable")
+                if identity["cancelled"] and not transfer.cancelled:
+                    raise ValueError("Cancelled transfer cannot be reopened")
+                if Decimal(identity["target_credit"]) > transfer.target_credit:
+                    raise ValueError("Confirmed credit cannot move backwards")
             before = conn.execute(
                 """
-                SELECT direction, currency, amount, source_debit, target_credit
+                SELECT direction, currency, amount, source_debit, target_credit, request_date, cancelled
                 FROM futu_mmf_transfer_observations
                 WHERE account = ? AND broker_account = ? AND balance_snapshot_id = ?
                   AND receipt_id = ?
@@ -39,8 +48,8 @@ class MmfTransitMixin:
                     """
                     INSERT INTO futu_mmf_transfer_observations (
                         account, broker_account, balance_snapshot_id, receipt_id, direction,
-                        currency, amount, source_debit, target_credit
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        currency, amount, source_debit, target_credit, request_date, cancelled
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     values,
                 )
@@ -51,9 +60,15 @@ class MmfTransitMixin:
         self, *, account: str, broker_account: str, balance_snapshot_id: str,
     ) -> list[ConfirmedMmfTransfer]:
         with self._connect() as conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(futu_mmf_transfer_observations)")}
+            if not columns:
+                return []
+            request_date = "request_date" if "request_date" in columns else "NULL AS request_date"
+            cancelled = "cancelled" if "cancelled" in columns else "0 AS cancelled"
             rows = conn.execute(
-                """
-                SELECT receipt_id, direction, currency, amount, source_debit, target_credit
+                f"""
+                SELECT receipt_id, direction, currency, amount, source_debit, target_credit,
+                       {request_date}, {cancelled}
                 FROM futu_mmf_transfer_observations
                 WHERE account = ? AND broker_account = ? AND balance_snapshot_id = ?
                 ORDER BY receipt_id
@@ -71,6 +86,8 @@ class MmfTransitMixin:
                 amount=Decimal(row["amount"]),
                 source_debit=Decimal(row["source_debit"]),
                 target_credit=Decimal(row["target_credit"]),
+                request_date=date.fromisoformat(row["request_date"]) if row["request_date"] else None,
+                cancelled=bool(row["cancelled"]),
             )
             for row in rows
         ]

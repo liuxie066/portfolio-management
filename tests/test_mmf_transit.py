@@ -1,4 +1,5 @@
 from dataclasses import replace
+from datetime import date
 from decimal import Decimal
 
 import pytest
@@ -85,16 +86,21 @@ def test_app_intake_and_opend_reconciliation(monkeypatch, tmp_path):
     provider = SimpleNamespace(
         account_fingerprint="broker-sy",
         fetch_mmf_cash_flows=lambda day: [
-            {"cashflow_id": "f1", "settlement_date": day, "cashflow_direction": "IN",
+            {"cashflow_id": "f1", "clearing_date": day, "settlement_date": day, "cashflow_direction": "IN",
              "currency": "HKD", "cashflow_amount": 100},
         ],
     )
     monkeypatch.setattr(service, "current_mmf_balance", lambda account: (provider, "balance-1"))
-    monkeypatch.setattr(service, "OperationStateStore", lambda: OperationStateStore(path))
+    monkeypatch.setattr(OperationStateStore, "resolve_db_path_read_only", staticmethod(lambda *args: path))
+    monkeypatch.setattr(service, "_balance_date", lambda *args: date.fromisoformat("2026-11-20"))
+    monkeypatch.setattr("src.config.get_data_dir", lambda: tmp_path)
     kwargs = {
         "snapshot_id": "balance-1", "receipt_id": "app-1", "direction": "redemption",
         "currency": "HKD", "amount": "100", "source_debit": "100", "target_credit": "100",
+        "request_date": "2026-11-20",
     }
+    with pytest.raises(ValueError, match="later than"):
+        service.record_app_receipt("sy", **{**kwargs, "request_date": "2099-01-01"})
     assert service.record_app_receipt("sy", **kwargs)["recorded"] is False
     assert not path.exists()
     assert service.record_app_receipt("sy", **kwargs, confirm=True)["recorded"] is True
@@ -102,6 +108,8 @@ def test_app_intake_and_opend_reconciliation(monkeypatch, tmp_path):
         "snapshot_id": "balance-1", "receipt_id": "app-1",
         "clearing_date": "2026-11-20", "flow_ids": ["f1"],
     }
+    with pytest.raises(ValueError, match="outside"):
+        service.reconcile_app_receipt("sy", **{**recon, "clearing_date": "2026-11-19"})
     assert service.reconcile_app_receipt("sy", **recon)["closed"] is False
     for _ in range(2):
         assert service.reconcile_app_receipt("sy", **recon, confirm=True)["closed"] is True
@@ -122,7 +130,7 @@ def test_mmf_funding_returns_only_snapshot_bound_confirmations(monkeypatch, tmp_
     provider = SimpleNamespace(account_fingerprint="broker-sy", trd_env="REAL")
     receipt = {
         "account": "sy", "source_snapshot_id": "balance-1", "success": True,
-        "source_metadata": {"account_fingerprint": "broker-sy"},
+        "source_metadata": {"account_fingerprint": "broker-sy", "trd_env": "REAL"},
         "cash_write": {
             "snapshot_id": "balance-1", "status": "verified",
             "balances": {"CNY": 0, "HKD": -100, "USD": 0},
@@ -212,7 +220,14 @@ def test_shared_publication_previews_then_atomically_replaces(monkeypatch, tmp_p
     from src.app import mmf_transit_service
     from src import process_lock
 
-    funding = {"success": True, "account": "sy", "status": "none"}
+    funding = {
+        "success": True, "account": "sy", "status": "none", "transfers": [], "adjustments": {},
+        "account_fingerprint": "broker-sy", "environment": "REAL", "snapshot_id": "snapshot-1",
+    }
+    from types import SimpleNamespace
+    provider = SimpleNamespace(account_fingerprint="broker-sy", trd_env="REAL")
+    monkeypatch.setattr(mmf_transit_service.FutuOpenApiBalanceProvider, "from_account", lambda account: provider)
+    monkeypatch.setattr(mmf_transit_service, "current_mmf_balance", lambda account: (provider, "snapshot-1"))
     shared = tmp_path / "shared"
     monkeypatch.setenv("FUTU_MMF_FUNDING_DIR", str(shared))
     monkeypatch.setattr(mmf_transit_service, "read_mmf_funding", lambda account: funding)
@@ -230,3 +245,82 @@ def test_shared_publication_previews_then_atomically_replaces(monkeypatch, tmp_p
         assert json.load(previous)["status"] == "none"
     assert mmf_transit_service.read_mmf_valuation_funding("sy")["status"] == "unverified"
     assert list(shared.iterdir()) == [target]
+
+
+
+def test_cancelled_app_receipt_invalidates_old_published_state(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from src.app import mmf_transit_service as service
+    from src.app.futu_mmf_shared import read_mmf_shared
+    from src.app.operation_state import OperationStateStore
+
+    provider = SimpleNamespace(account_fingerprint="broker-sy", trd_env="REAL")
+    receipt = {
+        "account": "sy", "success": True, "source_snapshot_id": "balance-1",
+        "source_metadata": {"account_fingerprint": "broker-sy", "trd_env": "REAL"},
+        "cash_write": {
+            "snapshot_id": "balance-1", "status": "verified", "fund_assets": 200,
+            "balances": {"CNY": 0, "HKD": 0, "USD": 0},
+            "observed_at_utc": "2026-11-20T03:00:00Z",
+        },
+    }
+    shared = tmp_path / "shared"
+    monkeypatch.setenv("FUTU_MMF_FUNDING_DIR", str(shared))
+    monkeypatch.setattr(service.FutuOpenApiBalanceProvider, "from_account", lambda account: provider)
+    monkeypatch.setattr(service.FutuSyncEvidenceStore, "latest", lambda self, account: receipt)
+    monkeypatch.setattr(OperationStateStore, "resolve_db_path_read_only", staticmethod(
+        lambda *args: tmp_path / "operation.sqlite3"
+    ))
+    monkeypatch.setattr("src.config.get_data_dir", lambda: tmp_path)
+    assert service.publish_mmf_funding("sy", confirm=True)["status"] == "none"
+    args = {
+        "snapshot_id": "balance-1", "receipt_id": "withdrawn", "direction": "redemption",
+        "currency": "HKD", "amount": "100", "source_debit": "0", "target_credit": "0",
+        "request_date": "2026-11-20", "cancelled": True, "confirm": True,
+    }
+    service.record_app_receipt("sy", **args)
+    assert read_mmf_shared("sy")["status"] == "unverified"
+    assert service.publish_mmf_funding("sy", confirm=True)["status"] == "none"
+    service.record_app_receipt("sy", **args)
+    assert read_mmf_shared("sy")["status"] == "none"
+    receipt["source_snapshot_id"] = receipt["cash_write"]["snapshot_id"] = "balance-2"
+    receipt["cash_write"]["observed_at_utc"] = "2026-11-20T04:00:00Z"
+    assert service.read_mmf_valuation_funding("sy")["status"] == "none"
+
+
+def test_preview_without_database_does_not_create_it(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from src.app import mmf_transit_service as service
+    from src.app.operation_state import OperationStateStore
+
+    path = tmp_path / "operation.sqlite3"
+    monkeypatch.setattr(service, "current_mmf_balance", lambda account: (
+        SimpleNamespace(account_fingerprint="broker-sy"), "balance-1",
+    ))
+    monkeypatch.setattr(OperationStateStore, "resolve_db_path_read_only", staticmethod(lambda *args: path))
+    with pytest.raises(ValueError, match="unconfirmed"):
+        service.reconcile_app_receipt(
+            "sy", snapshot_id="balance-1", receipt_id="no-receipt",
+            clearing_date="2026-11-20", flow_ids=[],
+        )
+    assert not path.exists()
+
+
+
+def test_historical_rebuild_requires_sealed_mmf_evidence(monkeypatch, tmp_path):
+    from src import config
+    from src.app.nav_valuation_evidence_service import HistoricalNavValuationEvidenceService
+
+    original_get = config.get
+    monkeypatch.setattr(config, "get", lambda key, default=None: (
+        {"sy": {}} if key == "futu.profiles" else original_get(key, default)
+    ))
+    monkeypatch.setenv("FUTU_MMF_FUNDING_DIR", str(tmp_path))
+    service = HistoricalNavValuationEvidenceService(storage=None, portfolio=None, evidence_store=object())
+    with pytest.raises(ValueError, match="sealed valuation"):
+        service.prepare(
+            account="sy", nav_date="2026-11-20", source_run_id="run-sy",
+            expected_holdings_digest="", expected_cash_flow_fingerprint="",
+            source_effect_store_revision="", valuation_as_of="", usdcny=7, hkdcny=0.85,
+        )
