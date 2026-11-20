@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.21 - 2026-11-20
+
+- Reconcile confirmed Futu money-fund transfers using shared account files. Show the in-transit value once in holdings and NAV, then use the settled balance after credit.
+
 ## 0.2.20 - 2026-11-20
 
 - Preserve verified option contract multipliers in NAV holdings snapshots so unchanged Futu captures pass validation and option valuation retains the correct multiplier.
