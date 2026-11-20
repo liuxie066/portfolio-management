@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.20 - 2026-11-20
+
+- Preserve verified option contract multipliers in NAV holdings snapshots so unchanged Futu captures pass validation and option valuation retains the correct multiplier.
+
 ## 0.2.19 - 2026-11-19
 
 - Sync long and short Futu option positions with their contract multipliers and value them at Futu closing prices in daily NAV and portfolio analysis.
