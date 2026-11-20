@@ -171,6 +171,14 @@ def read_mmf_funding(account):
         "cash": cash["balances"], "fund_assets_cny": cash["fund_assets"],
         "cash_target_cny": cash.get("target"), "fx": (cash.get("fx") or {}).get("rates"),
         "adjustments": {currency: str(value) for currency, value in amounts.items()},
+        "transfers": [
+            {
+                "receipt_id": item.receipt_id, "direction": item.direction.value,
+                "currency": item.currency, "amount": str(item.amount),
+                "source_debit": str(item.source_debit), "target_credit": str(item.target_credit),
+            }
+            for item in sorted(active, key=lambda item: item.receipt_id)
+        ],
     }
 
 
@@ -213,3 +221,57 @@ def mmf_valuation_holdings(holdings, funding, *, account, capture=None):
         "amounts": adjustments,
         "value_cny": str(total),
     }
+
+
+def read_mmf_valuation_funding(account):
+    """Read OSS independently and bind its evidence to this PM account."""
+    from .futu_mmf_oss import mmf_oss_configured, read_mmf_oss
+
+    if not mmf_oss_configured():
+        return {"status": "none"}
+    funding = read_mmf_oss(account)
+    if funding["status"] == "verified":
+        provider = FutuOpenApiBalanceProvider.from_account(account)
+        if (
+            funding["account_fingerprint"] != provider.account_fingerprint
+            or funding["environment"] != provider.trd_env
+        ):
+            raise ValueError("OSS money-fund reconciliation account mismatch")
+        _, snapshot = current_mmf_balance(account)
+        if funding["snapshot_id"] != snapshot:
+            raise ValueError("OSS money-fund reconciliation is for a previous balance")
+    return funding
+
+
+def publish_mmf_funding(account, *, confirm=False):
+    """Publish only to the shared private account object, with explicit confirmation."""
+    import json
+    from pathlib import Path
+    import subprocess
+    from tempfile import TemporaryDirectory
+
+    from src.process_lock import account_lock_key, process_lock
+
+    from .futu_mmf_oss import mmf_oss_uri, read_mmf_oss
+
+    uri = mmf_oss_uri(account)
+
+    def payload():
+        return {"schema": "futu.mmf-funding.v1", **read_mmf_funding(account)}
+
+    if not confirm:
+        return {"success": True, "published": False, "uri": uri, "evidence": payload()}
+    with process_lock(account_lock_key(account), blocking=False):
+        evidence = payload()
+        with TemporaryDirectory(prefix="pm-mmf-funding-") as folder:
+            source = Path(folder) / "funding.json"
+            source.write_text(json.dumps(evidence, ensure_ascii=False), encoding="utf-8")
+            result = subprocess.run(
+                ["ossutil", "cp", str(source), uri, "--force"],
+                capture_output=True, check=False, timeout=10,
+            )
+            if result.returncode:
+                raise ValueError("Failed to publish OSS money-fund reconciliation")
+        if read_mmf_oss(account) != evidence:
+            raise ValueError("OSS money-fund reconciliation readback did not match the publication")
+        return {"success": True, "published": True, "uri": uri, "status": evidence["status"]}

@@ -149,19 +149,6 @@ class CashResponse(PublicResponse):
     count: int
 
 
-class MmfFundingResponse(BaseModel):
-    success: bool
-    account: str
-    status: str
-    account_fingerprint: Optional[str] = None
-    environment: Optional[str] = None
-    snapshot_id: Optional[str] = None
-    observed_at: Optional[str] = None
-    cash: Optional[dict[str, float]] = None
-    fund_assets_cny: Optional[float] = None
-    adjustments: Optional[dict[str, str]] = None
-
-
 class NavResponse(PublicResponse):
     latest: dict[str, Any]
     history: list[dict[str, Any]]
@@ -616,21 +603,6 @@ def create_app(service: Optional[PortfolioService] = None, allow_remote: Optiona
             dataset_ids=("pm.cash_aggregate", "pm.fund_mmf"),
             accounts=(account,),
         )
-
-
-    @app.get(
-        "/api/v1/futu/mmf-funding", tags=["cash"], response_model=MmfFundingResponse,
-        response_model_exclude_none=True, responses=V1_RESPONSES,
-    )
-    def get_mmf_funding(request: Request, account: str = Query(..., pattern=r"^[a-z][a-z0-9_-]*$")):
-        from src.app.mmf_transit_service import read_mmf_funding
-
-        try:
-            return read_mmf_funding(account)
-        except (ValueError, RuntimeError, OSError):
-            return _public_result(request, {
-                "success": False, "error": "Futu MMF funding evidence is unavailable",
-            })
 
 
     @app.post("/futu/holdings/sync", tags=["holdings"], include_in_schema=False)

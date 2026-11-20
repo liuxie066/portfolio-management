@@ -224,9 +224,9 @@ class PortfolioReadService:
         from src import config
 
         if self.account in (config.get("futu.profiles", {}) or {}):
-            from .mmf_transit_service import mmf_valuation_holdings, read_mmf_funding
+            from .mmf_transit_service import mmf_valuation_holdings, read_mmf_valuation_funding
 
-            funding = read_mmf_funding(self.account)
+            funding = read_mmf_valuation_funding(self.account)
             if funding["status"] != "none":
                 baseline = (
                     holdings if holdings is not None

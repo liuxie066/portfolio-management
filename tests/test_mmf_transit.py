@@ -174,7 +174,7 @@ def test_priced_holdings_and_nav_share_one_transit_row(monkeypatch):
     monkeypatch.setattr(config, "get", lambda key, default=None: (
         {"sy": {}} if key == "futu.profiles" else original_get(key, default)
     ))
-    monkeypatch.setattr(mmf_transit_service, "read_mmf_funding", lambda account: funding)
+    monkeypatch.setattr(mmf_transit_service, "read_mmf_valuation_funding", lambda account: funding)
     storage = SimpleNamespace(get_holdings=lambda **kw: balances, get_price=lambda code: None, get_total_shares=lambda account: 100)
     valuation = ValuationService(manager=None, storage=storage, price_fetcher=None)
     portfolio = SimpleNamespace(calculate_valuation=valuation.calculate_valuation)
@@ -202,3 +202,37 @@ def test_priced_holdings_and_nav_share_one_transit_row(monkeypatch):
     funding["adjustments"] = {}
     settled = service.get_holdings(include_price=True)
     assert all(row["code"] != "CNY-MMF-TRANSIT" for row in settled["holdings"])
+
+
+def test_oss_publication_previews_then_uploads_and_reads_back(monkeypatch, tmp_path):
+    from contextlib import nullcontext
+    import json
+    from pathlib import Path
+    import subprocess
+    from types import SimpleNamespace
+
+    from src.app import mmf_transit_service
+    from src import process_lock
+
+    funding = {"success": True, "account": "sy", "status": "none"}
+    monkeypatch.setenv("FUTU_MMF_FUNDING_OSS_PREFIX", "oss://test-bucket/reconciliation")
+    monkeypatch.setattr(mmf_transit_service, "read_mmf_funding", lambda account: funding)
+    monkeypatch.setattr(process_lock, "process_lock", lambda *args, **kwargs: nullcontext())
+    commands = []
+    uploaded = b""
+
+    def run(args, **kwargs):
+        nonlocal uploaded
+        commands.append(args[:2])
+        if args[1] == "cp":
+            assert args[3] == "oss://test-bucket/reconciliation/sy.json"
+            uploaded = Path(args[2]).read_bytes()
+        return SimpleNamespace(returncode=0, stdout=uploaded)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    assert not mmf_transit_service.publish_mmf_funding("sy")["published"]
+    assert not commands
+    assert mmf_transit_service.publish_mmf_funding("sy", confirm=True)["published"]
+    assert commands == [["ossutil", "cp"], ["ossutil", "cat"]]
+    assert json.loads(uploaded) == {"schema": "futu.mmf-funding.v1", **funding}
+    assert mmf_transit_service.read_mmf_valuation_funding("sy")["status"] == "none"

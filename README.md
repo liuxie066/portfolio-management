@@ -163,6 +163,13 @@ Cash Flow 管理。OpenD 的账户级在途汇总仅用于诊断。
 「货基互转在途」。正式 NAV 用同一份余额快照及调整，飞书持仓无需新增行。
 款项进入目标余额后，估值停止加回，OpenD 流水匹配后关闭对账。
 
+启用时，PM 和 OM 设置相同的 `FUTU_MMF_FUNDING_OSS_PREFIX`
+（私有 `oss://桶名/对象前缀`），并配置 ossutil 2.0 的读权限。
+PM 对账主机是唯一发布者。确认凭证或入账状态后，使用
+`pm futu mmf-publish --account <账户>` 预览，加 `--confirm` 发布到
+`<前缀>/<账户>.json`。只给发布身份写权限。两边直接读同一对象，
+资金数据无需跨项目调用 HTTP。比对快照失败时资金结果待核实。
+
 `pm futu sync` 真实写入完成后会通过飞书“刘看山”发送成功或失败回执；
 dry-run 不发消息。回执、Agent 对话和全部 Base 读写都使用
 `feishu.agent.app_id`、Agent systemd credential 和
