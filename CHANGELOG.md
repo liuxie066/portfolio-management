@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.22 - 2026-11-20
+
+- Prepare a new PM release offline from a shared wheel directory, keeping the running service untouched until the release has been checked.
+
 ## 0.2.21 - 2026-11-20
 
 - Reconcile confirmed Futu money-fund transfers using shared account files. Show the in-transit value once in holdings and NAV, then use the settled balance after credit.
