@@ -402,3 +402,32 @@ canonical Agent/Listener 字段。
 publisher 核对 checkout HEAD、VERSION 和远端 tag 剥离后的 commit；创建或公开草稿前再次核对 tag。已有公开 Release 只有身份匹配才能复用。读取错误不会当作 Release 不存在；Release 按 tag 查询的 HTTP 404 后，还需使用既有写权限身份分页查询草稿（最多 10 页，每页 100 条）；仅完整列表确认没有同名 Release 才进入创建分支，重复匹配、列表错误或超出上限均拒绝。创建保留 `gh release create --verify-tag --generate-notes --fail-on-no-commits`，显式指定相同 SHA，并在同次 CLI 调用中上传运行包和校验文件；草稿继续使用 `gh release edit --draft=false`。复用已有公开版本或公开草稿前，必须核对两个附件的名称、大小与 GitHub SHA-256 digest；缺失或不符时停止，人工核实，不自动覆盖附件。发布后读回也校验附件。
 
 同 tag 工作流串行且不自动取消。helper 最多调用一次变更 CLI，失败或超时后读回 Release 和 tag，无法证明已公开且身份匹配时报告结果未知，需人工核实后再决定重跑；不自动删除、重打 tag 或回滚公开内容。CLI 内部请求并非一次远端写入保证，外部强制移动 tag 也不受此串行约束。真实发布仍需单独授权；本轮验证只使用合成 API/CLI，未执行真实发布。
+
+## 使用共享 wheel 准备新版本
+
+在部署主机上，以部署用户备齐目标版本的 requirements.txt 以及部署所需的
+额外 SDK。OM 和 PM 可以使用同一个 wheel 目录。PM 单独按自己的依赖清单选包。
+备包完成后，用已验证的 wheel 目录准备一个新的版本目录：
+
+```bash
+bash scripts/install.sh --ref "$PM_TAG" --dir "$PM_RELEASE_DIR" \
+  --prepare-offline "$WHEEL_DIR"
+```
+
+上述变量分别是明确的发布标签、尚未使用的绝对版本目录和本地 wheel 目录。
+已启用额外 SDK 时，加上 `--extra-requirements "$PM_EXTRA_REQUIREMENTS"`，
+使用部署方维护的本地依赖清单。脚本从发布源下载并校验 PM 源码包，再禁用
+pip 索引，仅用本地二进制 wheel 安装并执行 `pip check`。成功后停在准备阶段。
+缺包时当前服务入口保留，下一次用未使用的版本目录重试。
+
+切换前，用目标版本的最终目录和解释器，在隔离配置、数据、报告目录和测试端口
+检查 API。盘点线上 API、launcher、定时任务和写入数据的监听器。首次迁移时，
+保留并备份旧服务定义及 launcher，准备一个先指向现有应用目录的稳定链接。
+暂停相关触发并等写任务退出后，由现有 `scripts/install_linux.py` 将这些入口
+统一绑定该稳定链接及其 `.venv/bin/python`，配置和数据路径沿用既有路径。
+核对旧版本经该链接能正常工作，再原子更新链接指向准备好的目标版本，
+重新启动相关长进程，验证 API、实际解释器和任务入口后恢复原触发状态。
+
+健康检查失败时，停止新版长进程并恢复此前的链接。首次迁移还应恢复旧单元
+和 launcher，再读回当前路径、版本、API 和原任务状态。每次在切换预览中确认
+服务操作权限和恢复命令。

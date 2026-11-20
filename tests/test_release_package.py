@@ -106,7 +106,10 @@ if sys.argv[1:3] == ['-m', 'venv']:
     if not binary.exists():
         binary.symlink_to(Path(__file__).resolve())
 elif sys.argv[1:3] == ['-m', 'pip']:
-    pass
+    with open(os.environ['PIP_LOG'], 'a') as log:
+        log.write(json.dumps(sys.argv[3:]) + '\\n')
+    if 'install' in sys.argv and os.environ.get('FAIL_PIP'):
+        raise SystemExit(1)
 elif sys.argv[1].endswith('/scripts/install_linux.py'):
     Path(os.environ['ASSET_LOG']).write_text(json.dumps(sys.argv[1:]))
 else:
@@ -116,7 +119,8 @@ else:
     environment = {**os.environ, "PATH": str(tools) + os.pathsep + os.environ["PATH"],
                    "PACKAGE_VERSION": (ROOT / "VERSION").read_text().strip(),
                    "PACKAGE_ARCHIVE": str(archive), "PACKAGE_CHECKSUMS": str(checksums),
-                   "DOWNLOAD_LOG": str(tmp_path / "downloads"), "ASSET_LOG": str(tmp_path / "assets")}
+                   "DOWNLOAD_LOG": str(tmp_path / "downloads"), "ASSET_LOG": str(tmp_path / "assets"),
+                   "PIP_LOG": str(tmp_path / "pip")}
     for name in list(environment):
         if name.startswith("PORTFOLIO_"):
             environment.pop(name)
@@ -147,6 +151,27 @@ def test_default_installer_downloads_verified_runtime_and_preserves_local_files(
     assert result.returncode == 0, result.stdout + result.stderr
     assert (app / "config.yaml").read_text() == "operator configuration\n"
     assert (app / ".data/state").read_text() == "operator state\n"
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_offline_preparation_never_applies_services(bootstrap, tmp_path, missing):
+    invoke, app, environment = bootstrap
+    wheels = tmp_path / "wheels"
+    wheels.mkdir()
+    if missing:
+        environment["FAIL_PIP"] = "1"
+    result = invoke("--ref", "v" + environment["PACKAGE_VERSION"], "--prepare-offline", str(wheels))
+    assert (result.returncode != 0) is missing, result.stderr
+    assert not Path(environment["ASSET_LOG"]).exists()
+    calls = [json.loads(line) for line in Path(environment["PIP_LOG"]).read_text().splitlines()]
+    assert "--no-index" in calls[0] and "--only-binary=:all:" in calls[0]
+    assert str(wheels) in calls[0]
+    assert len(calls) == (1 if missing else 2)
+    if not missing:
+        assert calls[1][-1] == "check"
+    repeat = invoke("--ref", "v" + environment["PACKAGE_VERSION"], "--prepare-offline", str(wheels))
+    assert repeat.returncode != 0
+    assert not Path(environment["ASSET_LOG"]).exists()
 
 
 def test_checksum_failure_never_installs_or_runs_assets(bootstrap, tmp_path):
