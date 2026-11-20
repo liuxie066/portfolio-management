@@ -221,6 +221,25 @@ class PortfolioReadService:
             valuation_kwargs["option_nav_date"] = option_nav_date
         if valuation_fx is not None:
             valuation_kwargs["valuation_fx"] = valuation_fx
+        from src import config
+
+        if self.account in (config.get("futu.profiles", {}) or {}):
+            from .mmf_transit_service import mmf_valuation_holdings, read_mmf_valuation_funding
+
+            funding = read_mmf_valuation_funding(self.account)
+            if funding["status"] != "disabled":
+                baseline = (
+                    holdings if holdings is not None
+                    else self.storage.get_holdings(account=self.account)
+                )
+                valuation_kwargs["holdings"], mmf_provenance = mmf_valuation_holdings(
+                    baseline, funding, account=self.account,
+                    capture=(holdings_provenance or {}).get("futu_capture"),
+                )
+                holdings_provenance = {
+                    **(holdings_provenance or {}),
+                    "mmf_transit": mmf_provenance,
+                }
         valuation = self.portfolio.calculate_valuation(
             self.account,
             **valuation_kwargs,

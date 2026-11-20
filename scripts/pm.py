@@ -865,6 +865,37 @@ def cmd_futu_sync(args):
     return result
 
 
+def cmd_futu_mmf_receipt(args):
+    from src.app.mmf_transit_service import reconcile_app_receipt, record_app_receipt
+
+    account = _default_account(args.account)
+    shared = {
+        "snapshot_id": args.snapshot_id,
+        "receipt_id": args.receipt_id,
+        "confirm": args.confirm,
+    }
+    if args.futu_cmd == "mmf-record":
+        result = record_app_receipt(
+            account, **shared, direction=args.direction, currency=args.currency,
+            amount=args.amount, source_debit=args.source_debit, target_credit=args.target_credit,
+            request_date=args.request_date, cancelled=args.cancelled,
+        )
+    else:
+        result = reconcile_app_receipt(
+            account, **shared, clearing_date=args.clearing_date, flow_ids=args.flow_id,
+        )
+    _dump(result, args.json)
+    return result
+
+
+def cmd_futu_mmf_publish(args):
+    from src.app.mmf_transit_service import publish_mmf_funding
+
+    result = publish_mmf_funding(args.account, confirm=args.confirm)
+    _dump(result, args.json)
+    return result
+
+
 def cmd_futu_accounts(args):
     from src.app import FutuOpenApiBalanceProvider
 
@@ -2264,6 +2295,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_futu_sync.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
     add_service_args(p_futu_sync)
     p_futu_sync.set_defaults(func=cmd_futu_sync)
+
+    p_mmf_record = futu_sub.add_parser("mmf-record", help="confirm a Futu App MMF transfer receipt")
+    p_mmf_reconcile = futu_sub.add_parser("mmf-reconcile", help="check or confirm OpenD settlement flows")
+    for parser in (p_mmf_record, p_mmf_reconcile):
+        parser.add_argument("--account", required=True)
+        parser.add_argument("--snapshot-id", required=True)
+        parser.add_argument("--receipt-id", required=True, help="Futu App receipt reference")
+        parser.add_argument("--confirm", action="store_true", help="persist the reviewed evidence")
+        parser.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+        parser.set_defaults(func=cmd_futu_mmf_receipt)
+    p_mmf_record.add_argument("--direction", required=True, choices=("subscription", "redemption"))
+    p_mmf_record.add_argument("--currency", required=True, choices=("CNY", "HKD", "USD"))
+    p_mmf_record.add_argument("--request-date", required=True, help="App request date, YYYY-MM-DD")
+    p_mmf_record.add_argument("--cancelled", action="store_true", help="confirm cancellation and no remaining debit")
+    p_mmf_record.add_argument("--amount", required=True)
+    p_mmf_record.add_argument("--source-debit", required=True)
+    p_mmf_record.add_argument("--target-credit", required=True)
+    p_mmf_reconcile.add_argument("--clearing-date", required=True)
+    p_mmf_reconcile.add_argument("--flow-id", action="append", default=[])
+
+    p_mmf_publish = futu_sub.add_parser("mmf-publish", help="publish account evidence to the shared directory")
+    p_mmf_publish.add_argument("--account", required=True)
+    p_mmf_publish.add_argument("--confirm", action="store_true", help="publish the reviewed evidence")
+    p_mmf_publish.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    p_mmf_publish.set_defaults(func=cmd_futu_mmf_publish)
 
     p_cash_flow = sp.add_parser("cash-flow", help="cash-flow ledger maintenance")
     cash_flow_sub = p_cash_flow.add_subparsers(dest="cash_flow_cmd", required=True)

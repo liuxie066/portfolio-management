@@ -341,6 +341,27 @@ def test_futu_openapi_provider_reads_exact_currency_cash_and_mmf():
     assert ctx.position_called is False
 
 
+def test_futu_pending_asset_is_diagnostic_and_keeps_reporting_currency(monkeypatch):
+    provider = FutuOpenApiBalanceProvider(acc_id=123)
+    monkeypatch.setattr(provider, "_import_sdk", lambda: object())
+    monkeypatch.setattr(provider, "_open_trade_context", lambda sdk: object())
+    monkeypatch.setattr(provider, "_verify_account_authority", lambda sdk, ctx: None)
+    monkeypatch.setattr(provider, "_close", lambda ctx: None)
+    monkeypatch.setattr(provider, "_fetch_accinfo_row", lambda sdk, ctx: {
+        "currency": "CNH", "pending_asset": "71657.6773",
+        "cn_cash": "0", "us_cash": "0", "hk_cash": "-84134.88",
+        "fund_assets": "1032301.98",
+    })
+
+    snapshot = provider.fetch_balances()
+
+    assert snapshot.cash_by_currency == {"CNY": 0.0, "USD": 0.0, "HKD": -84134.88}
+    assert snapshot.mmf == 1032301.98
+    assert FutuBalanceSyncService._public_source_metadata(snapshot)["pending_asset"] == {
+        "amount": 71657.6773, "currency": "CNH", "scope": "account_aggregate",
+    }
+
+
 def test_futu_cash_never_falls_back_to_non_authoritative_fields():
     provider = FutuOpenApiBalanceProvider()
     assert provider._cash_balances_from_row({

@@ -29,9 +29,13 @@ class OperationStateBase:
         db_path: Optional[str | Path] = None,
         *,
         now_factory: Optional[Callable[[], datetime]] = None,
+        read_only: bool = False,
     ):
         self.db_path = self.resolve_db_path(db_path)
         self.now_factory = now_factory or bj_now_naive
+        self.read_only = read_only
+        if read_only:
+            return
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
         self._validate()
@@ -70,11 +74,13 @@ class OperationStateBase:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.db_path, timeout=10)
+        target = f"{self.db_path.as_uri()}?mode=ro" if self.read_only else self.db_path
+        conn = sqlite3.connect(target, timeout=10, uri=self.read_only)
         try:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA busy_timeout = 10000")
-            conn.execute("PRAGMA journal_mode = WAL")
+            if not self.read_only:
+                conn.execute("PRAGMA journal_mode = WAL")
             with conn:
                 yield conn
         finally:
