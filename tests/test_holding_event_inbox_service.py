@@ -192,28 +192,37 @@ def test_worker_retries_transient_fresh_read_failure(tmp_path):
     assert event["attempt_count"] == 1
 
 
-def test_worker_retries_futu_provider_failure_without_materializing_cases(tmp_path):
+def test_worker_reuses_futu_evidence_per_account_and_refreshes_on_retry(tmp_path):
+    accounts_by_record = {
+        **{f"lx-{index:02d}": "lx" for index in range(21)},
+        "sy-00": "sy",
+        "sy-01": "sy",
+    }
+
     class FutuStorage(_Storage):
         def get_raw_holdings(self, *, account=None, record_id=None):
-            rows = super().get_raw_holdings(account=account, record_id=record_id)
+            rows = super().get_raw_holdings(account=account, record_id="rec-1")
             if not rows:
                 return rows
             fields = dict(rows[0].raw_fields)
             fields["broker"] = "富途"
-            return [RawHoldingRecord(rows[0].record_id, fields)]
+            fields["account"] = accounts_by_record[record_id]
+            return [RawHoldingRecord(record_id, fields)]
 
     current_time = [datetime(2026, 7, 31, 21, 0)]
     provider_ready = [False]
+    observations = []
 
-    def observe(_account):
-        if not provider_ready[0]:
+    def observe(account):
+        observations.append(account)
+        if account == "sy" and not provider_ready[0]:
             raise RuntimeError("OpenD unavailable")
         return SimpleNamespace(
             source="futu",
-            source_snapshot_id="snapshot-lx",
+            source_snapshot_id=f"snapshot-{account}-{len(observations)}",
             observed_at_utc="2026-07-31T13:00:00+00:00",
-            profile_fingerprint="profile-lx",
-            account_fingerprint="account-lx",
+            profile_fingerprint=f"profile-{account}",
+            account_fingerprint=f"account-{account}",
             positions=(
                 SimpleNamespace(
                     asset_id="AAPL.US",
@@ -246,7 +255,10 @@ def test_worker_retries_futu_provider_failure_without_materializing_cases(tmp_pa
         workflow=workflow,
         target=TARGET,
     )
-    service.accept(_payload())
+    service.accept(_payload(actions=[
+        {"action": "record_added", "record_id": record_id}
+        for record_id in accounts_by_record
+    ]))
 
     failed = service.process_due()
 
@@ -254,6 +266,7 @@ def test_worker_retries_futu_provider_failure_without_materializing_cases(tmp_pa
     assert "provider evidence unavailable" in failed["results"][0]["error"]
     assert store.get_holding_event("evt-1")["state"] == "failed_retryable"
     assert store.list_holding_cases() == []
+    assert observations == ["lx", "sy"]
 
     provider_ready[0] = True
     current_time[0] += timedelta(minutes=2)
@@ -261,7 +274,15 @@ def test_worker_retries_futu_provider_failure_without_materializing_cases(tmp_pa
 
     assert recovered["success"] is True
     assert store.get_holding_event("evt-1")["state"] == "processed"
-    assert len(store.list_holding_cases()) == 1
+    assert len(store.list_holding_cases()) == len(accounts_by_record)
+    assert observations == ["lx", "sy", "lx", "sy"]
+    assert len(storage.read_calls) == 2 * len(accounts_by_record) - 1
+
+    service.accept(_payload("evt-2", actions=[
+        {"action": "record_edited", "record_id": "lx-00"},
+    ]))
+    assert service.process_due()["success"] is True
+    assert observations == ["lx", "sy", "lx", "sy", "lx"]
 
 
 def test_new_event_for_repaired_record_closes_once_then_becomes_semantic_noop(tmp_path):
@@ -392,7 +413,7 @@ def test_worker_loop_logs_cycle_failure_and_keeps_running(tmp_path, capsys):
 
 
 class _InvalidWorkflow:
-    def process_event_notification(self, *, record_id, trigger):
+    def process_event_notification(self, *, record_id, trigger, event_futu_evidence=None):
         case = {
             "case_key": "case-atomic",
             "record_id": record_id,

@@ -116,6 +116,8 @@ class HoldingEventInboxService:
 
         materializations = []
         validations = []
+        # An event attempt shares account snapshots while reading each Feishu row fresh.
+        event_futu_evidence = {}
         for record_id in sorted(actions_by_record):
             trigger = {
                 "mode": "event_validate_notify",
@@ -130,6 +132,7 @@ class HoldingEventInboxService:
             planned = self.workflow.process_event_notification(
                 record_id=record_id,
                 trigger=trigger,
+                event_futu_evidence=event_futu_evidence,
             )
             validations.append(planned.pop("validation"))
             materializations.append(planned)

@@ -17,6 +17,10 @@ Hong Kong stock-name policies described below.
   fallback.
 - The callback validates and durably inserts trigger metadata, then returns. A
   worker fresh-reads the exact record before validation.
+- For a multi-record holdings event, the worker reuses one successful OpenD
+  snapshot per Futu account during that attempt. It validates each Feishu row
+  individually. A retry starts with fresh Futu evidence and retains the existing
+  atomic event completion and notification rules.
 - Added and edited records may create validation cases and receipt outbox rows.
   For a known non-Futu broker, an explicit `cn_fund`/`otc_fund` type, an account
   and a six-digit code, the worker can fill an empty `asset_name` from an exact

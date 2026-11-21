@@ -77,6 +77,7 @@ class HoldingsReconciliationService:
         record_id: Optional[str] = None,
         include_fund_name: bool = False,
         include_hk_stock_name: bool = False,
+        event_futu_evidence: Optional[dict[str, FutuAccountEvidence]] = None,
     ) -> HoldingsReconciliationEvaluation:
         if account and record_id:
             raise ValueError("account and record_id are mutually exclusive")
@@ -87,6 +88,7 @@ class HoldingsReconciliationService:
             record_id=record_id,
             include_fund_name=include_fund_name,
             include_hk_stock_name=include_hk_stock_name,
+            event_futu_evidence=event_futu_evidence,
         )
 
     def evaluate_records(
@@ -97,6 +99,7 @@ class HoldingsReconciliationService:
         record_id: Optional[str] = None,
         include_fund_name: bool = False,
         include_hk_stock_name: bool = False,
+        event_futu_evidence: Optional[dict[str, FutuAccountEvidence]] = None,
     ) -> HoldingsReconciliationEvaluation:
         """Validate an already frozen complete source slice."""
 
@@ -113,10 +116,17 @@ class HoldingsReconciliationService:
         evidence_errors: dict[str, str] = {}
         for target_account in futu_accounts:
             try:
-                evidence_by_account[target_account] = self._evidence_from_snapshot(
-                    target_account,
-                    self.futu_observer(target_account),
+                evidence = (
+                    event_futu_evidence.get(target_account)
+                    if event_futu_evidence is not None else None
                 )
+                if evidence is None:
+                    evidence = self._evidence_from_snapshot(
+                        target_account, self.futu_observer(target_account),
+                    )
+                    if event_futu_evidence is not None:
+                        event_futu_evidence[target_account] = evidence
+                evidence_by_account[target_account] = evidence
             except Exception as exc:
                 evidence_errors[target_account] = str(exc)
 

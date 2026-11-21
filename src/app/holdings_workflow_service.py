@@ -32,6 +32,7 @@ from .holdings_reconciliation_service import (
 from .holdings_validation import (
     ASSET_CLASS_POLICY_VERSION,
     CURRENCY_POLICY_VERSION,
+    FutuAccountEvidence,
     RecordIssue,
     RecordValidation,
     HoldingsValidationReport,
@@ -129,13 +130,16 @@ class HoldingsWorkflowService:
         *,
         record_id: str,
         trigger: Dict[str, Any],
+        event_futu_evidence: Optional[dict[str, FutuAccountEvidence]] = None,
     ) -> Dict[str, Any]:
         """Complete an eligible empty name, then plan durable notifications."""
 
         resolved_record_id = str(record_id or "").strip()
         if not resolved_record_id:
             raise ValueError("event notification requires one record id")
-        evaluation = self.reconciliation.evaluate(record_id=resolved_record_id)
+        evaluation = self.reconciliation.evaluate(
+            record_id=resolved_record_id, event_futu_evidence=event_futu_evidence,
+        )
         if evaluation.report.evidence_errors:
             errors = "; ".join(
                 f"{account}: {error}"
