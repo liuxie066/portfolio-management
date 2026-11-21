@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.23 - 2026-11-21
+
+- Reduce OpenD connections during batch holdings validation by reusing one account snapshot per event attempt.
+
 ## 0.2.22 - 2026-11-20
 
 - Prepare a new PM release offline from a shared wheel directory, keeping the running service untouched until the release has been checked.
