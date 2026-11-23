@@ -299,16 +299,32 @@ class FeishuClient:
             response.raise_for_status()
             raise RuntimeError(f"Feishu API response has invalid code: {raw_code!r}")
         code = raw_code
-        if code == 1254043:
-            raise FeishuRecordNotFoundError(
-                code=code,
-                message=str(data.get('msg') or 'RecordIdNotFound'),
+        if code != 0:
+            error = data.get('error')
+            log_id = response.headers.get('X-Tt-Logid') or (
+                error.get('log_id') if isinstance(error, dict) else None
             )
+            if code == 1254043:
+                raise FeishuRecordNotFoundError(
+                    code=code,
+                    message=str(data.get('msg') or 'RecordIdNotFound'),
+                    http_status=response.status_code,
+                    log_id=log_id,
+                )
+            trace = f", log_id={log_id}" if log_id else ""
+            message = (
+                f"飞书 API 错误: {data.get('msg')} "
+                f"(HTTP {response.status_code}, code={code}{trace})"
+            )
+            try:
+                response.raise_for_status()
+            except requests.HTTPError as exc:
+                raise requests.HTTPError(
+                    message, response=response, request=exc.request,
+                ) from exc
+            raise Exception(message)
 
         response.raise_for_status()
-
-        if code != 0:
-            raise Exception(f"飞书 API 错误: {data.get('msg')} (code={data.get('code')})")
 
         if 'data' not in data or not isinstance(data['data'], dict):
             raise RuntimeError(f"Feishu API success response has invalid data: {data.get('data')!r}")

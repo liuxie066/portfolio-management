@@ -126,6 +126,9 @@ class FutuSyncReceiptService:
                 cash_mmf.get("success") is True
                 and "created" in cash_mmf
                 and "updated" in cash_mmf
+            ) or (
+                (stages.get("fund_mmf") or {}).get("status") == "succeeded"
+                and "items" in cash_mmf
             )
             mmf_items = [i for i in cash_mmf.get("items", []) if i.get("asset_id") == MMF_ASSET_ID]
             mmf_created = sum(bool(i.get("created")) for i in mmf_items) if "items" in cash_mmf else cash_mmf.get("created", 0)
@@ -136,19 +139,26 @@ class FutuSyncReceiptService:
                 if mmf_counts_confirmed
                 else "MMF 结果未确认"
             )
-            if cash_mmf.get("cash_mode") == "writeback":
+            if (stages.get("fund_mmf") or {}).get("status") in {"not_run", "pending"}:
+                mmf_result = "MMF 未执行"
+            cash_mode = cash_mmf.get("cash_mode") or (
+                stages.get("securities_cash") or {}
+            ).get("mode")
+            if cash_mode == "writeback":
                 cash_write = cash_mmf.get("cash_write")
                 cash_text = (
                     f"CNY-CASH ¥{cash_write['current']:,.2f}→¥{cash_write['target']:,.2f}"
                     if cash_write else "CNY-CASH 未核验"
                 )
                 fields.append(("CASH / MMF", f"{cash_text}；{mmf_result}"))
-            else:
+            elif cash_mode == "observe_only":
                 fields.append((
                     "CASH / MMF",
                     "富途原币余额仅观测；PM 使用 CNY-CASH 人民币汇总，不做金额对账；"
                     f"{mmf_result}",
                 ))
+            else:
+                fields.append(("CASH / MMF", f"CNY-CASH 结果未确认；{mmf_result}"))
         for item in (cash_mmf or sync_result).get("items", []):
             if item.get("asset_id") == FUTU_PENDING_ASSET_ID:
                 fields.append(("富途在途资产", f"¥{_format_cost(item.get('target'))}（单独计入总资产）"))
@@ -161,7 +171,14 @@ class FutuSyncReceiptService:
                 fields.append(("富途总资产核对", f"未通过：{total.get('reason_code')}；差额 {total.get('difference', '数据缺失')}"))
         pending = datasets.get("pm.pending_asset")
         if pending and pending.get("status") != "trusted":
-            fields.append(("富途在途资产核对", "未通过，持仓回读与富途金额或币种不一致"))
+            reason = pending.get("reason_code") or "原因未返回"
+            pending_text = {
+                "FUTU_PENDING_ASSET_INVALID": "未通过，在途持仓缺失、重复或类型／币种不符合要求",
+                "FUTU_PENDING_ASSET_MISMATCH": "未通过，在途持仓金额与富途不一致",
+            }.get(reason, f"未通过（{reason}）")
+            if pending.get("status") == "unavailable":
+                pending_text = f"无法核对，持仓回读不可用（{reason}）"
+            fields.append(("富途在途资产核对", pending_text))
         partial_write_possible = bool(
             sync_result.get("partial_write_possible")
             or cash_mmf.get("partial_write_possible")

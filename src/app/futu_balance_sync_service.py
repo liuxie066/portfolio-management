@@ -1081,22 +1081,29 @@ class FutuBalanceSyncService:
         writes_cash = snapshot.source == "futu-openapi"
         stages = {
             "securities_cash": {
-                "status": "succeeded",
+                "status": "started",
                 "mode": "writeback" if writes_cash else "observe_only",
                 "partial_write_possible": False,
             },
             "fund_mmf": {
-                "status": "started",
+                "status": "not_run",
                 "partial_write_possible": False,
             },
         }
+        if snapshot.pending_asset is not None:
+            stages["pending_asset"] = {
+                "status": "not_run",
+                "partial_write_possible": False,
+            }
         stage = "securities_cash"
         try:
             if writes_cash:
                 if broker != "富途":
                     raise ValueError("Futu cash writeback requires the mapped Futu broker")
                 cash_result = self._sync_aggregate_cash(snapshot, account=account, dry_run=dry_run)
+            stages["securities_cash"]["status"] = "succeeded"
             stage = "fund_mmf"
+            stages[stage]["status"] = "started"
             items.extend(self._sync_asset(
                 account=account,
                 broker=broker,
@@ -1109,7 +1116,7 @@ class FutuBalanceSyncService:
             stages["fund_mmf"]["status"] = "succeeded"
             if snapshot.pending_asset is not None:
                 stage = "pending_asset"
-                stages[stage] = {"status": "started", "partial_write_possible": False}
+                stages[stage]["status"] = "started"
                 items.extend(self._sync_asset(
                     account=account, broker=broker, asset_id=FUTU_PENDING_ASSET_ID,
                     asset_name="富途在途资产", asset_type=AssetType.OTHER,
@@ -1117,11 +1124,11 @@ class FutuBalanceSyncService:
                 ))
                 stages[stage]["status"] = "succeeded"
         except Exception as exc:
-            stages[stage] = {
+            stages[stage].update({
                 "status": "failed",
                 "partial_write_possible": not dry_run,
                 "reason_code": {"fund_mmf": "FUND_MMF_WRITE_FAILED", "pending_asset": "FUTU_PENDING_ASSET_WRITE_FAILED"}.get(stage, "FUTU_CASH_WRITE_FAILED"),
-            }
+            })
             return {
                 "success": False,
                 "account": account,
@@ -1132,6 +1139,8 @@ class FutuBalanceSyncService:
                 "source_metadata": self._public_source_metadata(snapshot),
                 "stages": stages,
                 "partial_write_possible": not dry_run,
+                "cash_mode": "writeback" if writes_cash else "observe_only",
+                "cash_write": cash_result,
                 "items": [item.__dict__ for item in items],
                 "error": str(exc),
             }

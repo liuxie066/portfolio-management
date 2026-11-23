@@ -3,6 +3,7 @@ import pytest
 from unittest.mock import Mock, patch
 import json
 import os
+import requests
 
 from src import config
 from src.feishu.errors import FeishuRecordNotFoundError
@@ -320,6 +321,40 @@ class TestFeishuClientRequest:
             client._request('POST', '/test/endpoint')
         assert '飞书 API 错误' in str(exc_info.value)
 
+    @pytest.mark.parametrize('status', [200, 400, 500])
+    @pytest.mark.parametrize('trace_source', ['header', 'body', 'absent'])
+    def test_request_preserves_business_error_and_trace(self, status, trace_source):
+        response = requests.Response()
+        response.status_code = status
+        response.url = 'https://example.test/records?account=private-account'
+        response.request = requests.Request('GET', response.url).prepare()
+        body = {'code': 1254045, 'msg': 'FieldNameNotFound'}
+        if trace_source == 'header':
+            response.headers['X-Tt-Logid'] = 'trace-123'
+        elif trace_source == 'body':
+            body['error'] = {'log_id': 'trace-123'}
+        response._content = json.dumps(body).encode()
+        client = FeishuClient(app_id='test', app_secret='secret')
+        with patch.object(client, '_get_headers', return_value={}), \
+                patch.object(client.session, 'request', return_value=response) as request:
+            with pytest.raises(Exception) as caught:
+                client._request('GET', '/records')
+
+        message = str(caught.value)
+        assert f'HTTP {status}' in message
+        assert 'code=1254045' in message
+        assert 'FieldNameNotFound' in message
+        assert 'private-account' not in message
+        if trace_source != 'absent':
+            assert 'log_id=trace-123' in message
+        else:
+            assert 'log_id=' not in message
+        if status >= 400:
+            assert isinstance(caught.value, requests.HTTPError)
+            assert caught.value.response is response
+            assert caught.value.request is response.request
+        assert request.call_count == 1
+
     @patch('src.feishu_client.requests.Session.request')
     @patch('src.feishu_client.FeishuClient._get_headers')
     def test_request_maps_only_structured_record_not_found(self, mock_headers, mock_request):
@@ -338,6 +373,37 @@ class TestFeishuClientRequest:
             client._request('GET', '/test/record')
 
         assert exc_info.value.code == 1254043
+
+    @pytest.mark.parametrize('status', [200, 400, 404, 500])
+    @pytest.mark.parametrize('trace_source', ['header', 'body', 'absent'])
+    def test_record_not_found_preserves_diagnostics_and_classification(self, status, trace_source):
+        response = requests.Response()
+        response.status_code = status
+        body = {'code': 1254043, 'msg': 'RecordIdNotFound'}
+        if trace_source == 'header':
+            response.headers['X-Tt-Logid'] = 'missing-record-trace'
+        elif trace_source == 'body':
+            body['error'] = {'log_id': 'missing-record-trace'}
+        response._content = json.dumps(body).encode()
+        client = FeishuClient(app_id='test', app_secret='secret')
+        with patch.object(client, '_get_headers', return_value={}), \
+                patch.object(client.session, 'request', return_value=response):
+            with pytest.raises(FeishuRecordNotFoundError) as caught:
+                client._request('GET', '/records/missing-record')
+        assert caught.value.code == 1254043
+        assert caught.value.message == 'RecordIdNotFound'
+        assert caught.value.http_status == status
+        assert f'HTTP {status}' in str(caught.value)
+        if trace_source != 'absent':
+            assert caught.value.log_id == 'missing-record-trace'
+            assert 'log_id=missing-record-trace' in str(caught.value)
+        else:
+            assert caught.value.log_id is None
+            assert 'log_id=' not in str(caught.value)
+
+    def test_record_not_found_without_transport_keeps_legacy_constructor(self):
+        error = FeishuRecordNotFoundError(code=1254043, message='RecordIdNotFound')
+        assert str(error) == 'Feishu record not found: RecordIdNotFound (code=1254043)'
 
     @pytest.mark.parametrize(
         ("payload", "message"),

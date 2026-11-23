@@ -1,3 +1,5 @@
+import pytest
+
 from src.app.futu_sync_receipt_service import FutuSyncReceiptService
 
 
@@ -19,7 +21,10 @@ def _write_result():
         "success": True,
         "account": "sy",
         "dry_run": False,
-        "cash_mmf": {"success": True, "created": 0, "updated": 1},
+        "cash_mmf": {
+            "success": True, "created": 0, "updated": 1,
+            "cash_mode": "observe_only",
+        },
         "cash_effects": {
             "created": 1,
             "resolved": 0,
@@ -169,8 +174,7 @@ def test_futu_sync_failure_receipt_uses_nested_error_and_exact_failed_stage():
         "失败阶段｜fund_mmf\n"
         "错误｜飞书 API 错误: TextFieldConvFail (code=1254060)\n"
         "Run｜sync_123\n"
-        "CASH / MMF｜富途原币余额仅观测；PM 使用 CNY-CASH 人民币汇总，"
-        "不做金额对账；MMF 结果未确认\n"
+        "CASH / MMF｜CNY-CASH 结果未确认；MMF 结果未确认\n"
         "警告｜fund_mmf 阶段可能已部分写入，请先 dry-run 复核\n"
         "下一步｜pm futu sync --account lx --dry-run --json\n"
         "\n"
@@ -221,3 +225,39 @@ def test_pending_receipt_separates_mmf_counts_and_reports_total_mismatch():
     assert "MMF 新增 0，更新 1" in message
     assert "富途在途资产" in message and "¥9745.00" in message
     assert "富途总资产核对" in message and "差额 9745" in message
+
+
+@pytest.mark.parametrize('verdict, expected', [
+    ({'status': 'unavailable', 'reason_code': 'REPOSITORY_READ_FAILED'}, '无法核对，持仓回读不可用'),
+    ({'status': 'untrusted', 'reason_code': 'FUTU_PENDING_ASSET_INVALID'}, '未通过，在途持仓缺失、重复或类型／币种不符合要求'),
+    ({'status': 'untrusted', 'reason_code': 'FUTU_PENDING_ASSET_MISMATCH'}, '未通过，在途持仓金额与富途不一致'),
+    ({'status': 'untrusted', 'reason_code': 'OTHER_REASON'}, '未通过（OTHER_REASON）'),
+])
+def test_pending_receipt_explains_specific_failure(verdict, expected):
+    result = _write_result()
+    result['success'] = False
+    result['reconciliation'] = {'datasets': {'pm.pending_asset': verdict}}
+    message = FutuSyncReceiptService.build_message(result)
+    assert f'富途在途资产核对｜{expected}' in message
+
+
+def test_failure_receipt_does_not_infer_cash_observation_from_missing_mode():
+    message = FutuSyncReceiptService.build_message({
+        'success': False, 'account': 'lx',
+        'cash_mmf': {'success': False, 'error': 'read failed'},
+    })
+    assert 'CNY-CASH 结果未确认' in message
+    assert '仅观测' not in message
+
+
+def test_failure_receipt_uses_recorded_stage_cash_mode_for_older_results():
+    message = FutuSyncReceiptService.build_message({
+        'success': False, 'account': 'lx',
+        'stages': {
+            'securities_cash': {'status': 'succeeded', 'mode': 'writeback'},
+            'fund_mmf': {'status': 'failed'},
+        },
+        'cash_mmf': {'success': False, 'error': 'read failed'},
+    })
+    assert 'CNY-CASH 未核验' in message
+    assert '仅观测' not in message
