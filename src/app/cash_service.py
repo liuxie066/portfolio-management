@@ -67,7 +67,7 @@ class CashService:
         """Sync a cash-like holding to an absolute target balance.
 
         CASH is rejected here and must use a confirmed cash-flow effect.
-        The current broker sync caller uses this method only for MMF.
+        Broker sync uses this for MMF and separately classified pending assets.
         """
         if asset_type == AssetType.CASH:
             raise RuntimeError("cash_effect_confirmation_required")
@@ -87,6 +87,8 @@ class CashService:
         self, *, account: str, asset_id: str, asset_name: str, asset_type: AssetType,
         target: float, broker: str, dry_run: bool,
     ) -> dict[str, Any]:
+        balance_class = AssetClass.ALTERNATIVE if asset_type == AssetType.OTHER else AssetClass.CASH
+        balance_industry = Industry.OTHER if asset_type == AssetType.OTHER else Industry.CASH
         target_qty = float(self.quantize_money(target))
         existing = self.storage.get_holding_fresh(asset_id, account, broker)
         current_qty = float(self.quantize_money(existing.quantity if existing else 0))
@@ -103,8 +105,8 @@ class CashService:
                 broker=broker,
                 quantity=target_qty,
                 currency="CNY",
-                asset_class=AssetClass.CASH,
-                industry="现金",
+                asset_class=balance_class,
+                industry=balance_industry,
             )
         )
 
@@ -114,8 +116,8 @@ class CashService:
                 "asset_name": asset_name,
                 "asset_type": asset_type,
                 "currency": "CNY",
-                "asset_class": AssetClass.CASH,
-                "industry": Industry.CASH,
+                "asset_class": balance_class,
+                "industry": balance_industry,
             }
             for field, declared_target_value in comparable_fields.items():
                 current_value = getattr(existing, field, None)

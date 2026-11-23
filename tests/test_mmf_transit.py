@@ -170,6 +170,7 @@ def test_priced_holdings_and_nav_share_one_transit_row(monkeypatch):
         for code, kind, quantity in (
             ("CNY-CASH", AssetType.CASH, -85),
             ("CNY-MMF", AssetType.MMF, 200),
+            ("CNY-FUTU-PENDING", AssetType.OTHER, 155),
         )
     ]
     funding = {
@@ -194,22 +195,40 @@ def test_priced_holdings_and_nav_share_one_transit_row(monkeypatch):
     nav = service.build_snapshot(
         holdings=balances, holdings_provenance={"futu_capture": {"snapshot_id": "balance-1"}},
     )
-    transit = [row for row in view["holdings"] if row["code"] == "CNY-MMF-TRANSIT"]
+    transit = [row for row in view["holdings"] if row["code"] == "CNY-FUTU-PENDING"]
     assert len(transit) == 1
-    assert transit[0]["name"] == "货基互转在途"
+    assert all(row["code"] != "CNY-MMF-TRANSIT" for row in view["holdings"])
     assert nav["valuation"].total_value_cny == view["total_value"] == 270
-    assert len(balances) == 2
-    assert nav["normalized_valuation"].canonical_payload()["holdings_provenance"]["mmf_transit"] == {
-        "snapshot_id": "balance-1", "amounts": {"HKD": "100", "USD": "10"},
-        "value_cny": "155.00",
-    }
-    with pytest.raises(ValueError, match="formal NAV"):
-        service.build_snapshot(
-            holdings=balances, holdings_provenance={"futu_capture": {"snapshot_id": "balance-2"}},
-        )
-    funding["adjustments"] = {}
-    settled = service.get_holdings(include_price=True)
-    assert all(row["code"] != "CNY-MMF-TRANSIT" for row in settled["holdings"])
+    assert len(balances) == 3
+    assert nav["valuation"].stock_value_cny == 0
+    assert nav["valuation"].pending_asset_value_cny == 155
+    from src.app.reporting_service import ReportingService
+    from src.app.account_service import report_value_breakdown
+    from src.domain.report.holdings_projection import report_holdings_fields
+    reporting = ReportingService(portfolio, storage)
+    distribution = reporting.get_asset_distribution("sy")
+    assert distribution["股票"] == 0
+    assert distribution["富途在途资产"] == pytest.approx(155 / 270)
+    position = reporting.build_position(nav)
+    assert position["non_cash_value"] == position["pending_asset_value"] == 155
+    report = report_holdings_fields(nav["holdings_data"], nav["position_data"])
+    assert report_value_breakdown(report)["stock_value"] == 0
+    assert report_value_breakdown(report)["non_cash_value"] == 155
+    from src.domain.snapshot_contracts import NormalizedValuationSnapshot
+    replay = NormalizedValuationSnapshot.from_compatibility_projection(nav["valuation"])
+    assert replay.total_value == 270 and replay.equity_value == 0 and replay.pending_asset_value == 155
+    from src.domain.nav_calculator import NavCalculator
+    assert NavCalculator.project_valuation(nav["valuation"]).non_cash_value == 155
+    evidence = service.build_valuation_evidence(holdings=balances)
+    assert evidence["status"] == "complete"
+    pending_evidence = [h for h in evidence["holdings"] if h["code"] == "CNY-FUTU-PENDING"]
+    assert len(pending_evidence) == 1 and pending_evidence[0]["market_value_cny"] == 155
+    assert "mmf_transit" not in nav["normalized_valuation"].canonical_payload()["holdings_provenance"]
+    # A stale or conflicting old manual file cannot add to or block broker assets.
+    funding["status"] = "unverified"
+    assert service.get_holdings(include_price=True)["total_value"] == 270
+    balances[-1].quantity = 0
+    assert service.get_holdings(include_price=True)["total_value"] == 115
 
 
 def test_shared_publication_previews_then_atomically_replaces(monkeypatch, tmp_path):
@@ -308,7 +327,7 @@ def test_preview_without_database_does_not_create_it(monkeypatch, tmp_path):
 
 
 
-def test_historical_rebuild_requires_sealed_mmf_evidence(monkeypatch, tmp_path):
+def test_historical_rebuild_ignores_retired_mmf_switch(monkeypatch, tmp_path):
     from src import config
     from src.app.nav_valuation_evidence_service import HistoricalNavValuationEvidenceService
 
@@ -318,7 +337,7 @@ def test_historical_rebuild_requires_sealed_mmf_evidence(monkeypatch, tmp_path):
     ))
     monkeypatch.setenv("FUTU_MMF_FUNDING_DIR", str(tmp_path))
     service = HistoricalNavValuationEvidenceService(storage=None, portfolio=None, evidence_store=object())
-    with pytest.raises(ValueError, match="sealed valuation"):
+    with pytest.raises(ValueError, match="scope is incomplete"):
         service.prepare(
             account="sy", nav_date="2026-11-20", source_run_id="run-sy",
             expected_holdings_digest="", expected_cash_flow_fingerprint="",

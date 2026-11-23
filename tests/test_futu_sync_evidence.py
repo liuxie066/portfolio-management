@@ -74,6 +74,7 @@ class _Provider:
             cash_by_currency={"CNY": 100, "USD": 20, "HKD": -10},
             mmf=200,
             source="futu-openapi",
+            pending_asset=0, pending_asset_currency="CNH",
             account_id=123,
             profile_fingerprint="sha256:redacted",
             cash_source_fields={
@@ -229,6 +230,9 @@ def test_formal_nav_uses_matching_morning_futu_readback(tmp_path, monkeypatch):
     holdings = _Storage().get_holdings_fresh(account="lx")
     sync = {
         "source_snapshot_id": "one",
+        "reconciliation": {"datasets": {
+            "pm.pending_asset": {"status": "trusted"}, "pm.total_assets": {"status": "trusted"},
+        }},
         "success": True,
         "holdings_digest": futu_holdings_digest(holdings),
         "cash_write": {
@@ -282,6 +286,9 @@ def test_nav_capture_survives_option_freeze_and_rejects_multiplier_drift(tmp_pat
     }
     store.save(account, "synthetic-capture", {
         "success": True, "source_snapshot_id": "synthetic-snapshot",
+        "reconciliation": {"datasets": {
+            "pm.pending_asset": {"status": "trusted"}, "pm.total_assets": {"status": "trusted"},
+        }},
         "cash_write": proof, "holdings_digest": futu_holdings_digest([option, cash]),
     })
 
@@ -300,3 +307,122 @@ def test_nav_capture_survives_option_freeze_and_rejects_multiplier_drift(tmp_pat
     rows[0] = rows[0].model_copy(update={"contract_multiplier": 200})
     with pytest.raises(ValueError, match="do not match verified NAV capture"):
         store.require_nav_capture(account, nav_day, rows)
+
+
+def _pending_snapshot(amount=9745, **changes):
+    from dataclasses import replace
+
+    return replace(
+        _Provider().fetch_balances(),
+        cash_by_currency={"CNY": -9745, "USD": 0, "HKD": 0}, mmf=86899.37,
+        pending_asset=amount, pending_asset_currency="CNH",
+        account_assets={
+            "currency": "CNH", "cash": -9745, "fund_assets": 86899.37,
+            "market_val": 158117.6122, "pending_asset": amount,
+            "total_assets": -9745 + 86899.37 + 158117.6122 + amount,
+        },
+        **changes,
+    )
+
+
+def test_pending_sync_replay_settlement_and_account_isolation(tmp_path):
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from src.models import FUTU_PENDING_ASSET_ID, AssetClass
+
+    storage = _Storage()
+    snapshot = _pending_snapshot()
+    provider = SimpleNamespace(fetch_balances=lambda: snapshot)
+    service = FutuBalanceSyncService(storage, provider, fx_loader=_fx,
+        evidence_store=FutuSyncEvidenceStore(tmp_path),
+        reconciler=FutuSyncReconciler(storage, wait=lambda _: None))
+    for _ in range(2):
+        result = service.sync_cash_and_mmf(account="lx")
+        assert result["success"]
+    pending = storage.get_holding_fresh(FUTU_PENDING_ASSET_ID, "lx", "富途")
+    assert pending.quantity == 9745
+    assert pending.asset_type == AssetType.OTHER
+    assert pending.asset_class == AssetClass.ALTERNATIVE
+    assert pending.asset_name == "富途在途资产"
+    assert storage.writes.count(FUTU_PENDING_ASSET_ID) == 1
+    assert result["reconciliation"]["datasets"]["pm.total_assets"]["status"] == "trusted"
+    service.sync_cash_and_mmf(account="sy")
+    snapshot = replace(snapshot, pending_asset=0,
+        account_assets={**snapshot.account_assets, "pending_asset": 0,
+                        "total_assets": snapshot.account_assets["total_assets"] - 9745})
+    assert service.sync_cash_and_mmf(account="lx")["success"]
+    assert storage.get_holding_fresh(FUTU_PENDING_ASSET_ID, "lx", "富途").quantity == 0
+    assert storage.get_holding_fresh(FUTU_PENDING_ASSET_ID, "sy", "富途").quantity == 9745
+
+
+def test_pending_write_failure_and_bad_total_are_not_success(tmp_path):
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from src.models import FUTU_PENDING_ASSET_ID
+
+    snapshot = _pending_snapshot()
+    storage = _Storage(fail_asset_id=FUTU_PENDING_ASSET_ID)
+    service = FutuBalanceSyncService(storage, SimpleNamespace(fetch_balances=lambda: snapshot),
+        fx_loader=_fx, evidence_store=FutuSyncEvidenceStore(tmp_path),
+        reconciler=FutuSyncReconciler(storage, wait=lambda _: None))
+    result = service.sync_cash_and_mmf(account="lx")
+    assert not result["success"]
+    assert result["stages"]["pending_asset"]["reason_code"] == "FUTU_PENDING_ASSET_WRITE_FAILED"
+    storage.fail_asset_id = None
+    # A total that omits pending must be flagged, not 'repaired' by another addition.
+    snapshot = replace(snapshot, account_assets={**snapshot.account_assets,
+        "total_assets": snapshot.account_assets["total_assets"] - 9745})
+    result = service.sync_cash_and_mmf(account="lx")
+    assert not result["success"]
+    assert result["reconciliation"]["datasets"]["pm.total_assets"]["reason_code"] == "FUTU_TOTAL_ASSETS_MISMATCH"
+    assert storage.get_holding_fresh(FUTU_PENDING_ASSET_ID, "lx", "富途").quantity == 9745
+    snapshot = replace(snapshot, account_assets={**snapshot.account_assets, "total_assets": None})
+    result = service.sync_cash_and_mmf(account="lx")
+    assert not result["success"]
+    assert result["reconciliation"]["datasets"]["pm.total_assets"]["status"] == "unavailable"
+
+
+def test_pending_missing_invalid_and_wrong_currency_do_not_write(tmp_path):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    for amount, currency in ((None, "CNH"), (-1, "CNH"), (float("nan"), "CNH"), (1, "USD")):
+        snapshot = replace(_pending_snapshot(), pending_asset=amount, pending_asset_currency=currency)
+        storage = _Storage()
+        result = FutuBalanceSyncService(storage, SimpleNamespace(fetch_balances=lambda: snapshot),
+            fx_loader=_fx, evidence_store=FutuSyncEvidenceStore(tmp_path)).sync_cash_and_mmf(account="lx")
+        assert not result["success"]
+        assert storage.writes == []
+
+
+def test_pending_dry_run_and_payload_identity(tmp_path):
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from src.models import FUTU_PENDING_ASSET_ID
+
+    snapshot = _pending_snapshot()
+    storage = _Storage()
+    result = FutuBalanceSyncService(storage, SimpleNamespace(fetch_balances=lambda: snapshot),
+        fx_loader=_fx, evidence_store=FutuSyncEvidenceStore(tmp_path)).sync_cash_and_mmf(account="lx", dry_run=True)
+    assert result["success"]
+    assert storage.writes == []
+    assert next(i for i in result["items"] if i["asset_id"] == FUTU_PENDING_ASSET_ID)["target"] == 9745
+    assert FutuBalanceSyncService._snapshot_payload_sha256(snapshot) != FutuBalanceSyncService._snapshot_payload_sha256(replace(snapshot, pending_asset=0))
+
+
+def test_portfolio_sync_preserves_pending_through_balance_stage(tmp_path):
+    from dataclasses import asdict
+    from types import SimpleNamespace
+    from src.app.futu_balance_sync_service import FutuPortfolioSnapshot
+    from src.models import FUTU_PENDING_ASSET_ID
+
+    snapshot = FutuPortfolioSnapshot(**asdict(_pending_snapshot()))
+    storage = _Storage()
+    result = FutuBalanceSyncService(storage, SimpleNamespace(fetch_portfolio=lambda: snapshot),
+        fx_loader=_fx, evidence_store=FutuSyncEvidenceStore(tmp_path),
+        reconciler=FutuSyncReconciler(storage, wait=lambda _: None)).sync_portfolio(account="lx", dry_run=False, confirm=True)
+    assert result["success"]
+    assert result["stages"]["pending_asset"]["status"] == "succeeded"
+    assert storage.get_holding_fresh(FUTU_PENDING_ASSET_ID, "lx", "富途").quantity == 9745
+    assert result["holdings_digest"]
+    assert result["reconciliation"]["datasets"]["pm.pending_asset"]["status"] == "trusted"

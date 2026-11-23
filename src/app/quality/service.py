@@ -10,7 +10,7 @@ from typing import Any
 from jsonschema import Draft202012Validator, FormatChecker
 
 from src import config
-from src.app.futu_sync_evidence import FutuSyncEvidenceStore
+from src.app.futu_sync_evidence import FutuSyncEvidenceStore, FUTU_ASSET_DATASETS
 from src.app.nav_finality import evaluate_nav_finality
 
 from .artifact import QualityArtifactStore
@@ -24,13 +24,14 @@ from .policy import nav_gate
 
 _ROOT = Path(__file__).resolve().parents[3]
 _SCHEMA = _ROOT / "contracts" / "quality-monitoring" / "quality_status.v1.schema.json"
-_REQUIRED_SYNC_STAGES = frozenset({"positions", "securities_cash", "fund_mmf"})
+_REQUIRED_SYNC_STAGES = frozenset({"positions", "securities_cash", "fund_mmf", "pending_asset"})
 _REQUIRED_RECONCILIATION_DATASETS = frozenset(
     {
         "pm.holdings_quantity",
         "pm.cost_basis",
         "pm.cash_aggregate",
         "pm.fund_mmf",
+        *FUTU_ASSET_DATASETS,
     }
 )
 
@@ -212,7 +213,11 @@ class PMQualityService:
         valuation_datasets, nav_dataset = self._valuation_and_nav_datasets(
             account,
             observed_at,
-            {item["dataset_id"]: item for item in [mapping, source, sync, *replica, cash_like]},
+            {
+                **{item["dataset_id"]: item for item in [mapping, source, sync, *replica, cash_like]},
+                **{key: (((receipt or {}).get("reconciliation") or {}).get("datasets") or {}).get(key, {})
+                   for key in FUTU_ASSET_DATASETS},
+            },
         )
         nav_history = self._nav_history_dataset(account, observed_at)
         if nav_history["status"] != "trusted" and nav_dataset["status"] == "trusted":

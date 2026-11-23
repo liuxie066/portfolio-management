@@ -17,6 +17,7 @@ from src.domain.holdings import (
 )
 from src.models import (
     CASH_ASSET_ID,
+    FUTU_PENDING_ASSET_ID,
     AssetClass,
     AssetType,
     Currency,
@@ -55,6 +56,7 @@ class FutuBalanceSnapshot:
     pagination_complete: bool = False
     pending_asset: Optional[float] = None
     pending_asset_currency: Optional[str] = None
+    account_assets: Optional[dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -144,6 +146,7 @@ class FutuPortfolioSnapshot:
     pagination_complete: bool = False
     pending_asset: Optional[float] = None
     pending_asset_currency: Optional[str] = None
+    account_assets: Optional[dict[str, Any]] = None
 
 
 class FutuBalanceProvider(Protocol):
@@ -341,6 +344,7 @@ class FutuOpenApiBalanceProvider:
         return FutuBalanceSnapshot(
             pending_asset=pending_asset,
             pending_asset_currency=pending_currency,
+            account_assets=self._account_assets_from_row(row),
             cash_by_currency=self._cash_balances_from_row(row),
             mmf=self._mmf_from_row(row),
             source="futu-openapi",
@@ -397,6 +401,7 @@ class FutuOpenApiBalanceProvider:
         return FutuPortfolioSnapshot(
             pending_asset=pending_asset,
             pending_asset_currency=pending_currency,
+            account_assets=self._account_assets_from_row(account_row),
             cash_by_currency=self._cash_balances_from_row(account_row),
             mmf=self._mmf_from_row(account_row),
             positions=positions,
@@ -455,13 +460,21 @@ class FutuOpenApiBalanceProvider:
 
     def _pending_asset_from_row(self, row: dict[str, Any]) -> tuple[Optional[float], Optional[str]]:
         currency = str(row.get("currency") or "").strip().upper()
-        if currency not in {"CNH", "CNY", "HKD", "USD"}:
-            return None, None
-        try:
-            amount = self._money_field(row, "pending_asset", quantize=False)
-        except RuntimeError:
-            return None, None
-        return (amount, currency) if amount is not None else (None, None)
+        # Account aggregates are explicitly requested in CNH, just like MMF.
+        if currency not in {"CNH", "CNY"}:
+            raise RuntimeError("Futu account aggregate currency must be CNH/CNY")
+        amount = self._money_field(row, "pending_asset", quantize=False)
+        if amount is None or amount < 0:
+            raise RuntimeError("Futu pending_asset is missing or negative")
+        return amount, currency
+
+    def _account_assets_from_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "currency": str(row.get("currency") or "").upper(),
+            **{name: self._money_field(row, name, quantize=False) for name in (
+                "cash", "fund_assets", "market_val", "pending_asset", "total_assets",
+            )},
+        }
 
     @staticmethod
     def _money_field(row: dict[str, Any], field: str, *, quantize: bool) -> Optional[float]:
@@ -873,6 +886,9 @@ class FutuBalanceSyncService:
                     FutuBalanceSnapshot(
                         cash_by_currency=snapshot.cash_by_currency,
                         mmf=snapshot.mmf,
+                        pending_asset=snapshot.pending_asset,
+                        pending_asset_currency=snapshot.pending_asset_currency,
+                        account_assets=snapshot.account_assets,
                         source=snapshot.source,
                         account_id=snapshot.account_id,
                         profile_fingerprint=snapshot.profile_fingerprint,
@@ -918,6 +934,8 @@ class FutuBalanceSyncService:
 
             stages["securities_cash"] = dict(cash_result["stages"]["securities_cash"])
             stages["fund_mmf"] = dict(cash_result["stages"]["fund_mmf"])
+            if "pending_asset" in cash_result["stages"]:
+                stages["pending_asset"] = dict(cash_result["stages"]["pending_asset"])
             result = {
                 "success": bool(cash_result.get("success")),
                 "status": "dry_run" if dry_run else "written",
@@ -956,6 +974,11 @@ class FutuBalanceSyncService:
                         or stored_mmf.currency != "CNY" or stored_mmf.quantity != snapshot.mmf
                     ):
                         raise ValueError("Futu CASH/MMF readback changed before final reconciliation")
+                    stored_pending = actual.get(FUTU_PENDING_ASSET_ID)
+                    if (stored_pending is None or stored_pending.asset_type != AssetType.OTHER
+                            or stored_pending.currency != "CNY"
+                            or stored_pending.quantity != self.quantize_money(snapshot.pending_asset)):
+                        raise ValueError("Futu pending_asset readback mismatch")
                     for item in items:
                         row = actual.get(item.asset_id)
                         if (row.quantity if row else 0) != item.target_quantity:
@@ -1084,11 +1107,20 @@ class FutuBalanceSyncService:
                 dry_run=dry_run,
             ))
             stages["fund_mmf"]["status"] = "succeeded"
+            if snapshot.pending_asset is not None:
+                stage = "pending_asset"
+                stages[stage] = {"status": "started", "partial_write_possible": False}
+                items.extend(self._sync_asset(
+                    account=account, broker=broker, asset_id=FUTU_PENDING_ASSET_ID,
+                    asset_name="富途在途资产", asset_type=AssetType.OTHER,
+                    target=snapshot.pending_asset, dry_run=dry_run,
+                ))
+                stages[stage]["status"] = "succeeded"
         except Exception as exc:
             stages[stage] = {
                 "status": "failed",
                 "partial_write_possible": not dry_run,
-                "reason_code": "FUND_MMF_WRITE_FAILED" if stage == "fund_mmf" else "FUTU_CASH_WRITE_FAILED",
+                "reason_code": {"fund_mmf": "FUND_MMF_WRITE_FAILED", "pending_asset": "FUTU_PENDING_ASSET_WRITE_FAILED"}.get(stage, "FUTU_CASH_WRITE_FAILED"),
             }
             return {
                 "success": False,
@@ -1277,6 +1309,10 @@ class FutuBalanceSyncService:
             )
         if not snapshot.mmf_present or snapshot.mmf_source_field != "fund_assets" or snapshot.mmf is None:
             raise RuntimeError("authoritative Futu fund_assets field is missing")
+        pending = ProviderNumericFact.parse(snapshot.pending_asset)
+        if (pending.state != ProviderValueState.VALID or pending.value < 0
+                or snapshot.pending_asset_currency not in {"CNH", "CNY"}):
+            raise RuntimeError("authoritative Futu pending_asset or reporting currency is invalid")
         if str(snapshot.trd_env).upper() != "REAL":
             raise RuntimeError("Futu trading environment must be REAL")
         if snapshot.account_id is None:
@@ -1403,6 +1439,7 @@ class FutuBalanceSyncService:
                     snapshot.cash_present_by_currency or {}
                 ),
             },
+            "account_assets": snapshot.account_assets,
             "pending_asset": {
                 "amount": getattr(snapshot, "pending_asset", None),
                 "currency": getattr(snapshot, "pending_asset_currency", None),
@@ -1459,6 +1496,9 @@ class FutuBalanceSyncService:
                     (snapshot.cash_by_currency or {}).items()
                 )
             },
+            "pending_asset": snapshot.pending_asset,
+            "pending_asset_currency": snapshot.pending_asset_currency,
+            "account_assets": snapshot.account_assets,
             "fund_mmf": None if snapshot.mmf is None else str(snapshot.mmf),
             "position_snapshot_included": hasattr(snapshot, "positions"),
             "positions": positions,

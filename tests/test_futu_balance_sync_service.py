@@ -341,7 +341,7 @@ def test_futu_openapi_provider_reads_exact_currency_cash_and_mmf():
     assert ctx.position_called is False
 
 
-def test_futu_pending_asset_is_diagnostic_and_keeps_reporting_currency(monkeypatch):
+def test_futu_pending_asset_keeps_reporting_currency(monkeypatch):
     provider = FutuOpenApiBalanceProvider(acc_id=123)
     monkeypatch.setattr(provider, "_import_sdk", lambda: object())
     monkeypatch.setattr(provider, "_open_trade_context", lambda sdk: object())
@@ -388,6 +388,7 @@ def test_authoritative_cash_and_mmf_missing_block_before_write():
             cash_by_currency={"CNY": 0, "USD": None, "HKD": 0},
             mmf=0,
             source="futu-openapi",
+            pending_asset=0, pending_asset_currency="CNH",
             account_id=123,
             profile_fingerprint="sha256:redacted",
             cash_source_fields=dict(FutuOpenApiBalanceProvider.CASH_COLUMNS),
@@ -422,6 +423,7 @@ def test_authoritative_zero_is_present_and_preserves_per_currency_evidence():
             cash_by_currency={"CNY": 0, "USD": 0, "HKD": 0},
             mmf=0,
             source="futu-openapi",
+            pending_asset=0, pending_asset_currency="CNH",
             account_id=123,
             profile_fingerprint="sha256:redacted",
             cash_source_fields=dict(FutuOpenApiBalanceProvider.CASH_COLUMNS),
@@ -1394,7 +1396,7 @@ def test_futu_portfolio_provider_fetches_average_cost_and_closes_contexts(monkey
                 "cn_cash": 12.34,
                 "us_cash": 5.67,
                 "hk_cash": -1,
-                "fund_assets": 56.78,
+                "fund_assets": 56.78, "currency": "CNH", "pending_asset": 0,
                 "currency": "CNH",
             }]
 

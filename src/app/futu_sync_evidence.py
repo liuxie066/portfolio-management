@@ -11,6 +11,9 @@ from src.domain.snapshot_contracts import digest_payload
 from src.time_utils import TZ_SHANGHAI, bj_today
 
 
+FUTU_ASSET_DATASETS = ("pm.pending_asset", "pm.total_assets")
+
+
 def futu_holdings_digest(holdings) -> str:
     """Bind the priced facts in one account to its verified Futu readback."""
     rows = [
@@ -62,6 +65,9 @@ class FutuSyncEvidenceStore:
         latest = self.latest(account)
         if not latest or not latest.get("success"):
             raise ValueError("formal NAV requires a successful Futu portfolio sync")
+        verdicts = (latest.get("reconciliation") or {}).get("datasets") or {}
+        if any((verdicts.get(key) or {}).get("status") != "trusted" for key in FUTU_ASSET_DATASETS):
+            raise ValueError("formal NAV requires verified Futu pending and total assets")
         cash_write = latest.get("cash_write") or {}
         observed_at = datetime.fromisoformat(cash_write.get("observed_at_utc") or "")
         if observed_at.tzinfo is None:

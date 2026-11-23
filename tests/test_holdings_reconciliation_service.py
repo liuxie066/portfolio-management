@@ -27,6 +27,7 @@ def _snapshot(*positions):
         mmf=4.0,
         positions=tuple(positions),
         source="futu-openapi",
+        pending_asset=0, pending_asset_currency="CNH",
         account_id=123,
         profile_fingerprint="profile",
         cash_source_fields={"CNY": "cn_cash", "USD": "us_cash", "HKD": "hk_cash"},

@@ -125,7 +125,9 @@ class PortfolioReadService:
             if raw_type == "option":
                 continue
             currency = str(holding.currency or "").strip().upper()
-            if not isinstance(raw_quote, dict) and raw_type in {"cash", "mmf"} and currency == "CNY":
+            from src.models import FUTU_PENDING_ASSET_ID
+
+            if not isinstance(raw_quote, dict) and (raw_type in {"cash", "mmf"} or code == FUTU_PENDING_ASSET_ID) and currency == "CNY":
                 raw_quote = {
                     "code": code,
                     "price": 1.0,
@@ -221,25 +223,6 @@ class PortfolioReadService:
             valuation_kwargs["option_nav_date"] = option_nav_date
         if valuation_fx is not None:
             valuation_kwargs["valuation_fx"] = valuation_fx
-        from src import config
-
-        if self.account in (config.get("futu.profiles", {}) or {}):
-            from .mmf_transit_service import mmf_valuation_holdings, read_mmf_valuation_funding
-
-            funding = read_mmf_valuation_funding(self.account)
-            if funding["status"] != "disabled":
-                baseline = (
-                    holdings if holdings is not None
-                    else self.storage.get_holdings(account=self.account)
-                )
-                valuation_kwargs["holdings"], mmf_provenance = mmf_valuation_holdings(
-                    baseline, funding, account=self.account,
-                    capture=(holdings_provenance or {}).get("futu_capture"),
-                )
-                holdings_provenance = {
-                    **(holdings_provenance or {}),
-                    "mmf_transit": mmf_provenance,
-                }
         valuation = self.portfolio.calculate_valuation(
             self.account,
             **valuation_kwargs,
@@ -345,7 +328,8 @@ class PortfolioReadService:
         equity_value = valuation.stock_value_cny
         fund_value = valuation.fund_value_cny
         option_value = getattr(valuation, "option_value_cny", 0.0)
-        non_cash_value = equity_value + fund_value + option_value
+        pending_value = getattr(valuation, "pending_asset_value_cny", 0.0)
+        non_cash_value = equity_value + fund_value + option_value + pending_value
         cn_exposure_value = getattr(valuation, "cn_asset_value", 0.0)
         us_exposure_value = getattr(valuation, "us_asset_value", 0.0)
         hk_exposure_value = getattr(valuation, "hk_asset_value", 0.0)
@@ -367,6 +351,7 @@ class PortfolioReadService:
                 "non_cash_value": non_cash_value,
                 "fund_value": fund_value,
                 "option_value": option_value,
+                "pending_asset_value": pending_value,
                 "cn_exposure_value": cn_exposure_value,
                 "us_exposure_value": us_exposure_value,
                 "hk_exposure_value": hk_exposure_value,

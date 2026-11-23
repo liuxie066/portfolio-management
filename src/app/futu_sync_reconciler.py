@@ -8,6 +8,7 @@ from typing import Any
 from src.models import (
     AssetType,
     CASH_ASSET_ID,
+    FUTU_PENDING_ASSET_ID,
     MMF_ASSET_ID,
 )
 
@@ -69,6 +70,7 @@ class FutuSyncReconciler:
                     account=account,
                     broker=broker,
                 ),
+                **self._pending_verdicts(snapshot, holdings, account=account, broker=broker),
                 "pm.fund_mmf": self._cash_verdict(
                     holdings,
                     account=account,
@@ -153,6 +155,7 @@ class FutuSyncReconciler:
         return {
             "pm.holdings_quantity": _verdict(quantity_diff, "HOLDINGS_QUANTITY_MISMATCH"),
             "pm.cost_basis": _verdict(cost_diff, "COST_BASIS_MISMATCH"),
+            **self._pending_verdicts(snapshot, positions, account=account, broker=broker),
             _AGGREGATE_CASH_DATASET: self._aggregate_cash_verdict(
                 positions,
                 account=account,
@@ -167,6 +170,44 @@ class FutuSyncReconciler:
                 reason_code="FUND_MMF_MISMATCH",
             ),
         }
+
+    def _pending_verdicts(self, snapshot, holdings, *, account, broker):
+        result = {}
+        if getattr(snapshot, "pending_asset", None) is not None:
+            verdict = self._cash_verdict(
+                holdings, account=account, broker=broker,
+                asset_id=FUTU_PENDING_ASSET_ID, expected=snapshot.pending_asset,
+                reason_code="FUTU_PENDING_ASSET_MISMATCH",
+            )
+            rows = [h for h in holdings if h.asset_id == FUTU_PENDING_ASSET_ID
+                    and h.account == account and h.broker == broker]
+            if len(rows) != 1 or rows[0].currency != "CNY" or rows[0].asset_type != AssetType.OTHER:
+                verdict = {"status": "untrusted", "reason_code": "FUTU_PENDING_ASSET_INVALID",
+                           "diff_count": 1, "diff_subjects": [FUTU_PENDING_ASSET_ID]}
+            result["pm.pending_asset"] = verdict
+        assets = getattr(snapshot, "account_assets", None)
+        if assets is not None:
+            components = ("cash", "fund_assets", "market_val", "pending_asset")
+            if (assets.get("currency") not in {"CNH", "CNY"}
+                    or any(not _finite_decimal(assets.get(k)) for k in (*components, "total_assets"))):
+                result["pm.total_assets"] = {
+                    "status": "unavailable", "reason_code": "FUTU_TOTAL_ASSETS_MISSING",
+                    "diff_count": 0, "diff_subjects": [],
+                }
+            else:
+                calculated = sum(Decimal(str(assets[k])) for k in components)
+                delta = calculated - Decimal(str(assets["total_assets"]))
+                # Four rounded components plus a rounded total: at most 2.5 cents.
+                matched = abs(delta) <= Decimal("0.03")
+                result["pm.total_assets"] = {
+                    "status": "trusted" if matched else "untrusted",
+                    "reason_code": "FUTU_TOTAL_ASSETS_MATCHED" if matched else "FUTU_TOTAL_ASSETS_MISMATCH",
+                    "diff_count": 0 if matched else 1, "diff_subjects": [] if matched else ["total_assets"],
+                    "currency": assets["currency"], "components": {k: assets[k] for k in components},
+                    "calculated": str(calculated), "reported": str(assets["total_assets"]),
+                    "difference": str(delta), "tolerance": "0.03",
+                }
+        return result
 
     def _cash_verdict(
         self,
@@ -361,7 +402,7 @@ def _retryable_mismatches(datasets: dict[str, dict[str, Any]]) -> list[str]:
     return [
         dataset_id
         for dataset_id, verdict in datasets.items()
-        if dataset_id != _AGGREGATE_CASH_DATASET
+        if dataset_id not in {_AGGREGATE_CASH_DATASET, "pm.total_assets"}
         and verdict.get("status") != "trusted"
     ]
 

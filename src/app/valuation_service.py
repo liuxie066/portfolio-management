@@ -12,7 +12,7 @@ from src.domain.snapshot_contracts import (
     NormalizedValuationSnapshot,
     normalize_quantity,
 )
-from src.models import AssetType, PortfolioValuation
+from src.models import AssetType, PortfolioValuation, FUTU_PENDING_ASSET_ID
 from src.pricing.payload import positive_finite_decimal
 from src.reporting_utils import normalize_holding_type
 
@@ -252,10 +252,10 @@ class ValuationService:
 
             else:
                 price_meta["missing"] += 1
-                can_use_unit_price = currency == "CNY" and raw_type in (
+                can_use_unit_price = currency == "CNY" and (holding.asset_id == FUTU_PENDING_ASSET_ID or raw_type in (
                     AssetType.CASH.value,
                     AssetType.MMF.value,
-                )
+                ))
                 if can_use_unit_price:
                     price_dec = Decimal("1")
                     cny_price_dec = Decimal("1")

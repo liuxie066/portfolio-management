@@ -73,18 +73,19 @@ def report_value_breakdown(report: Dict[str, Any]) -> Dict[str, float]:
 
     nav = report.get("nav") or {}
     option_value = _as_float(overview.get("option_value"), 0.0)
+    pending_value = _as_float(overview.get("pending_asset_value"), 0.0)
     if cash_ratio == 0 and stock_ratio == 0 and fund_ratio == 0 and total_value:
         cash_value = _as_float(nav.get("cash_value"), 0.0)
         # Persisted NAV compatibility field ``stock_value`` is the complete
         # non-cash value; ``fund_value`` is a subset of it.
         non_cash_value = _as_float(nav.get("stock_value"), 0.0)
         fund_value = _as_float(nav.get("fund_value"), 0.0)
-        equity_value = non_cash_value - fund_value - option_value
+        equity_value = non_cash_value - fund_value - option_value - pending_value
     else:
         cash_value = total_value * cash_ratio
         equity_value = total_value * stock_ratio
         fund_value = total_value * fund_ratio
-        non_cash_value = equity_value + fund_value + option_value
+        non_cash_value = equity_value + fund_value + option_value + pending_value
 
     return {
         "total_value": _round_money(total_value),
@@ -92,6 +93,7 @@ def report_value_breakdown(report: Dict[str, Any]) -> Dict[str, float]:
         "stock_value": _round_money(equity_value),
         "fund_value": _round_money(fund_value),
         "non_cash_value": _round_money(non_cash_value),
+        **({"pending_asset_value": _round_money(pending_value)} if pending_value else {}),
     }
 
 

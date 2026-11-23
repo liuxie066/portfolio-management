@@ -53,7 +53,7 @@ class ReportQueryService:
             live_cash = valuation.cash_value_cny
             live_equity_value = valuation.stock_value_cny
             live_fund_value = valuation.fund_value_cny
-            live_non_cash_value = live_equity_value + live_fund_value + getattr(valuation, "option_value_cny", 0.0)
+            live_non_cash_value = live_equity_value + live_fund_value + getattr(valuation, "option_value_cny", 0.0) + getattr(valuation, "pending_asset_value_cny", 0.0)
 
             working_navs = [nav for nav in all_navs if nav.date < today]
             today_nav = self._latest_nav_on(all_navs, today)

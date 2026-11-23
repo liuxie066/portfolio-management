@@ -30,6 +30,8 @@ class ReportingService:
             "现金": valuation.cash_value_cny / valuation.total_value_cny,
             "股票": valuation.stock_value_cny / valuation.total_value_cny,
             "基金": valuation.fund_value_cny / valuation.total_value_cny,
+            **({"富途在途资产": valuation.pending_asset_value_cny / valuation.total_value_cny}
+               if getattr(valuation, "pending_asset_value_cny", 0) else {}),
             "中国资产": cn_exposure_value / valuation.total_value_cny,
             "美国资产": us_exposure_value / valuation.total_value_cny,
             "港股资产": hk_exposure_value / valuation.total_value_cny,
@@ -66,7 +68,8 @@ class ReportingService:
                 if holding.asset_type.value == "option"
             ]
             option_value = getattr(valuation, "option_value_cny", 0.0)
-            non_cash_value = equity_value + fund_value + option_value
+            pending_value = getattr(valuation, "pending_asset_value_cny", 0.0)
+            non_cash_value = equity_value + fund_value + option_value + pending_value
             cash_value = valuation.cash_value_cny
             return {
                 "success": True,
@@ -74,6 +77,7 @@ class ReportingService:
                 "stock_value": equity_value,
                 "fund_value": fund_value,
                 "non_cash_value": non_cash_value,
+                **({"pending_asset_value": pending_value} if pending_value else {}),
                 **({
                     "option_value": option_value,
                     "option_long_value": sum(row.market_value_cny or 0.0 for row in option_rows if row.quantity > 0),
@@ -94,7 +98,8 @@ class ReportingService:
         cash_value = holdings_data.get("cash_value", 0) or 0
         holdings = holdings_data.get("holdings") or []
         fund_value = sum((h.get("market_value") or 0) for h in holdings if h.get("normalized_type") == "fund")
-        equity_value = max(0, non_cash_value - fund_value)
+        pending_value = holdings_data.get("pending_asset_value", 0) or 0
+        equity_value = max(0, non_cash_value - fund_value - pending_value)
 
         return {
             "success": True,
@@ -102,6 +107,7 @@ class ReportingService:
             "stock_value": equity_value,
             "fund_value": fund_value,
             "non_cash_value": non_cash_value,
+            **({"pending_asset_value": pending_value} if pending_value else {}),
             "cash_value": cash_value,
             "stock_ratio": position_data.get("stock_ratio", equity_value / total_value if total_value > 0 else 0),
             "fund_ratio": position_data.get("fund_ratio", fund_value / total_value if total_value > 0 else 0),

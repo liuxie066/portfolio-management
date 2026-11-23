@@ -14,6 +14,7 @@ import json
 from typing import Any, Iterable, Mapping, Optional
 
 from src.snapshot_models import HoldingSnapshot
+from src.models import FUTU_PENDING_ASSET_ID
 
 
 NORMALIZED_VALUATION_VERSION = "pm.normalized_valuation.v2"
@@ -641,6 +642,10 @@ class NormalizedValuationRow:
             raise ValueError("normalized valuation row quantity is not canonical")
         if quantity == 0:
             raise ValueError("zero quantity rows must be excluded before normalization")
+        if self.asset_id == FUTU_PENDING_ASSET_ID and (
+            self.asset_type != "other" or self.normalized_type != "other" or self.currency != "CNY"
+        ):
+            raise ValueError("invalid Futu pending asset valuation contract")
         if self.asset_type == "option":
             if (
                 self.normalized_type != "option"
@@ -1330,7 +1335,7 @@ class NormalizedValuationSnapshot:
                 else "fund"
                 if "fund" in raw_type
                 else "option" if raw_type == "option"
-                else "equity"
+                else "other" if holding.asset_id == FUTU_PENDING_ASSET_ID else "equity"
             )
             rows.append(
                 NormalizedValuationRow.from_holding(
@@ -1356,6 +1361,7 @@ class NormalizedValuationSnapshot:
             (row.market_value_cny or Decimal("0"))
             for row in rows
             if row.normalized_type not in {"cash", "fund", "option"}
+            and row.asset_id != FUTU_PENDING_ASSET_ID
         )
         declared = {
             "cash": finite_decimal(
@@ -1421,6 +1427,7 @@ class NormalizedValuationSnapshot:
             (row.market_value_cny or Decimal("0"))
             for row in self.rows
             if row.normalized_type not in {"cash", "fund", "option"}
+            and row.asset_id != FUTU_PENDING_ASSET_ID
         )
 
     def _component_value(self, category: str) -> Decimal:
@@ -1450,8 +1457,15 @@ class NormalizedValuationSnapshot:
         )
 
     @property
+    def pending_asset_value(self) -> Decimal:
+        return sum(
+            (row.market_value_cny or Decimal("0") for row in self.rows
+             if row.asset_id == FUTU_PENDING_ASSET_ID), Decimal("0"),
+        )
+
+    @property
     def non_cash_value(self) -> Decimal:
-        return self.equity_value + self.fund_value + self.option_value
+        return self.equity_value + self.fund_value + self.option_value + self.pending_asset_value
 
     @property
     def total_value(self) -> Decimal:
@@ -1525,6 +1539,7 @@ class NormalizedValuationSnapshot:
             stock_value_cny=float(self.equity_value),
             fund_value_cny=float(self.fund_value),
             option_value_cny=float(self.option_value),
+            pending_asset_value_cny=float(self.pending_asset_value),
             cn_asset_value=float(self._region_value("中国资产")),
             us_asset_value=float(self._region_value("美国资产")),
             hk_asset_value=float(self._region_value("港股资产")),
@@ -1633,6 +1648,8 @@ class NormalizedValuationSnapshot:
             "cash_value_cny": number("cash_value_cny"),
             "stock_value_cny": number("stock_value_cny"),
             "fund_value_cny": number("fund_value_cny"),
+            **({"pending_asset_value_cny": number("pending_asset_value_cny")}
+               if getattr(valuation, "pending_asset_value_cny", 0) else {}),
             **({"option_value_cny": number("option_value_cny")}
                if getattr(valuation, "option_value_cny", 0) else {}),
             "cn_asset_value": number("cn_asset_value"),

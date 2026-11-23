@@ -7,6 +7,7 @@ from typing import Any, Callable, Optional
 from src import config
 from src.app.notification_shells import render_receipt
 from src.feishu_client import FeishuClient
+from src.models import FUTU_PENDING_ASSET_ID, MMF_ASSET_ID
 
 
 class FutuSyncReceiptService:
@@ -126,9 +127,12 @@ class FutuSyncReceiptService:
                 and "created" in cash_mmf
                 and "updated" in cash_mmf
             )
+            mmf_items = [i for i in cash_mmf.get("items", []) if i.get("asset_id") == MMF_ASSET_ID]
+            mmf_created = sum(bool(i.get("created")) for i in mmf_items) if "items" in cash_mmf else cash_mmf.get("created", 0)
+            mmf_updated = sum(bool(i.get("updated")) for i in mmf_items) if "items" in cash_mmf else cash_mmf.get("updated", 0)
             mmf_result = (
-                f"MMF 新增 {cash_mmf.get('created', 0)}，"
-                f"更新 {cash_mmf.get('updated', 0)}"
+                f"MMF 新增 {mmf_created}，"
+                f"更新 {mmf_updated}"
                 if mmf_counts_confirmed
                 else "MMF 结果未确认"
             )
@@ -145,6 +149,19 @@ class FutuSyncReceiptService:
                     "富途原币余额仅观测；PM 使用 CNY-CASH 人民币汇总，不做金额对账；"
                     f"{mmf_result}",
                 ))
+        for item in (cash_mmf or sync_result).get("items", []):
+            if item.get("asset_id") == FUTU_PENDING_ASSET_ID:
+                fields.append(("富途在途资产", f"¥{_format_cost(item.get('target'))}（单独计入总资产）"))
+        datasets = (sync_result.get("reconciliation") or {}).get("datasets") or {}
+        total = datasets.get("pm.total_assets")
+        if total:
+            if total.get("status") == "trusted":
+                fields.append(("富途总资产核对", "通过（现金＋基金＋证券＋在途）"))
+            else:
+                fields.append(("富途总资产核对", f"未通过：{total.get('reason_code')}；差额 {total.get('difference', '数据缺失')}"))
+        pending = datasets.get("pm.pending_asset")
+        if pending and pending.get("status") != "trusted":
+            fields.append(("富途在途资产核对", "未通过，持仓回读与富途金额或币种不一致"))
         partial_write_possible = bool(
             sync_result.get("partial_write_possible")
             or cash_mmf.get("partial_write_possible")

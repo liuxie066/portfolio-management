@@ -555,6 +555,7 @@ def build_historical_price_snapshot(
         get_cash_price_with_rates,
         get_crypto_value_price_with_rates,
         get_mmf_price_with_rates,
+        get_pending_asset_price,
     )
     from src.pricing.payload import normalize_price_payload, positive_finite_decimal
 
@@ -573,7 +574,11 @@ def build_historical_price_snapshot(
             continue
         code = str(holding.asset_id or "").strip()
         normalized_code = normalize_code(code)
-        if holding.asset_type == AssetType.CASH:
+        from src.models import FUTU_PENDING_ASSET_ID
+
+        if code == FUTU_PENDING_ASSET_ID:
+            payload = get_pending_asset_price(code)
+        elif holding.asset_type == AssetType.CASH:
             payload = get_cash_price_with_rates(code, rates)
         elif holding.asset_type == AssetType.MMF:
             payload = get_mmf_price_with_rates(code, rates)
@@ -763,11 +768,6 @@ class HistoricalNavValuationEvidenceService:
         from src.pricing.payload import positive_finite_decimal
 
         account = str(account or "").strip()
-        from src.app.futu_mmf_shared import mmf_shared_configured
-
-        if mmf_shared_configured() and account in (config.get("futu.profiles", {}) or {}):
-            raise ValueError("Historical NAV requires sealed valuation evidence for shared MMF funding")
-
         source_run_id = str(source_run_id or "").strip()
         expected_holdings_digest = str(expected_holdings_digest or "").strip()
         expected_cash_flow_fingerprint = str(
