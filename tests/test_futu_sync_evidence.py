@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from src.app.futu_balance_sync_service import FutuBalanceSnapshot, FutuBalanceSyncService
 from src.app.futu_sync_evidence import FutuSyncEvidenceStore
 from src.app.futu_sync_reconciler import FutuSyncReconciler
@@ -426,3 +428,62 @@ def test_portfolio_sync_preserves_pending_through_balance_stage(tmp_path):
     assert storage.get_holding_fresh(FUTU_PENDING_ASSET_ID, "lx", "富途").quantity == 9745
     assert result["holdings_digest"]
     assert result["reconciliation"]["datasets"]["pm.pending_asset"]["status"] == "trusted"
+
+
+@pytest.mark.parametrize('failed_asset, failed_stage', [
+    ('CNY-CASH', 'securities_cash'),
+    ('CNY-MMF', 'fund_mmf'),
+    ('CNY-FUTU-PENDING', 'pending_asset'),
+])
+def test_portfolio_failure_preserves_completed_results_and_unstarted_stages(
+    tmp_path, monkeypatch, failed_asset, failed_stage,
+):
+    from dataclasses import asdict
+    from types import SimpleNamespace
+    from src.app.futu_balance_sync_service import FutuPortfolioSnapshot
+    from src.app.futu_sync_receipt_service import FutuSyncReceiptService
+
+    snapshot = FutuPortfolioSnapshot(**asdict(_pending_snapshot()))
+    storage = _Storage()
+    original_read = storage.get_holding_fresh
+
+    def fail_read(asset_id, account, broker):
+        if asset_id == failed_asset:
+            raise RuntimeError('飞书 API 错误: BadRequest (HTTP 400, code=123, log_id=trace-123)')
+        return original_read(asset_id, account, broker)
+
+    monkeypatch.setattr(storage, 'get_holding_fresh', fail_read)
+    store = FutuSyncEvidenceStore(tmp_path)
+    result = FutuBalanceSyncService(
+        storage, SimpleNamespace(fetch_portfolio=lambda: snapshot),
+        fx_loader=_fx, evidence_store=store,
+        reconciler=FutuSyncReconciler(storage, wait=lambda _: None),
+    ).sync_portfolio(account='lx', dry_run=False, confirm=True)
+
+    assert result['success'] is False
+    stages = result['stages']
+    assert stages[failed_stage]['status'] == 'failed'
+    assert stages['securities_cash']['mode'] == 'writeback'
+    cash = result['cash_mmf']
+    assert cash['cash_mode'] == 'writeback'
+    message = FutuSyncReceiptService.build_message(result)
+    assert 'HTTP 400, code=123, log_id=trace-123' in message
+    assert '仅观测' not in message
+    assert '进行中' not in message
+    if failed_stage == 'securities_cash':
+        assert cash['cash_write'] is None
+        assert stages['fund_mmf']['status'] == 'not_run'
+        assert 'CNY-CASH 未核验' in message
+        assert 'MMF 未执行' in message
+        assert storage.writes == []
+    else:
+        assert cash['cash_write']['target'] == -9745
+        assert stages['securities_cash']['status'] == 'succeeded'
+        assert 'CNY-CASH ¥100.00→¥-9,745.00' in message
+    if failed_stage != 'pending_asset':
+        assert stages['pending_asset']['status'] == 'not_run'
+        assert 'pending_asset · 未执行' in message
+    else:
+        assert stages['fund_mmf']['status'] == 'succeeded'
+        assert 'MMF 新增 1，更新 1' in message
+    assert store.latest('lx')['stages'] == stages

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.25 - 2026-11-23
+
+- Preserve Feishu HTTP status, business error details and request log IDs in failed synchronization diagnostics.
+- Retain completed cash and money-market fund results in failed Futu sync receipts, mark unstarted stages accurately, and distinguish pending-asset validation failures.
+
 ## 0.2.24 - 2026-11-23
 
 - Show Futu pending assets separately in holdings and count them once in total assets and NAV, without inflating stock or available cash.

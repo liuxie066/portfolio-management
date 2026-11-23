@@ -37,6 +37,19 @@ migration evidence only; production secure mode rejects plaintext Secret
 fallback.
 Run `systemctl start portfolio-feishu-preflight.service` before enabling jobs.
 
+Failed Futu sync receipts preserve completed cash writeback and mark subsequent
+stages that never started as `not_run` (未执行). An unknown cash mode or missing
+writeback result is shown as unconfirmed. A completed MMF stage remains confirmed
+if the later pending-asset stage fails. Pending-asset checks distinguish unavailable
+readback, invalid holding structure and amount mismatch.
+
+Feishu business errors include the HTTP status, `code`, `msg` and available
+`log_id` in the error text, including HTTP 400 responses. Record these alongside
+the sync run ID when investigating a failed request. HTTP 400 is not automatically
+retried. The partial-write warning remains conservative because a read can fail
+before or after a write; use the receipt's account-specific dry-run command to
+inspect current state before another confirmed write.
+
 Durable background Futu refreshes enqueue a compact receipt only for successful,
 trusted stock, ETF or option quantity changes, including new/zeroed positions:
 the shared PM receipt shell with type “富途持仓同步”, status “✅ 成功” and a
