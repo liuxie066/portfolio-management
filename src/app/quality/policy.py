@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from src import config
-from src.app.futu_sync_evidence import FutuSyncEvidenceStore
+from src.app.futu_sync_evidence import FutuSyncEvidenceStore, FUTU_ASSET_DATASETS
 
 from .futu_evidence import (
     evaluate_receipt_freshness,
@@ -18,6 +18,7 @@ NAV_REQUIRED_DATASETS = (
     "pm.holdings_quantity",
     "pm.cash_aggregate",
     "pm.fund_mmf",
+    *FUTU_ASSET_DATASETS,
     "pm.prices",
     "pm.fx",
 )
@@ -82,6 +83,7 @@ def assert_official_nav_write_allowed(
     )
     datasets: dict[str, dict[str, Any]] = {
         "pm.account_mapping": {"status": mapping_status},
+        **{key: {"status": (verdicts.get(key) or {}).get("status", "unavailable")} for key in FUTU_ASSET_DATASETS},
         "pm.holdings_quantity": {
             "status": (verdicts.get("pm.holdings_quantity") or {}).get("status", "unavailable")
         },

@@ -205,3 +205,19 @@ def test_futu_sync_receipt_does_not_infer_counts_from_success_alone():
 
     assert "MMF 结果未确认" in message
     assert "MMF 新增 0，更新 0" not in message
+
+
+def test_pending_receipt_separates_mmf_counts_and_reports_total_mismatch():
+    result = _write_result()
+    result["success"] = False
+    result["cash_mmf"].update(created=1, updated=2, items=[
+        {"asset_id": "CNY-MMF", "created": False, "updated": True},
+        {"asset_id": "CNY-FUTU-PENDING", "created": True, "updated": True, "target": 9745},
+    ])
+    result["reconciliation"] = {"datasets": {"pm.total_assets": {
+        "status": "untrusted", "reason_code": "FUTU_TOTAL_ASSETS_MISMATCH", "difference": "9745",
+    }}}
+    message = FutuSyncReceiptService.build_message(result)
+    assert "MMF 新增 0，更新 1" in message
+    assert "富途在途资产" in message and "¥9745.00" in message
+    assert "富途总资产核对" in message and "差额 9745" in message

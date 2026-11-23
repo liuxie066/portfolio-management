@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.24 - 2026-11-23
+
+- Show Futu pending assets separately in holdings and count them once in total assets and NAV, without inflating stock or available cash.
+- Reconcile pending assets against the same broker balance snapshot and block official NAV when the evidence is missing or inconsistent.
+
 ## 0.2.23 - 2026-11-21
 
 - Reduce OpenD connections during batch holdings validation by reusing one account snapshot per event attempt.

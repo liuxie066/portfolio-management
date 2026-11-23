@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Callable, Dict
 
 from .payload import normalize_price_payload
+from src.models import FUTU_PENDING_ASSET_ID
 
 
 def _currency_from_code(code: str) -> str:
@@ -125,6 +126,8 @@ def get_crypto_value_price(
 
 def fixed_quote_factory(code: str) -> tuple[str, Callable[..., dict]] | None:
     """Find the fixed quote builder and its diagnostic source for a pricing code."""
+    if code == FUTU_PENDING_ASSET_ID:
+        return "futu_pending", get_pending_asset_price
     if is_crypto_value_code(code):
         return "crypto_value", get_crypto_value_price
     if code == "CASH" or code.endswith("-CASH"):
@@ -132,3 +135,12 @@ def fixed_quote_factory(code: str) -> tuple[str, Callable[..., dict]] | None:
     if code.endswith("-MMF"):
         return "mmf", get_mmf_price
     return None
+
+
+def get_pending_asset_price(code: str, fetch_exchange_rates=None) -> Dict:
+    """The Futu holding already contains its CNH/CNY account value."""
+    return normalize_price_payload({
+        "code": code, "name": "富途在途资产", "price": 1.0,
+        "currency": "CNY", "cny_price": 1.0, "exchange_rate": 1.0,
+        "market_type": "other", "source": "fixed",
+    })

@@ -13,6 +13,11 @@ Manual editing policy:
 - System-only tables should not be edited by hand except during explicit repair.
 - Registry schema presence and per-operation row requirements are separate contracts.
 
+Futu synchronization owns the generated CNY-FUTU-PENDING holding for each
+account/broker. Its name is 富途在途资产, asset_type is other, currency is CNY,
+and quantity is the current RMB pending value, not a cumulative cash flow.
+No new table or select option is needed. See [valuation rules](valuation.md#futu-pending-assets).
+
 <!-- BEGIN GENERATED FEISHU CONTRACTS -->
 ## Generated Field Contracts
 

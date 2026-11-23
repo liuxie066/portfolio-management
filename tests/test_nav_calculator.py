@@ -46,12 +46,14 @@ def test_nav_calculator_period_metrics_and_yearly_mutation():
     assert yearly_data["2025"]["appreciation"] == 250.0
 
 
-def test_nav_calculator_build_and_validate_nav_record():
+@pytest.mark.parametrize("pending,option", [(0, 0), (150, 0), (0, -20), (150, -20)])
+def test_nav_calculator_build_and_validate_nav_record(pending, option):
     valuation = PortfolioValuation(
         account="a",
         total_value_cny=1100.0,
         cash_value_cny=100.0,
-        stock_value_cny=1000.0,
+        stock_value_cny=1000.0 - pending - option,
+        pending_asset_value_cny=pending, option_value_cny=option,
     )
     nav = NavCalculator.build_nav_record(
         today=date(2025, 3, 14),

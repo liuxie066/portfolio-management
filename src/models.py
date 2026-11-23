@@ -38,6 +38,7 @@ def _quantize_decimal(value: Any, quant: Decimal) -> Optional[float]:
 # 现金资产ID常量
 CASH_ASSET_ID = "CNY-CASH"      # 人民币现金
 MMF_ASSET_ID = "CNY-MMF"        # 货币基金
+FUTU_PENDING_ASSET_ID = "CNY-FUTU-PENDING"  # 富途人民币计价的汇总在途资产
 USD_CASH_ASSET_ID = "USD-CASH"  # 美元现金
 HKD_CASH_ASSET_ID = "HKD-CASH"  # 港币现金
 
@@ -453,6 +454,7 @@ class PortfolioValuation(BaseModel):
     stock_value_cny: float = 0.0
     fund_value_cny: float = 0.0
     option_value_cny: float = 0.0
+    pending_asset_value_cny: float = 0.0
 
     # 市场分布
     cn_asset_value: float = 0.0
@@ -476,7 +478,7 @@ class PortfolioValuation(BaseModel):
     warnings: List[str] = Field(default_factory=list)
 
     @field_validator(
-        'total_value_cny', 'cash_value_cny', 'stock_value_cny', 'fund_value_cny',
+        'total_value_cny', 'cash_value_cny', 'stock_value_cny', 'fund_value_cny', 'pending_asset_value_cny',
         'cn_asset_value', 'us_asset_value', 'hk_asset_value', 'shares',
         mode='before'
     )

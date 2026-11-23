@@ -108,6 +108,8 @@ def report_holdings_fields(holdings_data: dict, position_data: dict) -> dict:
             "total_value": total_value,
             "cash_ratio": position_data.get("cash_ratio", 0),
             "stock_ratio": position_data.get("stock_ratio", 0),
+            **({"pending_asset_value": holdings_data["pending_asset_value"]}
+               if holdings_data.get("pending_asset_value") else {}),
             "fund_ratio": position_data.get("fund_ratio", 0),
             **option_values,
         },

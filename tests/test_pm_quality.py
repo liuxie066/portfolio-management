@@ -98,6 +98,7 @@ def _receipt(
             "positions": {"status": "succeeded"},
             "securities_cash": {"status": "succeeded"},
             "fund_mmf": {"status": "succeeded"},
+            "pending_asset": {"status": "succeeded"},
         },
         "success": success,
         "partial_write_possible": False,
@@ -105,6 +106,8 @@ def _receipt(
             "status": "trusted" if {cost_status, cash_status, mmf_status} == {"trusted"} else "untrusted",
             "datasets": {
                 "pm.holdings_quantity": {"status": "trusted", "reason_code": "MATCH"},
+                "pm.pending_asset": {"status": "trusted"},
+                "pm.total_assets": {"status": "trusted"},
                 "pm.cost_basis": {"status": cost_status, "reason_code": "MATCH" if cost_status == "trusted" else "MISMATCH"},
                 "pm.cash_aggregate": {
                     "status": cash_status,
@@ -177,6 +180,8 @@ def test_cost_basis_does_not_block_nav_but_cash_or_mmf_does():
         "pm.holdings_quantity": {"status": "trusted"},
         "pm.cash_aggregate": {"status": "trusted"},
         "pm.fund_mmf": {"status": "trusted"},
+        "pm.pending_asset": {"status": "trusted"},
+        "pm.total_assets": {"status": "trusted"},
         "pm.prices": {"status": "trusted"},
         "pm.fx": {"status": "trusted"},
         "pm.cost_basis": {"status": "untrusted"},
@@ -574,3 +579,22 @@ def test_finality_rejects_explicit_unrecognized_snapshot_marker(snapshot_status)
     decision = evaluate_nav_finality(nav.details, target_date=nav.date)
     assert not decision.eligible
     assert decision.reason == "snapshot_incomplete"
+
+
+def test_nav_rejects_pending_or_total_failure_even_when_cash_and_mmf_match(monkeypatch, tmp_path):
+    import pytest
+
+    _configure(monkeypatch, tmp_path, onboarded=True)
+    store = FutuSyncEvidenceStore(tmp_path / "receipts")
+    for key in ("pm.pending_asset", "pm.total_assets"):
+        for state in ("untrusted", "unavailable", None):
+            receipt = _receipt()
+            if state:
+                receipt["reconciliation"]["datasets"][key] = {"status": state}
+            else:
+                del receipt["reconciliation"]["datasets"][key]
+            _publish_receipt(store, receipt)
+            with pytest.raises(ValueError, match=key):
+                assert_official_nav_write_allowed(account="lx", receipt_store=store,
+                    valuation_quality={"prices": {"status": "trusted"}, "fx": {"status": "trusted"}},
+                    now=datetime(2026, 7, 26, 10, tzinfo=UTC))

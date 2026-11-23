@@ -786,6 +786,7 @@ def test_historical_prices_bind_symbols_fact_dates_and_supplied_fx():
             ("USD-CASH", AssetType.CASH, "USD"),
             ("HKD-MMF", AssetType.MMF, "HKD"),
             ("BTC-CRYPTO-USD", AssetType.CRYPTO, "USD"),
+            ("CNY-FUTU-PENDING", AssetType.OTHER, "CNY"),
         )
     ]
     symbols = []
@@ -814,6 +815,8 @@ def test_historical_prices_bind_symbols_fact_dates_and_supplied_fx():
     assert prices["BRK.B"]["cny_price"] == 67.57
     assert prices["00700"]["cny_price"] == 8.61
     assert prices["007722"]["fact_date"] == "2026-08-12"
+    assert prices["CNY-FUTU-PENDING"]["price"] == 1
+    assert prices["CNY-FUTU-PENDING"]["cny_price"] == 1
     assert prices["USD-CASH"]["exchange_rate"] == 6.757
     assert all(
         payload["retrieved_at"] == "2026-08-14T08:11:45.216546"
