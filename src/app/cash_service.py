@@ -74,23 +74,30 @@ class CashService:
         return self._sync_absolute_balance(
             account=account, asset_id=asset_id, asset_name=asset_name,
             asset_type=asset_type, target=target, broker=broker, dry_run=dry_run,
+            existing=self.storage.get_holding_fresh(asset_id, account, broker),
         )
 
-    def sync_futu_cash(self, *, account: str, target: float, dry_run: bool) -> dict[str, Any]:
-        """Apply the verified CNY aggregate for the mapped Futu account."""
+    def sync_futu_cash(
+        self, *, account: str, target: float, dry_run: bool, base: Holding | None,
+    ) -> dict[str, Any]:
+        """Apply CNY cash against the fresh base used to prepare its evidence."""
         return self._sync_absolute_balance(
             account=account, asset_id=CASH_ASSET_ID, asset_name="人民币现金",
             asset_type=AssetType.CASH, target=target, broker="富途", dry_run=dry_run,
+            existing=base,
         )
 
     def _sync_absolute_balance(
         self, *, account: str, asset_id: str, asset_name: str, asset_type: AssetType,
-        target: float, broker: str, dry_run: bool,
+        target: float, broker: str, dry_run: bool, existing: Holding | None,
     ) -> dict[str, Any]:
+        if existing is not None and (existing.account, existing.asset_id, existing.broker) != (
+            account, asset_id, broker,
+        ):
+            raise ValueError("cash base identity does not match the requested holding")
         balance_class = AssetClass.ALTERNATIVE if asset_type == AssetType.OTHER else AssetClass.CASH
         balance_industry = Industry.OTHER if asset_type == AssetType.OTHER else Industry.CASH
         target_qty = float(self.quantize_money(target))
-        existing = self.storage.get_holding_fresh(asset_id, account, broker)
         current_qty = float(self.quantize_money(existing.quantity if existing else 0))
         delta = float(self.quantize_money(target_qty - current_qty))
         created = existing is None

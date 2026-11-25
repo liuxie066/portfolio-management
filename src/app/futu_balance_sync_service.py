@@ -1058,7 +1058,9 @@ class FutuBalanceSyncService:
         }
         if not dry_run:
             self.evidence_store.save_cash_write(account, proof)
-        result = self.cash_service.sync_futu_cash(account=account, target=target, dry_run=dry_run)
+        result = self.cash_service.sync_futu_cash(
+            account=account, target=target, dry_run=dry_run, base=current,
+        )
         if not dry_run:
             readback = self.storage.get_holding_fresh(CASH_ASSET_ID, account, "富途")
             if not self._cash_matches(readback, account=account, target=target):

@@ -487,3 +487,116 @@ def test_portfolio_failure_preserves_completed_results_and_unstarted_stages(
         assert stages['fund_mmf']['status'] == 'succeeded'
         assert 'MMF 新增 1，更新 1' in message
     assert store.latest('lx')['stages'] == stages
+
+
+class _CashTransport:
+    """Exercise real repository base checking and readback with deterministic I/O."""
+    def __init__(self, *, quantity=100, corrupt_write=False):
+        self.fields = None if quantity is None else self.cash_fields(quantity)
+        self.reads = 0
+        self.writes = 0
+        self.corrupt_write = corrupt_write
+
+    @staticmethod
+    def cash_fields(quantity):
+        return {
+            'asset_id': 'CNY-CASH', 'asset_name': '人民币现金', 'asset_type': 'cash',
+            'account': 'lx', 'broker': '富途', 'quantity': quantity, 'currency': 'CNY',
+            'asset_class': '现金', 'industry': '现金',
+        }
+
+    def list_records(self, table, **kwargs):
+        self.reads += 1
+        return [] if self.fields is None else [{'record_id': 'cash-record', 'fields': dict(self.fields)}]
+
+    def update_record(self, table, record_id, fields):
+        self.writes += 1
+        self.fields.update(fields)
+        if self.corrupt_write:
+            self.fields['quantity'] += 1
+        return {'record_id': record_id, 'fields': dict(self.fields)}
+
+    def create_record(self, table, fields):
+        self.fields = {}
+        return self.update_record(table, 'cash-record', fields)
+
+
+def _aggregate_sync(tmp_path, transport):
+    from unittest.mock import Mock
+    from src.feishu_storage import FeishuStorage
+
+    storage = FeishuStorage(client=transport, local_price_cache=Mock())
+    store = FutuSyncEvidenceStore(tmp_path / 'cash-receipts')
+    sync = FutuBalanceSyncService(storage, evidence_store=store, fx_loader=_fx)
+    return sync, store
+
+
+@pytest.mark.parametrize('quantity,expected_reads,expected_writes', [
+    (100, 4, 1), (None, 4, 1), (236, 2, 0),
+])
+def test_aggregate_cash_reuses_prepared_base_but_keeps_write_proofs(
+    tmp_path, quantity, expected_reads, expected_writes,
+):
+    transport = _CashTransport(quantity=quantity)
+    sync, store = _aggregate_sync(tmp_path, transport)
+    result = sync._sync_aggregate_cash(_Provider().fetch_balances(), account='lx', dry_run=False)
+    assert result['target'] == 236
+    assert transport.reads == expected_reads
+    assert transport.writes == expected_writes
+    assert transport.fields['quantity'] == 236
+    proof = store.cash_write('lx')
+    assert proof['status'] == 'verified'
+    assert proof['previous_quantity'] == quantity
+    assert proof['record_id'] == 'cash-record'
+
+
+def test_cash_base_reuse_does_not_overwrite_a_concurrent_change(tmp_path, monkeypatch):
+    from src.domain.holding_mutations import HoldingMutationConflictError
+
+    transport = _CashTransport()
+    sync, store = _aggregate_sync(tmp_path, transport)
+    save = store.save_cash_write
+
+    def concurrent_change(account, proof):
+        save(account, proof)
+        if proof['status'] == 'prepared':
+            transport.fields['quantity'] = 150
+
+    monkeypatch.setattr(store, 'save_cash_write', concurrent_change)
+    with pytest.raises(HoldingMutationConflictError):
+        sync._sync_aggregate_cash(_Provider().fetch_balances(), account='lx', dry_run=False)
+    assert transport.writes == 0
+    assert transport.fields['quantity'] == 150
+    assert store.cash_write('lx')['status'] == 'prepared'
+
+
+def test_cash_base_reuse_still_rejects_incorrect_write_readback(tmp_path):
+    from src.domain.holding_mutations import HoldingMutationProofError
+
+    transport = _CashTransport(corrupt_write=True)
+    sync, store = _aggregate_sync(tmp_path, transport)
+    with pytest.raises(HoldingMutationProofError):
+        sync._sync_aggregate_cash(_Provider().fetch_balances(), account='lx', dry_run=False)
+    assert transport.writes == 1
+    assert store.cash_write('lx')['status'] == 'prepared'
+
+
+def test_cash_dry_run_reads_once_without_writing_proof_or_holding(tmp_path):
+    transport = _CashTransport()
+    sync, store = _aggregate_sync(tmp_path, transport)
+    result = sync._sync_aggregate_cash(_Provider().fetch_balances(), account='lx', dry_run=True)
+    assert result['target'] == 236
+    assert transport.reads == 1
+    assert transport.writes == 0
+    assert store.cash_write('lx') is None
+
+
+def test_cash_base_for_another_account_is_rejected_before_write(tmp_path):
+    from src.app.cash_service import CashService
+
+    transport = _CashTransport()
+    sync, _store = _aggregate_sync(tmp_path, transport)
+    base = sync.storage.get_holding_fresh('CNY-CASH', 'lx', '富途')
+    with pytest.raises(ValueError, match='base identity'):
+        CashService(sync.storage).sync_futu_cash(account='sy', target=236, dry_run=False, base=base)
+    assert transport.writes == 0

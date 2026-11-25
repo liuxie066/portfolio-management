@@ -50,6 +50,58 @@ retried. The partial-write warning remains conservative because a read can fail
 before or after a write; use the receipt's account-specific dry-run command to
 inspect current state before another confirmed write.
 
+### Feishu read throttling
+
+GET requests retry HTTP 200/business code `1254290` (`TooManyRequest`) up to
+three times after the initial attempt. HTTP 429 retains its existing bounded
+retry policy. Other business errors and HTTP 400 are not retried; this change
+does not add business-error retries to writes, batch mutations or messages.
+The retry repeats only the current request/page, never the whole Futu sync.
+
+Backoff starts at 1, 2 and 4 seconds. A valid `Retry-After` (seconds or HTTP
+date) or `x-ogw-ratelimit-reset` (seconds) can extend the wait. If both hints
+exist, use the longer wait. Invalid hints are ignored. A wait exceeding 60
+seconds stops automatic retry instead of shortening the server's requested
+delay. Reads with a deadline refuse waits that do not fit the remaining budget
+and recheck the budget before sending again. Exhaustion preserves the final
+Feishu error and log ID. These retries improve recovery, not upstream capacity.
+
+Each request attempt through `FeishuClient._request` emits an INFO log named
+`feishu_request` with JSON fields: `started_at_epoch`, `elapsed_ms`, `pid`,
+`client`, `method`, `endpoint`, hashed app/base/table identities, `attempt`,
+`http_status`, `code`, `log_id`, `server_wait_seconds`, `retry_delay_seconds`
+and `outcome`. A failed attempt also records its exception type. `retry` means
+another attempt is planned; only a subsequent log proves it was sent. Authentication
+failures before sending, token acquisition and retries inside the HTTP adapter
+are outside this count. Logs omit raw URLs/query values, tokens, request and
+response bodies, exception text, account names and holding values.
+
+For a failed scheduled sync, inspect a bounded time window across the daily
+job, API and listener, e.g. (replace times with the incident's local times):
+
+```bash
+journalctl -u portfolio-nav-daily.service -u portfolio-management-api.service \
+  -u portfolio-holdings-event-listener.service \
+  --since '2026-11-25 08:09:30' --until '2026-11-25 08:11:00' --no-pager
+```
+
+Match the failure's `log_id`, then group request timestamps by endpoint and
+app/base/table hashes across PIDs to investigate overlapping requests. Local
+60 ms pacing applies to one client instance; it does not guarantee a global
+20 QPS allowance or prove which upstream quota was hit. Other applications
+and devices are not covered by these PM logs. Preserve the sync run ID and
+Feishu log ID for upstream investigation when aggregate evidence is insufficient.
+
+Cash synchronization reuses the fresh base already read for the prepared cash
+evidence, avoiding one duplicate account-wide read. The repository still checks
+that base immediately before a mutation and proves the write by fresh readback;
+cash evidence readback and final reconciliation remain intact. The diagnostic
+logs can guide further read reduction or shared pacing; neither should remove
+those safeguards. Do not rerun a complete confirmed sync merely because a read
+was throttled: inspect the receipt and use its dry-run command first.
+
+### Background refresh receipts
+
 Durable background Futu refreshes enqueue a compact receipt only for successful,
 trusted stock, ETF or option quantity changes, including new/zeroed positions:
 the shared PM receipt shell with type “富途持仓同步”, status “✅ 成功” and a
