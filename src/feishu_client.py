@@ -2,12 +2,17 @@
 飞书多维表 API 客户端
 支持读写核心表 holdings/cash_flow/nav_history/holdings_snapshot，以及可选 transactions/repair/schema 表。
 """
+import hashlib
 import json
+import logging
+import os
+import re
 import math
 import time
 import requests
 import requests.adapters
 import threading
+from email.utils import parsedate_to_datetime
 from contextlib import contextmanager
 from typing import Dict, List, Optional, Any
 from urllib3.exceptions import ReadTimeoutError
@@ -22,6 +27,9 @@ from src.feishu.contracts import (
 )
 from src.feishu.errors import FeishuMessageNotSent, FeishuReadTimeout, FeishuRecordNotFoundError
 from src.time_utils import remaining_timeout, sleep_with_deadline
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class FeishuBatchWriteError(RuntimeError):
@@ -79,9 +87,9 @@ class FeishuClient:
         self._token_expire_time = 0
         self._token_lock = threading.Lock()  # 用于双重检查锁
 
-        # 限流保护：飞书 API 限制 20 QPS
+        # Per-client pacing only; quotas can be shared and endpoint-specific.
         self._last_request_time = 0
-        self._min_interval = 0.06  # 60ms = 约 16 QPS，留有余量
+        self._min_interval = 0.06
         self._rate_lock = threading.Lock()
 
         # 表配置映射（支持两种配置方式）
@@ -237,56 +245,141 @@ class FeishuClient:
         # shortcut: socket budgets cannot cancel DNS/trickling bodies; hard cutoffs need execution isolation.
         return Timeout(total=self._remaining_budget(deadline, stage), connect=connect, read=read)
 
+    def _request_scope(self, endpoint: str) -> dict:
+        # Never log raw URLs, identifiers, query values or response bodies.
+        parts = endpoint.split('?', 1)[0].strip('/').split('/')
+        scope = {}
+        if len(parts) >= 6 and parts[:3] == ['bitable', 'v1', 'apps'] and parts[4] == 'tables':
+            category = 'bitable.tables'
+            if len(parts) >= 7 and parts[6] in {'records', 'fields'}:
+                category += '.' + parts[6]
+                if len(parts) >= 8:
+                    category += '.' + (parts[7] if parts[7] in {
+                        'batch_create', 'batch_update', 'batch_delete', 'search',
+                    } else 'item')
+            scope.update(base=parts[3], table=parts[5])
+        else:
+            category = 'im.messages' if parts[:3] == ['im', 'v1', 'messages'] else 'other'
+        if self.app_id:
+            scope['app'] = self.app_id
+        return {'endpoint': category, **{
+            key + '_hash': hashlib.sha256(value.encode()).hexdigest()[:16]
+            for key, value in scope.items()
+        }}
+
+    @staticmethod
+    def _retry_delay(response, attempt: int) -> tuple[float, float | None]:
+        hints = []
+        for name in ('Retry-After', 'x-ogw-ratelimit-reset'):
+            raw = response.headers.get(name)
+            if not isinstance(raw, str):
+                continue
+            try:
+                delay = float(raw)
+            except ValueError:
+                if name != 'Retry-After':
+                    continue
+                try:
+                    delay = parsedate_to_datetime(raw).timestamp() - time.time()
+                except (TypeError, ValueError, OverflowError):
+                    continue
+            if math.isfinite(delay) and delay >= 0:
+                hints.append(delay)
+        hint = max(hints) if hints else None
+        return max(2 ** attempt, hint or 0), hint
+
     def _request(self, method: str, endpoint: str, _retry_count: int = 0,
                  *, deadline: float | None = None, _stage: str = 'request', **kwargs) -> Dict:
-        """发送请求（带限流和错误处理）"""
-        self._rate_limit(**({'deadline': deadline} if deadline is not None else {}))
-
+        """Send bounded attempts; only GET gains business-throttle retries."""
         url = f"{self.BASE_URL}{endpoint}"
         is_message_send = method == 'POST' and endpoint == '/im/v1/messages'
-        try:
-            headers = self._get_headers(**({'deadline': deadline} if deadline is not None else {}))
-        except Exception as exc:
-            if is_message_send:
-                raise FeishuMessageNotSent("Feishu message authorization failed before sending") from exc
-            raise
-
         requested_timeout = kwargs.pop('timeout', None)
-        request_kwargs = dict(kwargs, timeout=self._bounded_timeout(requested_timeout, deadline, _stage))
         session = self.session if deadline is None else self._deadline_session
-        if deadline is not None:
-            request_kwargs['allow_redirects'] = False
-        try:
-            response = session.request(method, url, headers=headers, **request_kwargs)
-        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
-            if deadline is None or not (
-                isinstance(exc, requests.exceptions.Timeout)
-                or any(isinstance(arg, ReadTimeoutError) for arg in exc.args)
-            ):
-                raise
-            raise FeishuReadTimeout(_stage, str(exc)) from exc
-        if deadline is not None:
-            self._remaining_budget(deadline, _stage)
-
-        # 处理限流错误（最多重试3次）
-        if response.status_code == 429:
-            if _retry_count >= 3:
-                if is_message_send:
-                    raise FeishuMessageNotSent("Feishu message rejected by rate limit")
-                response.raise_for_status()
+        for attempt in range(_retry_count, 4):
+            self._rate_limit(deadline=deadline)
             try:
-                sleep_with_deadline(1 * (2 ** _retry_count), deadline)
+                headers = self._get_headers(**({'deadline': deadline} if deadline is not None else {}))
+            except Exception as exc:
+                if is_message_send:
+                    raise FeishuMessageNotSent("Feishu message authorization failed before sending") from exc
+                raise
+            request_kwargs = dict(kwargs, timeout=self._bounded_timeout(requested_timeout, deadline, _stage))
+            if deadline is not None:
+                request_kwargs['allow_redirects'] = False
+            started = time.monotonic()
+            event = {
+                **self._request_scope(endpoint), 'method': method,
+                'pid': os.getpid(), 'client': id(self), 'attempt': attempt + 1,
+                'started_at_epoch': time.time(), 'http_status': None, 'code': None,
+                'log_id': None, 'outcome': 'failed', 'retry_delay_seconds': None,
+                'server_wait_seconds': None,
+            }
+            try:
+                try:
+                    response = session.request(method, url, headers=headers, **request_kwargs)
+                except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+                    if deadline is not None and (
+                        isinstance(exc, requests.exceptions.Timeout)
+                        or any(isinstance(arg, ReadTimeoutError) for arg in exc.args)
+                    ):
+                        raise FeishuReadTimeout(_stage, str(exc)) from exc
+                    raise
+                event['http_status'] = response.status_code
+                try:
+                    data = response.json()
+                except (TypeError, ValueError) as exc:
+                    if response.status_code != 429:
+                        response.raise_for_status()
+                        raise RuntimeError("Feishu API returned a non-JSON response") from exc
+                    data = None
+                code = data.get('code') if isinstance(data, dict) else None
+                event['code'] = code if type(code) is int else None
+                error = data.get('error') if isinstance(data, dict) else None
+                log_id = response.headers.get('X-Tt-Logid') or (
+                    error.get('log_id') if isinstance(error, dict) else None
+                )
+                if isinstance(log_id, str) and re.fullmatch(r'[A-Za-z0-9_-]{1,128}', log_id):
+                    event['log_id'] = log_id
+                delay, hint = self._retry_delay(response, attempt)
+                event['server_wait_seconds'] = hint
+                event['elapsed_ms'] = round((time.monotonic() - started) * 1000, 3)
+                if deadline is not None:
+                    self._remaining_budget(deadline, _stage)
+                throttled = response.status_code == 429 or (
+                    method == 'GET' and response.status_code == 200
+                    and type(code) is int and code == 1254290
+                )
+                # Never retry earlier than a long server hint; leave it to the caller.
+                if throttled and attempt < 3 and delay <= 60:
+                    response.close()
+                    event['retry_delay_seconds'] = delay
+                    if deadline is not None and delay >= self._remaining_budget(deadline, 'retry_backoff'):
+                        raise FeishuReadTimeout('retry_backoff', 'insufficient deadline budget for retry backoff')
+                    event['outcome'] = 'retry'
+                else:
+                    if response.status_code == 429:
+                        if is_message_send:
+                            raise FeishuMessageNotSent("Feishu message rejected by rate limit")
+                        response.raise_for_status()
+                    result = self._decode_response(response, data)
+                    if deadline is not None:
+                        self._remaining_budget(deadline, _stage)
+                    event['outcome'] = 'succeeded'
+                    return result
+            except Exception as exc:
+                event['error_type'] = type(exc).__name__
+                raise
+            finally:
+                event.setdefault('elapsed_ms', round((time.monotonic() - started) * 1000, 3))
+                LOGGER.info('feishu_request %s', json.dumps(event, sort_keys=True))
+            try:
+                sleep_with_deadline(delay, deadline)
             except TimeoutError as exc:
                 raise FeishuReadTimeout('retry_backoff', str(exc)) from exc
-            return self._request(method, endpoint, _retry_count=_retry_count + 1,
-                                 deadline=deadline, _stage=_stage, timeout=requested_timeout, **kwargs)
+        raise RuntimeError('Feishu request exhausted attempts')
 
-        try:
-            data = response.json()
-        except (TypeError, ValueError) as exc:
-            response.raise_for_status()
-            raise RuntimeError("Feishu API returned a non-JSON response") from exc
-
+    @staticmethod
+    def _decode_response(response, data) -> Dict:
         if not isinstance(data, dict):
             response.raise_for_status()
             raise RuntimeError(f"Feishu API returned an invalid response object: {data!r}")
@@ -328,8 +421,6 @@ class FeishuClient:
 
         if 'data' not in data or not isinstance(data['data'], dict):
             raise RuntimeError(f"Feishu API success response has invalid data: {data.get('data')!r}")
-        if deadline is not None:
-            self._remaining_budget(deadline, _stage)
         return data['data']
 
     def _get_table_config(self, table_name: str) -> tuple:
