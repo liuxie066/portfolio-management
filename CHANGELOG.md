@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.26 - 2026-11-25
+
+- Recover temporarily throttled Feishu reads with bounded, deadline-aware retries and server wait hints, without replaying business writes.
+- Add sanitized per-attempt request diagnostics to investigate rate-limit contention across PM processes.
+- Avoid one duplicate account-wide read during Futu cash synchronization while preserving conflict checks and write verification.
+
 ## 0.2.25 - 2026-11-23
 
 - Preserve Feishu HTTP status, business error details and request log IDs in failed synchronization diagnostics.
