@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.27 - 2026-11-26
+
+- Show stocks, funds, signed option exposure, and cash including pending assets in NAV receipts without changing valuation or available cash.
+- Split account details into assets, returns, and allocation rows, and separate normal price summaries from warnings.
+
 ## 0.2.26 - 2026-11-25
 
 - Recover temporarily throttled Feishu reads with bounded, deadline-aware retries and server wait hints, without replaying business writes.
