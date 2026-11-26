@@ -103,6 +103,7 @@ import sys
 if sys.argv[1:3] == ['-m', 'venv']:
     binary = Path(sys.argv[3]) / 'bin/python'
     binary.parent.mkdir(parents=True, exist_ok=True)
+    (binary.parent.parent / 'pyvenv.cfg').write_text('home = fixture')
     if not binary.exists():
         binary.symlink_to(Path(__file__).resolve())
 elif sys.argv[1:3] == ['-m', 'pip']:
@@ -169,6 +170,14 @@ def test_offline_preparation_never_applies_services(bootstrap, tmp_path, missing
     assert len(calls) == (1 if missing else 2)
     if not missing:
         assert calls[1][-1] == "check"
+        receipt = json.loads((app / ".pm-prepared-release.json").read_text())
+        assert receipt["status"] == "prepared"
+        assert receipt["version"] == environment["PACKAGE_VERSION"]
+        assert receipt["package_sha256"] == hashlib.sha256(Path(environment["PACKAGE_ARCHIVE"]).read_bytes()).hexdigest()
+        assert receipt["files"]["scripts/pm.py"] == hashlib.sha256((app / "scripts/pm.py").read_bytes()).hexdigest()
+        assert receipt["venv_config_sha256"] == hashlib.sha256((app / ".venv/pyvenv.cfg").read_bytes()).hexdigest()
+    else:
+        assert json.loads((app / ".pm-prepared-release.json").read_text())["status"] == "source_verified"
     repeat = invoke("--ref", "v" + environment["PACKAGE_VERSION"], "--prepare-offline", str(wheels))
     assert repeat.returncode != 0
     assert not Path(environment["ASSET_LOG"]).exists()

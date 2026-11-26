@@ -24,7 +24,6 @@ from typing import Callable, Iterable
 
 import yaml
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -33,29 +32,30 @@ from src.configuration.feishu_credentials import (  # noqa: E402
     AGENT_APP_SECRET_CREDENTIAL,
     LISTENER_APP_SECRET_CREDENTIAL,
 )
+from src.maintenance.service_units import (
+    API_SERVICE_NAME,
+    CASH_FLOW_SERVICE_NAME,
+    CASH_FLOW_TIMER_NAME,
+    EVENING_SERVICE_NAME,
+    EVENING_TIMER_NAME,
+    FEISHU_PREFLIGHT_SERVICE_NAME,
+    HOLDINGS_EVENT_SERVICE_NAME,
+    QUALITY_LOCK_FILE,
+    QUALITY_SERVICE_NAME,
+    QUALITY_TIMER_NAME,
+    RECEIPT_LOCK_FILE,
+    RECEIPT_SERVICE_NAME,
+    RECEIPT_TIMER_NAME,
+    SCHEDULE_LOCK_FILE,
+    SERVICE_NAME,
+    TIMER_NAME,
+)
 
-
-SERVICE_NAME = "portfolio-nav-daily.service"
-TIMER_NAME = "portfolio-nav-daily.timer"
-EVENING_SERVICE_NAME = "portfolio-futu-evening.service"
-EVENING_TIMER_NAME = "portfolio-futu-evening.timer"
-CASH_FLOW_SERVICE_NAME = "portfolio-cash-flow-scan.service"
-CASH_FLOW_TIMER_NAME = "portfolio-cash-flow-scan.timer"
-API_SERVICE_NAME = "portfolio-management-api.service"
-QUALITY_SERVICE_NAME = "portfolio-quality-refresh.service"
-QUALITY_TIMER_NAME = "portfolio-quality-refresh.timer"
-RECEIPT_SERVICE_NAME = "portfolio-receipt-dispatch.service"
-RECEIPT_TIMER_NAME = "portfolio-receipt-dispatch.timer"
-HOLDINGS_EVENT_SERVICE_NAME = "portfolio-holdings-event-listener.service"
-FEISHU_PREFLIGHT_SERVICE_NAME = "portfolio-feishu-preflight.service"
 DEFAULT_MORNING_ON_CALENDAR = "Mon..Sat *-*-* 08:10:00 Asia/Shanghai"
 DEFAULT_EVENING_ON_CALENDAR = "Mon..Fri *-*-* 17:10:00 Asia/Shanghai"
 DEFAULT_QUALITY_REFRESH_INTERVAL = "15min"
 DEFAULT_RECEIPT_DISPATCH_INTERVAL = "5min"
 DEFAULT_CASH_FLOW_ON_CALENDAR = "*-*-* *:00/15:00 Asia/Shanghai"
-SCHEDULE_LOCK_FILE = "/var/lock/portfolio-management-scheduled.lock"
-QUALITY_LOCK_FILE = "/var/lock/portfolio-management-quality.lock"
-RECEIPT_LOCK_FILE = "/var/lock/portfolio-management-receipts.lock"
 DEFAULT_OPTIONS_MONITOR_ENV_FILE = "/etc/options-monitor/options-monitor.env"
 ENCRYPTED_CREDENTIAL_STORE_DIR = Path("/etc/credstore.encrypted")
 FEISHU_CREDENTIAL_NAMES = (

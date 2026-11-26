@@ -24,6 +24,8 @@
 - 日报 HTML：`scripts/publish_daily_report.py`
 - 架构图：`docs/architecture.md`、`docs/dependency-graph.md`
 - Linux 部署：`docs/deploy-linux.md`
+- Linux 已准备版本的激活与历史自动维护：`./pm service upgrade --help`；默认预览，
+  确认升级并通过验收后自动维护旧版本，保留当前及实际前序；完整步骤见 Linux 部署文档。
 - Schema：`docs/schema.md`、`docs/migrations.md`
 
 ## 非富途持仓变动回执
