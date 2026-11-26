@@ -441,3 +441,56 @@ def test_runtime_children_cannot_alias_a_release(deployment, child):
         c.preview()
     assert c.old.is_dir()
     assert not any(command[:2] in [["systemctl", "stop"], ["systemctl", "start"]] for command in c.calls)
+
+
+@pytest.mark.parametrize("transient", ["launcher", "missing_process", "cwd", "starting"])
+def test_restart_waits_for_both_worker_identities_before_health(deployment, monkeypatch, transient):
+    case = deployment
+    original_show, original_health = upgrade._show, upgrade.urlopen
+    unstable, health_calls = [], []
+
+    def show(unit):
+        info = original_show(unit)
+        if case.current.resolve() == case.target and unit == units.HOLDINGS_EVENT_SERVICE_NAME and not unstable:
+            unstable.append(unit)
+            if transient == "missing_process":
+                raise FileNotFoundError("launcher process changed")
+            if transient == "launcher":
+                info["StableEntrypoint"] = False
+            elif transient == "cwd":
+                info["MainPID"] = "999"  # cwd not yet observable in fixture /proc
+            else:
+                info.update(ActiveState="activating", SubState="start")
+        return info
+
+    def health(*args, **kwargs):
+        assert unstable  # An already healthy HTTP listener cannot bypass process readiness.
+        health_calls.append(args)
+        return original_health(*args, **kwargs)
+
+    monkeypatch.setattr(upgrade, "_show", show)
+    monkeypatch.setattr(upgrade, "urlopen", health)
+    result = case.apply(case.preview()["plan_sha256"])
+    assert result["status"] == "upgraded" and result["timers_restored"]
+    assert len(health_calls) == 1
+    assert result["acceptance"]["service_states"][units.HOLDINGS_EVENT_SERVICE_NAME]["StableEntrypoint"]
+
+
+def test_later_health_success_cannot_reuse_stale_process_identity(deployment, monkeypatch):
+    case = deployment
+    original_health = upgrade.urlopen
+    attempts = []
+
+    def health(*args, **kwargs):
+        if case.current.resolve() == case.target:
+            attempts.append(args)
+            (case.proc / "101/cmdline").write_bytes(b"/usr/bin/python\0/tmp/wrong.py\0")
+            raise OSError("initial HTTP startup")
+        return original_health(*args, **kwargs)
+
+    monkeypatch.setattr(upgrade, "urlopen", health)
+    result = case.apply(case.preview()["plan_sha256"])
+    assert result["status"] == "activation_failed_restored"
+    assert result["timers_restored"] and result["rollback_acceptance"]["ok"]
+    assert len(attempts) == 1
+    assert case.current.resolve() == case.previous

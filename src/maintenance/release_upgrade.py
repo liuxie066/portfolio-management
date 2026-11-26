@@ -329,26 +329,34 @@ def _preflight():
 
 
 def _accept(target):
-    states = {unit: _show(unit) for unit in units.SERVICES}
-    for info in states.values():
-        if (info.get("ActiveState") != "active" or info.get("SubState") != "running"
-                or not info.get("StableEntrypoint")
-                or not info.get("MainPID", "0").isdigit() or info["MainPID"] == "0"
-                or (_PROC_ROOT / info["MainPID"] / "cwd").resolve(strict=True) != target):
-            raise RuntimeError("service process does not run the accepted release")
     deadline = time.monotonic() + 10
+    identity_ready = False
     while time.monotonic() < deadline:
         try:
-            with urlopen("http://127.0.0.1:8765/health", timeout=1) as response:
-                raw = response.read(65537)
-                if len(raw) > 65536:
-                    raise ValueError("health response limit")
-                health = json.loads(raw)
-            if health.get("success") is True and health.get("status") == "ok":
-                return {"ok": True, "service_states": states}
-        except (OSError, ValueError):
-            pass
+            states = {unit: _show(unit) for unit in units.SERVICES}
+            identity_ready = all(
+                info.get("ActiveState") == "active" and info.get("SubState") == "running"
+                and info.get("StableEntrypoint")
+                and info.get("MainPID", "0").isdigit() and info["MainPID"] != "0"
+                and (_PROC_ROOT / info["MainPID"] / "cwd").resolve(strict=True) == target
+                for info in states.values()
+            )
+        except (FileNotFoundError, ProcessLookupError):
+            identity_ready = False
+        if identity_ready:
+            try:
+                with urlopen("http://127.0.0.1:8765/health", timeout=1) as response:
+                    raw = response.read(65537)
+                    if len(raw) > 65536:
+                        raise ValueError("health response limit")
+                    health = json.loads(raw)
+                if health.get("success") is True and health.get("status") == "ok":
+                    return {"ok": True, "service_states": states}
+            except (OSError, ValueError):
+                pass
         time.sleep(0.25)
+    if not identity_ready:
+        raise RuntimeError("service process does not run the accepted release")
     raise RuntimeError("accepted release health check failed")
 
 

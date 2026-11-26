@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.31 - 2026-11-26
+
+- Wait briefly for both restarted workers to reach their verified Python entry points and target directories before accepting health, including during rollback. Persistent identity mismatches still fail and retain automatic-trigger protection.
+
 ## 0.2.30 - 2026-11-26
 
 - Expose complete, read-only submitted Cash Flow facts for OM withdrawal reservations, with account isolation and trusted freshness evidence.
