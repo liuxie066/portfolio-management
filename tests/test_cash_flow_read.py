@@ -115,3 +115,26 @@ def test_real_repository_incomplete_page_is_public_503():
     assert response.status_code == 503
     assert response.json()["error_code"] == "PM_SERVICE_UNAVAILABLE"
     assert not fake.forbidden_calls
+
+
+@pytest.mark.parametrize("owner", [[{"text": "lx"}], {"text": "lx"}, True, 123])
+def test_malformed_account_cannot_become_trusted_empty(owner):
+    fake, client = adapter_http([{"items": [{"record_id": "bad", "fields": {**FIELDS, "account": owner}}],
+                                 "has_more": False}])
+    result = client.get("/api/v1/cash-flows", params={"account": "lx"})
+    assert result.status_code == 200
+    payload = result.json()
+    assert payload["freshness"]["trust_status"] == "partial"
+    assert payload["row_errors"] == [{"issues": [{"code": "cash_flow_account_missing"}]}]
+    assert not fake.forbidden_calls
+
+
+@pytest.mark.parametrize("currency", [[{"text": "HKD"}], {"text": "HKD"}])
+def test_nested_invalid_value_returns_json_row_error(currency):
+    fake, client = adapter_http([{"items": [{"record_id": "bad", "fields": {**FIELDS, "currency": currency}}],
+                                 "has_more": False}])
+    result = client.get("/api/v1/cash-flows", params={"account": "lx"})
+    assert result.status_code == 200
+    assert result.json()["row_errors"][0]["record_id"] == "bad"
+    assert result.json()["freshness"]["trust_status"] == "partial"
+    assert not fake.forbidden_calls

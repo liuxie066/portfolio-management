@@ -6,7 +6,9 @@ OM vendors that snapshot and verifies every client method against it.
 `GET /api/v1/cash-flows?account=...` reads the complete external Cash Flow
 dataset without reconciliation or financial writes, returning only the requested
 account. Unknown account ownership produces anonymous row errors; other accounts
-are never returned.
+are never returned. Account ownership must be a nonempty string; structured values
+are unknown ownership, never silently filtered as another account. Row errors omit
+raw values so malformed nested source values remain JSON-serializable.
 Manual signed amounts determine direction; missing generated FX fields do not
 hide newly submitted withdrawals. `records` contains normalized rows with stable
 record IDs and financial content fingerprints; `row_errors` retains invalid row
