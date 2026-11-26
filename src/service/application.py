@@ -800,6 +800,17 @@ class PortfolioService:
 
         return CashService(self.storage).get_cash(self._resolve_account(account))
 
+    def get_cash_flows(self, *, account: str) -> Dict[str, Any]:
+        from src.app.cash_flow_read import read_cash_flows
+
+        resolved = self._resolve_account(account)
+        try:
+            return read_cash_flows(self.storage, resolved)
+        except Exception:
+            LOGGER.exception("pm_cash_flow_read_failed")
+            return {"success": False, "error_code": "PM_SERVICE_UNAVAILABLE",
+                    "error": "cash flow source unavailable"}
+
     def _run_futu_holdings_sync(
         self,
         *,

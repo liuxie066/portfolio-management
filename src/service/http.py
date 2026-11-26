@@ -121,6 +121,15 @@ class AccountsResponse(PublicResponse):
     count: int
 
 
+class CashFlowsResponse(PublicResponse):
+    schema_version: Literal["portfolio.cash_flows.v1"]
+    account: str
+    source_identity: Literal["pm.cash_flow"]
+    complete: Literal[True]
+    records: list[dict[str, Any]]
+    row_errors: list[dict[str, Any]]
+
+
 class AccountsOverviewResponse(PublicResponse):
     status: str
     accounts: list[str]
@@ -593,6 +602,10 @@ def create_app(service: Optional[PortfolioService] = None, allow_remote: Optiona
             include_price=include_price,
         ), dataset_ids=tuple(required), accounts=(account,))
 
+
+    @app.get("/api/v1/cash-flows", tags=["cash"], response_model=CashFlowsResponse, responses=V1_RESPONSES)
+    def get_cash_flows_query(request: Request, account: str = Query(..., min_length=1)):
+        return _public_result(request, _service(request).get_cash_flows(account=account))
 
     @app.get("/cash", tags=["cash"], include_in_schema=False)
     @app.get("/api/v1/cash", tags=["cash"], response_model=CashResponse, response_model_exclude_none=True, responses=V1_RESPONSES)
