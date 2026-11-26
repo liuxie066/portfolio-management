@@ -3,6 +3,10 @@ from datetime import datetime
 from src.app.nav_history_receipt_service import NavHistoryReceiptService
 
 
+def _item_text(item):
+    return "\n".join(NavHistoryReceiptService._item_rows(item))
+
+
 def _written(
     account,
     *,
@@ -101,7 +105,7 @@ def test_nav_receipt_sends_one_consolidated_success_message():
     assert "结果｜写入 3，跳过 0，失败 0" in text
     assert "✅ lx｜NAV 0.957931｜总资产 ¥3,893,292.82｜当期盈亏 +¥65,375.44" in text
     assert "✅ hb｜NAV 1.023482｜总资产 ¥1,286,450.20｜当期盈亏 -¥3,421.18" in text
-    assert "MTD NAV +2.00%｜YTD NAV +5.00%｜复合增长率 +8.88%｜股票 70.00%｜基金 10.00%｜现金 20.00%" in text
+    assert "MTD NAV +2.00%｜YTD NAV +5.00%｜复合增长率 +8.88%\n仓位｜股票 70.00%｜基金 10.00%｜期权 0.00%｜现金（含在途） 20.00%" in text
     assert "资金变动 +¥5,000.00" in text
     assert "## 告警" not in text
     assert "Run ID｜daily-nav-job-multi-1" in text
@@ -283,10 +287,10 @@ def test_nav_receipt_renders_global_blocker_once_despite_account_copies():
 
 
 def test_nav_receipt_formats_negative_and_missing_nav_changes():
-    negative = NavHistoryReceiptService._item_row(
+    negative = _item_text(
         _written("lx", mtd_nav_change=-0.0456, ytd_nav_change=-0.0123, cagr=-0.0456)
     )
-    missing = NavHistoryReceiptService._item_row(
+    missing = _item_text(
         _written("hb", mtd_nav_change=None, ytd_nav_change=None, cagr=None)
     )
 
@@ -295,7 +299,7 @@ def test_nav_receipt_formats_negative_and_missing_nav_changes():
     assert "复合增长率 -4.56%" in negative
     assert "MTD NAV -｜" in missing
     assert "YTD NAV -｜" in missing
-    assert "复合增长率 -｜" in missing
+    assert "复合增长率 -\n" in missing
 
 
 def test_nav_receipt_formats_existing_nav_skip():
@@ -445,7 +449,7 @@ def test_nav_receipt_formats_structured_cash_flow_blockers_without_raw_json():
 
 
 def test_nav_receipt_unknown_structured_cash_flow_refusal_uses_run_id_guidance():
-    row = NavHistoryReceiptService._item_row({
+    row = _item_text({
         "success": False,
         "status": "failed",
         "account": "lx",
@@ -464,7 +468,7 @@ def test_nav_receipt_unknown_structured_cash_flow_refusal_uses_run_id_guidance()
 
 
 def test_nav_receipt_does_not_claim_generic_structured_failure_is_cash_flow():
-    row = NavHistoryReceiptService._item_row({
+    row = _item_text({
         "success": False,
         "status": "failed",
         "account": "lx",
@@ -484,7 +488,7 @@ def test_nav_receipt_does_not_claim_generic_structured_failure_is_cash_flow():
 
 
 def test_nav_receipt_effect_gate_failure_does_not_instruct_table_edit():
-    row = NavHistoryReceiptService._item_row({
+    row = _item_text({
         "success": False,
         "status": "failed",
         "account": "lx",
@@ -789,3 +793,48 @@ def test_nav_receipt_renders_holdings_digest_for_written_and_blocked_items():
     assert "Holdings abcdef123456" in text
     assert "Holdings 123456abcdef" in text
     assert "holdings_confirmation_required" in text
+
+
+def test_nav_receipt_groups_pending_cash_and_keeps_signed_options_and_funds():
+    from copy import deepcopy
+
+    item = _written("example", total_value=1000)
+    item["report"]["overview"] = {
+        "total_value": 1000,
+        "stock_ratio": 0.7,
+        "fund_ratio": 0.1,
+        "cash_ratio": 0.25,
+        "pending_asset_value": 50,
+        "option_value": -100,
+    }
+    original = deepcopy(item)
+    rows = NavHistoryReceiptService._item_rows(item)
+    assert rows[2] == "仓位｜股票 70.00%｜基金 10.00%｜期权 -10.00%｜现金（含在途） 30.00%"
+    assert sum(float(part.split()[-1].rstrip("%")) for part in rows[2].split("｜")[1:]) == 100
+    assert rows[0].startswith("✅ example｜NAV")
+    assert rows[1].startswith("收益｜MTD NAV")
+    assert item == original  # Notification grouping must not alter accounting facts.
+
+
+def test_nav_receipt_zero_total_and_unknown_values_are_not_fabricated():
+    item = _written("example", total_value=0)
+    item["report"]["overview"].update(pending_asset_value=50, option_value=-10)
+    text = _item_text(item)
+    assert "期权 -｜现金（含在途） -" in text
+    item["report"]["total_value"] = -100
+    assert "期权 -｜现金（含在途） -" in _item_text(item)
+    item["report"]["total_value"] = 1000
+    item["report"]["overview"].update(pending_asset_value=None, option_value=None)
+    assert "期权 -｜现金（含在途） -" in _item_text(item)
+
+
+def test_nav_receipt_normal_prices_are_not_warnings():
+    item = _written("example", warnings=[
+        "[价格汇总] realtime=2, cache=0, stale_fallback=0, missing=0",
+        "another warning",
+    ])
+    text = NavHistoryReceiptService.build_message({"items": [item]})
+    assert "## 价格\n价格：正常｜实时 2" in text
+    assert "## 告警\nexample: another warning" in text
+    assert "\n收益｜" in text
+    assert "\n仓位｜" in text

@@ -176,7 +176,8 @@ class NavHistoryReceiptService:
             fields.append(("Run ID", job_result["run_id"]))
 
         price_summary, warnings = cls._warning_summary(items)
-        warning_rows = ([price_summary] if price_summary else []) + list(warnings)
+        price_is_normal = bool(price_summary and price_summary.startswith("价格：正常"))
+        warning_rows = ([] if price_is_normal or not price_summary else [price_summary]) + list(warnings)
         holdings_rows = cls._holdings_preflight_rows(job_result, items)
 
         return render_receipt(
@@ -186,7 +187,8 @@ class NavHistoryReceiptService:
             fields=fields,
             sections=[
                 ("Holdings 预检", holdings_rows),
-                ("账户明细", [cls._item_row(item) for item in items]),
+                ("账户明细", [row for item in items for row in cls._item_rows(item)]),
+                ("价格", [price_summary] if price_is_normal else []),
                 ("告警", warning_rows),
             ],
         )
@@ -309,7 +311,7 @@ class NavHistoryReceiptService:
         return "成功"
 
     @classmethod
-    def _item_row(cls, item: dict[str, Any]) -> str:
+    def _item_rows(cls, item: dict[str, Any]) -> list[str]:
         account = item.get("account") or "-"
         status = str(item.get("status") or "")
         holdings_snapshot = item.get("holdings_snapshot") or {}
@@ -327,21 +329,41 @@ class NavHistoryReceiptService:
         if status == "written":
             report = item.get("report") or {}
             overview = report.get("overview") or {}
-            row = (
+            total = _as_float(overview.get("total_value", report.get("total_value")))
+            cash_ratio = _as_float(overview.get("cash_ratio"))
+            pending = _as_float(overview.get("pending_asset_value", 0))
+            option = _as_float(overview.get("option_value", 0))
+            option_ratio = (
+                option / total
+                if total is not None and total > 0 and option is not None else None
+            )
+            if total is None or total <= 0:
+                cash_ratio = None
+            elif pending:
+                cash_ratio = (
+                    cash_ratio + pending / total
+                    if cash_ratio is not None else None
+                )
+            elif pending is None:
+                cash_ratio = None
+            rows = [
                 f"✅ {account}｜NAV {_format_nav(report.get('nav'))}"
                 f"｜总资产 {_format_money(report.get('total_value'))}"
-                f"｜当期盈亏 {_format_signed_money(report.get('pnl'))}"
-                f"｜MTD NAV {_format_signed_pct(report.get('mtd_nav_change'))}"
+                f"｜当期盈亏 {_format_signed_money(report.get('pnl'))}",
+                f"收益｜MTD NAV {_format_signed_pct(report.get('mtd_nav_change'))}"
                 f"｜YTD NAV {_format_signed_pct(report.get('ytd_nav_change'))}"
-                f"｜复合增长率 {_format_signed_pct(report.get('cagr'))}"
-                f"｜股票 {_format_pct(overview.get('stock_ratio'))}"
+                f"｜复合增长率 {_format_signed_pct(report.get('cagr'))}",
+                f"仓位｜股票 {_format_pct(overview.get('stock_ratio'))}"
                 f"｜基金 {_format_pct(overview.get('fund_ratio'))}"
-                f"｜现金 {_format_pct(overview.get('cash_ratio'))}"
-            )
+                f"｜期权 {_format_pct(option_ratio)}"
+                f"｜现金（含在途） {_format_pct(cash_ratio)}",
+            ]
             cash_flow = _as_float(report.get("cash_flow"))
             if cash_flow not in (None, 0.0):
-                row += f"｜资金变动 {_format_signed_money(cash_flow)}"
-            return row + digest_text
+                rows.append(f"资金变动 {_format_signed_money(cash_flow)}")
+            if digest_text:
+                rows.append(digest_text.lstrip("｜"))
+            return rows
 
         if status.startswith("skipped_"):
             label = "NAV 已存在" if status == "skipped_existing_nav" else status
@@ -351,19 +373,19 @@ class NavHistoryReceiptService:
             if item.get("total_value") is not None:
                 details.append(f"总资产 {_format_money(item.get('total_value'))}")
             suffix = f"｜{'｜'.join(details)}" if details else ""
-            return f"⏭ {account}｜{label}{suffix}{digest_text}"
+            return [f"⏭ {account}｜{label}{suffix}{digest_text}"]
 
         cash_flow_row = cls._cash_flow_failure_row(item)
         if cash_flow_row:
-            return cash_flow_row + digest_text
+            return [cash_flow_row + digest_text]
 
         error = item.get("error") or "unknown error"
         stage = str(item.get("stage") or "").strip()
         stage_text = f"｜阶段 {stage}" if stage else ""
-        return (
+        return [
             f"❌ {account}｜{status or 'failed'}{stage_text}｜{error}"
             f"{digest_text}"
-        )
+        ]
 
     @staticmethod
     def _cash_flow_failure_row(item: dict[str, Any]) -> Optional[str]:

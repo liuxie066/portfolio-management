@@ -3,6 +3,18 @@
 This runbook is for local or Linux-instance operations. Production writes should
 go through `./pm` or the local service, not ad hoc Python calls.
 
+## NAV receipt layout
+
+Successful accounts show NAV/assets, returns, and allocation on separate lines.
+Allocation lists stocks, funds, signed net option value, and cash including pending
+assets. Only the receipt groups pending assets with cash: this is not available
+cash and does not change NAV, stored holdings, or valuation/API fields. Ratios use
+unrounded values; independently rounded percentages can differ slightly from 100%. Missing option/pending fields in older reports mean no such
+asset; explicit unknown values remain unavailable. A nonpositive/missing denominator
+leaves derived ratios unavailable. Normal price summaries appear under Prices;
+price problems and other warnings remain under Warnings. Failure actions and
+holdings audit digests are retained.
+
 ## Preflight
 
 ```bash
