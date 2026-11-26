@@ -3,6 +3,19 @@
 PM owns the canonical `/api/v1` OpenAPI snapshot in `contracts/om-api/`.
 OM vendors that snapshot and verifies every client method against it.
 
+`GET /api/v1/cash-flows?account=...` reads the complete external Cash Flow
+dataset without reconciliation or financial writes, returning only the requested
+account. Unknown account ownership produces anonymous row errors; other accounts
+are never returned.
+Manual signed amounts determine direction; missing generated FX fields do not
+hide newly submitted withdrawals. `records` contains normalized rows with stable
+record IDs and financial content fingerprints; `row_errors` retains invalid row
+identities for the requested account. Consumers require `complete`, fresh trusted owner evidence and no row
+errors before treating an empty result as no withdrawals. Missing pages fail the
+read. `flow_date` is a Beijing business date; this interface does not assert bank
+settlement or cancellation. Optional `updated_at` is not an incremental cursor.
+OM owns reservation and bank-flow matching; PM owns external cash-flow facts.
+
 - `/health` and `/quality/status` remain unversioned operational endpoints.
 - Existing business paths remain deprecated aliases for at least two PM release cycles.
 - Breaking changes require `/api/v2`; V1 is never reinterpreted in place.
