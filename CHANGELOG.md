@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.32 - 2026-11-26
+
+- Retry temporarily unready Feishu reads with bounded, deadline-aware backoff so MMF verification can recover without replaying successful writes.
+
 ## 0.2.31 - 2026-11-26
 
 - Wait briefly for both restarted workers to reach their verified Python entry points and target directories before accepting health, including during rollback. Persistent identity mismatches still fail and retain automatic-trigger protection.
