@@ -429,6 +429,8 @@ publisher 核对 checkout HEAD、VERSION 和远端 tag 剥离后的 commit；创
 必须原本正在运行、使用该稳定链接，并实际使用指定 config-dir/config.yaml、
 runtime-dir/.data 和 runtime-dir/reports。配置和 runtime 的真实路径须在整个
 releases 根之外；其它布局应先单独核定，不能仅换参数操作另一套实例。
+常驻服务入口以实际进程的 Python 和脚本参数核对；安装器生成的 Listener `pm`
+launcher 也受支持，无须为升级改写 systemd 单元。无法读取或不匹配时仍拒绝切换。
 
 升级暂停原本 active 的固定 PM timers，复用 scheduled、quality、receipts 三把
 已安装作业锁；锁忙或 oneshot 仍运行则终止切换。缺少作业锁不会被重建成 root 私有
