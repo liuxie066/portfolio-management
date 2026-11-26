@@ -51,11 +51,12 @@ def events(caplog):
             if row.name == 'src.feishu_client' and row.message.startswith('feishu_request ')]
 
 
-def test_list_records_retries_same_page_without_replaying_prior_pages(transport, caplog):
+@pytest.mark.parametrize('status,code', [(200, 1254290), (400, 1254607)])
+def test_list_records_retries_same_page_without_replaying_prior_pages(transport, caplog, status, code):
     client, request, clock = transport
     request.side_effect = [
         response(data={'items': [{'record_id': 'r1', 'fields': {}}], 'has_more': True, 'page_token': 'page2'}),
-        response(1254290, headers={'Retry-After': '3', 'X-Tt-Logid': 'trace-header'}),
+        response(code, status=status, headers={'Retry-After': '3', 'X-Tt-Logid': 'trace-header'}),
         response(data={'items': [{'record_id': 'r2', 'fields': {}}], 'has_more': False}),
     ]
     rows = client.list_records('holdings', filter_str='private-account', field_names=['private-field'])
@@ -80,10 +81,11 @@ def test_list_records_retries_same_page_without_replaying_prior_pages(transport,
         assert private not in caplog.text
 
 
-def test_business_throttle_exhaustion_preserves_last_trace(transport, caplog):
+@pytest.mark.parametrize('status,code', [(200, 1254290), (400, 1254607)])
+def test_business_throttle_exhaustion_preserves_last_trace(transport, caplog, status, code):
     client, request, clock = transport
-    request.side_effect = [response(1254290, headers={'X-Tt-Logid': f'trace-{i}'}) for i in range(4)]
-    with pytest.raises(Exception, match=r'HTTP 200, code=1254290, log_id=trace-3'):
+    request.side_effect = [response(code, status=status, headers={'X-Tt-Logid': f'trace-{i}'}) for i in range(4)]
+    with pytest.raises(Exception, match=rf'HTTP {status}, code={code}, log_id=trace-3'):
         client.list_records('holdings')
     assert request.call_count == 4
     assert [call.args[0] for call in clock.sleep.call_args_list] == [1, 2, 4]
@@ -94,6 +96,9 @@ def test_business_throttle_exhaustion_preserves_last_trace(transport, caplog):
     ('POST', 200, 1254290), ('PUT', 200, 1254290), ('DELETE', 200, 1254290),
     ('GET', 400, 1254290), ('GET', 500, 1254290), ('GET', 200, 1254045),
     ('GET', 200, '1254290'),
+    ('POST', 400, 1254607), ('PUT', 400, 1254607), ('DELETE', 400, 1254607),
+    ('GET', 200, 1254607), ('GET', 500, 1254607), ('GET', 400, '1254607'),
+    ('GET', 400, 1254606),
 ])
 def test_does_not_expand_business_retry_to_writes_or_other_errors(transport, method, status, code):
     client, request, clock = transport
@@ -104,6 +109,7 @@ def test_does_not_expand_business_retry_to_writes_or_other_errors(transport, met
     clock.sleep.assert_not_called()
 
 
+@pytest.mark.parametrize('status,code', [(200, 1254290), (400, 1254607)])
 @pytest.mark.parametrize('headers,delay', [
     ({}, 1), ({'Retry-After': '2'}, 2), ({'x-ogw-ratelimit-reset': '3'}, 3),
     ({'Retry-After': '2', 'x-ogw-ratelimit-reset': '4'}, 4),
@@ -111,14 +117,14 @@ def test_does_not_expand_business_retry_to_writes_or_other_errors(transport, met
     ({'Retry-After': 'invalid'}, 1), ({'Retry-After': '-10'}, 1),
     ({'Retry-After': 'nan'}, 1), ({'Retry-After': 'inf'}, 1),
 ])
-def test_wait_hints(transport, headers, delay):
+def test_wait_hints(transport, headers, delay, status, code):
     client, request, clock = transport
-    request.side_effect = [response(1254290, headers=headers), response()]
+    request.side_effect = [response(code, status=status, headers=headers), response()]
     assert client._request('GET', '/test') == {}
     clock.sleep.assert_called_once_with(delay)
 
 
-@pytest.mark.parametrize('status,code', [(200, 1254290), (429, 0)])
+@pytest.mark.parametrize('status,code', [(200, 1254290), (429, 0), (400, 1254607)])
 def test_long_server_wait_is_not_shortened_or_slept(transport, caplog, status, code):
     client, request, clock = transport
     request.return_value = response(code, status=status, headers={'Retry-After': '120'})
@@ -130,18 +136,20 @@ def test_long_server_wait_is_not_shortened_or_slept(transport, caplog, status, c
     assert events(caplog)[0]['retry_delay_seconds'] is None
 
 
-def test_retry_recomputes_deadline_budget(transport):
+@pytest.mark.parametrize('status,code', [(200, 1254290), (400, 1254607)])
+def test_retry_recomputes_deadline_budget(transport, status, code):
     client, request, clock = transport
-    request.side_effect = [response(1254290), response()]
+    request.side_effect = [response(code, status=status), response()]
     client._request('GET', '/test', deadline=110, timeout=(1, 2))
     assert [call.kwargs['timeout'].total for call in request.call_args_list] == [10, 9]
     assert all(call.kwargs['timeout'].read_timeout == 2 for call in request.call_args_list)
     assert clock.now == 101
 
 
-def test_business_backoff_rejects_insufficient_budget(transport, caplog):
+@pytest.mark.parametrize('status,code', [(200, 1254290), (400, 1254607)])
+def test_business_backoff_rejects_insufficient_budget(transport, caplog, status, code):
     client, request, clock = transport
-    request.return_value = response(1254290, headers={'Retry-After': '3'})
+    request.return_value = response(code, status=status, headers={'Retry-After': '3'})
     with pytest.raises(FeishuReadTimeout, match='retry_backoff'):
         client._request('GET', '/test', deadline=102)
     request.assert_called_once()
@@ -149,9 +157,10 @@ def test_business_backoff_rejects_insufficient_budget(transport, caplog):
     assert events(caplog)[0]['outcome'] == 'failed'
 
 
-def test_business_retry_rechecks_budget_after_oversleep(transport):
+@pytest.mark.parametrize('status,code', [(200, 1254290), (400, 1254607)])
+def test_business_retry_rechecks_budget_after_oversleep(transport, status, code):
     client, request, clock = transport
-    request.return_value = response(1254290)
+    request.return_value = response(code, status=status)
     clock.sleep.side_effect = lambda _: setattr(clock, 'now', 120)
     with pytest.raises(FeishuReadTimeout):
         client._request('GET', '/test', deadline=110)
@@ -165,6 +174,22 @@ def test_http_429_non_json_still_retries(transport):
     request.side_effect = [throttle, response()]
     assert client._request('GET', '/test') == {}
     clock.sleep.assert_called_once_with(1)
+
+
+def test_not_ready_readback_does_not_replay_successful_write(transport, caplog):
+    client, request, clock = transport
+    request.side_effect = [
+        response(data={'record': {'record_id': 'mmf-record', 'fields': {'quantity': 200}}}),
+        response(1254607, status=400),
+        response(data={'items': [{'record_id': 'mmf-record', 'fields': {'quantity': 200}}]}),
+    ]
+    client.update_record('holdings', 'mmf-record', {'quantity': 200})
+    rows = client.list_records('holdings')
+    assert rows[0]['fields']['quantity'] == 200
+    assert [call.args[0] for call in request.call_args_list] == ['PUT', 'GET', 'GET']
+    assert request.call_args_list[1] == request.call_args_list[2]
+    clock.sleep.assert_called_once_with(1)
+    assert [event['outcome'] for event in events(caplog)] == ['succeeded', 'retry', 'succeeded']
 
 
 def test_transport_failure_logs_no_exception_message_and_does_not_retry(transport, caplog):

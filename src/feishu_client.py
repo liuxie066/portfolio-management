@@ -290,7 +290,7 @@ class FeishuClient:
 
     def _request(self, method: str, endpoint: str, _retry_count: int = 0,
                  *, deadline: float | None = None, _stage: str = 'request', **kwargs) -> Dict:
-        """Send bounded attempts; only GET gains business-throttle retries."""
+        """Send bounded attempts; only GET retries transient business errors."""
         url = f"{self.BASE_URL}{endpoint}"
         is_message_send = method == 'POST' and endpoint == '/im/v1/messages'
         requested_timeout = kwargs.pop('timeout', None)
@@ -345,12 +345,12 @@ class FeishuClient:
                 event['elapsed_ms'] = round((time.monotonic() - started) * 1000, 3)
                 if deadline is not None:
                     self._remaining_budget(deadline, _stage)
-                throttled = response.status_code == 429 or (
-                    method == 'GET' and response.status_code == 200
-                    and type(code) is int and code == 1254290
+                retryable = response.status_code == 429 or (
+                    method == 'GET' and type(code) is int
+                    and (response.status_code, code) in {(200, 1254290), (400, 1254607)}
                 )
                 # Never retry earlier than a long server hint; leave it to the caller.
-                if throttled and attempt < 3 and delay <= 60:
+                if retryable and attempt < 3 and delay <= 60:
                     response.close()
                     event['retry_delay_seconds'] = delay
                     if deadline is not None and delay >= self._remaining_budget(deadline, 'retry_backoff'):

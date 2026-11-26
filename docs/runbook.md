@@ -57,18 +57,22 @@ readback, invalid holding structure and amount mismatch.
 
 Feishu business errors include the HTTP status, `code`, `msg` and available
 `log_id` in the error text, including HTTP 400 responses. Record these alongside
-the sync run ID when investigating a failed request. HTTP 400 is not automatically
+the sync run ID when investigating a failed request. GET HTTP 400/code `1254607`
+is retried as described below; other HTTP 400 errors are not automatically
 retried. The partial-write warning remains conservative because a read can fail
 before or after a write; use the receipt's account-specific dry-run command to
 inspect current state before another confirmed write.
 
 ### Feishu read throttling
 
-GET requests retry HTTP 200/business code `1254290` (`TooManyRequest`) up to
-three times after the initial attempt. HTTP 429 retains its existing bounded
-retry policy. Other business errors and HTTP 400 are not retried; this change
-does not add business-error retries to writes, batch mutations or messages.
+GET requests retry HTTP 200/business code `1254290` (`TooManyRequest`) and
+HTTP 400/code `1254607` (`Data not ready, please try again later`) up to three
+times after the initial attempt. HTTP 429 retains its existing bounded retry
+policy. Other business errors are not retried; this policy does not add
+business-error retries to writes, batch mutations or messages.
 The retry repeats only the current request/page, never the whole Futu sync.
+This includes the fresh MMF readback after a successful update: only the read
+is repeated, and the sync still fails if that read cannot be confirmed.
 
 Backoff starts at 1, 2 and 4 seconds. A valid `Retry-After` (seconds or HTTP
 date) or `x-ogw-ratelimit-reset` (seconds) can extend the wait. If both hints
