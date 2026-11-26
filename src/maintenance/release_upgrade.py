@@ -158,7 +158,15 @@ def _show(unit):
     if unit in units.SERVICES:
         root = result.get("WorkingDirectory", "")
         script = "scripts/serve.py" if unit == units.API_SERVICE_NAME else "scripts/pm.py"
-        result["StableEntrypoint"] = bool(root) and str(Path(root) / ".venv/bin/python") in execution and str(Path(root) / script) in execution
+        # The installed listener uses the pm launcher, which execs Python.
+        # Bind the actual running entry rather than requiring a different unit.
+        pid = result.get("MainPID", "0")
+        result["StableEntrypoint"] = False
+        if root and pid.isdigit() and pid != "0":
+            with (_PROC_ROOT / pid / "cmdline").open("rb") as source:
+                raw = source.read(65537)
+            expected = [str(Path(root) / ".venv/bin/python").encode(), str(Path(root) / script).encode()]
+            result["StableEntrypoint"] = len(raw) <= 65536 and raw.endswith(b"\0") and raw.split(b"\0")[:2] == expected
     return result
 
 
@@ -324,6 +332,7 @@ def _accept(target):
     states = {unit: _show(unit) for unit in units.SERVICES}
     for info in states.values():
         if (info.get("ActiveState") != "active" or info.get("SubState") != "running"
+                or not info.get("StableEntrypoint")
                 or not info.get("MainPID", "0").isdigit() or info["MainPID"] == "0"
                 or (_PROC_ROOT / info["MainPID"] / "cwd").resolve(strict=True) != target):
             raise RuntimeError("service process does not run the accepted release")

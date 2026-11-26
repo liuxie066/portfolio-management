@@ -56,7 +56,7 @@ def deployment(tmp_path, monkeypatch):
                            current=current, config=config, runtime=runtime, proc=proc,
                            calls=calls, forbidden=forbidden, failure=None, fail_once=False,
                            stale_preflight=False, missing_preflight=False, invocation="before",
-                           jobs_busy=False, timers={u: "active" for u in units.TIMERS})
+                           jobs_busy=False, unit_exec={}, timers={u: "active" for u in units.TIMERS})
     case.timers[units.TIMERS[-1]] = "inactive"
 
     def process_paths(target_path):
@@ -69,6 +69,10 @@ def deployment(tmp_path, monkeypatch):
                 link.symlink_to(target_path if name == "cwd" else target_path / ".venv/bin/python")
             (p / "fd").mkdir(exist_ok=True)
             (p / "maps").write_text("")
+            script = "scripts/serve.py" if pid == "100" else "scripts/pm.py"
+            (p / "cmdline").write_bytes((str(current / ".venv/bin/python") + "\0" + str(current / script) + "\0").encode())
+            if case.failure == "cmdline" and target_path == target:
+                (p / "cmdline").write_bytes(b"/usr/bin/python\0/tmp/other.py\0")
             (p / "environ").write_bytes(("PORTFOLIO_CONFIG_FILE=" + str(config / "config.yaml") + "\0PM_DATA_DIR=" + str(runtime / ".data") + "\0PM_REPORTS_DIR=" + str(runtime / "reports") + "\0").encode())
 
     process_paths(previous)
@@ -91,7 +95,7 @@ def deployment(tmp_path, monkeypatch):
                 state = {"LoadState": "loaded", "ActiveState": active, "SubState": "running" if unit in units.SERVICES else "waiting",
                          "MainPID": "100" if unit == units.API_SERVICE_NAME else "101" if unit in units.SERVICES else "0",
                          "UnitFileState": "disabled" if unit == units.TIMERS[-1] else "enabled",
-                         "WorkingDirectory": str(current), "ExecStart": str(current / ".venv/bin/python") + " " + str(current / script)}
+                         "WorkingDirectory": str(current), "ExecStart": case.unit_exec.get(unit, str(current / ".venv/bin/python") + " " + str(current / script))}
                 return result(command, "\n".join(k + "=" + v for k, v in state.items()))
             if action in {"start", "stop"}:
                 assert set(names) <= {*units.TIMERS, *units.SERVICES, units.FEISHU_PREFLIGHT_SERVICE_NAME}
@@ -140,6 +144,53 @@ def deployment(tmp_path, monkeypatch):
 
 def unit_or_worker(names):
     return bool(set(names) & set(units.SERVICES))
+
+
+def test_installed_listener_launcher_can_upgrade_without_unit_rewrite(deployment):
+    from scripts import install_linux
+
+    c = deployment
+    args = install_linux.build_parser().parse_args(["--app-dir", str(c.current), "--launcher", "/usr/local/bin/pm"])
+    text = install_linux.render_holdings_event_service_unit(install_linux.build_paths(args), run_user="portfolio")
+    execution = next(line.removeprefix("ExecStart=") for line in text.splitlines() if line.startswith("ExecStart="))
+    assert "/usr/local/bin/pm events listen" in execution
+    assert "scripts/pm.py" not in execution
+    c.unit_exec[units.HOLDINGS_EVENT_SERVICE_NAME] = execution
+    preview = c.preview()
+    result = c.apply(preview["plan_sha256"])
+    assert result["success"] and result["timers_restored"]
+    assert c.current.resolve() == c.target
+    assert not c.forbidden
+
+
+@pytest.mark.parametrize("pid", ["100", "101"])
+def test_matching_unit_text_cannot_hide_different_running_entry(deployment, pid):
+    c = deployment
+    (c.proc / pid / "cmdline").write_bytes(b"/usr/bin/python\0/tmp/other.py\0")
+    with pytest.raises(ValueError, match="stable release entry points"):
+        c.preview()
+    assert c.current.resolve() == c.previous
+    assert not any(command[:2] in [["systemctl", "stop"], ["systemctl", "start"]] for command in c.calls)
+
+
+def test_unreadable_running_entry_blocks_before_changes(deployment):
+    c = deployment
+    (c.proc / "101/cmdline").unlink()
+    with pytest.raises(FileNotFoundError):
+        c.preview()
+    assert c.current.resolve() == c.previous
+    assert not any(command[:2] in [["systemctl", "stop"], ["systemctl", "start"]] for command in c.calls)
+
+
+def test_wrong_entry_after_restart_restores_previous_without_cleanup(deployment):
+    c = deployment
+    preview = c.preview()
+    c.failure = "cmdline"
+    result = c.apply(preview["plan_sha256"])
+    assert result["status"] == "activation_failed_restored"
+    assert result["rollback_acceptance"]["ok"] and result["timers_restored"]
+    assert c.current.resolve() == c.previous and c.old.is_dir()
+    assert "post_upgrade_cleanup" not in result
 
 
 def test_preview_and_confirmed_activation_through_public_cli(deployment, capsys):

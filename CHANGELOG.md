@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.29 - 2026-11-26
+
+- Accept the installed listener launcher during controlled upgrades by verifying the running Python and script entry points before and after activation, without rewriting service units.
+
 ## 0.2.28 - 2026-11-26
 
 - Activate verified, prepared Linux releases through a previewed and confirmed upgrade with service health checks and recovery receipts.
