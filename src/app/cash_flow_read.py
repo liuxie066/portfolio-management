@@ -10,16 +10,16 @@ def read_cash_flows(storage, account):
     rows = storage.get_raw_cash_flows(require_complete=True)
     records, errors = [], []
     for raw in rows:
-        owner = str(raw.raw_fields.get("account") or "").strip()
-        if not owner:
+        owner = raw.raw_fields.get("account")
+        if not isinstance(owner, str) or not owner.strip():
             errors.append({"issues": [{"code": "cash_flow_account_missing"}]})
             continue
-        if owner != account:
+        if owner.strip() != account:
             continue
         facts, issues = ManualCashFlowFacts.validate(raw)
         if issues:
             errors.append({"record_id": raw.record_id, "account": raw.raw_fields.get("account"),
-                           "issues": [issue.as_dict() for issue in issues]})
+                           "issues": [{key: value for key, value in issue.as_dict().items() if key != "raw_value"} for issue in issues]})
             continue
         direction = raw.raw_fields.get("flow_type")
         if direction not in (None, "", facts.expected_flow_type):
