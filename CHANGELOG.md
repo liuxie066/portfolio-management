@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.28 - 2026-11-26
+
+- Activate verified, prepared Linux releases through a previewed and confirmed upgrade with service health checks and recovery receipts.
+- Maintain historical versions after successful upgrades while preserving the current version, actual rollback version, runtime data and active dependencies.
+
 ## 0.2.27 - 2026-11-26
 
 - Show stocks, funds, signed option exposure, and cash including pending assets in NAV receipts without changing valuation or available cash.

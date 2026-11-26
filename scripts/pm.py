@@ -2615,10 +2615,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_init_nav.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="output JSON")
     p_init_nav.set_defaults(func=cmd_init_nav)
 
+    service = sp.add_parser("service", help="controlled deployment operations")
+    service_commands = service.add_subparsers(dest="service_operation", required=True)
+    upgrade = service_commands.add_parser("upgrade", help="preview or activate a prepared Linux release")
+    upgrade.add_argument("arguments", nargs=argparse.REMAINDER)
+
     return p
 
 
 def main(argv=None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments[:2] == ["service", "upgrade"]:
+        from src.maintenance.release_upgrade import cli
+
+        return cli(arguments[2:])
     logging.basicConfig(level=logging.INFO)
     parser = build_parser()
     args = parser.parse_args(argv)

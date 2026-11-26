@@ -236,6 +236,17 @@ root = staging / "unpacked" / f"portfolio-management-{version}"
 if (root / "VERSION").read_text().strip() != version:
     raise SystemExit("Runtime release version mismatch")
 shutil.copytree(root, destination, dirs_exist_ok=True)
+# Bind the verified package's exact runtime sources before dependency preparation.
+import json
+files = {}
+for path in sorted(root.rglob("*")):
+    if path.is_symlink():
+        raise SystemExit("Runtime package source links are not supported")
+    if path.is_file():
+        files[str(path.relative_to(root))] = hashlib.sha256(path.read_bytes()).hexdigest()
+receipt = {"schema": "pm_prepared_release.v1", "status": "source_verified",
+           "version": version, "package_sha256": expected, "files": files}
+Path(destination, ".pm-prepared-release.json").write_text(json.dumps(receipt, sort_keys=True))
 PY
 }
 
@@ -332,7 +343,15 @@ if [[ -n "$WHEEL_DIR" ]]; then
     --isolated --disable-pip-version-check install --no-index --only-binary=:all: \
     --find-links "$WHEEL_DIR" "${requirements[@]}"
   PIP_CONFIG_FILE=/dev/null "$APP_DIR/.venv/bin/python" -m pip --isolated --disable-pip-version-check check
-  log "Prepared $REF in $APP_DIR"
+  "$APP_DIR/.venv/bin/python" -I - "$SCRIPT_REPO_ROOT" "$APP_DIR" <<'PY'
+from pathlib import Path
+import sys
+bootstrap, target = sys.argv[1:]
+sys.path.insert(0, str(Path(bootstrap or target).resolve()))
+from src.maintenance.release_upgrade import finish_preparation
+finish_preparation(Path(target))
+PY
+  log "Prepared $REF in $APP_DIR; activation remains a separate confirmed step"
   exit 0
 fi
 

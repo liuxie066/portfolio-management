@@ -403,6 +403,57 @@ publisher 核对 checkout HEAD、VERSION 和远端 tag 剥离后的 commit；创
 
 同 tag 工作流串行且不自动取消。helper 最多调用一次变更 CLI，失败或超时后读回 Release 和 tag，无法证明已公开且身份匹配时报告结果未知，需人工核实后再决定重跑；不自动删除、重打 tag 或回滚公开内容。CLI 内部请求并非一次远端写入保证，外部强制移动 tag 也不受此串行约束。真实发布仍需单独授权；本轮验证只使用合成 API/CLI，未执行真实发布。
 
+## 正式激活与历史版本自动维护
+
+已有稳定代码链接、独立配置/runtime、完整 systemd 资产的 Linux 实例，可使用
+`pm service upgrade` 激活已准备的正式版本。它不下载软件、不重新生成服务或配置，
+也不替代首次部署。先沿用下一节 `install.sh --prepare-offline` 准备新目录；安装器
+验证发布包 SHA256SUMS、源文件和依赖后生成 `.pm-prepared-release.json`。
+只准备不切换、不重启、不清理；旧安装缺回执时不能伪造回执跳过准备。
+
+```bash
+./pm service upgrade \
+  --current-link /home/liuxie/apps/portfolio-management \
+  --release-dir /home/liuxie/apps/portfolio-management-releases/0.2.28 \
+  --config-dir /etc/portfolio-management \
+  --runtime-dir /var/lib/portfolio-management \
+  --json
+```
+
+版本号仅作示例，不代表已经发布或获准升级。默认预览无写入，返回
+`plan_sha256`，绑定实际前序、目标准备回执、配置摘要、服务/timer状态及清理集合。
+取得指定主机/版本的升级授权后，用相同参数追加
+`--apply --confirm --expected-plan-sha256 <预览摘要>`。确认在升级锁内重新读取，
+漂移即拒绝，必须重新预览。调用者须已有 systemctl、journalctl、作业锁、代码链接
+及 runtime 写入权限；入口不会自动提权。当前仅支持 Linux/systemd，且两个常驻服务
+必须原本正在运行、使用该稳定链接，并实际使用指定 config-dir/config.yaml、
+runtime-dir/.data 和 runtime-dir/reports。配置和 runtime 的真实路径须在整个
+releases 根之外；其它布局应先单独核定，不能仅换参数操作另一套实例。
+
+升级暂停原本 active 的固定 PM timers，复用 scheduled、quality、receipts 三把
+已安装作业锁；锁忙或 oneshot 仍运行则终止切换。缺少作业锁不会被重建成 root 私有
+文件。保持原本 inactive/disabled/masked 的 timer，不自动启用停用的服务。
+切换后复用 credential preflight，核对本次新 invocation 的两个成功命令及作业完成，
+再检查两个常驻服务的实际进程目录和 loopback health。失败时恢复实际前序并重做
+验收；代码回退不撤销业务写入或外部消息。补偿无法验收时保留触发暂停，记录恢复
+缺口并等待人工核定，不能宣称调度已安全恢复。正常成功或已验收的补偿才恢复原 timer。
+
+正常激活及 timer 恢复成功后，默认自动维护历史版本，无需额外清理开关：
+
+- 保留当前版和升级前实际运行的版本；更高的待激活版本也保留。
+- 只处理同一 releases 根下、有完整安装身份回执且内容未变的标准旧版本。
+  缺回执、分支/手工 rollback、额外文件或空状态目录均保留。
+- 保护配置、保留环境依赖及当前进程引用的目录；引用观察失败/权限未知时保留候选。
+  不跟随 release symlink，不清共享环境、生产数据库、报表或升级证据。
+- 升级失败、未验收补偿或 timer 恢复失败均不清理。本入口必须执行受控重启，
+  不提供跳过重启后清理。清理失败不回滚健康升级，单独记录 `post_upgrade_cleanup`。
+
+回执为指定 runtime 下独占的 `release-upgrade-<ID>.json`，保存预览、实际前序、
+验收、恢复及清理路径。删除前逐项持久化 `deleting_path`；失联/中断后先读回回执和
+源对象，不自动重放。新升级锁只约束采用本入口的升级；旧逐次 `activate.py`
+不遵守它，禁止并发执行。首次采用须使用包含本入口的新控制器；发布代码本身不会
+让旧控制器自动改用新流程。现有历史手工目录仍需单独核定和批准清理。
+
 ## 使用共享 wheel 准备新版本
 
 在部署主机上，以部署用户备齐目标版本的 requirements.txt 以及部署所需的
