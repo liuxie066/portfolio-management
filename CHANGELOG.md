@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.30 - 2026-11-26
+
+- Expose complete, read-only submitted Cash Flow facts for OM withdrawal reservations, with account isolation and trusted freshness evidence.
+- Preserve partial-result errors for malformed account ownership and nested invalid values instead of returning a trusted empty response or serialization failure.
+
 ## 0.2.29 - 2026-11-26
 
 - Accept the installed listener launcher during controlled upgrades by verifying the running Python and script entry points before and after activation, without rewriting service units.
